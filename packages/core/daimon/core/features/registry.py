@@ -873,6 +873,22 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         authority=_ADMIN,
     ),
     FeatureSpec(
+        key="provider_keys_file",
+        name="Keys on OpenAI and Gemini",
+        category="guardrails",
+        effect="guardrail",
+        values=_ON_OFF,
+        default="on",
+        tiers=("deployment",),
+        binds="turn",
+        doc=(
+            "An agent's saved keys go with it to OpenAI and Gemini, as a .env file in that "
+            "provider's sandbox, so that provider receives them. Off leaves the file out."
+        ),
+        platforms=_CALL_GATE_PLATFORMS,
+        authority=_ADMIN,
+    ),
+    FeatureSpec(
         key="reach_budget",
         name="Reach check",
         category="guardrails",

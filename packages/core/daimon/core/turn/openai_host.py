@@ -8,7 +8,7 @@ the lease, send claims and journal. Unknown container cost remains durable pendi
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from decimal import Decimal
@@ -49,7 +49,9 @@ from daimon.core.turn.prepare import (
     PreparedTurn,
     ProviderPreparationRequest,
 )
+from daimon.core.turn.provider_env import PATH, EnvFile, turn_env_file
 from daimon.core.turn.replace_binding import (
+    ENV_REF,
     BindingFacts,
     OldSession,
     binding_decision,
@@ -71,7 +73,13 @@ from mux.drivers.openai import (
     SessionControls,
     Transport,
 )
-from mux.errors import ContinuityLost, ProviderError, ScopeViolation, UnsupportedCapability
+from mux.errors import (
+    ContinuityLost,
+    MuxError,
+    ProviderError,
+    ScopeViolation,
+    UnsupportedCapability,
+)
 from mux.profiles.openai import NATIVE_MODELS, PERSISTENT_WORKSPACE
 from mux.state.lease import Lease, Slot
 from mux.state.operations import request_digest
@@ -251,6 +259,8 @@ async def _create(
     runtime: OpenAIHostRuntime,
     *,
     replacing: tuple[ProviderBinding, str, Lease] | None = None,
+    env: EnvFile | None = None,
+    uploaded: list[tuple[OpenAIDriver, ResourceRef]] | None = None,
 ) -> Session:
     # Stable per empty slot, including after a crash. Changed config/plan gets a
     # digest conflict, not a fresh operation which might create a second session.
@@ -265,7 +275,13 @@ async def _create(
         request.scope,
         "openai:prepare:" + str(uuid5(NAMESPACE_URL, slot.model_dump_json())) + era,
     )
-    digest = request_digest({"spec": digest_body(spec), "controls": digest_body(runtime.controls)})
+    digest = request_digest(
+        {
+            "spec": digest_body(spec),
+            "controls": digest_body(runtime.controls),
+            **({"env": env.sha256} if env is not None else {}),
+        }
+    )
     begun = await store.begin_operation(
         request.scope,
         key=key,
@@ -296,6 +312,11 @@ async def _create(
         final = await reauthorize(request.deps, request.admission)
         if final != request.admission:
             raise AdmissionDenied(reason="backend_unsupported")
+        if env is not None:
+            # Uploaded before the claim: a failed upload leaves the create to retry.
+            spec, file = await _with_env(request.scope, backend, spec, env, key=f"{key}:env")
+            if uploaded is not None:
+                uploaded.append((backend, file))
         await store.claim_send(request.scope, key, now=request.now(), fence=lease)
         try:
             # Bound this create call within the lease and the turn deadline.
@@ -335,6 +356,32 @@ async def _create(
     finally:
         if replacing is None:
             await store.release_lease(lease)
+
+
+async def _with_env(
+    scope: Scope, backend: OpenAIDriver, spec: SessionSpec, env: EnvFile, *, key: str
+) -> tuple[SessionSpec, ResourceRef]:
+    """`spec` with the agent's keys file uploaded and mounted at `provider_env.PATH`."""
+
+    async def body() -> AsyncIterator[bytes]:
+        yield env.body
+
+    file = await backend.artifacts.upload(
+        scope, body(), filename=".env", media_type="text/plain", key=key
+    )
+    mount = ResourceBinding(id="daimon-env", kind="artifact", target_path=PATH, resource=file.ref)
+    return spec.model_copy(update={"resources": (*spec.resources, mount)}), file.ref
+
+
+async def _delete_env(scope: Scope, uploaded: list[tuple[OpenAIDriver, ResourceRef]]) -> None:
+    """Delete the uploaded keys files once the session that mounted them has run."""
+    for backend, ref in uploaded:
+        try:
+            await backend.artifacts.delete(scope, ref, key=f"env-delete:{ref.id}")
+        except MuxError as error:
+            # Left at the provider; logged by category, never content.
+            log.warning("openai.env_file_delete_failed", error=type(error).__name__)
+    uploaded.clear()
 
 
 async def _create_key(store: StateStore, scope: Scope, base: str) -> str:
@@ -385,9 +432,13 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
     )
     from daimon.core.turn.provider_gate import gated_turn
 
+    uploaded: list[tuple[OpenAIDriver, ResourceRef]] = []
     try:
-        return await gated_turn(request, lambda gated: _prepare_with_runtime(gated, runtime))
+        return await gated_turn(
+            request, lambda gated: _prepare_with_runtime(gated, runtime, uploaded)
+        )
     except BaseException:
+        await _delete_env(request.scope, uploaded)
         # A per-turn MCP credential minted before the turn existed (a template's
         # session create) is revoked now, not left to its TTL.
         if runtime.end_of_turn is not None:
@@ -401,7 +452,9 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
 
 
 async def _prepare_with_runtime(
-    request: ProviderPreparationRequest, runtime: OpenAIHostRuntime
+    request: ProviderPreparationRequest,
+    runtime: OpenAIHostRuntime,
+    uploaded: list[tuple[OpenAIDriver, ResourceRef]],
 ) -> PreparedTurn:
     revision = request.admission.backend_revision
     if revision is None or not request.deps.channel_backends:
@@ -484,6 +537,8 @@ async def _prepare_with_runtime(
     binding = await store.get_binding(slot)
     reused = binding is not None
     continuity = CONTINUED
+    # Mounted when the session is created; a changed file replaces the session.
+    env = await turn_env_file(request) if revision.profile in _MOUNTING_PROFILES else None
 
     async def publishable(
         native: Session, binding_id: str, era: str
@@ -513,6 +568,7 @@ async def _prepare_with_runtime(
                 "account_scope": runtime.account_scope_id,
                 "model": revision.model or "",
                 "plan_digest": plan_digest,
+                **({ENV_REF: env.sha256} if env is not None else {}),
                 **(
                     {"daimon_chat_session_id": chat_session_id}
                     if chat_session_id is not None
@@ -543,6 +599,7 @@ async def _prepare_with_runtime(
         account_scope=runtime.account_scope_id,
         model=revision.model or "",
         plan_digest=plan_digest,
+        env_sha256=env.sha256 if env is not None else "",
     )
     decision = (
         None
@@ -573,7 +630,15 @@ async def _prepare_with_runtime(
             )
             with native_mcp_session(request.scope, chat_session_id):
                 created = await _create(
-                    request, store, slot, target, planned, runtime, replacing=(old, era, lease)
+                    request,
+                    store,
+                    slot,
+                    target,
+                    planned,
+                    runtime,
+                    replacing=(old, era, lease),
+                    env=env,
+                    uploaded=uploaded,
                 )
             verified, published = await publishable(created, old.id, era)
             successors.append(verified)
@@ -626,7 +691,9 @@ async def _prepare_with_runtime(
             if carried.mounts:
                 planned = spec.model_copy(update={"resources": (*spec.resources, *carried.mounts)})
         with native_mcp_session(request.scope, chat_session_id):
-            created = await _create(request, store, slot, backend, planned, runtime)
+            created = await _create(
+                request, store, slot, backend, planned, runtime, env=env, uploaded=uploaded
+            )
         binding_id, era = adopted_identity(
             await store.get_binding(slot, include_released=True),
             str(shared)
@@ -721,10 +788,29 @@ async def _prepare_with_runtime(
         native_chat_session_id=binding.native_refs.get("daimon_chat_session_id"),
         continuity=continuity,
         # Revokes a template turn's per-turn MCP credential however the turn ends.
-        _finalize=runtime.end_of_turn,
+        _finalize=_finalized(request.scope, runtime, uploaded),
+        env_sha256=binding.native_refs.get(ENV_REF),
         # A shared agent copy's turn drives the owner's session.
         _scope=request.scope if owned else None,
     )
+
+
+def _finalized(
+    scope: Scope, runtime: OpenAIHostRuntime, uploaded: list[tuple[OpenAIDriver, ResourceRef]]
+) -> Callable[[], Awaitable[None]] | None:
+    """The turn's end: delete the keys file it uploaded, then `runtime.end_of_turn`."""
+    if not uploaded:
+        return runtime.end_of_turn
+    end = runtime.end_of_turn
+
+    async def finalize() -> None:
+        try:
+            await _delete_env(scope, uploaded)
+        finally:
+            if end is not None:
+                await end()
+
+    return finalize
 
 
 def _old_session(

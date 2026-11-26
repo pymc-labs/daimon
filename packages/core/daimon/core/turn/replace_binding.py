@@ -58,6 +58,8 @@ MAX_CARRIED_FILES = 20
 MAX_CARRIED_FILE_BYTES = 10 * 1024 * 1024
 MAX_CARRIED_TOTAL_BYTES = 50 * 1024 * 1024
 CARRIED_FILES_DIR = "/workspace/previous"
+#: The binding ref holding the hash of the keys file its session mounted (`provider_env`).
+ENV_REF = "env_sha256"
 
 BindingField = Literal[
     "profile", "provider", "config_revision", "agent", "account_scope", "model", "plan_digest"
@@ -86,6 +88,8 @@ class BindingFacts:
     plan_digest: str
     environment: str = ""
     """Set by a host whose plan names its environment (self-hosted)."""
+    env_sha256: str = ""
+    """The mounted keys file's hash, set by a host that mounts it only at creation (OpenAI)."""
 
 
 def recorded_facts(binding: ProviderBinding, *, environment: bool = False) -> BindingFacts:
@@ -100,6 +104,7 @@ def recorded_facts(binding: ProviderBinding, *, environment: bool = False) -> Bi
         account_scope=refs.get("account_scope", ""),
         model=refs.get("model", ""),
         plan_digest=refs.get("plan_digest", ""),
+        env_sha256=refs.get(ENV_REF, ""),
     )
 
 
@@ -120,7 +125,7 @@ def _snapshot(facts: BindingFacts, updatable: frozenset[BindingField]) -> Sessio
         vault_id=None,
         tools_sha256=in_place,
         mcp_servers_sha256="",
-        env_sha256=None,
+        env_sha256=facts.env_sha256 or None,
         agent_version=0,
         agent_name="",
     )
@@ -142,7 +147,8 @@ def binding_decision(
     return decide_session_compatibility(
         recorded=_snapshot(recorded, updatable),
         desired=_snapshot(desired, updatable),
-        capabilities=MaCapabilities(session_agent_updatable=True),
+        # A provider session's keys file mounts only at creation: a new one replaces it.
+        capabilities=MaCapabilities(session_agent_updatable=True, env_replaceable_in_place=False),
         now=datetime.now(UTC),
     )
 

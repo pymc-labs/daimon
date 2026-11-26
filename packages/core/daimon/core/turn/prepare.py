@@ -42,7 +42,6 @@ from daimon.core.channel_backend import BackendUnsupported, backend_refusal_caus
 from daimon.core.channel_skills import PLATFORM_SKILL_RETRY_AFTER
 from daimon.core.config import get_repo_memory_settings
 from daimon.core.confirmation import confirmed_tools_for_tenant
-from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.features.eval_key import EvalKey
 from daimon.core.github_app_session import AppSessionAccess, token_scopes_for_tokens
 from daimon.core.ma_identity import derive_agent_uuid
@@ -67,7 +66,6 @@ from daimon.core.session_snapshot import (
     TokenScope,
     fingerprint_identity,
     fingerprint_mutable,
-    hash_env_bytes,
     session_skills,
     snapshot_from_created_session,
 )
@@ -81,7 +79,6 @@ from daimon.core.shared_threads import (
 from daimon.core.skills.unresolved import SkillUnavailable
 from daimon.core.stores import mux_state
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.agent_memory_stores import get_personal_memory_store_id
 from daimon.core.stores.domain import BackendAgent, TransferKind
 from daimon.core.stores.thread_sessions import (
@@ -225,6 +222,8 @@ class PreparedTurn:
     session_ref: ResourceRef | None = None
     runtime: TurnRuntime | None = None
     native_chat_session_id: str | None = field(default=None, kw_only=True)
+    # The keys file a provider session holds (`provider_env`); Claude's is on its snapshot.
+    env_sha256: str | None = field(default=None, kw_only=True)
     _scope: Scope | None = field(default=None, kw_only=True, compare=False, repr=False)
     _native_spec: AgentSpec | None = field(default=None, kw_only=True, compare=False, repr=False)
     # The provider created this turn's session without the agent's built-in tools.
@@ -309,20 +308,17 @@ async def _env_bytes_sha256(
 ) -> str | None:
     """Hash of the `.env` bytes `create_session` is about to mount, or None.
 
-    Mirrors `credential_env.upload_env_and_mount`: the same tenant-scoped rows
-    through the same `assemble_env_bytes`, and None for an agent with no
-    secrets (that agent gets no `.env` resource at all). Read BEFORE the
-    session is created, deliberately — a key written while `create_session`
-    runs then records as stale rather than as current, and a stale hash costs
-    one redundant refresh, where a falsely-current one would leave the session
-    silently running the old secrets.
+    Mirrors `credential_env.upload_env_and_mount` (`provider_env.agent_env_file`),
+    and None for an agent with no secrets (that agent gets no `.env` resource at
+    all). Read BEFORE the session is created, deliberately — a key written while
+    `create_session` runs then records as stale rather than as current, and a
+    stale hash costs one redundant refresh, where a falsely-current one would
+    leave the session silently running the old secrets.
     """
-    async with deps.sessionmaker() as session:
-        rows = await list_agent_files(session, tenant_id=tenant_id, agent_id=agent_uuid)
-    rows = [row for row in rows if row.key not in ("GH_TOKEN", "GITHUB_TOKEN")]
-    if not rows:
-        return None
-    return hash_env_bytes(assemble_env_bytes(rows))
+    from daimon.core.turn.provider_env import agent_env_file
+
+    found = await agent_env_file(deps.sessionmaker, tenant_id=tenant_id, agent_id=agent_uuid)
+    return None if found is None else found.sha256
 
 
 @dataclass(frozen=True)
