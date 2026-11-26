@@ -881,18 +881,18 @@ async def _capture_source_capabilities(
                     # Tools it can't map (custom tools, a partial toolset) go whole.
                     mapped_tools, unavailable_builtin_tools = (), ()
                     template_losses = ("tools",)
-                # Anthropic's built-in skills have no bytes to carry: their open
-                # equivalents go instead.
-                carried = (
-                    *carried_skills(spec),
-                    *await open_skills(
-                        request.deps.sessionmaker,
-                        source.tenant_id,
-                        (s.id for s in spec.skills or () if is_builtin_skill(s)),
-                    ),
-                )
-                if carried and not attaches_session_skills(profile):
+                carried = carried_skills(spec)
+                built_ins = tuple(s.id for s in spec.skills or () if is_builtin_skill(s))
+                if (carried or built_ins) and not attaches_session_skills(profile):
                     template_losses, carried = ("skills", *template_losses), ()
+                elif built_ins:
+                    # Anthropic's built-ins have no bytes to carry: their open copies go
+                    # instead, and one with no copy is a named loss.
+                    copies, missing = await open_skills(
+                        request.deps.sessionmaker, source.tenant_id, built_ins
+                    )
+                    carried = (*carried, *copies)
+                    template_losses = (*template_losses, *missing)
             else:
                 mapped_tools = represented_execution_tools(
                     profile,

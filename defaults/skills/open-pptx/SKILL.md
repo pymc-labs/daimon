@@ -5,8 +5,8 @@ description: Create, read and edit PowerPoint (.pptx) files with python-pptx. Us
 
 # PowerPoint decks
 
-Use `python-pptx` (`from pptx import Presentation`). If the import fails, run
-`python3 -m pip install python-pptx`.
+Use `python-pptx` (`from pptx import Presentation`), installed in the sandbox. If the
+import fails and `pip install python-pptx` has no network, say the library is missing.
 
 ## Read
 

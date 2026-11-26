@@ -594,8 +594,9 @@ async def test_builtin_skills_are_carried_as_their_open_copies(
         await record_seeded_skill(
             session, tenant_id=tenant.id, name="open-docx", content_hash="h", anthropic_id="sk_d"
         )
-    got = await session_skills.open_skills(
+    got, missing = await session_skills.open_skills(
         db_session_factory, tenant.id, ("docx", "pdf", "brainstorm")
     )
 
     assert got == (SkillRef(id="sk_d", version="latest", source="custom"),), "only a seeded copy"
+    assert missing == ("skill:pdf", "skill:brainstorm"), "the rest are named losses"

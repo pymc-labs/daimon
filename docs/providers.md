@@ -296,8 +296,8 @@ project, spend holds or storage:
 - **Spend.** Each attempt places a hold, an estimate against `cap_usd`.
   Holds release on a refusal, settle when usage is final, and otherwise expire
   after 24 hours. An optional `spend_limit_usd_cents` caps each reply as for
-  OpenAI: the host stops it once its priced usage passes the limit. Rows built
-  in code set 50.
+  OpenAI: the host stops it once its priced usage passes the limit, for a
+  model with a known price. Rows built in code set 50.
 - **Growth.** Records and holds have no size bound or compaction, so monitor
   database storage before raising load.
 

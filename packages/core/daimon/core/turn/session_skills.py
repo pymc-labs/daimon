@@ -101,19 +101,25 @@ async def open_skills(
     sessionmaker: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
     built_in_ids: Iterable[str],
-) -> tuple[SkillRef, ...]:
-    """The tenant's open copies of these built-in skills, for a provider without them.
+) -> tuple[tuple[SkillRef, ...], tuple[str, ...]]:
+    """The tenant's open copies of these built-in skills, and the `skill:` loss of each left out.
 
-    A copy the tenant has not seeded yet, or a built-in with none, adds nothing.
+    A built-in has no copy when it has no open equivalent, or the tenant has not been
+    seeded with it yet (a deploy seeds `defaults/skills`; a keyless install never does).
     """
     from daimon.core.stores.seeded_skills import load_seeded_skill
 
-    wanted = tuple(OPEN_SKILLS[i] for i in built_in_ids if i in OPEN_SKILLS)
-    if not wanted:
-        return ()
+    ids = tuple(dict.fromkeys(built_in_ids))
     async with sessionmaker() as session:
-        rows = [await load_seeded_skill(session, tenant_id=tenant_id, name=n) for n in wanted]
-    return tuple(SkillRef(id=r.anthropic_id, version="latest", source="custom") for r in rows if r)
+        rows = {
+            i: await load_seeded_skill(session, tenant_id=tenant_id, name=OPEN_SKILLS[i])
+            for i in ids
+            if i in OPEN_SKILLS
+        }
+    copies = tuple(
+        SkillRef(id=r.anthropic_id, version="latest", source="custom") for r in rows.values() if r
+    )
+    return copies, tuple(f"skill:{i}" for i in ids if rows.get(i) is None)
 
 
 def skill_names(sizes: Mapping[tuple[str, str], SkillSizeRow]) -> dict[str, str]:
@@ -694,19 +700,15 @@ async def channel_session_skills(
     if not attaches_session_skills(profile):
         return (), (), {}
     # The built-ins (a Teams turn's docx, pptx, xlsx) go as their open copies.
+    copies, missing = await open_skills(
+        deps.sessionmaker, request.tenant_id, (s.skill_id for s in skills if s.type != "custom")
+    )
     custom = (
         *((s.skill_id, s.version) for s in skills if s.type == "custom"),
-        *(
-            (s.id, s.version)
-            for s in await open_skills(
-                deps.sessionmaker,
-                request.tenant_id,
-                (s.skill_id for s in skills if s.type != "custom"),
-            )
-        ),
+        *((c.id, c.version) for c in copies),
     )
     if not custom:
-        return (), (), {}
+        return (), missing, {}
 
     async def pin(skill: tuple[str, str | None]) -> SkillRef | None:
         skill_id, current = skill
@@ -740,7 +742,7 @@ async def channel_session_skills(
         manifests=profile.skill_upload_limits is not None,
     )
     kept = fitting_skills(profile, pins, sizes)
-    return kept, (*unresolved, *skill_losses(pins, kept)), skill_names(sizes)
+    return kept, (*unresolved, *missing, *skill_losses(pins, kept)), skill_names(sizes)
 
 
 async def turn_session_skills(

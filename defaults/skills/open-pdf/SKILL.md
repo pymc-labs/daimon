@@ -6,7 +6,8 @@ description: Read, merge, split, fill and create PDF files with pypdf, pdfplumbe
 # PDF files
 
 Libraries: `pypdf` (pages, merge, split, forms), `pdfplumber` (text and tables),
-`reportlab` (new documents). Install any missing one with `python3 -m pip install`.
+`reportlab` (new documents), installed in the sandbox. For a missing one, try
+`python3 -m pip install`; with no network, say which library is missing.
 
 ## Read
 

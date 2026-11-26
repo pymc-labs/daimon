@@ -5,7 +5,8 @@ description: Create, read and edit Word (.docx) files with python-docx. Use for 
 
 # Word documents
 
-Use `python-docx` (`import docx`). If the import fails, run `python3 -m pip install python-docx`.
+Use `python-docx` (`import docx`), installed in the sandbox. If the import fails and
+`pip install python-docx` has no network, say the library is missing; don't hand-write the XML.
 
 ## Read
 

@@ -6,8 +6,8 @@ description: Create, read and edit Excel (.xlsx) spreadsheets with openpyxl and 
 # Excel workbooks
 
 Use `openpyxl` for structure, formulas and formatting and `pandas` for bulk data
-(`pd.read_excel`, `df.to_excel`). If openpyxl is missing, run
-`python3 -m pip install openpyxl`.
+(`pd.read_excel`, `df.to_excel`); both ship with the sandbox. If openpyxl is missing
+and `pip install openpyxl` has no network, say so.
 
 ## Read
 
