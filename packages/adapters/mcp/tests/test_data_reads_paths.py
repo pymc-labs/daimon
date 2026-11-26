@@ -308,6 +308,9 @@ async def test_a_memory_that_recorded_data_shows_only_where_all_of_it_is_readabl
     assert [e.name for e in shown] == ["plain", "ok"]
     assert asked == [[["record:a"], ["record:b"]]], "untagged memories are not checked"
     assert noted == [("s", ["record:a"]), ("asker", ["record:a"])], "a recall joins the reads"
+    noted.clear()
+    await repo_memory._shown(runtime, _auth(), [ok], recall=False)  # pyright: ignore[reportPrivateUsage]
+    assert not noted, "a listing joins nothing"
 
 
 @asynccontextmanager
