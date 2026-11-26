@@ -6,7 +6,7 @@ import logging
 import random
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import NoReturn, Protocol
+from typing import Final, NoReturn, Protocol
 from uuid import uuid4
 
 from pydantic import JsonValue
@@ -113,6 +113,7 @@ from mux.errors import (
 )
 from mux.profiles import PACKAGE_MANAGERS, network_effect
 from mux.profiles.gemini import INLINE_REUSE as PROFILE
+from mux.profiles.gemini import SESSION_NAMESPACE, WITHHOLD_BUILTINS
 from mux.state.operations import SendClaimed, request_digest
 from mux.state.store import StateStore
 
@@ -228,6 +229,16 @@ class Base:
             max_output_tokens=self._max_output_tokens,
             thinking_level=self._thinking_level,
         )
+        session = spec.extensions.get(SESSION_NAMESPACE)
+        if session is not None and session.value.get(WITHHOLD_BUILTINS) is True:
+            # Each interaction sends its tools, so a session leaves its agent's out.
+            tools = request["tools"]
+            kept = [
+                t
+                for t in (tools if isinstance(tools, list) else [])
+                if _tool_type(t) not in BUILTIN_TOOLS
+            ]
+            request["tools"] = kept or [copy.deepcopy(NO_TOOLS_TOOL)]
         if self._max_output_tokens is not None:
             if (
                 self._native_agent is not None
@@ -641,6 +652,14 @@ class GeminiAgents(Base):
         refuse("agent_delete")
 
 
+BUILTIN_TOOLS: Final = ("code_execution", "google_search", "url_context")
+"""Gemini's own tools an agent may name; the rest are functions and MCP servers."""
+
+
+def _tool_type(tool: JsonValue) -> JsonValue:
+    return tool.get("type") if isinstance(tool, dict) else None
+
+
 def compile_agent(
     spec: AgentSpec,
     *,
@@ -681,11 +700,7 @@ def compile_agent(
         for tool in spec.tools or ():
             if tool.permission != "auto":
                 refuse("tool_confirmation")
-            if tool.kind == "builtin" and tool.name in (
-                "code_execution",
-                "google_search",
-                "url_context",
-            ):
+            if tool.kind == "builtin" and tool.name in BUILTIN_TOOLS:
                 tools.append({"type": tool.name})
             elif tool.kind == "mcp_toolset" and any(
                 connection.name == tool.name for connection in spec.mcp_servers or ()
@@ -842,13 +857,22 @@ class GeminiSessions(Base):
         self._check(scope, spec.agent, "agent")
         if spec.resources or spec.state_mode != "continue" or initial is not None:
             refuse("session_resources", "initial_input_or_fresh_state")
-        ext = spec.extensions.get("gemini.session")
-        if set(spec.extensions) != {"gemini.session"} or ext is None:
+        ext = spec.extensions.get(SESSION_NAMESPACE)
+        if set(spec.extensions) != {SESSION_NAMESPACE} or ext is None:
             refuse("gemini.session")
         if ext.version != 1:
             raise ExtensionVersionError("gemini.session", ext.version, (1,))
-        if set(ext.value) != {"thread", "binding_id"}:
-            raise ValueError("gemini.session accepts only thread and binding_id")
+        if (
+            not {"thread", "binding_id"}
+            <= set(ext.value)
+            <= {
+                "thread",
+                "binding_id",
+                WITHHOLD_BUILTINS,
+            }
+            or ext.value.get(WITHHOLD_BUILTINS, True) is not True
+        ):
+            raise ValueError("gemini.session accepts thread, binding_id and withhold_builtins")
         thread = ThreadRef.model_validate(ext.value["thread"])
         if thread.channel.tenant_id != scope.tenant_id:
             raise ScopeViolation(thread.thread_id, "thread is outside tenant scope")
