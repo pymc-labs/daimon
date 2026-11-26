@@ -151,7 +151,7 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         await noted(auth, [f"record:{record.item.id}"])
         start = max(start, 0)
         end = start + PAGE
-        body = r.show(record.body)  # whole, so a name never straddles a page
+        body = r.show(record.body, record.item.source_id)  # whole: no name straddles a page
         return _text(r.show({
             **dataclasses.asdict(record.item),
             "text": body[start:end],

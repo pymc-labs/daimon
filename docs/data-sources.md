@@ -124,6 +124,9 @@ A set's `at` says when it applies. Unset, as before, regex, aliases and removals
 at ingest, and entity names hide at read time. `storage` applies all of them at ingest,
 entity names becoming their label for everyone. `answer` stores text as the source has it
 and rewrites answers instead, entity names hiding as when unset. `exclude_ids` always keeps records out of the store.
+A set applies to the sources that name it. When its rules change, answers from those sources
+apply them too until each source syncs again. While any answer applies rules, SQL and file
+reads are refused.
 
 ## Declared config
 
