@@ -32,6 +32,7 @@ from daimon.core.defaults.metadata import BUILTIN_AGENT_NAMES, MA_METADATA_KEY_M
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
 from daimon.core.mcp_identity import (
+    DM_ROUTINE_DESTINATION,
     RELAY_CLAIM,
     RELAY_PATH,
     REQUESTER_PLATFORMS,
@@ -67,6 +68,7 @@ from daimon.core.stores.domain import (
     TurnOriginRow,
     WatchRow,
 )
+from daimon.core.stores.lead_intake import execution_is_active
 from daimon.core.stores.routines import get_routine
 from daimon.core.stores.task_continuations import get_running_wake_row
 from daimon.core.stores.thread_sessions import get_thread_session_by_id
@@ -329,6 +331,59 @@ async def _routine_run(
     ):
         return None
     return row
+
+
+async def _dm_routine_run(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    binding: RelayBinding,
+    origin: TurnOriginRow,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    person: str,
+    now: datetime,
+) -> bool:
+    """Whether a call comes from a live fire of a routine posting to its owner's DM.
+
+    `origin` is the turn holding the credential's own grant. It must be that routine's
+    unattended turn in a fresh `dm:` scope: no person's message, not a helper's, not a
+    watch's or timer's (they never reach the owner). The owner is the signed-in person,
+    the credential's and the routine's, which still posts to that person's DM, runs this
+    agent, is enabled and unedited since the fire began; and the fire is still running
+    (`routine_execution`). Checked on every call, so a pause or an edit stops the next.
+    """
+    if (
+        binding.execution is None
+        or binding.revision is None
+        or binding.dm_channel is None
+        or binding.routine_id is None
+        or binding.destination != DM_ROUTINE_DESTINATION
+        or binding.owner != person
+        or origin.helper_of is not None
+        or origin.human_invocation is not False
+        or origin.attended
+        or not origin.own_dm_reach
+        or origin.platform != "discord"
+        or not origin.thread_id.startswith(DM_SCOPE_PREFIX)
+        or origin.parent_channel_id != origin.thread_id
+        or origin.platform_channel_id is not None
+        or origin.platform_message_id is not None
+        or origin.expires_at <= now
+    ):
+        return False
+    async with sessionmaker() as session:
+        row = await get_routine(session, binding.routine_id, tenant_id=tenant_id)
+        if (
+            row is None
+            or not row.enabled
+            or row.destination_kind != "dm"
+            or not row.created_by_user_id == row.destination_id == person
+            or routine_destination_key(row) != DM_ROUTINE_DESTINATION
+            or derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=row.agent_id) != agent_id
+            or row.updated_at != datetime.fromisoformat(binding.revision)
+        ):
+            return False
+        return await execution_is_active(session, tenant_id, binding.routine_id, binding.execution)
 
 
 async def _watch_poll(
@@ -682,6 +737,7 @@ def build_identity_relay_route(
                 server.routine_claims
                 and origin is None
                 and binding.routine_id is not None
+                and binding.session_key is None
                 and FOREIGN_HOME_CLAIM not in claims
             ):
                 # Only a run the routine check passes, still posting where it did when the
@@ -710,9 +766,34 @@ def build_identity_relay_route(
                         TurnPlace(channel_id=destination[0], message_id=None),
                         destination[1],
                     )
+            elif (
+                server.routine_claims
+                and server.dm_routine_claims
+                and origin is not None
+                and granted
+                and binding.session_key is not None
+                and binding.dm_channel is not None
+                and isinstance(person, str)
+                and person
+                and await _dm_routine_run(
+                    sessionmaker,
+                    binding,
+                    origin,
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    person=person,
+                    now=now,
+                )
+            ):
+                # A routine posting to its owner's DM, in a live fire: the owner, their DM
+                # (opened by the fire, never the origin's) and room `dm`. Any check failing
+                # leaves the call as it is without the setting.
+                routine_id = str(binding.routine_id)
+                place, room = TurnPlace(channel_id=binding.dm_channel, message_id=None), "dm"
             wake: WakeReason | None = None
             if (
                 server.wake_claims
+                and routine_id is None
                 and origin is not None
                 and granted
                 and isinstance(person, str)
@@ -775,6 +856,7 @@ def build_identity_relay_route(
                 conversation = requester_conversation(origin, unattended=kind == "routine")
             elif (
                 binding.routine_id is not None
+                and binding.session_key is None
                 and platform in REQUESTER_PLATFORMS
                 and FOREIGN_HOME_CLAIM not in claims
             ):

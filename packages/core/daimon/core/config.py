@@ -2367,6 +2367,12 @@ class SignedIdentityServer(BaseModel):
     # running, or a queued continuation posting to its own thread, as a routine there would
     # (`daimon.adapters.mcp.identity_relay`). Off by default, independent of routine_claims.
     wake_claims: bool = False
+    # Also sign a routine posting to its owner's DM: its routine, the owner as the
+    # person, the owner's DM and room `dm`, only for a live fire of that routine,
+    # enabled and unedited since the fire began (`identity_relay._dm_routine_run`). The
+    # server then reads for the owner with nobody watching, from a stored prompt the
+    # model or an admin may have written. Off by default; needs routine_claims.
+    dm_routine_claims: bool = False
 
     @model_validator(mode="after")
     def _wake_needs_requester(self) -> SignedIdentityServer:
@@ -2378,6 +2384,8 @@ class SignedIdentityServer(BaseModel):
             raise ValueError("routine_claims needs a signed server")
         if self.wake_claims and self.auth != "signed":
             raise ValueError("wake_claims needs a signed server")
+        if self.dm_routine_claims and not self.routine_claims:
+            raise ValueError("dm_routine_claims needs routine_claims")
         return self
 
     @model_validator(mode="after")
@@ -2558,6 +2566,11 @@ class McpIdentitySettings(BaseModel):
     def names_routine(self) -> bool:
         """Whether any server is sent routine claims (`routine_claims`)."""
         return any(server.routine_claims for server in self.servers)
+
+    @property
+    def names_dm_routine(self) -> bool:
+        """Whether any server is sent a DM routine's claims (`dm_routine_claims`)."""
+        return any(server.dm_routine_claims for server in self.servers)
 
     @property
     def names_agent_chat_requester(self) -> bool:

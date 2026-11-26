@@ -207,7 +207,7 @@ __all__ = [
 
 
 if TYPE_CHECKING:
-    pass
+    from daimon.core.mcp_identity import DmRoutineRelay
 
 _log = structlog.get_logger(__name__)
 
@@ -465,6 +465,9 @@ class Admission:
     # The origin channel is shared with another organisation (stamped on the turn origin).
     shared_channel: bool = False
     private_dm_id: str | None = None
+    # A routine posting to its owner's DM, with that DM opened: bound into the turn's
+    # relay credential (`daimon.core.mcp_identity.DmRoutineRelay`). None otherwise.
+    dm_routine_relay: DmRoutineRelay | None = None
     # A relay agent's turn (`daimon.core.relay_scope`): held, sealed, no memory, a fresh session.
     relay_scoped: bool = False
     # The channel and thread the turn runs in, and every sealed id that seals
