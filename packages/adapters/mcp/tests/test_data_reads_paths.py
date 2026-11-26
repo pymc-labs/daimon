@@ -31,9 +31,11 @@ from daimon.core.features.registry import FEATURES
 from daimon.core.stores.data_memory import UNKNOWN_READ
 from daimon.core.stores.domain import Role
 from daimon.core.stores.repo_memory import MemoryEntry
+from daimon.core.teams_graph import GraphMember
 from daimon.core.turn import admission
 from daimon.core.turn_hold import TurnHold
 from daimon.data.identity import IdentityKey
+from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
 
 
@@ -61,14 +63,14 @@ _GUARDS: list[tuple[str, Callable[..., Any], str]] = [
     ("agent chat ask starts or follows up", agent_chat._ask_impl, "_start_turn_impl"),  # pyright: ignore[reportPrivateUsage]
     ("hub and session transcripts", sessions.SessionEventOut.from_event, "redact_data_results"),
     ("every caller is resolved from signed facts", data_access.data_audience_for, "data_origin"),
-    ("chat turns by their grant, never the latest origin", data_access._turn_origin, "matching_turn"),  # pyright: ignore[reportPrivateUsage]
+    ("chat turns by their grant, never the latest origin", data_access._turn_and_parent, "matching_turn"),  # pyright: ignore[reportPrivateUsage]
     ("rooms: outsiders close them", data_access._room, "channel_has_outsiders"),  # pyright: ignore[reportPrivateUsage]
     ("Discord rooms: stored viewers", data_access._room, "read_viewers"),  # pyright: ignore[reportPrivateUsage]
     ("Slack rooms: members read per call", data_access._room, "_slack_viewers"),  # pyright: ignore[reportPrivateUsage]
     ("Teams rooms: members read per call", data_access._room, "_teams_viewers"),  # pyright: ignore[reportPrivateUsage]
     ("helper turns: the asking agent reads data here", data_access._turn_origin, "reads_data"),  # pyright: ignore[reportPrivateUsage]
     ("the data tools register in one place", server.create_mcp_app, "register_data_tools"),  # pyright: ignore[reportUnknownMemberType]
-    ("a memory saved after a data read records it", repo_memory.repo_memory_impl, "reads_of"),
+    ("a memory saved after a data read records it", repo_memory._refs, "reads_of"),  # pyright: ignore[reportPrivateUsage]
     ("a memory that recorded data shows to its audience only", repo_memory.repo_memory_impl, "_shown"),
 ]  # fmt: skip
 
@@ -172,6 +174,46 @@ async def test_callers_without_a_turn_resolve_from_their_credential(
         assert got.asker is not None and got.asker.subject == user_subject("discord", "1", "7"), (
             "the key's maker asks"
         )
+
+
+_HOME = GraphMember(user_id="A", tenant_id="T")
+_ROOMS: list[tuple[str, str, GraphMember | str, tuple[frozenset[str] | None, bool]]] = [
+    ("home members", "19:c@thread.v2", _HOME, (frozenset({"a"}), False)),
+    ("a guest", "19:c@thread.v2", GraphMember(user_id="b", tenant_id="T", roles=["guest"]), (None, True)),
+    ("another tenant", "19:c@thread.v2", GraphMember(user_id="b", tenant_id="X"), (None, True)),
+    ("standard channel", "19:c@thread.tacv2", "standard", (frozenset({"a"}), False)),
+    ("shared channel", "19:c@thread.tacv2", "shared", (None, True)),
+    ("channel not found", "19:c@thread.tacv2", "missing", (None, True)),
+]  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("row", "conversation", "case", "want"), _ROOMS, ids=[r[0] for r in _ROOMS]
+)
+async def test_a_teams_room_with_outsiders_gets_no_data(
+    monkeypatch: pytest.MonkeyPatch,
+    row: str,
+    conversation: str,
+    case: GraphMember | str,
+    want: tuple[frozenset[str] | None, bool],
+) -> None:
+    members = [_HOME] + ([case] if isinstance(case, GraphMember) and case is not _HOME else [])
+    graph = SimpleNamespace(
+        list_chat_members=AsyncMock(return_value=members),
+        list_channel_members=AsyncMock(return_value=members),
+    )
+
+    async def _locate(*_: object) -> object:
+        if case == "missing":
+            raise ToolError("no such channel")
+        return SimpleNamespace(channel_type=case, group_id="g", channel_id="c")
+
+    monkeypatch.setattr(data_access, "graph_for", lambda _client: graph)  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    monkeypatch.setattr(data_access, "locate_channel", _locate)
+    runtime = cast(McpRuntime, SimpleNamespace(teams_client=object()))
+    auth = _auth(platform="teams", external_id="t")
+    got = await data_access._teams_viewers(runtime, auth, conversation)  # pyright: ignore[reportPrivateUsage]
+    assert got == want, row
 
 
 def test_a_transcript_read_elsewhere_hides_data_results() -> None:

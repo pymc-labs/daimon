@@ -112,8 +112,8 @@ An answer shows only what everyone who will see it may read: the asker and, in a
 members. Discord rooms keep their members; Slack and Teams rooms are read on each call.
 Teams needs the app's `ChannelMember.Read.Group` and `ChatMember.Read.Chat` consents, which
 a team owner or chat member grants when adding or updating the app. Until then, and in
-rooms whose members cannot be read, answers hold only what everyone may read. A helper asked
-from a DM reads with the asker's access.
+rooms whose members cannot be read, answers hold only what everyone may read. Teams rooms
+with a guest, another organisation's member, or a shared channel get no data.
 
 A memory saved after a data read records what was read. It shows only where everyone could
 read all of it; a deleted item, a live result or SQL hides it.
