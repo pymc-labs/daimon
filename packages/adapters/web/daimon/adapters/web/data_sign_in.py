@@ -45,7 +45,7 @@ async def prove_sign_in(
                         or tenant.platform != PLATFORM_OF[identity.provider]
                         or tenant.external_id not in proved
                         or not await workspace_data_sources_on(runtime, db, tenant.id)
-                        or not await has_sources(runtime.settings, tenant.id)
+                        or not await has_sources(runtime.sessionmaker, runtime.settings, tenant.id)
                     ):
                         continue
                 async with store(runtime) as conn:

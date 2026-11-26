@@ -3254,7 +3254,7 @@ async def place_features(
         data is None
         or not data.on
         or deps.settings is None
-        or await has_sources(deps.settings, place.tenant_id)
+        or await has_sources(deps.sessionmaker, deps.settings, place.tenant_id)
     ):
         return features
     return without_data_sources(features)
