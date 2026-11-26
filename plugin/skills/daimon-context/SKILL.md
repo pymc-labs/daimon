@@ -23,13 +23,21 @@ spends that workspace's credit.
 5. For a follow-up on the same topic, pass the previous result's `handle` to `ask` so the
    daimon keeps its context and no new session is opened.
 
+For a job that takes more than two minutes (a code review, a test run, a long report),
+do not use `ask`. Call `start_turn(daimon_id, message)`, then `await_turn(daimon_id, handle)`.
+`await_turn` returns when the daimon says something or finishes. While its `status` is
+`running`, call it again with the returned `cursor` as `after`. The final answer is the
+last of `messages` when `status` is `idle`. Never loop on `get_session`.
+
 ## Failure modes
 
 - A server reports missing authentication: tell the user to run `/mcp` and authenticate
   that server. Do not retry the call.
-- `ask` times out after about two minutes: the error carries a `handle`. Call
-  `get_session(daimon_id, handle)` until `idle`, then `list_events` to read the reply.
-  Do not resend the question.
+- `ask` times out after about two minutes: the error carries a `handle`, and the daimon
+  is still working. Call `await_turn(daimon_id, handle)` until `status` is `idle`; the
+  reply is the last of `messages`. Do not resend the question.
+- `await_turn` returns `paused`: the daimon stopped and `hint` says why. Tell the user
+  what it says. Do not call `continue_turn` in a loop.
 - One daimon fails while others answer: report the partial result and name the daimon
   that did not answer.
 - `list_daimons` returns an empty list: daimon is not installed in any workspace the user
