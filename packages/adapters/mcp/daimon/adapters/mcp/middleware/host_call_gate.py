@@ -1,9 +1,10 @@
 """The MCP side of press-applies confirmation (`daimon.core.host_calls`).
 
-A provider-turn credential has no confirmation card, so a gated Daimon tool is not
-refused here when the gate is on: the call is checked, recorded and carded, and the
-model gets a waiting result. The wake turn's one-shot `confirmed_call` credential
-later runs exactly that call, consumed once, on exactly that tool and arguments.
+A provider-turn credential has no confirmation card, so a gated Daimon tool, or one
+an agent's `ask` or channel rule covers, is not refused here when the gate is on: the
+call is checked, recorded and carded, and the model gets a waiting result. The wake
+turn's one-shot `confirmed_call` credential later runs exactly that call, consumed
+once, on exactly that tool and arguments.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from daimon.core.stores import host_call_cards as cards
 from daimon.core.stores.mcp_tokens import revoke_mcp_token
 from daimon.core.stores.turn_origins import get_session_origin
 from daimon.core.switch_cards import SWITCH_CARD_MAX_S
-from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall, confirmation_gated_tools
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, MiddlewareContext
 from fastmcp.tools import ToolResult
@@ -143,13 +144,15 @@ class HostCallGate:
         self, context: MiddlewareContext, identity: AuthIdentity, run: CallNext
     ) -> object:
         """Record the gated call and post its card; fail closed on anything missing.
-        A call Claude's session runs without a card runs through `run` here too."""
+        A call Claude's session runs without a card runs through `run` here too, and so
+        does a call that only an agent tool rule sent here, where the rule allows it."""
         from daimon.adapters.mcp.tools._own_card import post_own_card
         from daimon.core.confirmation import reach_title
         from daimon.core.turn.approvals import (
             agent_rule_lookup,
             channel_for_tool_rules,
             read_error_verdict,
+            refusal_message,
             rule_for,
             tool_call_verdict,
         )
@@ -159,7 +162,10 @@ class HostCallGate:
         name, args = _call_of(context)
         settings = self._runtime.settings
         platform = identity.platform or ""
-        if self.off_for(identity):
+        # With the gate off a gated tool is refused as before; a tool only a rule sent
+        # here still runs where its rule allows it.
+        off = self.off_for(identity)
+        if off and name in confirmation_gated_tools():
             raise _refuse("off")
         # A held turn gets here only with a held-allowlisted tool, as Claude's card asks.
         if (
@@ -239,8 +245,10 @@ class HostCallGate:
         if verdict.outcome == "allow":
             return await run(context)
         if verdict.outcome != "ask":
-            # An unattended or operator refusal, as on Claude.
-            raise _refuse(f"verdict_{verdict.reason}")
+            # An unattended, operator or rule refusal, in Claude's words.
+            raise _refuse(f"verdict_{verdict.reason}", refusal_message(call, verdict))
+        if off:
+            raise _refuse("off")
         expires_at = now + timedelta(seconds=min(policy.confirmation_timeout_s, SWITCH_CARD_MAX_S))
         async with self._runtime.session_factory.begin() as session:
             created = await cards.create_card(

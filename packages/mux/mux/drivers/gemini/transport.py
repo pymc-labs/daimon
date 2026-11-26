@@ -20,7 +20,7 @@ from google.genai import errors as genai_errors
 from google.genai._interactions import APIConnectionError, APIError, APIStatusError
 from pydantic import JsonValue
 
-from mux.contracts.errors import ProviderErrorCategory, bounded_retry_after
+from mux.contracts.errors import ProviderErrorCategory, bounded_retry_after, redact_native_text
 from mux.drivers.gemini.mcp_auth import (
     RedactedCredential,
     contains_secret,
@@ -30,6 +30,16 @@ from mux.drivers.gemini.mcp_auth import (
 from mux.errors import ProviderError
 
 API_REVISION = "2026-05-20"
+STREAM_TIMEOUT = httpx.Timeout(60.0, read=1200.0)
+"""An event stream's HTTP timeouts: 60 s to connect, 20 min between bytes.
+
+The SDK builds its interactions client with no timeout, so without this a stream had
+no HTTP read bound at all. Other interaction calls are unchanged.
+
+Google: "Set HTTP read timeouts to 15 to 20 minutes per stream"
+(https://aistudio.google.com/docs/long-decode). The turn's own idle clock is shorter
+and decides when to reconnect; this only keeps the HTTP layer from cutting first.
+"""
 log = logging.getLogger(__name__)
 type Object = dict[str, JsonValue]
 
@@ -461,6 +471,34 @@ def _error_payload(error: Exception) -> dict[str, object] | None:
     return cast(dict[str, object], nested) if isinstance(nested, dict) else None
 
 
+#: Longest provider reason kept on a 4xx `ProviderError`.
+NATIVE_MESSAGE_LIMIT = 300
+
+
+def refusal_reason(error: Exception) -> str | None:
+    """Why Google refused a request, safe to log: its status and message.
+
+    Used only where the request carried no body (opening an interaction's
+    stream), so the text cannot echo a prompt or a credential the request
+    sent. Keys, tokens, URLs and quoted values are masked anyway and the text
+    is capped at `NATIVE_MESSAGE_LIMIT`. None when the body has neither.
+    """
+    payload = _error_payload(error)
+    if payload is None:
+        # Only google-genai's own error keeps a parsed message. Another SDK error's
+        # message can be the raw response body, which is never logged.
+        if not isinstance(error, genai_errors.APIError):
+            return None
+        message: object = error.message
+        status: object = error.status
+    else:
+        message, status = payload.get("message"), payload.get("status")
+    parts = [p for p in (status, message) if isinstance(p, str) and p.strip()]
+    if not parts:
+        return None
+    return redact_native_text(": ".join(parts), values=True, limit=NATIVE_MESSAGE_LIMIT)
+
+
 def _error_details(payload: dict[str, object]) -> list[dict[str, object]]:
     details = payload.get("details")
     return [
@@ -593,6 +631,17 @@ async def provider_call[T](call: Awaitable[T]) -> T:
         return await call
     except (APIError, genai_errors.APIError, httpx.HTTPError) as error:
         raise normalize_error(error) from None
+
+
+async def stream_open_call[T](call: Awaitable[T]) -> T:
+    """`provider_call` for opening a stream: a refusal (4xx) also keeps its reason."""
+    try:
+        return await call
+    except (APIError, genai_errors.APIError, httpx.HTTPError) as error:
+        normalized = normalize_error(error)
+        if (normalized.native_error_code or "").startswith("http_4"):
+            normalized.native_message = refusal_reason(error)
+        raise normalized from None
 
 
 class OwnedStream[T](AsyncIterator[T]):
@@ -906,12 +955,13 @@ class SDKTransport:
     ) -> AsyncIterator[Object]:
         from google.genai._interactions import omit
 
-        source = await provider_call(
+        source = await stream_open_call(
             self._interactions.get(
                 id=interaction_id,
                 stream=True,
                 last_event_id=after if after is not None else omit,
                 extra_headers={"Api-Revision": API_REVISION},
+                timeout=STREAM_TIMEOUT,
             )
         )
 

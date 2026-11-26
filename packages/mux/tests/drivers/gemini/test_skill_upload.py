@@ -13,10 +13,11 @@ import pytest
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.extensions import ExtensionConfig
-from mux.contracts.ids import ModelRef, Scope, SkillRef
+from mux.contracts.ids import ModelRef, PageRequest, Scope, SkillRef
 from mux.contracts.resources import AgentSpec, Session, SessionSpec, SkillUpload, SkillUploadFile
 from mux.drivers.gemini import GeminiManagedAgents, Records
 from mux.drivers.gemini.bundles import (
+    file_archive,
     mounted_files,
     skill_archive,
     upload_manifest,
@@ -587,3 +588,29 @@ async def test_the_sdk_transport_speaks_the_environment_routes() -> None:
     assert raw(files) == "/v1beta/environments/env%2F1/files/.agents/skills/x"
     assert files.url.params["recursive"] == "true"
     assert (delete.method, raw(delete)) == ("DELETE", "/v1beta/environments/env%2F1")
+
+
+@pytest.mark.asyncio
+async def test_a_private_file_is_placed_once_by_hash_and_never_an_output() -> None:
+    transport, storage = FakeTransport(), MemoryStorage()
+    ma = driver(transport, storage, None)
+    session = await start(ma, ())
+    path, secret = ".daimon/.env", b"API_KEY=s3cret\n"
+    assert await ma.sessions.place_file(SCOPE, session.ref, path, secret)
+    ((env, config),) = transport.environments.items()
+    assert transport.uploads == [(env, ".daimon", True)]
+    assert transport.environment_files[env] == {path: len(secret)}
+    assert await ma.sessions.place_file(SCOPE, session.ref, path, secret)
+    assert len(transport.uploads) == 1, "an unchanged file is not sent again"
+    request = await send(ma, transport, session, env)
+    assert request["environment"] == env
+    async with storage.read() as records:
+        record = records.sessions[session.ref.id]
+        assert b"s3cret" not in json.dumps([config, request], default=str).encode()
+        assert "s3cret" not in repr(record), "only the hash is kept"
+    transport.snapshots[env] = file_archive({path: secret, "out.txt": b"work"})
+    listed = await ma.artifacts.list(SCOPE, session.ref, page=PageRequest())
+    assert [a.filename for a in listed.data] == ["out.txt"]
+    assert not await ma.sessions.place_file(SCOPE, session.ref, path, None)
+    assert transport.uploads[-1] == (env, ".daimon", True)
+    assert transport.environment_files[env] == {path: 0}, "removed keys empty the file"

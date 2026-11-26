@@ -467,6 +467,9 @@ class Routine(Base):
     source_thread_id: Mapped[str | None]
     created_at: Mapped[TsNow]
     updated_at: Mapped[TsNow]
+    # A failure notice for a Slack or Teams owner, until that adapter sends it (0224).
+    # Mapped before `delivery_hold`: 0221's down/up test re-adds that column last.
+    owner_notice: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     # The hold the fire of that pending result ran under (`daimon.core.routine_hold`):
     # NULL for a legacy row, else `{"held": false}` or `{"held": true, "channel_id": ...}`.
     delivery_hold: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
@@ -2758,6 +2761,13 @@ class TurnOrigin(Base):
     self_helpers: Mapped[FalseFlag]
     # A helper turn's own session key, when the helper's agent id does not give it.
     helper_key: Mapped[str | None]
+    # Set at admission, never by a caller: the turn may read a limited room its person can
+    # read themselves (`daimon.core.authz`, READ_CHANNEL). True only for an interactive owner
+    # DM turn and a routine fired by the scheduler's owner-DM path.
+    own_dm_reach: Mapped[FalseFlag]
+    # Set when the turn read a limited room through that reach: for the rest of the turn it
+    # posts and sends direct messages to its person's own DM only.
+    reach_read: Mapped[FalseFlag]
 
 
 class AgentHelper(Base):
@@ -3058,6 +3068,10 @@ class TurnOutcome(Base):
     # What the turn ran with (`daimon.core.features.eval_key.EvalKey`), for
     # grouping eval results. NULL on turns without a session snapshot.
     eval_key: Mapped[dict[str, Any] | None]
+    # A turn in a private direct message; false for every turn recorded before this column.
+    is_dm: Mapped[bool] = mapped_column(server_default=text("false"))
+    # Counted as an answer, as `turn.finished` is logged (the alert denominator); NULL before.
+    alertable: Mapped[bool | None]
 
 
 class TenantGitHubRepo(Base):
@@ -3214,6 +3228,23 @@ class AgentGitHubGrant(Base):
     granted_by_account_id: Mapped[AccountSetNull]
     granted_at: Mapped[TsNow]
     version: Mapped[int] = mapped_column(server_default="1")
+
+
+class AgentGitHubGrantRemoval(Base):
+    """A repo an admin took off an agent, so an agent that follows its org is not given it back.
+
+    Written when a grant is removed; cleared when the grant is staged again.
+    """
+
+    __tablename__ = "agent_github_grant_removals"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "agent_id", "repo_id"),
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
+    )
+    tenant_id: Mapped[uuid.UUID]
+    agent_id: Mapped[uuid.UUID]
+    repo_id: Mapped[int] = mapped_column(BigInteger)
+    removed_at: Mapped[TsNow]
 
 
 class AgentGitHubGrantDraft(Base):
@@ -4428,7 +4459,10 @@ class SessionSettleState(Base):
     is read only on the reserved cutoff rows: `backlog-cutoff`, when this
     settle path was deployed, and `web-search-cutoff`, when search billing
     was. `unattended_turn_event_id` is the latest turn an agent-chat send
-    started (`unattended_turn`), never cleared by a settle.
+    started (`unattended_turn`), never cleared by a settle. The `agent_chat_*`
+    columns say who drives the session, which sends were recorded and where the
+    session came from (`daimon.core.agent_chat_requester`); the settle columns are
+    billing state and never decide that.
 
     The table keeps its original name; the former catch-up's cursor columns
     are no longer mapped and are dropped later. Private to
@@ -4436,6 +4470,14 @@ class SessionSettleState(Base):
     """
 
     __tablename__ = "usage_reconcile_progress"
+    __table_args__ = (
+        Index(
+            "uq_usage_reconcile_progress_agent_chat_grant",
+            "agent_chat_grant",
+            unique=True,
+            postgresql_where=text("agent_chat_grant IS NOT NULL"),
+        ),
+    )
 
     managed_session_id: Mapped[str] = mapped_column(primary_key=True)
     covered_through: Mapped[datetime | None]
@@ -4444,6 +4486,20 @@ class SessionSettleState(Base):
     # The latest turn an agent-chat send started here, and its tool-rule channel.
     unattended_turn_event_id: Mapped[str | None]
     unattended_rules_channel_id: Mapped[str | None]
+    # Whether the latest send or resume on this agent-chat session came from a person
+    # signed in to the hub, on an idle session (`daimon.core.agent_chat_requester`).
+    agent_chat_signed_in: Mapped[bool | None]
+    # Agent-chat sends begun on this session, and the number of the latest one whose turn
+    # was recorded; both written only under the session fence. A person's send names them
+    # only when the two match.
+    agent_chat_sends: Mapped[int | None]
+    agent_chat_recorded_send: Mapped[int | None]
+    # Where the agent-chat session came from, copied from its own metadata on each send:
+    # the grant its Daimon credential signs (`chat_session_id`), the channel its tools were
+    # chosen for, and the account that created it (`daimon.core.agent_chat_requester`).
+    agent_chat_grant: Mapped[str | None]
+    agent_chat_channel: Mapped[str | None]
+    agent_chat_account_id: Mapped[uuid.UUID | None]
     updated_at: Mapped[TsNow]
 
 
@@ -5160,12 +5216,17 @@ class ComputeSessionRecord(Base):
     agent_name: Mapped[str]
     source_metadata: Mapped[dict[str, str]] = mapped_column(JSONB, server_default="{}")
     extension_keys: Mapped[list[str]] = mapped_column(JSONB, server_default="[]")
+    # The wake turns (origin ids, hex) that acted since the owner last acted here.
+    wake_turns: Mapped[list[str]] = mapped_column(JSONB, server_default="[]")
     request_key: Mapped[str]
     app_name: Mapped[str]
     profile: Mapped[str]
     image: Mapped[str]
     region: Mapped[str]
-    cpu_kind: Mapped[str]
+    # The removed Fly provider's CPU class. Nothing reads it. It is still written, as
+    # `shared`, so a release that reads it and a schema without the default both work;
+    # a later release drops the column.
+    cpu_kind: Mapped[str] = mapped_column(default="shared", server_default="shared")
     cpus: Mapped[int]
     memory_mb: Mapped[int]
     state: Mapped[str] = mapped_column(server_default="launching")
@@ -5242,6 +5303,8 @@ class ComputeTaskRecord(Base):
     created_at: Mapped[datetime]
     finished_at: Mapped[datetime | None]
     version: Mapped[int] = mapped_column(server_default="0")
+    # The scheduler does not poll the task before this: its caller still waits for it.
+    wait_until: Mapped[datetime | None]
 
 
 class AgentDaimonToolAllowlist(Base):
@@ -5851,6 +5914,76 @@ class MonitoredEvent(Base):
     tool_name: Mapped[str | None]
     outcome: Mapped[str | None]
     created_at: Mapped[TsNow]
+
+
+class OpsEvent(Base):
+    """One failure or warning an operator watches, coalesced: `count` occurrences in one row.
+
+    Content-free: `reason` is a fixed vocabulary word, never exception text, and only
+    `note` (a routine agent's own one-line blocker, at most 300 characters) is free text.
+    Issues are these rows grouped by `fingerprint` at read time. A person's rows go with
+    their account; every row goes with its tenant and after the retention window.
+    """
+
+    __tablename__ = "ops_events"
+    __table_args__ = (
+        Index("ix_ops_events_tenant_at", "tenant_id", text("occurred_at DESC")),
+        Index("ix_ops_events_fingerprint", "tenant_id", "fingerprint", text("occurred_at DESC")),
+        Index("ix_ops_events_occurred", "occurred_at"),
+        Index(
+            "ix_ops_events_account", "account_id", postgresql_where=text("account_id IS NOT NULL")
+        ),
+        CheckConstraint("severity IN ('error', 'warning')", name="ck_ops_events_severity"),
+        CheckConstraint(
+            "area IN ('turn', 'dm', 'routine', 'delivery', 'watch', 'wake', 'bridge')",
+            name="ck_ops_events_area",
+        ),
+        CheckConstraint("count >= 1", name="ck_ops_events_count"),
+        CheckConstraint("char_length(note) <= 300", name="ck_ops_events_note"),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    occurred_at: Mapped[datetime]
+    count: Mapped[int] = mapped_column(server_default="1")
+    code: Mapped[str]
+    area: Mapped[str]
+    severity: Mapped[str]
+    reason: Mapped[str | None]
+    fingerprint: Mapped[str]
+    # The agent is the MA agent id (text), as on routines and watches.
+    agent_id: Mapped[str | None]
+    routine_id: Mapped[uuid.UUID | None]
+    watch_id: Mapped[uuid.UUID | None]
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE")
+    )
+    platform: Mapped[str | None]
+    channel_id: Mapped[str | None]
+    thread_id: Mapped[str | None]
+    session_id: Mapped[str | None]
+    # The bridge server, connector key or wake kind the event is about.
+    subject_key: Mapped[str | None]
+    release: Mapped[str | None]
+    note: Mapped[str | None]
+
+
+class OpsIssueState(Base):
+    """An admin's resolve or mute of one issue (a fingerprint); reopening deletes the row.
+
+    Erasing the admin's account clears `by_account_id` and keeps the state.
+    """
+
+    __tablename__ = "ops_issue_states"
+    __table_args__ = (
+        CheckConstraint("state IN ('resolved', 'muted')", name="ck_ops_issue_states_state"),
+    )
+
+    tenant_id: Mapped[TenantPk]
+    fingerprint: Mapped[str] = mapped_column(primary_key=True)
+    state: Mapped[str]
+    by_account_id: Mapped[AccountSetNull]
+    at: Mapped[datetime]
 
 
 # ---------- Evals (`daimon.core.evals`) ----------

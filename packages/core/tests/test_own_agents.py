@@ -203,24 +203,30 @@ def test_a_routine_session_is_stamped_where_it_fires_with_the_rule_now() -> None
     channel = _routine("local", "c1")
     private = f"routine:{channel.id}"
     assert routine_origin(POLICY, channel, platform="discord") == RoutineOrigin(
-        "c1", None, frozenset({"c1"}), private
+        "c1", None, frozenset({"c1"}), private, reads_inside=True
     )
     discord = channel.model_copy(update={"destination_kind": "thread", "destination_id": "t9"})
     assert routine_origin(POLICY, discord, platform="discord") == RoutineOrigin(
-        "c1", "t9", frozenset({"c1"}), private
+        "c1", "t9", frozenset({"c1"}), private, reads_inside=True
     ), "a Discord thread sits under its saved parent"
     slack = channel.model_copy(update={"destination_kind": "thread", "destination_id": "c1:1.2"})
     assert routine_origin(POLICY, slack, platform="slack") == RoutineOrigin(
         "c1", "1.2", frozenset({"c1"}), private
-    )
+    ), "only a Discord destination reads inside its room"
+    assert not routine_origin(POLICY, channel, platform="slack").reads_inside  # pyright: ignore[reportOptionalMemberAccess]
+    assert not routine_origin(POLICY, channel, platform="teams").reads_inside  # pyright: ignore[reportOptionalMemberAccess]
     open_channel = _routine("shared", "c2")
     assert routine_origin(POLICY, open_channel, platform="discord") == RoutineOrigin(
-        "c2", None, frozenset(), f"routine:{open_channel.id}"
+        "c2", None, frozenset(), f"routine:{open_channel.id}", reads_inside=True
     ), "an open destination limits no readers"
     no_destination = _routine("shared", None).model_copy(update={"channel_id": "c1"})
     assert routine_origin(POLICY, no_destination, platform="discord") == RoutineOrigin(
         "c1", None, frozenset({"c1"}), f"routine:{no_destination.id}"
-    ), "without a destination it runs where it was made"
+    ), "without a destination it runs where it was made, and reads from outside it"
+    dm = no_destination.model_copy(update={"destination_kind": "dm", "destination_id": "u9"})
+    assert routine_origin(POLICY, dm, platform="discord") == RoutineOrigin(
+        "c1", None, frozenset({"c1"}), f"routine:{dm.id}"
+    ), "one that reports to a DM reads from outside it too"
     assert routine_origin(POLICY, _routine("shared", None), platform="discord") is None
 
 

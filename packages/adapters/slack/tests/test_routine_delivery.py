@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -9,11 +10,12 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 from daimon.adapters.slack import routine_delivery as poster_mod
-from daimon.adapters.slack.routine_delivery import make_slack_routine_poster
+from daimon.adapters.slack.routine_delivery import make_slack_owner_dm, make_slack_routine_poster
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.native_admins import GroupMembersCache
+from daimon.core.owner_notices import OwnerNotice
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import FeatureTarget, RoutineRow
@@ -55,6 +57,7 @@ def _poster(
     monkeypatch: pytest.MonkeyPatch,
     *,
     dm_policies: dict | None = None,
+    build: Callable[[SlackRuntime], Any] = make_slack_routine_poster,
 ) -> tuple[Any, MagicMock]:
     client = MagicMock()
     client.token = "xoxb-test"
@@ -94,7 +97,44 @@ def _poster(
             ),
         ),
     )
-    return make_slack_routine_poster(runtime), client
+    return build(runtime), client
+
+
+@pytest.mark.parametrize(
+    ("text", "policy", "sent"),
+    [
+        ("Your readout failed.", "members", "text"),
+        (None, "members", "card"),
+        ("x", "disabled", None),
+    ],
+)
+async def test_the_owner_gets_its_failure_notice_by_dm_where_dms_are_allowed(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    text: str | None,
+    policy: str,
+    sent: str | None,
+) -> None:
+    """The agent's words, else the error card; a DM policy that excludes the owner, nothing."""
+    from daimon.core.config import DirectMessagePolicy
+
+    row = await _routine(db_session, kind="channel", destination_id="C1")
+    send, client = _poster(
+        db_session_factory,
+        monkeypatch,
+        dm_policies={row.tenant_id: DirectMessagePolicy(mode=policy)},  # type: ignore[arg-type]
+        build=make_slack_owner_dm,
+    )
+
+    closed = await send(row, OwnerNotice('Your routine "x" failed', "It stopped.", text))
+
+    posts = [call.kwargs for call in client.chat_postMessage.await_args_list]
+    if sent is None:
+        assert (closed, posts) == ("dm_policy_denies", []), "no DM the policy excludes"
+    else:
+        assert closed is None and [p["channel"] for p in posts] == ["D_CREATOR"], "a DM"
+        assert ("blocks" in posts[0]) == (sent == "card"), "the card only without the agent's"
 
 
 async def test_posts_into_a_thread_without_broadcasting(

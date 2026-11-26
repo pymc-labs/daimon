@@ -57,17 +57,18 @@ from daimon.core.cost_footer import cost_footer_shown
 from daimon.core.features.model_input import ANSWER_MESSAGES
 from daimon.core.monitoring import MonitoringNotice
 from daimon.core.ops_alerts import alert_ops
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.outbound.opt_out import tag_opt_outs
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
 from daimon.core.provider_turn_cost import LATE_TURN_COSTS
 from daimon.core.tenant_balance import debit_amount
-from daimon.core.thread_models import model_label
 from daimon.core.turn.card_state import CardState as EmbedState
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import RefusalNouns, ended_label, render_termination_notice
 from daimon.core.turn.output import OutputGate
 from daimon.core.turn.provider_events import ProviderDraft
+from daimon.core.turn.shown_model import card_label
 from daimon.core.turn.state import (
     ToolUseBlock,
     TurnState,
@@ -476,7 +477,7 @@ class DiscordTurnLifecycle(OutputGate):
             phase=TurnPhase.THINKING,
             agent_name=agent_name,
             started_at=self._clock(),
-            model_label=model_label(model_id) if model_id else "",
+            model_label=card_label(model_id) if model_id else "",
             timed=card_timer,
         )
         # Seeded only by dead-session recovery, which hands over the message the
@@ -1525,7 +1526,23 @@ class DiscordTurnLifecycle(OutputGate):
             except discord.HTTPException as exc:
                 if not table_files:
                     raise
-                log.warning("turn.table_delivery_failed", error_type=type(exc).__name__)
+                log.warning(
+                    "turn.table_delivery_failed",
+                    tenant_id=str(self._tenant_id) if self._tenant_id is not None else None,
+                    platform="discord",
+                    error_type=type(exc).__name__,
+                )
+                if self._sessionmaker is not None:
+                    report_ops_event(
+                        self._sessionmaker,
+                        OpsEvent(
+                            "delivery.output_failed",
+                            self._tenant_id,
+                            reason=type(exc).__name__,
+                            platform="discord",
+                        ),
+                        logged=False,
+                    )
                 chunks = (
                     _split_with_name_prefix(original_response_text, self._agent_name)
                     if use_name_prefix

@@ -30,44 +30,6 @@ class StoredRoom:
     parent_id: str | None = None
 
 
-def merge_with_baseline(
-    cache: Mapping[str, StoredRoom], baseline: Mapping[str, StoredRoom] | None
-) -> dict[str, StoredRoom]:
-    """Rooms computed from the gateway cache, never more open than the last reconcile saw.
-
-    A room also in `baseline` is contained or narrow if either says so, so only the next
-    reconcile can relax what a reconcile found. A room not in `baseline` (new since) keeps
-    the cache result, and a room missing from `cache` is dropped. A thread is then never
-    more open than its merged parent, because a new thread inherits a parent the cache may
-    hold stale. Pure.
-    """
-    merged = {
-        channel_id: _tighter(room, (baseline or {}).get(channel_id))
-        for channel_id, room in cache.items()
-    }
-    for channel_id, room in merged.items():
-        parent = merged.get(room.parent_id) if room.parent_id is not None else None
-        if parent is not None and parent.parent_id is None:
-            merged[channel_id] = _tighter(room, parent)
-    return merged
-
-
-def _tighter(room: StoredRoom, other: StoredRoom | None) -> StoredRoom:
-    """`room`, contained or narrow where `other` is too. An unknown room stays unknown."""
-    if other is None or not room.facts.known:
-        return room
-    facts = room.facts
-    return StoredRoom(
-        RoomFacts(
-            contained=facts.contained or other.facts.contained,
-            narrow=facts.narrow or other.facts.narrow,
-            outsiders_count=facts.outsiders_count,
-            team_shut_out_count=facts.team_shut_out_count,
-        ),
-        room.parent_id,
-    )
-
-
 @dataclass(frozen=True)
 class AudienceStatus:
     """A server's state row, read at `now`."""
@@ -152,29 +114,29 @@ async def _bump(
 async def renew_fresh_until(
     session: AsyncSession,
     *,
-    fresh_until: Mapping[uuid.UUID, datetime],
+    tenant_id: uuid.UUID,
+    generation: int,
+    fresh_until: datetime,
     now: datetime,
-) -> set[uuid.UUID]:
-    """Push `fresh_until` out to each server's own limit, for each complete, still fresh
-    server among the keys.
+) -> bool:
+    """Push the server's `fresh_until` out to `fresh_until`, if its facts are still the
+    complete, fresh set of `generation`. Whether it was renewed.
 
-    The caller bounds each limit by the server's last full reconcile. A lapsed server is
-    not revived: it stays unknown until the next full publish. Returns the servers renewed.
+    The caller bounds the limit by the start of the read the facts came from. A lapsed,
+    retired or replaced set is not touched: it stays as it is until the next full publish.
     """
-    renewed: set[uuid.UUID] = set()
-    for tenant_id, limit in fresh_until.items():
-        done = await session.execute(
-            update(DiscordAudienceState)
-            .where(
-                DiscordAudienceState.tenant_id == tenant_id,
-                DiscordAudienceState.complete.is_(True),
-                DiscordAudienceState.fresh_until > now,
-            )
-            .values(fresh_until=limit)
-            .returning(DiscordAudienceState.tenant_id)
+    done = await session.execute(
+        update(DiscordAudienceState)
+        .where(
+            DiscordAudienceState.tenant_id == tenant_id,
+            DiscordAudienceState.generation == generation,
+            DiscordAudienceState.complete.is_(True),
+            DiscordAudienceState.fresh_until > now,
         )
-        renewed.update(done.scalars())
-    return renewed
+        .values(fresh_until=fresh_until)
+        .returning(DiscordAudienceState.tenant_id)
+    )
+    return done.scalar_one_or_none() is not None
 
 
 async def retire_facts(session: AsyncSession, *, tenant_id: uuid.UUID, now: datetime) -> None:
@@ -233,12 +195,15 @@ async def read_channel_facts(
     channel_id: str,
     now: datetime,
     parent_id: str | None = None,
+    public_thread: bool = False,
 ) -> RoomFacts:
     """One room's facts: unknown when the server is incomplete or lapsed or the room has no row.
 
-    A thread with no row (an archived one is not cached) that names its `parent_id` takes
-    the parent's "contained" and is narrow: both kinds of thread take "contained" from the
-    parent, and a private one is always narrow.
+    A thread with no row (an archived one is not cached, a new one has none for seconds) that
+    names its `parent_id` takes the parent's "contained" and is narrow, unless the caller knows
+    from the platform that it is a `public_thread` (a forum post and an announcement thread
+    too): then it takes both facts from the parent, as the next reconcile writes them
+    (`compute_room_facts`). A private thread, and a thread of unknown kind, is always narrow.
     """
     found = await read_channel_rows(
         session,
@@ -251,7 +216,7 @@ async def read_channel_facts(
         return RoomFacts(contained=own[0], narrow=own[1])
     parent = found.get(parent_id) if parent_id else None
     if parent is not None:
-        return RoomFacts(contained=parent[0], narrow=True)
+        return RoomFacts(contained=parent[0], narrow=parent[1] if public_thread else True)
     return UNKNOWN_FACTS
 
 

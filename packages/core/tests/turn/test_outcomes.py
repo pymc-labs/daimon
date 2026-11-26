@@ -200,3 +200,35 @@ def test_billed_cost_is_the_marked_up_sum_of_the_turns_calls() -> None:
     )
     turn.note_usage(_call(tenant_id, "c").model_copy(update={"output_tokens": None}))
     assert turn.billed_cost(Decimal(2)) is None, "one unpriced call makes the total unknown"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "logged", "failed"),
+    [
+        ({"reason": TerminationReason.COMPLETED}, True, False),
+        ({"reason": TerminationReason.CEILING}, True, True),
+        ({"reason": TerminationReason.COMPLETED, "fallback": True}, False, False),
+    ],
+)
+async def test_turn_finished_logs_every_answered_turn_but_not_fallback_finishes(
+    kwargs: dict[str, object], logged: bool, failed: bool
+) -> None:
+    """`turn.finished` is the denominator of the failure rate, so it follows the
+    `turn.user_failure` gate (not a fallback finish) without its failure condition."""
+    # No database: the background outcome write fails and logs, which this test ignores.
+    observation = TurnObservation(
+        async_sessionmaker(), uuid.uuid4(), "discord", agent_id="agent", is_dm=True
+    )
+    with capture_logs() as logs:
+        observation.finish(**kwargs)  # pyright: ignore[reportArgumentType]
+    await drain_outcomes()
+    finished = [e for e in logs if e["event"] == "turn.finished"]
+    assert bool(finished) == logged, "turn.finished follows the user-failure gate"
+    if logged:
+        assert finished[0]["failed"] is failed, "failed mirrors the user-visible failures"
+        assert finished[0]["is_dm"] is True and finished[0]["agent_id"] == "agent", (
+            "is_dm and agent_id ride on the line"
+        )
+    assert bool([e for e in logs if e["event"] == "turn.user_failure"]) == failed, (
+        "only a failed answer logs turn.user_failure"
+    )

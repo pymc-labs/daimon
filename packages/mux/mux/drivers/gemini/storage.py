@@ -72,6 +72,8 @@ class SessionRecord:
     refs: tuple[RowKey, ...] = ()
     # Retention dropped its history: only the binding's ContinuityLost remains.
     pruned: bool = False
+    # Workspace path -> "environment_id:sha256" of a private file `place_file` put there.
+    placed: dict[str, str] = field(default_factory=dict[str, str])
 
 
 @dataclass(frozen=True)

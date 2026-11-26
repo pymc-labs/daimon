@@ -447,6 +447,7 @@ async def _first_turn(
         watermark=None,
         reused=False,
         continuity=ContinuityOutcome(),
+        session_ref=None,
     )
 
     @asynccontextmanager

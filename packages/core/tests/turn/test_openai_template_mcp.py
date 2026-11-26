@@ -34,7 +34,7 @@ from mux.contracts.config import ConfigRevision
 
 from ..test_agent_backend import owned as owned
 from .test_declared_drop_preparation import switched_request as switched_request
-from .test_gemini_full_source import CUSTOM, default_skill_bundles
+from .test_gemini_full_source import CUSTOM, UNSEEDED_BUILT_INS, default_skill_bundles
 from .test_openai_agent_template import KEY, template_row
 from .test_openai_full_source import PARAMS, FullWire
 from .test_openai_runtime_transport import clients_for
@@ -326,8 +326,8 @@ async def test_consent_keeps_daimon_tools_and_drops_only_what_the_template_lacks
     _, quote, *_ = template
     assert "mcp" not in quote.declared_drops
     assert "memory" in quote.declared_drops
-    # Its custom skills fit OpenAI's limits: each attaches, none is a loss.
-    assert not [d for d in quote.declared_drops if d.startswith("skill")]
+    # Its custom skills fit OpenAI's limits: each attaches; only the unseeded built-ins are lost.
+    assert {d for d in quote.declared_drops if d.startswith("skill")} == UNSEEDED_BUILT_INS
     # J6b: its execution tools map to bash in the hosted environment; only web tools
     # (none on this source) would be named losses.
     assert "tools" not in quote.declared_drops
@@ -516,7 +516,7 @@ async def test_a_preparation_that_fails_after_minting_revokes_the_credential(tem
     request, _, _, _ = template
     minted: list[str] = []
 
-    async def mint_then_fail(preparation, runtime):
+    async def mint_then_fail(preparation, runtime, _uploaded):
         connection = preparation.target_spec.mcp_servers[0]
         assert runtime.mcp_secrets is not None
         minted.append(
@@ -671,7 +671,10 @@ async def test_a_channels_skill_is_carried_and_one_over_the_limit_is_a_named_los
             assert carried == {f"source-{s['skill_id']}" for s in CUSTOM} | {"skill_team"}
         else:
             # Gemini's shared inline budget may leave one out, but always by name.
-            assert len(carried) + len(losses) == len(CUSTOM) + 2, (carried, losses)
+            assert len(carried) + len(losses) == len(CUSTOM) + 2 + len(UNSEEDED_BUILT_INS), (
+                carried,
+                losses,
+            )
     from daimon.core.confirmation import drop_words
 
     words = drop_words(("memory", "skill:skill_huge"), {"skill_huge": "skill-huge"})

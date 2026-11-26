@@ -139,3 +139,71 @@ export type AgentMonitoring = {
   direct_messages: { on: boolean; since: string | null }
   coding_tools: { on: boolean; since: string | null }
 }
+
+// Ops: the overview and grouped issues (failures and warnings).
+export type OpsPeriod = "24h" | "7d" | "30d"
+export type OpsArea = "turn" | "dm" | "routine" | "delivery" | "watch" | "wake" | "bridge"
+export type OpsSeverity = "error" | "warning"
+export type OpsStatus = "healthy" | "degraded" | "failing"
+export type IssueSubject = { kind: "agent" | "routine" | "watch" | "server" | "connector" | "platform" | "wake"; id: string | null; name: string }
+export type Issue = {
+  fingerprint: string
+  code: string
+  title: string
+  area: OpsArea
+  severity: OpsSeverity
+  subject: IssueSubject | null
+  reason: string | null
+  reason_label: string | null
+  events: number
+  people: number
+  first_seen: string
+  last_seen: string
+  /** Event counts per hour (24h) or day, oldest first, ending now. */
+  buckets: number[]
+  new: boolean
+  active: boolean
+  /** Resolved hides the issue until a newer event reopens it as `regressed`; muted hides it until reopened. */
+  state: IssueState
+  regressed: boolean
+  state_by: { id: string; name: string } | null
+  state_at: string | null
+}
+export type IssueState = "open" | "resolved" | "muted"
+export type IssueAction = "resolve" | "mute" | "reopen"
+export type IssueDetail = Omit<Issue, "people"> & {
+  people: { id: string; name: string }[]
+  agent: { id: string; name: string } | null
+  release: string | null
+}
+export type IssueEvent = {
+  at: string
+  count: number
+  person: { id: string | null; name: string } | null
+  platform: string | null
+  where_label: string | null
+  reason_label: string | null
+  thread_url: string | null
+  note: string | null
+}
+export type OpsOverview = {
+  updated_at: string
+  status: OpsStatus
+  answers: number
+  failed: number
+  failed_rate: number
+  dm_failures: number
+  routines_failing: number
+  routines_total: number
+  balance_usd: number
+  runway_days: number | null
+  /** Per hour (24h) or day; `answered` excludes `failed`, so the two stack to all answers. */
+  series: { at: string; answered: number; failed: number }[]
+  by_area: { area: OpsArea; label: string; events: number }[]
+  attention: Issue[]
+  answers_facts: { p50_ms: number | null; p95_ms: number | null; busy: number; recovered: number; cost_per_answer_usd: number | null }
+  workspace: {
+    agents: number; people: number; channels: number; routines_on: number; routines_total: number
+    watches_on: number; watches_total: number; watches_failing: number; funding_mode: "prepaid" | "operator_funded"
+  }
+}

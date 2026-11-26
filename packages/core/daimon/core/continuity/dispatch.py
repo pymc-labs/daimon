@@ -39,6 +39,7 @@ from daimon.core.continuity.wakes import (
     keep_wake,
     list_dispatchable_wakes,
     release_wake,
+    report_wake_failed,
     settle_wake,
     start_wake,
 )
@@ -85,6 +86,9 @@ async def _settle(
     claim: WakeClaim,
     skip_reason: str | None,
     now: Callable[[], datetime],
+    *,
+    row: TaskContinuationRow,
+    error_class: str | None = None,
 ) -> None:
     await settle_wake(
         sessionmaker,
@@ -92,6 +96,8 @@ async def _settle(
         status="delivered" if skip_reason is None else "skipped",
         now=now(),
         skip_reason=skip_reason,
+        row=row,
+        error_class=error_class,
     )
 
 
@@ -237,6 +243,13 @@ async def dispatch_pending_continuations(
                     )
             except AnthropicDisabled:
                 log.warning("continuation.provider_guard_denied", row_id=str(row.id))
+                report_wake_failed(
+                    sessionmaker,
+                    row.tenant_id,
+                    row.reason,
+                    "provider_guard_denied",
+                    thread_id=row.thread_id,
+                )
                 await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
                 continue
             except WatchFeatureUnreadable:
@@ -257,18 +270,20 @@ async def dispatch_pending_continuations(
             if decision.action != "dispatch" or (seed is None and run_decision is None):
                 reason = decision.action if decision.action != "dispatch" else "missing_seed"
                 if settle_before_notice:
-                    await _settle(sessionmaker, claim, reason, now)
+                    await _settle(sessionmaker, claim, reason, now, row=row)
                 if decision.message is not None and (
                     reason != "missing_seed" or notify_missing_seed
                 ):
                     await notify(row, decision.message, reason=reason)
                 if not settle_before_notice:
-                    await _settle(sessionmaker, claim, reason, now)
+                    await _settle(sessionmaker, claim, reason, now, row=row)
                 continue
             if not await start_wake(sessionmaker, claim, now=now()):
                 continue  # Another dispatcher took the row over while this one decided.
             try:
-                async with keep_wake(sessionmaker, claim, now=now):
+                async with keep_wake(
+                    sessionmaker, claim, now=now, tenant_id=row.tenant_id, kind=row.reason
+                ):
                     if run_decision is not None:
                         await run_decision(row, decision)
                     else:
@@ -276,6 +291,13 @@ async def dispatch_pending_continuations(
                         await run_follow_up(row, seed)
             except AnthropicDisabled:
                 log.warning("continuation.provider_guard_denied", row_id=str(row.id))
+                report_wake_failed(
+                    sessionmaker,
+                    row.tenant_id,
+                    row.reason,
+                    "provider_guard_denied",
+                    thread_id=row.thread_id,
+                )
                 await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
             except BotAccessUnavailable:
                 # The bot cannot reach the thread's channel yet; nothing ran, nothing is paused.
@@ -283,28 +305,30 @@ async def dispatch_pending_continuations(
                 retry_at = busy_retry_at(row, now=now(), delay=BOT_ACCESS_RETRY_DELAY)
                 await release_wake(sessionmaker, claim, retry_at=retry_at)
             except SessionPreparationFailed:
-                await _settle(sessionmaker, claim, "blocked_preparation_failed", now)
+                await _settle(sessionmaker, claim, "blocked_preparation_failed", now, row=row)
             except ResponderChanged as exc:
                 # A wake whose thread another agent answers now; the turn never started.
                 if settle_before_notice:
-                    await _settle(sessionmaker, claim, "skip_target_changed", now)
+                    await _settle(sessionmaker, claim, "skip_target_changed", now, row=row)
                 await notify(row, exc.message, reason="skip_target_changed")
                 if not settle_before_notice:
-                    await _settle(sessionmaker, claim, "skip_target_changed", now)
+                    await _settle(sessionmaker, claim, "skip_target_changed", now, row=row)
             except TurnNotStarted as exc:
                 # The turn never got a slot. A capacity miss goes back to pending,
                 # like a busy thread; a Stop settles it, not delivered.
                 if exc.capacity:
                     await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
                 else:
-                    await _settle(sessionmaker, claim, f"not_started:{exc.result}", now)
+                    await _settle(sessionmaker, claim, f"not_started:{exc.result}", now, row=row)
             except AdmissionDenied as exc:
                 # Held to the same gates as a mention: a busy or cooling provider is
                 # offered again, any other refusal is final.
                 if is_transient_denial(exc):
                     await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
                 else:
-                    await _settle(sessionmaker, claim, f"admission_denied:{exc.reason}", now)
+                    await _settle(
+                        sessionmaker, claim, f"admission_denied:{exc.reason}", now, row=row
+                    )
             except SessionBusyError as busy:
                 # Nothing ran: the same row goes back to pending with its claim refunded.
                 retry_at = busy_retry_at(row, now=now(), not_before=busy.retry_after)
@@ -313,9 +337,18 @@ async def dispatch_pending_continuations(
                 log.warning(
                     "continuation.dispatch_failed",
                     row_id=str(row.id),
-                    error=str(exc),
+                    tenant_id=str(row.tenant_id),
+                    kind=row.reason,
+                    error_type=type(exc).__name__,
                     causes=backend_refusal_causes(exc),
                 )
-                await _settle(sessionmaker, claim, "dispatch_failed", now)
+                await _settle(
+                    sessionmaker,
+                    claim,
+                    "dispatch_failed",
+                    now,
+                    row=row,
+                    error_class=type(exc).__name__,
+                )
             else:
-                await _settle(sessionmaker, claim, None, now)
+                await _settle(sessionmaker, claim, None, now, row=row)

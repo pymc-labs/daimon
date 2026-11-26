@@ -86,6 +86,15 @@ def value_text(spec: FeatureSpec, value: str, locked: bool = False) -> str:
     return f"{text}, locked" if locked and value != DEFAULT else text
 
 
+def ask_to_turn_on(spec: FeatureSpec) -> str:
+    """Who to ask to turn `spec` on: the last sentence of every refusal for a feature that
+    is off. Only a server admin changes one that leaves out agent owners and delegated
+    admins (long jobs, cloud computers); anything else an admin or an owner can."""
+    if spec.authority.action is None and not spec.authority.agent_owner:
+        return "Ask a server admin to turn it on."
+    return "Ask an admin or an owner to turn it on."
+
+
 def unavailable_text(spec: FeatureSpec, reason: str) -> str:
     if reason == "depends_on":
         needs = ", ".join(FEATURES[key].name for key in spec.depends_on if key in FEATURES)

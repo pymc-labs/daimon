@@ -24,18 +24,18 @@ one turned Off since.
 | Direct message memory | `dm_history_depth` | Model input | 12 messages | ✓ | ✓ | ✓ |  |  |  | Only Discord, Slack, Teams, Web; 100 messages by default on Teams |
 | Channel background | `channel_history` | Model input | 25 messages | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Setup guidance | `guidance` | Model input | On | ✓ | ✓ | ✓ |  |  |  |  |
-| Run commands | `tool.bash` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Up to Agent on Gemini, OpenAI |
-| Read files | `tool.read` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Up to Agent on Gemini, OpenAI |
-| Edit files | `tool.edit` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Up to Agent on Gemini, OpenAI |
-| Write files | `tool.write` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Up to Agent on Gemini, OpenAI |
-| Search file contents | `tool.grep` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Up to Agent on Gemini, OpenAI |
-| Find files | `tool.glob` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Up to Agent on Gemini, OpenAI |
-| Open web pages | `tool.web_fetch` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Up to Agent on Gemini, OpenAI |
-| Search the web | `tool.web_search` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Up to Agent on Gemini, OpenAI |
+| Run commands | `tool.bash` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Read files | `tool.read` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Edit files | `tool.edit` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Write files | `tool.write` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Search file contents | `tool.grep` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Find files | `tool.glob` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Open web pages | `tool.web_fetch` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Search the web | `tool.web_search` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Web app | `web_awareness` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Connected server briefing | `mcp_briefing` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
 | Notes on non-chat messages | `origin_fragments` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
-| Keys file | `agent_env_file` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
+| Keys file | `agent_env_file` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Platform prompt | `platform_prompt` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Always Off on OpenAI |
 | Platform skills | `platform_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
 | Agent skills | `agent_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Always On on Gemini, OpenAI |
@@ -64,7 +64,7 @@ one turned Off since.
 | Vote buttons | `message_feedback` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Direct message wait | `dm_debounce_seconds` | Chat | Off | ✓ | ✓ |  |  |  |  |  |
 | /new in threads | `thread_new` | Chat | Off | ✓ | ✓ |  |  |  |  | Only Discord |
-| Other providers per conversation | `thread_providers` | Chat | Off | ✓ | ✓ | ✓ |  |  |  |  |
+| Other providers per conversation | `thread_providers` | Chat | On | ✓ | ✓ | ✓ |  |  |  |  |
 | Repository memory | `repo_memory` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Context provider | `context_provider` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
 | Personal memory | `memory_personal` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
@@ -78,7 +78,7 @@ one turned Off since.
 | Long jobs | `long_jobs` | Capability | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Secret sharing | `secret_sharing` | Capability | Off | ✓ | ✓ | ✓ |  |  |  | Only Discord |
 | Wait for bot access | `bot_access_wait` | Capability | Off |  | ✓ |  |  |  |  | Only Discord |
-| Cloud computers | `compute` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
+| Cloud computers | `compute` | Capability | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Notebooks | `notebooks` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Report publishing | `report_publish` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Video transcripts | `media` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
@@ -113,14 +113,19 @@ one turned Off since.
 | Tool safety | `tool_safety` | Guardrail | On | ✓ |  |  |  |  |  |  |
 | Package registries in eval sandboxes | `eval_package_registries` | Guardrail | Block package registries | ✓ |  |  |  |  |  |  |
 | Approve cards for OpenAI and Gemini | `host_call_gate` | Guardrail | On | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
-| Connectors on OpenAI and Gemini | `mcp_connector_relay` | Guardrail | Off | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
+| Connectors on OpenAI and Gemini | `mcp_connector_relay` | Guardrail | On | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
+| Keys on OpenAI and Gemini | `provider_keys_file` | Guardrail | On | ✓ |  |  |  |  |  |  |
 | Reach check | `reach_budget` | Guardrail | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Built-in tools in routines | `unattended_capabilities` | Guardrail | Allowed | ✓ | ✓ | ✓ |  |  |  |  |
 | Sandbox tools in routines | `routine_sandbox_tools` | Guardrail | Off |  | ✓ | ✓ |  |  | ✓ |  |
 | Approval for watches | `watch_approval` | Guardrail | Ask |  | ✓ | ✓ |  |  |  |  |
+| Approval for cloud computers | `compute_approval` | Guardrail | Ask |  | ✓ | ✓ |  |  |  |  |
+| Cloud computers continue after a job | `compute_wake_runs` | Guardrail | Off |  | ✓ | ✓ |  |  |  |  |
+| Cloud computers from agent chat | `compute_agent_chat` | Guardrail | Off |  | ✓ | ✓ |  |  |  |  |
 | Routines must say where they post | `require_routine_destination` | Guardrail | Optional | ✓ | ✓ |  |  |  |  |  |
 | Monitor direct messages | `monitor_direct_messages` | Guardrail | Off | ✓ | ✓ | ✓ |  |  |  |  |
 | Monitor coding tools | `monitor_mcp` | Guardrail | Off | ✓ | ✓ | ✓ |  |  |  |  |
+| Follow the GitHub org | `github_follow_org` | Guardrail | Off |  |  | ✓ |  |  |  |  |
 
 ## Approvals
 
@@ -269,8 +274,6 @@ The agent can run commands. Off removes it here; On never gives more than the ag
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
-| Levels on Gemini | Deployment, Workspace, Agent |
-| Levels on OpenAI | Deployment, Workspace, Agent |
 
 ## Read files
 
@@ -283,8 +286,6 @@ The agent can read files. Off removes it here; On never gives more than the agen
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
-| Levels on Gemini | Deployment, Workspace, Agent |
-| Levels on OpenAI | Deployment, Workspace, Agent |
 
 ## Edit files
 
@@ -297,8 +298,6 @@ The agent can edit files. Off removes it here; On never gives more than the agen
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
-| Levels on Gemini | Deployment, Workspace, Agent |
-| Levels on OpenAI | Deployment, Workspace, Agent |
 
 ## Write files
 
@@ -311,8 +310,6 @@ The agent can write new files. Off removes it here; On never gives more than the
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
-| Levels on Gemini | Deployment, Workspace, Agent |
-| Levels on OpenAI | Deployment, Workspace, Agent |
 
 ## Search file contents
 
@@ -325,8 +322,6 @@ The agent can search inside files. Off removes it here; On never gives more than
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
-| Levels on Gemini | Deployment, Workspace, Agent |
-| Levels on OpenAI | Deployment, Workspace, Agent |
 
 ## Find files
 
@@ -339,8 +334,6 @@ The agent can find files by name. Off removes it here; On never gives more than 
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
-| Levels on Gemini | Deployment, Workspace, Agent |
-| Levels on OpenAI | Deployment, Workspace, Agent |
 
 ## Open web pages
 
@@ -353,8 +346,6 @@ The agent can open web pages. Off removes it here; On never gives more than the 
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
-| Levels on Gemini | Deployment, Workspace, Agent |
-| Levels on OpenAI | Deployment, Workspace, Agent |
 
 ## Search the web
 
@@ -367,8 +358,6 @@ The agent can search the web. Off removes it here; On never gives more than the 
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
-| Levels on Gemini | Deployment, Workspace, Agent |
-| Levels on OpenAI | Deployment, Workspace, Agent |
 
 ## Web app
 
@@ -411,7 +400,7 @@ A short note in front of a message that did not come from chat, such as a routin
 
 ## Keys file
 
-The agent's saved keys as a .env file in its working files. Off leaves the file out; the keys stay saved. Applies from the next message. Claude agents only.
+The agent's saved keys as a .env file in its sandbox; Off leaves it out. Applies from the next message.
 
 | | |
 | --- | --- |
@@ -420,8 +409,6 @@ The agent's saved keys as a .env file in its working files. Off leaves the file 
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
-| Levels on Gemini | Not available |
-| Levels on OpenAI | Not available |
 
 ## Platform prompt
 
@@ -973,13 +960,13 @@ Work for a channel Daimon cannot reach waits, without failing, and runs once it 
 
 ## Cloud computers
 
-The agent can start a short-lived cloud computer to run code and keep files. Off removes the computer tools here.
+A short-lived cloud computer to run code. Only a server admin turns it on; Off removes its tools.
 
 | | |
 | --- | --- |
 | Key | `compute` |
 | Values | `on` (On), `off` (Off) |
-| Default | `on` |
+| Default | `off` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Off above is a ceiling |
 
@@ -1039,7 +1026,7 @@ Anyone who can change a conversation's model may pick an OpenAI or Gemini model 
 | --- | --- |
 | Key | `thread_providers` |
 | Values | `on` (On), `off` (Off) |
-| Default | `off` |
+| Default | `on` |
 | Levels | Deployment, Workspace, Agent |
 | Combines | Off above is a ceiling |
 
@@ -1287,7 +1274,19 @@ An agent's own connectors work on OpenAI and Gemini agents with the person's sig
 | --- | --- |
 | Key | `mcp_connector_relay` |
 | Values | `off` (Off), `on` (On) |
-| Default | `off` |
+| Default | `on` |
+| Levels | Deployment |
+| Combines | Stricter wins |
+
+## Keys on OpenAI and Gemini
+
+Sends the keys file to OpenAI and Gemini.
+
+| | |
+| --- | --- |
+| Key | `provider_keys_file` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
 | Levels | Deployment |
 | Combines | Stricter wins |
 
@@ -1330,13 +1329,49 @@ On gives an agent's or one routine's runs its built-in tools, for the agent and 
 
 ## Approval for watches
 
-Ask shows a card with the destination and duration before a watch is made or resumed. Skip makes it without the card, in the same thread for the default duration. Editing a watch, long jobs, key rotation and Fly launches keep asking. Only a server admin can change it.
+Ask shows a card with the destination and duration before a watch is made or resumed. Skip makes it without the card, in the same thread for the default duration. Editing a watch, long jobs and key rotation keep asking. Only a server admin can change it.
 
 | | |
 | --- | --- |
 | Key | `watch_approval` |
 | Values | `skip` (Skip the card), `ask` (Ask) |
 | Default | `ask` |
+| Levels | Workspace, Agent |
+| Combines | Most specific wins |
+
+## Approval for cloud computers
+
+Ask shows a card to start or extend a cloud computer. Skip: no card, default time only; OpenAI and Gemini still ask. Only a server admin sets it.
+
+| | |
+| --- | --- |
+| Key | `compute_approval` |
+| Values | `skip` (Skip the card), `ask` (Ask) |
+| Default | `ask` |
+| Levels | Workspace, Agent |
+| Combines | Most specific wins |
+
+## Cloud computers continue after a job
+
+After an unwatched command ends, the agent may run the next, up to a set number in a row; then it waits for the owner to run a command or write a file (not a message). Off: it only reports. Only a server admin sets it.
+
+| | |
+| --- | --- |
+| Key | `compute_wake_runs` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Workspace, Agent |
+| Combines | Most specific wins |
+
+## Cloud computers from agent chat
+
+Agent chat may start cloud computers without a card and use them; it lists and stops all the person's. So may their keys driving it. Only a server admin sets it.
+
+| | |
+| --- | --- |
+| Key | `compute_agent_chat` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
 | Levels | Workspace, Agent |
 | Combines | Most specific wins |
 
@@ -1375,4 +1410,16 @@ Keeps what people ask this agent from their coding tools and what it answers, pl
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
 | Levels | Deployment, Workspace, Agent |
+| Combines | Off above is a ceiling |
+
+## Follow the GitHub org
+
+Follows the whole org.
+
+| | |
+| --- | --- |
+| Key | `github_follow_org` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Agent |
 | Combines | Off above is a ceiling |

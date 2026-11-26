@@ -7,7 +7,8 @@ Nothing listed the ways a session reaches GitHub, so nothing checked them all.
 
 `SURFACES` is that list. The test builds a two-installation session through the
 real token preparation (`prepare_app_access`, `finish_app_delivery`,
-`add_app_credentials`) with GitHub's token API faked, then resolves every
+`add_app_credentials`, and a provider turn's `open_turn_router`) with GitHub's
+token API faked, then resolves every
 granted repo through every surface and checks the token against the one GitHub
 minted for that repo's installation. It fails when a surface hands out another
 installation's token, and when `add_app_credentials` writes a GitHub
@@ -25,7 +26,7 @@ import json
 import re
 import uuid
 from collections.abc import AsyncIterator, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,7 +43,7 @@ from anthropic.types.beta.vaults.beta_managed_agents_static_bearer_auth_response
 )
 from cryptography.fernet import Fernet, MultiFernet
 from daimon.core import github_app_session
-from daimon.core._models import AgentGitHubGrant, Tenant, TenantGitHubRepo
+from daimon.core._models import Account, AgentGitHubGrant, Tenant, TenantGitHubRepo
 from daimon.core.agent_guidance import CREDENTIAL_GUIDANCE_BLOCK
 from daimon.core.config import GithubAppSettings
 from daimon.core.credential_env import render_github_repo_map
@@ -62,11 +63,16 @@ from daimon.core.github_router_tokens import (
     load_usable_rows,
     resolve_call,
 )
+from daimon.core.github_turn_router import close_turn_router, open_turn_router
 from daimon.core.mcp_server_url import GITHUB_COPILOT_MCP_URL, github_router_url
 from daimon.core.session_snapshot import session_mcp_servers
 from daimon.core.stores import github_app_installations, github_router_sessions
-from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+from daimon.core.stores.mcp_tokens import create_mcp_token_row
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, OPEN_TOOL_SAFETY
+from daimon.core.turn.runtime_manifest import relayed_connectors
 from daimon.testing.ma_models import ma_agent
+from mux.contracts.ids import ModelRef
+from mux.contracts.resources import AgentSpec, MCPConnection, ToolSpec
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -223,6 +229,10 @@ def _direct_mcp_token(credentials: SessionCredentials, _repo: str) -> str | None
     return credentials.bearers.get(GITHUB_COPILOT_MCP_URL)
 
 
+#: The providers whose relay reaches the `github` connector through a turn router.
+_RELAY_PROVIDERS = ("openai", "gemini")
+_RELAY_SURFACE = "github MCP via the relay ({})"
+
 _INSTALLATION_ENV = re.compile(r"GH_TOKEN_I[0-9]+_[0-9]+")
 
 
@@ -236,6 +246,14 @@ SURFACES: tuple[Surface, ...] = (
         frozenset({github_router_url(_PUBLIC_URL)}),
         lambda _repo: True,
         _resolved_by_router,
+    ),
+    # A provider turn's relay calls the router with its turn's own bearer
+    # (`github_turn_router`), which no vault holds: resolved like the router's.
+    *(
+        Surface(
+            _RELAY_SURFACE.format(provider), frozenset(), lambda _repo: True, _resolved_by_router
+        )
+        for provider in _RELAY_PROVIDERS
     ),
     Surface("gh with GH_TOKEN", frozenset({"GH_TOKEN"}), _is_working_repo, _gh_token),
     Surface(
@@ -321,8 +339,12 @@ class _FakeGitHub:
     """GitHub's installation-token endpoint: one distinct token per mint."""
 
     minted: dict[str, tuple[int, frozenset[int]]]
+    revoked: set[str] = field(default_factory=set[str])
 
     def handler(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "DELETE" and request.url.path == "/installation/token":
+            self.revoked.add(request.headers["authorization"].removeprefix("Bearer "))
+            return httpx.Response(204)
         match = re.fullmatch(r"/app/installations/([0-9]+)/access_tokens", request.url.path)
         assert match is not None, request.url.path
         installation_id = int(match.group(1))
@@ -394,6 +416,60 @@ async def _routed_session(
     return credentials, github, record.id, tenant_id, agent_id
 
 
+async def _turn_router(
+    factory: async_sessionmaker[AsyncSession],
+    fernet: MultiFernet,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+) -> tuple[str, uuid.UUID, _FakeGitHub]:
+    """A provider turn's router, opened as the relay opens it, under a live turn credential."""
+    account_id, jti, now = uuid.uuid4(), uuid.uuid4(), datetime.now(UTC)
+    async with factory.begin() as session:
+        session.add(Account(id=account_id, tenant_id=tenant_id))
+        await session.flush()
+        await create_mcp_token_row(
+            session,
+            jti=jti,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            agent_id=str(agent_id),
+            label="provider turn",
+            created_at=now,
+            expires_at=now + timedelta(minutes=15),
+        )
+    github = _FakeGitHub(minted={})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(github.handler)) as client:
+        bearer = await open_turn_router(
+            factory,
+            client,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=account_id,
+            turn_jti=jti,
+            expires_at=now + timedelta(minutes=15),
+            config=GithubAppSettings(app_id="123", private_key=SecretStr("unused")),
+            fernet=fernet,
+        )
+    assert bearer is not None
+    return bearer, jti, github
+
+
+def _relays_github(provider: str) -> bool:
+    """`github` is among the connectors this provider mounts through the relay."""
+    source = AgentSpec(
+        name="surfaces",
+        model=ModelRef(provider="anthropic", id="claude-opus-5-5"),
+        system="",
+        tools=(ToolSpec(name="github", kind="mcp_toolset"),),
+        mcp_servers=(MCPConnection(name="github", url=GITHUB_COPILOT_MCP_URL),),
+    )
+    daimon = MCPConnection(name=DAIMON_SERVER_NAME, url=_PUBLIC_URL, credential_ref="caller-mcp:t")
+    relayed = relayed_connectors(
+        source, daimon, provider=provider, relay_on=True, public_url=_PUBLIC_URL
+    )
+    return [c.name for c in relayed] == ["github"]
+
+
 async def _router_token(
     factory: async_sessionmaker[AsyncSession],
     *,
@@ -459,13 +535,35 @@ async def test_every_surface_uses_the_repo_installation_token(
     )
     assert server.url == github_router_url(_PUBLIC_URL)
 
+    turns = {
+        _RELAY_SURFACE.format(provider): await _turn_router(
+            db_session_factory, fernet, tenant_id, agent_id
+        )
+        for provider in _RELAY_PROVIDERS
+        if _relays_github(provider)
+    }
+    assert len(turns) == len(_RELAY_PROVIDERS), "a provider no longer relays `github`"
     by_name = {name: repo_id for _, repo_id, name, _, _ in repos}
     every_repo_reached: dict[str, set[str]] = {name: set() for name in by_name}
     for surface in SURFACES:
         for repo, repo_id in by_name.items():
             if not surface.covers(repo):
                 continue
-            if surface.name == "github MCP via the router":
+            minter = github
+            if surface.name in turns:
+                bearer, _, minter = turns[surface.name]
+                async with db_session_factory() as session:
+                    record = await github_router_sessions.verify(session, bearer=bearer)
+                assert record is not None
+                token = await _router_token(
+                    db_session_factory,
+                    fernet=fernet,
+                    router_session_id=record.id,
+                    tenant_id=tenant_id,
+                    agent_id=agent_id,
+                    repo=repo,
+                )
+            elif surface.name == "github MCP via the router":
                 token = await _router_token(
                     db_session_factory,
                     fernet=fernet,
@@ -476,15 +574,23 @@ async def test_every_surface_uses_the_repo_installation_token(
                 )
             else:
                 token = surface.token_for(credentials, repo)
-            assert token == github.token_for_repo(repo_id), (
+            assert token == minter.token_for_repo(repo_id), (
                 f"{surface.name} reaches {repo} with "
                 f"{'no token' if token is None else 'the wrong token'}"
             )
             every_repo_reached[repo].add(surface.name)
     assert all(
-        {"github MCP via the router", "github-repo.sh (clone, gh, push)"} <= reached
+        {"github MCP via the router", "github-repo.sh (clone, gh, push)", *turns} <= reached
         for reached in every_repo_reached.values()
     ), every_repo_reached
+
+    # The turn's end closes its router first, then revokes every token it minted.
+    for bearer, jti, minter in turns.values():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(minter.handler)) as client:
+            await close_turn_router(db_session_factory, client, turn_jti=jti, fernet=fernet)
+        async with db_session_factory() as session:
+            assert await github_router_sessions.verify(session, bearer=bearer) is None
+        assert minter.revoked == set(minter.minted)
 
 
 def test_every_surface_name_is_unique() -> None:

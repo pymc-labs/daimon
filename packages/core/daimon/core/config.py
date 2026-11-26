@@ -2358,11 +2358,17 @@ class SignedIdentityServer(BaseModel):
     # Tools whose call, in a person's turn, carries a wake link the server posts to
     # when the work it started ends (`daimon.adapters.mcp.identity_relay._wake_link`).
     wake_tools: frozenset[str] = frozenset()
+    # Also name the person on an agent-chat turn they started signed in to the hub, as
+    # requester kind `agent_chat`. Off by default: a server that does not know the kind
+    # may refuse every call that carries it.
+    agent_chat_requester: bool = False
 
     @model_validator(mode="after")
     def _wake_needs_requester(self) -> SignedIdentityServer:
         if self.wake_tools and not self.requester_meta:
             raise ValueError("wake_tools needs requester_meta")
+        if self.agent_chat_requester and not self.requester_meta:
+            raise ValueError("agent_chat_requester needs requester_meta")
         return self
 
     @model_validator(mode="after")
@@ -2442,6 +2448,10 @@ class McpIdentitySettings(BaseModel):
             "requester fields the caller supplied and stamps each tool call with who it is "
             "for and where: the asker while their turn is live, or the person an unattended "
             "run acts for. "
+            "Set agent_chat_requester to true as well for a server that accepts "
+            'requester_kind "agent_chat": a turn a person started through the MCP hub, '
+            "signed in with their platform login, then names that person with no place. "
+            "Turns started with an agent, coding or CLI key name nobody. "
             "An agent using a server stays in its channel with no long-term memory, a fresh "
             "session per channel turn and no handoffs, because the server answers with what "
             "the channel's readers can read. Set channel_scoped to false for a server that "
@@ -2526,6 +2536,11 @@ class McpIdentitySettings(BaseModel):
     def names_requester(self) -> bool:
         """Whether any server is sent the requester's identity (`requester_meta`)."""
         return any(server.requester_meta for server in self.servers)
+
+    @property
+    def names_agent_chat_requester(self) -> bool:
+        """Whether any server is sent the person behind an agent-chat turn."""
+        return any(server.agent_chat_requester for server in self.servers)
 
     @property
     def needs_signing_key(self) -> bool:
@@ -2878,37 +2893,93 @@ class ComputeProfile(BaseModel):
     image: str = Field(
         description="Operator-reviewed thin MCP image reference, preferably a digest."
     )
-    regions: list[str] = Field(default_factory=lambda: ["iad"], description="Allowed Fly regions.")
-    cpu_kind: Literal["shared", "performance"] = Field(
-        default="shared", description="Fly CPU class."
+    regions: list[str] = Field(
+        default_factory=lambda: list[str](),
+        description="Allowed Google Cloud regions, such as us-central1. At least one.",
     )
-    cpus: int = Field(default=2, gt=0, le=16, description="Fixed CPU count for this image profile.")
-    memory_mb: int = Field(default=4096, ge=256, le=131072, description="Fixed RAM in MB.")
+    cpus: int = Field(
+        default=2,
+        gt=0,
+        le=16,
+        description="Fixed CPU count for this image profile: 1, 2, 4, 6 or 8.",
+    )
+    memory_mb: int = Field(
+        default=4096,
+        ge=256,
+        le=131072,
+        description="Fixed RAM in MB: 512 to 32768, within the range its CPU count permits.",
+    )
+    description: str = Field(
+        default="",
+        max_length=1000,
+        description=(
+            "What this image holds and how to use it, for the agent. Shown when profiles are "
+            "listed and when a session starts. Plain text; no secrets."
+        ),
+    )
+
+
+_CLOUD_RUN_REGION = re.compile(r"[a-z]+-[a-z]+[0-9]+")
+# Cloud Run's memory range in MiB for each CPU count it accepts. The floor is 512 MiB
+# because sessions use the second generation environment and instance-based billing.
+_CLOUD_RUN_MEMORY_MB: Mapping[int, tuple[int, int]] = {
+    1: (512, 4096),
+    2: (512, 8192),
+    4: (2048, 16384),
+    6: (4096, 24576),
+    8: (4096, 32768),
+}
+
+
+def _cloud_run_profile_error(name: str, profile: ComputeProfile) -> str | None:
+    """Why Cloud Run would refuse this profile, so a launch never finds out first."""
+    bad = [region for region in profile.regions if not _CLOUD_RUN_REGION.fullmatch(region)]
+    if not profile.regions or bad:
+        return (
+            f"compute profile {name!r} needs Google Cloud regions such as us-central1; "
+            f"got {profile.regions}"
+        )
+    limits = _CLOUD_RUN_MEMORY_MB.get(profile.cpus)
+    if limits is None:
+        return (
+            f"compute profile {name!r}: Cloud Run allows 1, 2, 4, 6 or 8 CPUs, not {profile.cpus}"
+        )
+    if not limits[0] <= profile.memory_mb <= limits[1]:
+        return (
+            f"compute profile {name!r}: Cloud Run allows {limits[0]} to {limits[1]} MB "
+            f"with {profile.cpus} CPUs, not {profile.memory_mb}"
+        )
+    return None
 
 
 class ComputeSettings(BaseModel):
     enabled: bool = Field(
         default=False,
         description=(
-            "Allow attended owners to launch Fly sessions. Disabling launch does not "
+            "Allow attended owners to launch compute sessions. Disabling launch does not "
             "disable cleanup."
         ),
     )
     deployment_id: str = Field(
         default="",
         description=(
-            "Stable unique deployment identifier fencing Fly resources. Required to use compute."
+            "Stable unique deployment identifier fencing session resources. Required to "
+            "use compute."
         ),
     )
-    api_token: SecretStr | None = Field(
-        default=None,
-        repr=False,
+    cloud_run_project: str = Field(
+        default="",
         description=(
-            "Fly API token, control plane and scheduler only. Never mounted in compute machines."
+            "Google Cloud project id that holds the session services. Required to use "
+            "compute. Daimon signs in with application default credentials."
         ),
     )
-    org_slug: str = Field(
-        default="", description="Fly organization for this deployment's disposable sessions."
+    cloud_run_service_account: str = Field(
+        default="",
+        description=(
+            "Email of the service account session containers run as. Give it no roles. "
+            "Required to use compute."
+        ),
     )
     session_auth_key: SecretStr | None = Field(
         default=None,
@@ -2948,13 +3019,47 @@ class ComputeSettings(BaseModel):
             "command may run for at most max_ttl_hours."
         ),
     )
-    profiles: dict[str, ComputeProfile] = Field(
-        default_factory=dict,
+    wake_run_limit: int = Field(
+        default=20,
+        ge=1,
+        le=200,
         description=(
-            "Operator-managed image profiles. Empty means no images can be launched. "
-            "No environment or credentials are copied from template apps."
+            "How many wake turns in a row may act on one session. The count starts again "
+            "when the owner runs a command or writes a file on it; a chat message alone "
+            "does not."
         ),
     )
+    profiles: dict[str, ComputeProfile] = Field(
+        default_factory=dict,
+        description=("Operator-managed image profiles. Empty means no images can be launched."),
+    )
+
+    @property
+    def provider_configured(self) -> bool:
+        """Whether the provider has the settings its API calls need."""
+        return bool(self.cloud_run_project and self.cloud_run_service_account)
+
+    @model_validator(mode="after")
+    def _cloud_run_is_complete(self) -> ComputeSettings:
+        """Refuse a half-configured provider, or a profile Cloud Run could not run.
+
+        Nothing is checked until a Cloud Run setting is given: an installation that
+        does not use compute, or still carries settings of a removed provider, starts.
+        """
+        fields = ("cloud_run_project", "cloud_run_service_account")
+        given = [field for field in fields if getattr(self, field)]
+        missing = [field for field in fields if field not in given]
+        if not given:
+            return self
+        if missing:
+            raise ValueError(
+                f"DAIMON_COMPUTE__{given[0].upper()} also needs "
+                f"DAIMON_COMPUTE__{missing[0].upper()}"
+            )
+        for name, profile in self.profiles.items():
+            if (error := _cloud_run_profile_error(name, profile)) is not None:
+                raise ValueError(error)
+        return self
 
 
 class EvalsSettings(BaseModel):
@@ -3119,6 +3224,17 @@ class MonitoringSettings(BaseModel):
     )
 
 
+class OpsEventsSettings(BaseModel):
+    retention_days: int = Field(
+        default=30,
+        ge=1,
+        description=(
+            "Days a failure or warning shown on the admin Issues page is kept before the "
+            "scheduler deletes it, default 30."
+        ),
+    )
+
+
 class ProviderLimitsSettings(BaseModel):
     """How many turns one provider key serves at once (`DAIMON_PROVIDER_LIMITS__*`)."""
 
@@ -3186,6 +3302,7 @@ class Settings(BaseSettings):
     evals: EvalsSettings = Field(default_factory=EvalsSettings)
     long_jobs: LongJobsSettings = Field(default_factory=LongJobsSettings)
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
+    ops_events: OpsEventsSettings = Field(default_factory=OpsEventsSettings)
     security_audit_retention_days: int = Field(
         default=90,
         ge=0,

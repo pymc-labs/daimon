@@ -43,20 +43,19 @@ from daimon.core.thread_model_switch import (
     preview_thread_pick,
 )
 from daimon.core.thread_models import (
-    EFFORT_NOT_CLAUDE,
     EFFORT_OFF_CLAUDE,
     THREAD_MODEL_CHOICES,
     ThreadModelRefused,
     choose_thread_model,
+    effort_refusal,
     model_efforts,
-    model_label,
     resolve_effort,
 )
 from daimon.core.turn.notices import uses_phrase
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.config import DEFAULT_BACKEND
-from mux.contracts.ids import ModelRef
+from mux.contracts.ids import ModelRef, Provider
 
 _UNATTENDED = (
     "Only someone in the conversation can change its model, and nobody started "
@@ -98,28 +97,27 @@ async def _set_thread_model_impl(
     if model is None or not model.strip():
         if not wants_effort:
             raise ToolError("Name a model, an effort, or both. Nothing changed.")
-        if await _off_claude(runtime, auth, origin):
-            raise ToolError(EFFORT_OFF_CLAUDE + " Nothing changed.")
         return await _choose_claude(runtime, auth, origin, None, effort)
     chosen, _reset = resolve_effort(effort)
     model_id = THREAD_MODEL_CHOICES.get(model.strip().lower())
+    off = await _agent_provider(runtime, auth, origin) is not None
     if (
         chosen is not None
         and model_id is not None
+        and not off
         and chosen not in model_efforts(model_id)
-        and not await _off_claude(runtime, auth, origin)
     ):
         # Refuse before the model is saved: a refusal changes nothing.
-        raise ToolError(f"{model_label(model_id)} doesn't take an effort. Nothing changed.")
+        raise ToolError(f"{effort_refusal(DEFAULT_BACKEND, model_id)} Nothing changed.")
     result = await _set_model(runtime, auth, origin, model, revision)
     if not wants_effort or result.revision is not None:
         return result
-    if ":" in result.model and not result.model.startswith(f"{DEFAULT_BACKEND}:"):
-        return _with_note(result, EFFORT_NOT_CLAUDE)
-    if await _off_claude(runtime, auth, origin):
+    if model_id is not None and off:
         return _with_note(result, EFFORT_OFF_CLAUDE)
-    # The pick is kept as a Claude model: keep the effort beside it.
-    return await _choose_claude(runtime, auth, origin, None, effort)
+    try:
+        return await _choose_claude(runtime, auth, origin, None, effort)
+    except ToolError as refused:
+        return _with_note(result, f"The effort was not set: {refused}")
 
 
 def _with_note(result: ThreadModelResult, extra: str) -> ThreadModelResult:
@@ -140,7 +138,7 @@ async def _set_model(
         f"{DEFAULT_BACKEND}:{THREAD_MODEL_CHOICES[word]}" if word in THREAD_MODEL_CHOICES else model
     )
     picked = await _catalog_model(runtime, auth, value, model)
-    if picked.provider == DEFAULT_BACKEND and not await _off_claude(runtime, auth, origin):
+    if picked.provider == DEFAULT_BACKEND and await _agent_provider(runtime, auth, origin) is None:
         return await _choose_claude(runtime, auth, origin, _word_of(picked.id, said=model))
     pick = await _pick(runtime, auth, origin)
     admin = auth.admin_for(DelegatedAction.AGENT_SETTINGS)
@@ -199,6 +197,7 @@ async def _choose_claude(
             thread_id=origin.thread_id,
             choice=word,
             effort=effort,
+            agent_provider=await _agent_provider(runtime, auth, origin),
         )
     except ThreadModelRefused as exc:
         raise ToolError(str(exc)) from exc
@@ -270,14 +269,18 @@ def _word_of(model_id: str, *, said: str) -> str:
     return next((w for w, m in THREAD_MODEL_CHOICES.items() if m == model_id), said)
 
 
-async def _off_claude(runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow) -> bool:
-    """Whether the conversation's agent runs on another provider, so a Claude word moves it."""
+async def _agent_provider(
+    runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow
+) -> Provider | None:
+    """The provider the conversation's agent runs on when it is not Claude's, else None."""
     if not channel_backend.backend_selection_enabled(runtime.settings.turn):
-        return False
+        return None
     agent_id = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id)
     async with runtime.session_factory() as session:
         revision = await agent_backends.current(session, auth.tenant_id, agent_id)
-    return revision is not None and revision.backend not in (None, DEFAULT_BACKEND)
+    if revision is None or revision.backend in (None, DEFAULT_BACKEND):
+        return None
+    return revision.backend
 
 
 def register_thread_model_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
@@ -298,8 +301,9 @@ def register_thread_model_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         model) or a model from ``list_models`` as ``provider:id``. ``effort`` is
         ``low``, ``medium``, ``high``, ``xhigh``, ``max`` or ``default`` (the
         agent's own), and may be given alone: "think harder" means a higher
-        ``effort``, not another model. A model pick keeps the chosen effort; only
-        Claude models take one, and the note says when it was not set. The
+        ``effort``, not another model. A model pick keeps the chosen effort; Claude
+        models and OpenAI (low, medium, high) take one, Gemini none, and the note
+        says when it was not set. The
         conversation keeps the choice for every later reply until someone
         changes it; the reply in progress keeps its model. Other conversations
         are unaffected.

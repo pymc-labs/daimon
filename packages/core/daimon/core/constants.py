@@ -46,12 +46,12 @@ DEFAULT_AGENT_MODEL: str = "claude-sonnet-5-5"
 # surfaces cannot disagree.
 #
 # These are deliberate product caps chosen to sit below the provider's own
-# per-agent limits — not a copy of them. The provider's real limit is
-# established by the re-runnable probe at
-# `packages/core/tests/contracts/test_skill_cap.py`, which reads the number
-# out of the provider's own rejection message rather than a hardcoded second
-# value here, because that number has moved before.
-AGENT_SKILL_CAP: int = 20
+# per-agent limits — not a copy of them. The skill cap is what every backend
+# carries: the OpenAI skill pins, digests included, sit in bounded agent
+# metadata, and `tests/test_skill_cap_backends.py` keeps this many within it. The
+# re-runnable probe at `packages/core/tests/contracts/test_skill_cap.py` checks
+# the provider accepts that many, because its own limit has moved before.
+AGENT_SKILL_CAP: int = 50
 AGENT_MCP_CAP: int = 20
 
 # The byte cap on a single key/token value entered through a private form.

@@ -137,6 +137,13 @@ async def unattended_provider_origin(
         yield origin
 
 
+def without_builtins(spec: AgentSpec) -> AgentSpec:
+    """`spec` with no built-in tool, as a routine fire without its opt-in runs."""
+    if spec.tools is None:
+        return spec
+    return spec.model_copy(update={"tools": tuple(t for t in spec.tools if t.kind != "builtin")})
+
+
 def require_native_unattended_capabilities(
     spec: AgentSpec | None, *, profile_id: str, gated: bool = False, sandbox: bool = False
 ) -> None:
@@ -362,6 +369,7 @@ def unattended_posture(
     entry_point: UnattendedEntryPoint | None = None,
     routine_sandbox_tools: bool = False,
     relays: RelayCatalogues | None = None,
+    owner_tools: frozenset[str] = frozenset(),
 ) -> PolicyApproval:
     """How an unattended turn on `session` answers its pauses.
 
@@ -373,7 +381,9 @@ def unattended_posture(
     is the seam for operator-trusted MCP hints; it must answer only for
     trusted servers. A built-in or custom call is refused (`capability_posture`)
     unless `routine_sandbox_tools` opts a `routine` in; no other `entry_point`
-    can be opted in.
+    can be opted in. `owner_tools` are protected tools whose owner a verified rule counts
+    as present (`compute_sessions.agent_chat_owner`); every deny and ask still decides
+    them, and the session keeps asking on each, so this posture sees every call.
     """
     posture = PolicyApproval(
         decide=unattended_decider(
@@ -393,6 +403,7 @@ def unattended_posture(
             if session_factory is not None and tenant_id is not None
             else None,
             daimon_rules=True,
+            owner_tools=owner_tools,
             annotations_for=annotations_for
             or session_annotations(
                 policy,

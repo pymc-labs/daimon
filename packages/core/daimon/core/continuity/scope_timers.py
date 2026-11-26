@@ -25,6 +25,7 @@ from daimon.core.continuity.wakes import (
     claim_wake,
     is_transient_denial,
     release_wake,
+    report_wake_failed,
     settle_wake,
     start_wake,
 )
@@ -36,6 +37,7 @@ from daimon.core.turn.errors import (
     SessionPreparationFailed,
     TurnNotStarted,
 )
+from daimon.core.turn_origin import wake_turn
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -72,11 +74,20 @@ async def dispatch_scope_timer(
         if not await start_wake(sessionmaker, claim, now=now()):
             return
         skip_reason: str | None = None
+        error_class: str | None = None
         try:
             # An imported timer carries no set time; the seed leaves it out.
-            await run_timer(row, render_timer_seed(row.requested_work or ""))
+            with wake_turn(claim.owner):
+                await run_timer(row, render_timer_seed(row.requested_work or ""))
         except AnthropicDisabled:
             log.warning("scope_timer.provider_guard_denied", row_id=str(row.id))
+            report_wake_failed(
+                sessionmaker,
+                row.tenant_id,
+                row.reason,
+                "provider_guard_denied",
+                thread_id=row.thread_id,
+            )
             await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
             return
         except SessionBusyError as busy:
@@ -120,11 +131,13 @@ async def dispatch_scope_timer(
                 error_type=type(exc).__name__,
                 causes=backend_refusal_causes(exc),
             )
-            skip_reason = "dispatch_failed"
+            skip_reason, error_class = "dispatch_failed", type(exc).__name__
         await settle_wake(
             sessionmaker,
             claim,
             status="delivered" if skip_reason is None else "skipped",
             now=now(),
             skip_reason=skip_reason,
+            row=row,
+            error_class=error_class,
         )

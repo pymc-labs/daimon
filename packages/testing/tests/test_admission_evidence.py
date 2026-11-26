@@ -336,13 +336,20 @@ async def test_real_gate_and_adapter_denial_have_no_native_sends_or_provider_roo
     with capture_logs(processors=[stamp_log]) as baseline_logs:
         await DaimonBot._orchestrate_observed(bot, message, "100", uuid.UUID(scope.tenant_id))  # pyright: ignore[reportPrivateUsage]
     assert tuple(entry.request_json for entry in gateway.events) == observed_requests
+
+    # `turn.finished` carries a wall-clock duration that differs between the two runs.
+    def comparable(fields: Any) -> dict[str, Any]:
+        return {k: v for k, v in fields.items() if k != "duration_ms"}
+
     assert [
         (
             entry["event"],
-            {k: v for k, v in entry.items() if k not in ("event", "log_level", "captured_s")},
+            comparable(
+                {k: v for k, v in entry.items() if k not in ("event", "log_level", "captured_s")}
+            ),
         )
         for entry in baseline_logs
-    ] == [(entry.event, entry.fields) for entry in receipt.effects.logs]
+    ] == [(entry.event, comparable(entry.fields)) for entry in receipt.effects.logs]
     await client.close()
     assert receipt.decision is not None and receipt.decision.reason == gate
     assert not receipt.decision.admitted

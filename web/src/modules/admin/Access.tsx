@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { Lock, Users } from "lucide-react"
 import { MultiPicker } from "@/components/picker"
 import { SettingsList, type SettingsRow } from "@/components/settings"
 import { Switch } from "@/components/ui/switch"
-import { usePeopleSearch } from "@/lib/hooks"
+import { useDebounced, usePeopleSearch } from "@/lib/hooks"
 import type { Access as AccessState, Providers as ProvidersState, SettingsPatch } from "./types"
 
 type Save = (patch: SettingsPatch) => void
@@ -18,11 +18,7 @@ export function Access({ access, save }: { access: AccessState; save: Save }) {
   const listed = access.people
   const ids = (listed ?? []).map((p) => p.id)
   const [text, setText] = useState("")
-  const [term, setTerm] = useState("")
-  useEffect(() => {
-    const t = setTimeout(() => setTerm(text.trim()), 200)
-    return () => clearTimeout(t)
-  }, [text])
+  const term = useDebounced(text.trim(), 200)
   const found = usePeopleSearch(term)
   const known = new Map([...(found.data ?? []), ...(listed ?? [])].map((p) => [p.id, p.name]))
   const items = [{ id: EVERYONE, label: "Everyone", icon: <Users className="size-3.5 text-muted-foreground" /> }, ...[...known].map(([id, label]) => ({ id, label }))]

@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -58,6 +58,10 @@ MAX_CARRIED_FILES = 20
 MAX_CARRIED_FILE_BYTES = 10 * 1024 * 1024
 MAX_CARRIED_TOTAL_BYTES = 50 * 1024 * 1024
 CARRIED_FILES_DIR = "/workspace/previous"
+#: The binding ref holding the hash of the keys file its session mounted (`provider_env`).
+ENV_REF = "env_sha256"
+#: The provider file holding those keys: it lives with the session (`retire_session`).
+ENV_FILE_REF = "env_file"
 
 BindingField = Literal[
     "profile", "provider", "config_revision", "agent", "account_scope", "model", "plan_digest"
@@ -86,6 +90,8 @@ class BindingFacts:
     plan_digest: str
     environment: str = ""
     """Set by a host whose plan names its environment (self-hosted)."""
+    env_sha256: str = ""
+    """The mounted keys file's hash, set by a host that mounts it only at creation (OpenAI)."""
 
 
 def recorded_facts(binding: ProviderBinding, *, environment: bool = False) -> BindingFacts:
@@ -100,6 +106,7 @@ def recorded_facts(binding: ProviderBinding, *, environment: bool = False) -> Bi
         account_scope=refs.get("account_scope", ""),
         model=refs.get("model", ""),
         plan_digest=refs.get("plan_digest", ""),
+        env_sha256=refs.get(ENV_REF, ""),
     )
 
 
@@ -120,7 +127,7 @@ def _snapshot(facts: BindingFacts, updatable: frozenset[BindingField]) -> Sessio
         vault_id=None,
         tools_sha256=in_place,
         mcp_servers_sha256="",
-        env_sha256=None,
+        env_sha256=facts.env_sha256 or None,
         agent_version=0,
         agent_name="",
     )
@@ -142,7 +149,8 @@ def binding_decision(
     return decide_session_compatibility(
         recorded=_snapshot(recorded, updatable),
         desired=_snapshot(desired, updatable),
-        capabilities=MaCapabilities(session_agent_updatable=True),
+        # A provider session's keys file mounts only at creation: a new one replaces it.
+        capabilities=MaCapabilities(session_agent_updatable=True, env_replaceable_in_place=False),
         now=datetime.now(UTC),
     )
 
@@ -324,9 +332,46 @@ async def end_session(
     return False
 
 
+async def retire_session(
+    scope: Scope,
+    backend: ManagedAgents | None,
+    ref: ResourceRef | None,
+    refs: Mapping[str, str],
+    *,
+    key: str,
+) -> bool:
+    """End a session, then delete the keys file it mounted (`delete_env_file`)."""
+    ended = await end_session(scope, backend, ref, key=key)
+    await delete_env_file(scope, backend, ref, refs, key=key)
+    return ended
+
+
+async def delete_env_file(
+    scope: Scope,
+    backend: ManagedAgents | None,
+    ref: ResourceRef | None,
+    refs: Mapping[str, str],
+    *,
+    key: str,
+) -> None:
+    """Delete the keys file (`ENV_FILE_REF`) the session `ref` mounted, if any."""
+    if backend is not None and ref is not None and (file_id := refs.get(ENV_FILE_REF)):
+        try:
+            await backend.artifacts.delete(
+                scope, ref.model_copy(update={"id": file_id, "kind": "artifact"}), key=key + ":env"
+            )
+        except MuxError as error:
+            # Left at the provider; logged by category, never content.
+            log.warning(
+                "binding.env_file_kept",
+                error=type(error).__name__,
+                causes=backend_refusal_causes(error),
+            )
+
+
 async def _terminate(scope: Scope, old: OldSession, key: str) -> bool:
     """End the replaced session: the successor is already published."""
-    return await end_session(scope, old.backend, old.ref, key=key)
+    return await retire_session(scope, old.backend, old.ref, old.binding.native_refs, key=key)
 
 
 def carry_framing(

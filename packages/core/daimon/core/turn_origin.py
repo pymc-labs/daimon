@@ -92,6 +92,33 @@ def execution_origin(
         current_execution_origin_id.reset(token)
 
 
+#: The claim owner of the wake whose turn this task runs, until that turn's origin takes it.
+_wake_owner: ContextVar[list[str] | None] = ContextVar("wake_owner", default=None)
+
+
+@contextmanager
+def wake_turn(owner: str) -> Iterator[None]:
+    """Run a started wake's turn: its origin takes the claim's ``owner`` as its id.
+
+    A dispatcher claims a wake row under a fresh owner (`continuity.wakes.claim_wake`),
+    kept on the row as ``lease_owner``. The first origin `turn_origin` creates inside
+    this block gets that owner as its id, so the row names the exact turn it started,
+    and no other turn. A read that only a wake's own turn may make checks the pair
+    (`daimon.core.stores.compute_tasks.wake_turn_of`). A turn started outside the
+    block, or a second origin inside it, gets an ordinary id and no such read.
+    """
+    token = _wake_owner.set([owner])
+    try:
+        yield
+    finally:
+        _wake_owner.reset(token)
+
+
+def _wake_origin_id() -> uuid.UUID | None:
+    owner = _wake_owner.get()
+    return uuid.UUID(owner.pop()) if owner else None
+
+
 class SessionState(BaseModel):
     """What happened to the workspace this turn runs in, and what changed with it.
 
@@ -195,6 +222,7 @@ async def turn_origin(
     platform_message_id: str | None = None,
     helper_of: uuid.UUID | None = None,
     helper_key: str | None = None,
+    own_dm_reach: bool = False,
 ) -> AsyncIterator[TurnOriginRow]:
     """Commit a distinct origin for this execution and remove it after execution.
 
@@ -213,6 +241,9 @@ async def turn_origin(
     takes them; signed MCP caller identities name them. None when unknown.
     `helper_of` is the asking turn's origin when this turn is a helper's.
     `helper_key` is a helper turn's own session key, when its agent id does not give it.
+    `own_dm_reach` is the admission's decision that the turn may read a limited room its
+    person can read themselves: true only for an interactive owner DM turn and a routine the
+    scheduler fires into its owner's DM. A helper's turn never has it.
     """
     now = datetime.now(UTC)
     async with sessionmaker.begin() as session:
@@ -239,6 +270,9 @@ async def turn_origin(
             platform_message_id=platform_message_id,
             helper_of=helper_of,
             helper_key=helper_key,
+            own_dm_reach=own_dm_reach,
+            # A helper works inside the turn that asked it: never a wake's own turn.
+            origin_id=None if helper_of is not None else _wake_origin_id(),
         )
         if message_text is not None:
             if not queued_message:

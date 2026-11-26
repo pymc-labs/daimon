@@ -3,6 +3,7 @@
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -18,8 +19,9 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_CONVERTED_FROM
 from daimon.core.errors import UserFacingError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mux_backend import resource_scope
+from daimon.core.ops_events import OpsEvent, record_of
 from daimon.core.provider_keys import DEFAULT_KEY_ENV
-from daimon.core.stores import agent_owners, routines, thread_sessions
+from daimon.core.stores import agent_owners, ops_events, routines, thread_sessions
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.agent_rekey import (
     KEPT,
@@ -136,6 +138,49 @@ async def test_rekey_moves_only_this_agent_and_is_repeatable(
     assert kept_routine is not None and kept_routine.agent_id == "agent_other", "other stays"
     assert moved_thread is not None and moved_thread.ma_agent_id == "dm_x", "thread follows"
     assert owner == account.id, "owner follows"
+
+
+async def test_a_resolved_issue_of_the_agent_stays_resolved_after_the_move(
+    db_session_factory: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    """An issue's fingerprint hashes the agent id, so it follows the new key with its state."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    now = datetime.now(UTC)
+    old = record_of(
+        OpsEvent("turn.failed", tenant.id, reason="upstream", agent_id="agent_old"), at=now
+    )
+    other = record_of(
+        OpsEvent("turn.failed", tenant.id, reason="upstream", agent_id="agent_other"), at=now
+    )
+    async with db_session_factory() as session, session.begin():
+        await ops_events.record_ops_events(session, tenant_id=tenant.id, events=[old, other])
+        await ops_events.set_issue_state(
+            session,
+            tenant_id=tenant.id,
+            fingerprint=old.fingerprint,
+            state="resolved",
+            by_account_id=None,
+            at=now,
+        )
+
+    async with db_session_factory() as session, session.begin():
+        await rekey_agent(session, tenant_id=tenant.id, old_id="agent_old", new_id="dm_x")
+
+    after = record_of(
+        OpsEvent("turn.failed", tenant.id, reason="upstream", agent_id="dm_x"), at=now
+    )
+    async with db_session_factory() as session:
+        groups = {
+            g.fingerprint: g
+            for g in await ops_events.list_issue_groups(
+                session, tenant_id=tenant.id, since=datetime.min.replace(tzinfo=UTC)
+            )
+        }
+    assert set(groups) == {after.fingerprint, other.fingerprint}, "the old key's issue moved"
+    followed = groups[after.fingerprint].state
+    assert followed is not None and followed.state == "resolved", "its resolved state followed"
+    assert groups[other.fingerprint].state is None, "another agent's issue is untouched"
 
 
 async def test_a_move_when_the_old_agent_had_thread_consents_then_drops_them(

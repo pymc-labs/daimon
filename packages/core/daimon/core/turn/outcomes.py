@@ -17,6 +17,7 @@ from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEv
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.context_prompt import TurnContext
 from daimon.core.model_presets import OPUS, OPUS_FAST
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.pricing import (
     MODEL_PRICING,
     ProviderPrice,
@@ -29,7 +30,7 @@ from daimon.core.pricing import (
 from daimon.core.release import current_release
 from daimon.core.runtime_health import track_turn
 from daimon.core.stores.turn_outcomes import OutcomeRecord, record
-from daimon.core.turn.state import TurnState
+from daimon.core.turn.state import TurnState, tool_errors_by_server
 from daimon.core.turn.termination import (
     USER_VISIBLE_FAILURES,
     TerminationReason,
@@ -115,6 +116,8 @@ class TurnObservation:
     alertable: bool = field(default=True, kw_only=True)
     """False for a turn nobody asked for (an unprompted reply): its failure is
     recorded in the outcome row but never logged as `turn.user_failure`."""
+    is_dm: bool = field(default=False, kw_only=True)
+    """Set at session binding; logged on `turn.finished` and `turn.user_failure`."""
     eval_key: dict[str, JsonValue] | None = field(default=None, kw_only=True)
     """`EvalKey.to_json()` of what the turn ran with; None where nothing set it."""
     id: uuid.UUID = field(default_factory=uuid.uuid4)
@@ -289,25 +292,77 @@ class TurnObservation:
             or termination_reason(error or (state.error if state else None))
         )
         terminal_error = error or (state.error if state else None)
-        if (
-            resolved in USER_VISIBLE_FAILURES
-            and self.alertable
-            and not fallback
-            and self.platform != "cli"
-        ):
-            log.warning(
-                "turn.user_failure",
+        alertable = self.alertable and not fallback and self.platform != "cli"
+        if alertable:
+            failed = resolved in USER_VISIBLE_FAILURES
+            duration_ms = max(0, int((time.monotonic() - self._started) * 1000))
+            tenant = str(self.tenant_id) if self.tenant_id is not None else None
+            tool_errors = tool_errors_by_server(state.content) if state else {}
+            # The denominator for failure-rate alerts: every answered turn, not only failures.
+            log.info(
+                "turn.finished",
+                tenant_id=tenant,
                 platform=self.platform,
-                reason=resolved.value,
-                error_class=type(terminal_error).__name__ if terminal_error else None,
-                causes=backend_refusal_causes(terminal_error),
                 origin=self.origin,
-                backend=self.backend or "unknown",
-                provider=(self.backend or "unknown").partition("/")[0],
-                release=current_release(),
-                turn_id=str(self.id),
-                tenant_id=str(self.tenant_id) if self.tenant_id is not None else None,
+                reason=resolved.value,
+                failed=failed,
+                is_dm=self.is_dm,
+                agent_id=self.agent_id,
+                duration_ms=duration_ms,
+                recovered=recovered,
+                tool_errors=sum(tool_errors.values()),
             )
+            # One event per server per turn, however many of its calls failed.
+            for server in tool_errors:
+                report_ops_event(
+                    self.sessionmaker,
+                    OpsEvent(
+                        "bridge.tool_errors",
+                        self.tenant_id,
+                        agent_id=self.agent_id,
+                        account_id=self.account_id,
+                        platform=self.platform,
+                        channel_id=self.channel_id,
+                        thread_id=self.thread_id,
+                        session_id=self.session_id,
+                        subject_key=server,
+                    ),
+                )
+            if failed:
+                log.warning(
+                    "turn.user_failure",
+                    platform=self.platform,
+                    reason=resolved.value,
+                    error_class=type(terminal_error).__name__ if terminal_error else None,
+                    causes=backend_refusal_causes(terminal_error),
+                    origin=self.origin,
+                    backend=self.backend or "unknown",
+                    provider=(self.backend or "unknown").partition("/")[0],
+                    release=current_release(),
+                    turn_id=str(self.id),
+                    tenant_id=tenant,
+                    is_dm=self.is_dm,
+                    agent_id=self.agent_id,
+                )
+                # The line above is what the log-based metric counts: do not log the event twice.
+                # A turn shed for concurrency is only `turn.shed`, not also a failed answer.
+                shed = resolved is TerminationReason.ADMISSION_CONCURRENCY_SHED
+                report_ops_event(
+                    self.sessionmaker,
+                    OpsEvent(
+                        "turn.shed" if shed else "turn.failed",
+                        self.tenant_id,
+                        reason=resolved.value,
+                        area="dm" if self.is_dm else None,
+                        agent_id=self.agent_id,
+                        account_id=self.account_id,
+                        platform=self.platform,
+                        channel_id=self.channel_id,
+                        thread_id=self.thread_id,
+                        session_id=self.session_id,
+                    ),
+                    logged=False,
+                )
         samples = self._counted_samples()
 
         def total(getter: Callable[[UsageSample], int | None]) -> int | None:
@@ -377,6 +432,8 @@ class TurnObservation:
             unpriced_calls=unpriced_calls,
             billing_posture=posture,
             eval_key=self.eval_key,
+            is_dm=self.is_dm,
+            alertable=alertable,
         )
         if not self.usage_available:
             # SDK polling/dispatch paths have outcomes but do not consume model spans.

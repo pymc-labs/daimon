@@ -1,10 +1,12 @@
 import { Check, Copy } from "lucide-react"
 import { useState } from "react"
+import { Link } from "react-router"
 import ReactMarkdown from "react-markdown"
 import remarkBreaks from "remark-breaks"
 import remarkGfm from "remark-gfm"
 
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { copy } from "@/lib/copy"
 import { absolute, ago, usd } from "@/lib/format"
 import { cn } from "@/lib/utils"
 
@@ -39,9 +41,9 @@ export function CopyButton({ text, className, label }: { text: string; className
       type="button"
       aria-label={label ?? "Copy"}
       className={cn("inline-flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground", className)}
-      onClick={(e) => {
+      onClick={async (e) => {
         e.stopPropagation()
-        navigator.clipboard?.writeText(text)
+        if (!(await copy(text))) return
         setDone(true)
         setTimeout(() => setDone(false), 2000)
       }}
@@ -63,15 +65,17 @@ export function Mono({ children, className }: { children: React.ReactNode; class
   return <span className={cn("font-mono text-[12.5px]", className)}>{children}</span>
 }
 
-export function StatStrip({ stats }: { stats: { label: string; value: React.ReactNode }[] }) {
+/** Headline numbers in one row; a stat with `to` opens that page. */
+export function StatStrip({ stats }: { stats: { label: string; value: React.ReactNode; to?: string }[] }) {
+  const cls = "min-w-0 flex-1 bg-background px-4 py-3 max-sm:last:odd:col-span-2"
   return (
     <div className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border bg-border sm:flex">
-      {stats.map((s) => (
-        <div key={s.label} className="min-w-0 flex-1 bg-background px-4 py-3 max-sm:last:odd:col-span-2">
-          <div className="text-xs font-medium text-muted-foreground">{s.label}</div>
-          <div className="mt-1 truncate text-lg font-semibold tabular">{s.value}</div>
-        </div>
-      ))}
+      {stats.map((s) => {
+        const body = <><div className="text-xs font-medium text-muted-foreground">{s.label}</div><div className="mt-1 truncate text-lg font-semibold tabular">{s.value}</div></>
+        return s.to
+          ? <Link key={s.label} to={s.to} className={cn(cls, "outline-none hover:bg-accent/60 focus-visible:bg-accent/60")}>{body}</Link>
+          : <div key={s.label} className={cls}>{body}</div>
+      })}
     </div>
   )
 }

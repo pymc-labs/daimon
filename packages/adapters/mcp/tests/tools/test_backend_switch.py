@@ -1221,7 +1221,8 @@ async def test_switching_the_default_agent_offers_a_copy_unless_its_for_everyone
             await _request_agent_backend_switch_impl(runtime, who, **switch, expected_revision=0)
         assert str(refused.value).startswith(
             "Switching Researcher changes it for everyone on this server. "
-            "To try Gemini just here, I can make a copy of me on Gemini. Nothing changed."
+            "To try Gemini just here, I can switch only this conversation to Gemini, "
+            "or make a copy of me on Gemini. Nothing changed."
         )
     # "For everyone" still needs the owner or an admin.
     agent()

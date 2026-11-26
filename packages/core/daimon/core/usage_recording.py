@@ -63,6 +63,7 @@ SPEND_LEDGER_REASONS: tuple[str, ...] = (
     "media_debit",
     "classifier_debit",
     "thread_naming_debit",
+    "owner_notice_debit",
     "eval_draft_debit",
     "eval_simulator_debit",
 )
@@ -560,6 +561,7 @@ _AUXILIARY_PURPOSES = {
     "classifier": ("classifier_debit", "classifier"),
     "eval_draft": ("eval_draft_debit", "eval-draft"),
     "eval_simulator": ("eval_simulator_debit", "eval-simulator"),
+    "owner_notice": ("owner_notice_debit", "owner-notice"),
 }
 
 

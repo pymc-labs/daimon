@@ -255,3 +255,27 @@ class TemplateMCPCredential:
         if row is not None and row.revoked_at is None:
             raise ScopeViolation("mcp-credential", "MCP credential revocation readback failed")
         self._minted = None
+        await _close_github_router(request, jti)
+
+
+async def _close_github_router(request: ProviderPreparationRequest, jti: UUID) -> None:
+    """Close the GitHub router the relay opened for this credential, if any.
+
+    The record closes first, so a failed GitHub revoke leaves only tokens that
+    nobody outside Daimon holds and that lapse within the hour.
+    """
+    import httpx
+    import structlog
+    from daimon.core.github_turn_router import close_turn_router
+
+    if request.deps.fernet is None:
+        return
+    try:
+        async with httpx.AsyncClient() as client:
+            await close_turn_router(
+                request.deps.sessionmaker, client, turn_jti=jti, fernet=request.deps.fernet
+            )
+    except (httpx.HTTPError, OSError) as error:
+        structlog.get_logger(__name__).warning(
+            "template_mcp.github_router_close_failed", error_type=type(error).__name__
+        )

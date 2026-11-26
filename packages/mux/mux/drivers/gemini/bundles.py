@@ -125,15 +125,20 @@ def skill_archive(uploaded: UploadedBundle, bundle: SkillUpload) -> bytes:
         )
     ):
         raise ProviderError("conflict", retryable=False, native_code="skill_bytes_mismatch")
+    return file_archive({path: contents[path] for path, _, _ in uploaded.files})
+
+
+def file_archive(files: Mapping[str, bytes], *, mode: int = 0o644) -> bytes:
+    """A tar.gz of regular files at validated relative paths."""
     buffer = io.BytesIO()
     with (
         gzip.GzipFile(fileobj=buffer, mode="wb", mtime=0) as zipped,
         tarfile.open(fileobj=zipped, mode="w", format=tarfile.PAX_FORMAT) as archive,
     ):
-        for path, size, _ in uploaded.files:
+        for path, content in files.items():
             info = tarfile.TarInfo(relative_path(path))
-            info.size, info.mode = size, 0o644
-            archive.addfile(info, io.BytesIO(contents[path]))
+            info.size, info.mode = len(content), mode
+            archive.addfile(info, io.BytesIO(content))
     return buffer.getvalue()
 
 
