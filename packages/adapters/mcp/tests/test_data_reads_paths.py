@@ -11,9 +11,12 @@ import ast
 import inspect
 import textwrap
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from daimon.adapters.mcp import data_access, server
@@ -25,6 +28,7 @@ from daimon.core.data_audience import user_subject
 from daimon.core.data_tools import DATA_READS, DATA_TOOLS, REDACTED_DATA_RESULT, mark_data_result
 from daimon.core.features import toolset
 from daimon.core.features.registry import FEATURES
+from daimon.core.stores.data_memory import UNKNOWN_READ
 from daimon.core.stores.domain import Role
 from daimon.core.stores.repo_memory import MemoryEntry
 from daimon.core.turn import admission
@@ -204,7 +208,32 @@ async def test_a_memory_that_recorded_data_shows_only_where_all_of_it_is_readabl
         asked.append(ref_sets)
         return [refs == ["record:a"] for refs in ref_sets]
 
+    noted: list[tuple[str, list[str]]] = []
+
+    async def note(_s: object, *, chat_session_id: str, refs: list[str], **_: object) -> None:
+        noted.append((chat_session_id, refs))
+
     monkeypatch.setattr(repo_memory, "readable_by_audience", readable)
-    shown = await repo_memory._shown(_NO_RUNTIME, _auth(), [plain, ok, hidden])  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.setattr(repo_memory, "ledgers", AsyncMock(return_value=["s", "asker"]))
+    monkeypatch.setattr(repo_memory, "note_reads", note)
+    runtime = cast(McpRuntime, SimpleNamespace(session_factory=SimpleNamespace(begin=_tx)))
+    shown = await repo_memory._shown(runtime, _auth(), [plain, ok, hidden])  # pyright: ignore[reportPrivateUsage]
     assert [e.name for e in shown] == ["plain", "ok"]
     assert asked == [[["record:a"], ["record:b"]]], "untagged memories are not checked"
+    assert noted == [("s", ["record:a"]), ("asker", ["record:a"])], "a recall joins the reads"
+
+
+@asynccontextmanager
+async def _tx() -> AsyncIterator[object]:
+    yield object()
+
+
+async def test_a_save_with_no_session_by_a_data_reader_shows_nowhere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no session's reads to record, a caller that may read data records an unknown
+    item; one that may not records nothing."""
+    for reading, refs in ((True, [UNKNOWN_READ]), (False, None)):
+        monkeypatch.setattr(repo_memory, "reads_data", AsyncMock(return_value=reading))
+        runtime = cast(McpRuntime, SimpleNamespace(session_factory=None, settings=None))
+        assert await repo_memory._refs(runtime, _auth(platform="discord")) == refs  # pyright: ignore[reportPrivateUsage]

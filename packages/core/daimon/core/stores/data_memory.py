@@ -10,11 +10,15 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterable
+from typing import Final
 
 from daimon.core._models import SessionDataRead
 from sqlalchemy import literal, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+
+UNKNOWN_READ: Final = "unknown"
+"""What a save records when it cannot tell what was read: readable by no one."""
 
 
 async def note_reads(
