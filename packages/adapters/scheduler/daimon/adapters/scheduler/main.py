@@ -72,6 +72,7 @@ from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.direct_messages import DirectMessageAccessRevoked, run_dm_routine
 from daimon.core.discord_membership import (
     DiscordRestMembershipResolver,
+    open_discord_dm,
     send_discord_error_dm,
 )
 from daimon.core.dm_access import roles_by_membership, sender_admits
@@ -89,6 +90,7 @@ from daimon.core.github_issued_token_sweep import sweep_closed_github_issued_tok
 from daimon.core.headless_runner import run_turn
 from daimon.core.health import start_liveness_responder
 from daimon.core.hub_oauth_kv_sweep import sweep_expired_hub_oauth_kv
+from daimon.core.lead_intake_execution import current_intake_execution
 from daimon.core.logging_setup import configure_logging, mark_shutting_down
 from daimon.core.long_jobs import LongJobExecutor
 from daimon.core.long_jobs_ma import ManagedLongJobPort
@@ -99,7 +101,7 @@ from daimon.core.ma_resolver import (
     resolve_agent,
     resolve_environment,
 )
-from daimon.core.mcp_identity import routine_destination_key
+from daimon.core.mcp_identity import DmRoutineRelay, routine_destination_key
 from daimon.core.mcp_vault_janitor import archive_idle_relay_vaults
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
@@ -561,6 +563,7 @@ async def _build_fire(
                     is_dm=True,
                     resolver=deps.membership_resolver,
                 )
+            relay, open_dm = _dm_routine_relay(row, owner_user_id)
             reply = await run_dm_routine(
                 deps,
                 requester_org=standing,
@@ -573,6 +576,8 @@ async def _build_fire(
                 # Built-ins only under an operator's opt-in for the agent: a DM
                 # routine takes no On of its own.
                 sandbox=await routine_sandbox(sm, settings, row, platform="discord"),
+                relay=relay,
+                open_dm=open_dm,
             )
         except (AdmissionDenied, DirectMessageAccessRevoked) as error:
             log.info(
@@ -614,6 +619,29 @@ async def _build_fire(
                 expected_private=row,
                 expected_row=row,
             )
+
+    def _dm_routine_relay(
+        row: RoutineRow, owner: str
+    ) -> tuple[DmRoutineRelay | None, Callable[[], Awaitable[str]] | None]:
+        """What this fire binds into its turn's relay credential, and how to open the
+        owner's DM, when a server signs DM routines: this routine, its owner, this fire's
+        execution and the routine's revision now. (None, None) otherwise: today's turn."""
+        execution = current_intake_execution.get()
+        if (
+            not settings.mcp_identity.names_dm_routine
+            or settings.discord is None
+            or execution is None
+            or execution[0] != row.id
+        ):
+            return None, None
+        relay = DmRoutineRelay(
+            routine_id=row.id,
+            owner=owner,
+            execution=execution[1],
+            revision=row.updated_at.isoformat(),
+        )
+        token = settings.discord.bot_token.get_secret_value()
+        return relay, functools.partial(open_discord_dm, token, owner)
 
     async def _owner_granted(row: RoutineRow, owner: str) -> bool:
         """The routine agent's DM grant admits the owner, by their current server roles.

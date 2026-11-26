@@ -125,9 +125,10 @@ the message's channel; a new public thread reads as its channel. A routine that 
 thread Daimon has not sorted yet, such as an archived one, signs `narrow`.
 
 A routine run names no person. On a server with `"routine_claims": true`, a run that posts
-to a Discord room carries `routine`, that room as `channel` and its `room`. A run that
-posts to a DM, or nowhere, carries none of them. Agent chat, the web app's tool list and
-senders from another organisation name no person either.
+to a Discord room carries `routine`, that room as `channel` and its `room`; a run posting
+nowhere carries none. A DM run needs
+[`dm_routine_claims`](unattended.md#a-routine-in-its-owners-dm) too. Agent chat, the web
+app's tool list and senders from another organisation name no person either.
 
 On a server with `"wake_claims": true`, Daimon signs `wake` only for these turns:
 
