@@ -180,7 +180,7 @@ async def test_candidates_need_two_verified_emails_and_auto_link_respects_every_
         tenant_id=people.tenant,
         by=admin,
         account_id=admin,
-        by_owner=True,
+        admin=True,
     )
     rows = [
         SourceAccount("a-me", email="ME@example.com", email_verified=True),
@@ -242,7 +242,7 @@ async def test_a_data_admin_links_others_with_a_notice_and_a_trail_and_never_a_p
             tenant_id=people.tenant,
             by=other,
             account_id=other,
-            by_owner=False,
+            admin=False,
         )
     await identity.grant_data_admin(
         people.conn,
@@ -250,7 +250,7 @@ async def test_a_data_admin_links_others_with_a_notice_and_a_trail_and_never_a_p
         tenant_id=people.tenant,
         by=other,
         account_id=admin,
-        by_owner=True,
+        admin=True,
     )
     with pytest.raises(NotAllowed):
         await link(admin, admin)

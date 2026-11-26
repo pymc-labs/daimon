@@ -370,15 +370,6 @@ async def act(
 # ---- scopes and grants -----------------------------------------------------------------------
 
 
-async def _admin(
-    conn: AsyncConnection[DictRow], schemas: Schemas, tenant_id: uuid.UUID, by: uuid.UUID
-) -> None:
-    """Scopes and grants decide who reads what, so only a data admin changes them, as for
-    links (`identity.admin_link`)."""
-    if not await identity.is_data_admin(conn, schemas, tenant_id, by):
-        raise identity.NotAllowed("Only a data admin can do this. Ask the owner.")
-
-
 async def scopes(
     conn: AsyncConnection[DictRow], schemas: Schemas, tenant_id: uuid.UUID
 ) -> list[ScopeView]:
@@ -408,6 +399,7 @@ async def create_scope(
     *,
     tenant_id: uuid.UUID,
     by: uuid.UUID,
+    admin: bool = False,
     id: str,
     kind: str,
     name: str,
@@ -420,7 +412,7 @@ async def create_scope(
     if not name.strip():
         raise Invalid("Give the scope a name.")
     async with conn.transaction():
-        await _admin(conn, schemas, tenant_id, by)
+        await identity.require_admin(conn, schemas, tenant_id, by, admin=admin)
         cur = await conn.execute(
             f"insert into {schemas.data}.scopes (tenant_id, id, kind, name, description)"
             " values (%s, %s, %s, %s, %s) on conflict do nothing returning id".encode(),
@@ -439,13 +431,14 @@ async def delete_scope(
     *,
     tenant_id: uuid.UUID,
     by: uuid.UUID,
+    admin: bool = False,
     id: str,
 ) -> None:
     """Remove a scope and its grants; refused while it or one of its grants is declared, or it
     is the default of a source."""
     d = schemas.data
     async with conn.transaction():
-        await _admin(conn, schemas, tenant_id, by)
+        await identity.require_admin(conn, schemas, tenant_id, by, admin=admin)
         row = await _one(
             conn,
             f"select bound from {d}.scopes where tenant_id = %s and id = %s for update",
@@ -479,15 +472,16 @@ async def grant(
     *,
     tenant_id: uuid.UUID,
     by: uuid.UUID,
+    admin: bool = False,
     scope: str,
     holder: str,
 ) -> None:
     if not HOLDER.match(holder):
         raise Invalid("Name who holds the scope.")
     async with conn.transaction():
-        await _admin(conn, schemas, tenant_id, by)
-        if holder in (await identity.holders_of(conn, schemas, tenant_id, [by]))[by]:
-            raise identity.NotAllowed("Ask another data admin to grant you a scope.")
+        await identity.require_admin(conn, schemas, tenant_id, by, admin=admin)
+        # A grant to oneself is allowed and marked so in the trail.
+        own = holder in (await identity.holders_of(conn, schemas, tenant_id, [by]))[by]
         await _one(
             conn,
             f"select 1 from {schemas.data}.scopes where tenant_id = %s and id = %s",
@@ -503,7 +497,7 @@ async def grant(
             return
         await record_audit(
             conn, schemas, tenant_id=tenant_id, kind="grant.created", account_id=by,
-            target=holder, detail={"scope": scope},
+            target=holder, detail={"scope": scope, **({"self": True} if own else {})},
         )  # fmt: skip
 
 
@@ -513,12 +507,13 @@ async def revoke(
     *,
     tenant_id: uuid.UUID,
     by: uuid.UUID,
+    admin: bool = False,
     scope: str,
     holder: str,
 ) -> None:
     d = schemas.data
     async with conn.transaction():
-        await _admin(conn, schemas, tenant_id, by)
+        await identity.require_admin(conn, schemas, tenant_id, by, admin=admin)
         row = await _one(
             conn,
             f"select bound from {d}.grants where tenant_id = %s and scope = %s and holder = %s"
