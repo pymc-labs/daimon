@@ -196,8 +196,8 @@ async def registered_account_token(
 async def stop_confirmation_workers() -> None:
     """Cancel the confirmation workers agent-chat sends started and wait them out.
 
-    A worker reads through the test's database connection, so a test that holds
-    one must call this before its database fixture tears down.
+    A worker reads through the test's database connection, so the database
+    fixtures call this before they tear down (``add_background_drain``).
     """
     from daimon.adapters.mcp.tools import _agent_chat_safety
 
