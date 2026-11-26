@@ -18,6 +18,7 @@ const editor = {
   installations: [{ id: 7, owner_id: 1, owner_login: "acme", repository_selection: "selected", repos: [a, b, c], owner_type: "Organization", avatar_url: null, state: "active", total: 3, truncated: false, fetch_state: "ok" }],
   grants: [grant(a, true), grant(b)], visible_repos: [a, b, c], available: [c], repairable_repo_ids: [], needs_write: {},
   requested_repo_id: null, working_repo_id: 1, past_cap_repo_ids: [], owner_order: ["acme"], owner_limit: 12, github_user_id: null, pending_installation: null, selection_error: null,
+  follow_offers: [], following: false,
 } as unknown as AgentEditorView
 
 afterEach(() => vi.unstubAllGlobals())
@@ -46,8 +47,28 @@ describe("github connect", () => {
     const body = JSON.parse(f.mock.calls.find(([p]) => p === "/api/github/connect/save")![1]!.body as string)
     expect(body).toEqual({
       state: "st", invitation: "inv", receipt: "rc", snapshot: "sn", snapshot_sig: "ss", visibility: "vi", visibility_sig: "vs",
-      repo: ["3"], remove: ["2"], access: ["write"], working: ["3"], repo_access: {},
+      repo: ["3"], remove: ["2"], access: ["write"], working: ["3"], repo_access: {}, follow_org: [],
     })
+  }, 30_000)
+
+  it("offers to follow the org once the agent would hold all of it, and sends it with the save", async () => {
+    const offer = { installation_id: 7, owner: "acme", repo_ids: [1, 2, 3] }
+    const f = server({
+      "GET /api/github/connect/view": () => json({ kind: "page", view: { ...editor, follow_offers: [offer] } }),
+      "POST /api/github/connect/save": () => json({ kind: "page", view: { kind: "saved_agent", agent_name: "Analyst", grants: [], visible_repo_ids: [], installations: [], back: null, following: true } }),
+    })
+    open("state=st")
+    const name = "Also give Analyst new repos added to acme"
+    await screen.findByRole("button", { name: "Add repos" })
+    expect(screen.queryByRole("checkbox", { name: new RegExp(name) })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole("button", { name: "Add repos" }))
+    await userEvent.click(await screen.findByRole("checkbox", { name: /gamma/ }))
+    await userEvent.click(screen.getByRole("button", { name: "Add 1 repo" }))
+    await userEvent.click(screen.getByRole("checkbox", { name: new RegExp(name) }))
+    await userEvent.click(screen.getByRole("button", { name: "Save changes" }))
+    expect(await screen.findByText("Analyst gets new repos added to its org on its own.")).toBeInTheDocument()
+    const body = JSON.parse(f.mock.calls.find(([p]) => p === "/api/github/connect/save")![1]!.body as string)
+    expect(body.follow_org).toEqual(["7"])
   }, 30_000)
 
   it("shows a status view and redirects when the step says so", async () => {

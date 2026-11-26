@@ -15,6 +15,8 @@ export type ConnectInstallation = {
   owner_type: string; avatar_url: string | null; state: "active" | "suspended"
   total: number; truncated: boolean; fetch_state: "ok" | "error"
 }
+/** An org the agent may follow: every new repo of it is given to the agent. */
+export type FollowOffer = { installation_id: number; owner: string; repo_ids: number[] }
 export type AgentRepo = {
   repo_id: number; full_name: string; scope: "agent" | "shared"
   max_access: "read" | "write"; baseline_access: "none" | "read" | "write"; ceiling_access: "read" | "write"
@@ -27,7 +29,7 @@ export type AgentRepo = {
 export type Selection = {
   state: string; invitation: string; receipt: string
   snapshot: string; snapshot_sig: string; visibility: string; visibility_sig: string
-  repo: string[]; remove: string[]; access: string[]; working: string[]
+  repo: string[]; remove: string[]; access: string[]; working: string[]; follow_org: string[]
   repo_access: Record<string, string[]>
 }
 
@@ -58,6 +60,8 @@ export type AgentEditorView = {
   owner_order: string[]; owner_limit: number; github_user_id: number | null
   pending_installation: { found: boolean; account_login: string | null } | null
   selection_error: string | null
+  /** Orgs the person may tick to follow, once the agent would hold every repo of one and no other. */
+  follow_offers: FollowOffer[]; following: boolean
 }
 export type WorkspacePickerView = {
   kind: "workspace_picker"; agent_name: string | null; workspace_label: string; platform: string
@@ -68,7 +72,7 @@ export type WorkspacePickerView = {
 }
 export type SavedAgentView = {
   kind: "saved_agent"; agent_name: string; grants: AgentRepo[]; visible_repo_ids: number[]
-  installations: ConnectInstallation[]; back: Back
+  installations: ConnectInstallation[]; back: Back; following: boolean
 }
 export type DoneView = { kind: "done"; count: number; requester_label: string; same_person: boolean; agent_name: string | null; back: Back }
 

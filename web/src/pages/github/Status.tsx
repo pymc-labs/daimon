@@ -142,6 +142,7 @@ export function SavedAgentPage({ view }: { view: SavedAgentView }) {
   return (
     <Card mark={<Mark icon={CircleCheck} tone="ok" />}>
       <Title title="Repos saved" sub={repos(view.grants.length, view.agent_name)} />
+      {view.following && <p className="mt-1 text-sm text-muted-foreground">{view.agent_name} gets new repos added to its org on its own.</p>}
       <Owners grants={view.grants} visible={new Set(view.visible_repo_ids)} installations={view.installations} />
       <BackButton back={view.back} />
     </Card>

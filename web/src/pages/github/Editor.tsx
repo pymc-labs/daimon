@@ -34,6 +34,7 @@ export function Editor({ view, step }: { view: AgentEditorView; step: Step }) {
   // The ticks of the open "Add repos" dialog; the requested repo starts ticked and opens it.
   const [draft, setDraft] = useState<Ids | null>(() => (view.requested_repo_id == null ? null : new Set([view.requested_repo_id])))
   const [choosing, setChoosing] = useState(false)
+  const [follow, setFollow] = useState<number | null>(null)
 
   const rows: Row[] = [
     ...view.grants.map((g): Row => ({ id: g.repo_id, name: g.full_name, owner: ownerOf(g.full_name), installation: g.installation_id, grant: g, visible: visible.has(g.repo_id), pastCap: pastCap.has(g.repo_id) })),
@@ -44,8 +45,13 @@ export function Editor({ view, step }: { view: AgentEditorView; step: Step }) {
   const owners = [...new Set([...view.owner_order, ...rows.map((r) => r.owner)])].filter((o) => rows.some((r) => r.owner.toLowerCase() === o.toLowerCase()))
   const accounts = new Set(kept.map((r) => (r.installation ? `i:${r.installation}` : `o:${r.owner.toLowerCase()}`)))
   const over = accounts.size - view.owner_limit
+  // An offer shows once the agent would hold every repo of that one org, as on the MCP page.
+  const keptIds = new Set(kept.map((r) => r.id))
+  const offers = view.follow_offers.filter((o) =>
+    kept.length > 0 && kept.every((r) => r.owner.toLowerCase() === o.owner.toLowerCase()) && o.repo_ids.every((id) => keptIds.has(id)))
+  if (follow != null && !offers.some((o) => o.installation_id === follow)) setFollow(null)
   const workChanged = working !== view.working_repo_id
-  const changed = adds.size + fixes.size + removed.size > 0 || workChanged
+  const changed = adds.size + fixes.size + removed.size > 0 || workChanged || follow != null
   const current = rows.find((r) => r.id === working)
 
   const drop = (id: number) => { if (working === id) { setWorking(null); if (id !== view.working_repo_id) setExplicit(true) } }
@@ -54,7 +60,7 @@ export function Editor({ view, step }: { view: AgentEditorView; step: Step }) {
     if (r.grant) setRemoved(flip(removed, r.id, true)); else setAdds(flip(adds, r.id, false))
   }
   const undo = (id: number) => { setRemoved(flip(removed, id, false)); if (!explicit && id === view.working_repo_id) setWorking(id) }
-  const discard = () => { setAdds(new Set()); setFixes(new Set()); setRemoved(new Set()); setWorking(view.working_repo_id); setExplicit(false) }
+  const discard = () => { setAdds(new Set()); setFixes(new Set()); setRemoved(new Set()); setWorking(view.working_repo_id); setExplicit(false); setFollow(null) }
   const confirmAdds = (next: Ids) => {
     setAdds(next)
     if (working != null && !view.grants.some((g) => g.repo_id === working) && !next.has(working)) { setWorking(null); setExplicit(true) }
@@ -67,6 +73,7 @@ export function Editor({ view, step }: { view: AgentEditorView; step: Step }) {
     repo: [...adds, ...fixes].map(String), remove: [...removed].map(String), access: ["write"],
     working: [keepWorking ? "keep" : working == null ? "clear" : String(working)],
     repo_access: Object.fromEntries([...fixes].map((id) => [String(id), ["write"]])),
+    follow_org: follow == null ? [] : [String(follow)],
   }))
 
   const groups = view.installations.map((item) => ({
@@ -122,6 +129,17 @@ export function Editor({ view, step }: { view: AgentEditorView; step: Step }) {
           )
         })}
       </div>
+      {offers.length > 0 && (
+        <div className="mt-4 space-y-1.5">
+          {offers.map((o) => (
+            <ChoiceRow key={o.installation_id} checked={follow === o.installation_id} onChange={() => setFollow(follow === o.installation_id ? null : o.installation_id)}>
+              <span className="font-medium">Also give {view.agent_name} new repos added to {o.owner}</span>
+              <span className="w-full text-xs text-muted-foreground">It can read and change them.</span>
+            </ChoiceRow>
+          ))}
+        </div>
+      )}
+      {view.following && <p className="mt-4 text-sm text-muted-foreground">{view.agent_name} gets new repos added to its org on its own.</p>}
 
       <div className="mt-6 flex min-h-6 flex-wrap items-center gap-x-2 gap-y-1">
         {changed ? (

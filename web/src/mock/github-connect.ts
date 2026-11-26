@@ -2,7 +2,7 @@
 //   /oauth/github/connect/<name>       redirects to the confirm step for editor and picker names
 //   /oauth/github/confirm?state=<name> shows the view; add &cancel=1 to cancel
 //   /oauth/github/callback?code=x&state=<name>, /oauth/github/setup?state=<name>
-// Names: editor editor-requested editor-error editor-fail picker picker-agent picker-requested install pending
+// Names: editor editor-requested editor-error editor-fail editor-follow editor-following picker picker-agent picker-requested install pending
 // no-repos expired error error-retry transient cancelled already already-agent saved done done-agent done-other.
 import { http, HttpResponse } from "msw"
 
@@ -51,8 +51,18 @@ const editor = (extra: Partial<Extract<ConnectView, { kind: "agent_editor" }>> =
     installations: INSTALLATIONS, grants: GRANTS, visible_repos: visible, available: visible.filter((r) => !held.has(r.id)),
     repairable_repo_ids: [shared.id], needs_write: { [shared.id]: true }, requested_repo_id: null, working_repo_id: mmm.id,
     past_cap_repo_ids: [GRANTS[4]!.repo_id], owner_order: ["acme", "maya-l", "northwind"], owner_limit: 12, github_user_id: 110,
-    pending_installation: null, selection_error: null, ...extra,
+    pending_installation: null, selection_error: null, follow_offers: [], following: false, ...extra,
   }
+}
+// A whole-org install: adding its last two repos offers to follow the org.
+const fern = [repo("fernhill", 16, "models"), repo("fernhill", 16, "data"), repo("fernhill", 16, "docs")]
+const FERN = [install(16, "fernhill", fern, { repository_selection: "all" })]
+const fernEditor = (held: ConnectRepo[], extra: Partial<Extract<ConnectView, { kind: "agent_editor" }>>, state: string): ConnectView => {
+  const ids = new Set(held.map((r) => r.id))
+  return editor({
+    installations: FERN, grants: held.map((r, i) => grant(r, { is_working_repo: i === 0 })), visible_repos: fern, available: fern.filter((r) => !ids.has(r.id)),
+    repairable_repo_ids: [], needs_write: {}, working_repo_id: fern[0]!.id, past_cap_repo_ids: [], owner_order: ["fernhill"], ...extra,
+  }, state)
 }
 const picker = (extra: Partial<Extract<ConnectView, { kind: "workspace_picker" }>> = {}, state = "picker"): ConnectView => ({
   kind: "workspace_picker", agent_name: null, workspace_label: "Fernhill Labs", platform: "slack",
@@ -66,6 +76,8 @@ const SCENARIOS: Record<string, () => ConnectView> = {
   "editor-requested": () => editor({ requested_repo_id: acme[7]!.id, pending_installation: { found: true, account_login: "Orbit Data" } }, "editor-requested"),
   "editor-error": () => editor({ selection_error: "Selection could not be verified." }, "editor-error"),
   "editor-fail": () => editor({}, "editor-fail"),
+  "editor-follow": () => fernEditor(fern.slice(0, 1), { follow_offers: [{ installation_id: 16, owner: "fernhill", repo_ids: fern.map((r) => r.id) }] }, "editor-follow"),
+  "editor-following": () => fernEditor(fern, { following: true }, "editor-following"),
   picker: () => picker(),
   "picker-agent": () => picker({ agent_name: "MMM Analyst", platform: "discord" }, "picker-agent"),
   "picker-requested": () => picker({ requested_repo_id: acme[9]!.id, selection_error: "GitHub did not answer. Try again." }, "picker-requested"),
@@ -84,8 +96,8 @@ const SCENARIOS: Record<string, () => ConnectView> = {
   "done-agent": () => ({ kind: "done", count: 2, requester_label: "Priya Raman", same_person: true, agent_name: "MMM Analyst", back }),
   "done-other": () => ({ kind: "done", count: 4, requester_label: "Priya Raman", same_person: false, agent_name: null, back: null }),
 }
-const saved = (grants: AgentRepo[]): ConnectView => ({
-  kind: "saved_agent", agent_name: "MMM Analyst", grants, visible_repo_ids: INSTALLATIONS.flatMap((i) => i.repos).map((r) => r.id), installations: INSTALLATIONS, back,
+const saved = (grants: AgentRepo[], installations = INSTALLATIONS, following = false): ConnectView => ({
+  kind: "saved_agent", agent_name: "MMM Analyst", grants, visible_repo_ids: installations.flatMap((i) => i.repos).map((r) => r.id), installations, back, following,
 })
 
 const page = (view: ConnectView): Outcome => ({ kind: "page", view })
@@ -100,9 +112,11 @@ function save(body: Selection): Outcome {
     return page({ kind: "transient_error", message: "GitHub did not answer", status: 502, retry_url: "/oauth/github/confirm", retry_selection: body })
   }
   if (body.state.startsWith("picker")) return scenario(body.state.endsWith("agent") ? "done-agent" : "done")
-  const view = editor() as Extract<ConnectView, { kind: "agent_editor" }>
+  const shown = SCENARIOS[body.state]?.()
+  const view = (shown?.kind === "agent_editor" ? shown : editor()) as Extract<ConnectView, { kind: "agent_editor" }>
   const adds = view.available.filter((r) => body.repo.includes(String(r.id))).map((r) => grant(r))
-  return page(saved([...GRANTS.filter((g) => !body.remove.includes(String(g.repo_id))), ...adds]))
+  const kept = view.grants.filter((g) => !body.remove.includes(String(g.repo_id)))
+  return page(saved([...kept, ...adds], view.installations, view.following || body.follow_org.length > 0))
 }
 
 const API = "/api/github/connect"
