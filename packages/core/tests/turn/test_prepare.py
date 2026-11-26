@@ -542,6 +542,7 @@ def test_prepared_turn_public_fields_exclude_recorder() -> None:
         "runtime",
         "native_chat_session_id",
         "snapshot",
+        "env_sha256",
     }, "PreparedTurn must expose exactly the documented public fields"
     assert next(f for f in dataclasses.fields(PreparedTurn) if f.name == "runtime").default is None
 
