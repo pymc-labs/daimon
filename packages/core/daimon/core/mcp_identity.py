@@ -26,14 +26,14 @@ import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Final, Literal, cast
+from typing import TYPE_CHECKING, Final, Literal, cast, get_args
 
 import jwt as pyjwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_server_url import ascii_mcp_url, canonical_mcp_url, same_ascii_mcp_url
-from daimon.core.stores.domain import TurnOriginRow
+from daimon.core.stores.domain import ContinuationReason, TurnOriginRow
 from daimon.core.turn_origin import origin_place
 
 if TYPE_CHECKING:
@@ -46,6 +46,10 @@ RELAY_PATH: Final = "/mcp-identity"
 RELAY_CLAIM: Final = "daimon_relay"
 #: The longest `routine` claim a server accepts.
 ROUTINE_CLAIM_MAX: Final = 80
+#: Why a call runs without a fresh message, as the `wake` claim says: `turn`, a person's
+#: turn still running, or the reason a queued continuation woke (`ContinuationReason`).
+WakeReason = Literal["turn"] | ContinuationReason
+WAKE_REASONS: Final[frozenset[str]] = frozenset({"turn", *get_args(ContinuationReason)})
 #: Servers accept at most 300 s between iat and exp; 120 s leaves room for skew.
 TOKEN_TTL: Final = timedelta(seconds=120)
 _SEED_BYTES: Final = 32
@@ -275,6 +279,9 @@ class IdentityClaims:
     room: str | None = None
     #: The routine a run posts for, with its `channel` and `room` and never a `sub` or `msg`.
     routine: str | None = None
+    #: Why the call runs (`WakeReason`): `turn` with `sub` and `msg`, any other reason with
+    #: `channel` and `room` and no `sub` or `msg`. Never with `routine`.
+    wake: str | None = None
 
     def payload(self, *, now: datetime, ttl: timedelta = TOKEN_TTL) -> dict[str, str | int]:
         issued = int(now.timestamp())
@@ -293,6 +300,7 @@ class IdentityClaims:
             ("msg", self.msg),
             ("room", self.room),
             ("routine", self.routine),
+            ("wake", self.wake),
         ):
             if value:
                 claims[name] = value
@@ -311,6 +319,7 @@ def caller_claims(
     place: TurnPlace | None,
     room: SignedRoom | None = None,
     routine: str | None = None,
+    wake: WakeReason | None = None,
 ) -> IdentityClaims:
     """Claims for one relayed request.
 
@@ -324,6 +333,10 @@ def caller_claims(
     `routine` names the routine a run posts for; `place` is then the room it posts to
     (`daimon.core.signed_room.routine_room`) and `room` its kind. Such a token names no
     person and no message, and is never signed without the room and its kind.
+
+    `wake` says why a call with no fresh message runs: `turn` is the person's live turn
+    and keeps its `sub` and `msg`; any other reason is a continuation posting to `place`,
+    signed like a routine with that room's kind and no person or message.
     """
     if routine is not None and not (
         0 < len(routine) <= ROUTINE_CLAIM_MAX
@@ -333,7 +346,22 @@ def caller_claims(
         and room != "dm"
     ):
         raise ValueError("a routine claim needs the room the routine posts to, and its kind")
-    person = routine is None and place is not None and bool(platform_user_id)
+    if wake is not None:
+        if wake not in WAKE_REASONS or routine is not None:
+            raise ValueError("a wake claim is one known reason and never with a routine")
+        if wake == "turn" and not (place is not None and place.message_id and platform_user_id):
+            raise ValueError("a turn wake needs the person and their message")
+        if wake != "turn" and not (
+            place is not None
+            and place.channel_id
+            and not place.message_id
+            and room is not None
+            and room != "dm"
+        ):
+            raise ValueError("a continuation wake needs its room and its kind, and no message")
+    person = (
+        routine is None and wake in (None, "turn") and place is not None and bool(platform_user_id)
+    )
     channel = place.channel_id if place is not None else None
     return IdentityClaims(
         iss=issuer,
@@ -346,6 +374,7 @@ def caller_claims(
         msg=place.message_id if person and place is not None else None,
         room=room if channel else None,
         routine=routine,
+        wake=wake,
     )
 
 

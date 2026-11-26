@@ -21,6 +21,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.verifier import FOREIGN_HOME_CLAIM, TOKEN_KIND_CLAIM
 from daimon.adapters.mcp.tools.watches import callback_watch_terms
+from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX, DM_SCOPE_PREFIX
 from daimon.core.agent_chat_requester import driver_signed_in
 from daimon.core.audience_gate import read_audience_mode
 from daimon.core.channel_audience import channel_has_outsiders
@@ -39,6 +40,7 @@ from daimon.core.mcp_identity import (
     RequesterBodyError,
     RequesterKind,
     TurnPlace,
+    WakeReason,
     called_tool,
     caller_claims,
     matching_turn,
@@ -55,13 +57,21 @@ from daimon.core.mcp_identity import (
 from daimon.core.mcp_server_url import same_ascii_mcp_url
 from daimon.core.ops_catalog import OpsCode
 from daimon.core.ops_events import OpsEvent, report_ops_event
-from daimon.core.signed_room import routine_room, turn_room
+from daimon.core.signed_room import SignedRoom, routine_room, turn_room
 from daimon.core.stores import watches
 from daimon.core.stores.agent_avatars import normalize_agent_name
-from daimon.core.stores.domain import ChatPlatform, RoutineRow, TurnOriginRow, WatchRow
+from daimon.core.stores.domain import (
+    ChatPlatform,
+    ContinuationReason,
+    RoutineRow,
+    TurnOriginRow,
+    WatchRow,
+)
 from daimon.core.stores.routines import get_routine
+from daimon.core.stores.task_continuations import get_running_wake_row
 from daimon.core.stores.thread_sessions import get_thread_session_by_id
 from daimon.core.stores.turn_origins import get_session_origin, list_active_origins
+from daimon.core.turn_origin import origin_place
 from fastmcp.server.auth.auth import TokenVerifier
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -186,8 +196,9 @@ async def _session_turn(
     agent_id: uuid.UUID,
     platform: str,
     now: datetime,
-) -> TurnOriginRow | None:
-    """The person's turn the calling session is running now, or None.
+) -> tuple[TurnOriginRow | None, bool]:
+    """The person's turn the calling session is running now, or None, and whether it was
+    found through the credential's own grant.
 
     The binding names the session's `thread_sessions` row. With the session's
     execution grant, the turn is the one holding it now (`bind_origin_session`),
@@ -196,7 +207,7 @@ async def _session_turn(
     while that row is the caller's live session and runs one turn in its thread.
     """
     if binding.session_key is None:
-        return None
+        return None, False
     async with sessionmaker() as session:
         row = await get_thread_session_by_id(session, id=binding.session_key)
         if row is None or (row.tenant_id, row.account_id, row.platform) != (
@@ -204,7 +215,7 @@ async def _session_turn(
             account_id,
             platform,
         ):
-            return None
+            return None, False
         if binding.grant is not None:
             held = await get_session_origin(
                 session,
@@ -216,12 +227,81 @@ async def _session_turn(
             )
             origins = [] if held is None else [held]
         elif row.status != "live":
-            return None
+            return None, False
         else:
             origins = await list_active_origins(
                 session, tenant_id=tenant_id, account_id=account_id, platform=platform, now=now
             )
-    return matching_turn(origins, tenant_id=tenant_id, agent_id=agent_id, thread_id=row.thread_id)
+    turn = matching_turn(origins, tenant_id=tenant_id, agent_id=agent_id, thread_id=row.thread_id)
+    return turn, turn is not None and binding.grant is not None
+
+
+def _live_person_turn(origin: TurnOriginRow, *, now: datetime) -> bool:
+    """Whether `origin` is a person's own turn still running: started by their message,
+    not a helper's, and not expired. It proves the turn runs, not how old its message is."""
+    return (
+        origin.human_invocation is True
+        and bool(origin.platform_message_id)
+        and origin.helper_of is None
+        and origin.expires_at > now
+    )
+
+
+async def _thread_wake(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    origin: TurnOriginRow,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    person: str,
+    platform: str,
+    now: datetime,
+) -> tuple[ContinuationReason, str, SignedRoom] | None:
+    """The reason, thread and room kind of the queued continuation `origin` runs, or None.
+
+    A wake's turn takes its claim's owner as its origin id (`turn_origin.wake_turn`), so
+    the row is found from the turn alone: claimed by that owner, started and inside its
+    lease, for this workspace, platform, requester and agent. Its origin and signed channel
+    must be the row's own thread under the same parent, so a watch report into a new
+    thread, a turn in the channel itself, a DM or channel scope and a helper find none.
+    The room is judged as a routine posting there judges it (`routine_room`), never as the
+    turn's own. Reads only.
+    """
+    thread = origin.thread_id
+    if (
+        origin.helper_of is not None
+        or origin_place(origin) == "dm"
+        or thread.startswith((DM_SCOPE_PREFIX, CHANNEL_SCOPE_PREFIX))
+        or origin.platform_channel_id != thread
+        or thread == origin.parent_channel_id
+    ):
+        return None
+    async with sessionmaker() as session:
+        row = await get_running_wake_row(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            thread_id=thread,
+            owner=origin.id.hex,
+            now=now,
+        )
+    if (
+        row is None
+        or row.parent_channel_id != origin.parent_channel_id
+        or not row.requester_account_id == origin.account_id == account_id
+        or row.requester_external_user_id != person
+        or row.target_ma_agent_id != origin.responder_ma_agent_id
+    ):
+        return None
+    destination = {
+        "place_type": "thread",
+        "channel_id": thread,
+        "parent_channel_id": row.parent_channel_id,
+    }
+    found = await routine_room(
+        sessionmaker, tenant_id=tenant_id, platform=platform, destination=destination, now=now
+    )
+    return None if found is None else (row.reason, found[0], found[1])
 
 
 async def _routine_run(
@@ -531,7 +611,7 @@ def build_identity_relay_route(
                 413, "body_too_large", server=server, tenant_id=tenant_id, sessions=sessionmaker
             )
         now = clock()
-        origin = await _session_turn(
+        origin, granted = await _session_turn(
             sessionmaker,
             binding,
             tenant_id=tenant_id,
@@ -630,6 +710,32 @@ def build_identity_relay_route(
                         TurnPlace(channel_id=destination[0], message_id=None),
                         destination[1],
                     )
+            wake: WakeReason | None = None
+            if (
+                server.wake_claims
+                and origin is not None
+                and granted
+                and isinstance(person, str)
+                and person
+            ):
+                # Only the turn holding this credential's own grant. A person's live turn
+                # keeps everything it signs; a continuation signs its thread as a routine
+                # posting there would. Anything else signs what it signs without the setting.
+                if _live_person_turn(origin, now=now):
+                    wake = "turn"
+                elif (
+                    running := await _thread_wake(
+                        sessionmaker,
+                        origin,
+                        tenant_id=tenant_id,
+                        account_id=account_id,
+                        person=person,
+                        platform=platform,
+                        now=now,
+                    )
+                ) is not None:
+                    wake, channel, room = running
+                    place = TurnPlace(channel_id=channel, message_id=None)
             identity = caller_claims(
                 issuer=server.issuer,
                 audience=server.audience,
@@ -641,6 +747,7 @@ def build_identity_relay_route(
                 place=place,
                 room=room,
                 routine=routine_id,
+                wake=wake,
             )
             headers["authorization"] = f"Bearer {tokens.token(identity, now=now)}"
         if request.method in ("GET", "DELETE"):

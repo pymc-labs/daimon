@@ -82,3 +82,46 @@ def test_a_routine_claim_names_no_person_even_when_its_credential_does() -> None
     ).payload(now=NOW)  # fmt: skip
     assert (claims["routine"], claims["channel"], claims["room"]) == ("r-1", "3", "team")
     assert not {"sub", "msg"} & set(claims), "the owner's account is not the asker"
+
+
+def _wake(place: TurnPlace | None, room: SignedRoom | None, wake: str, routine: str | None = None):
+    return caller_claims(
+        issuer="daimon-test", audience="https://tools.example.com", agent_id="agent-1",
+        platform="discord", workspace_id="1", platform_user_id="2", agent_name="Helper",
+        place=place, room=room, routine=routine, wake=wake,  # pyright: ignore[reportArgumentType]
+    )  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("place", "room", "wake", "routine"),
+    [
+        (TurnPlace("3", None), "team", "timer", "r-1"),
+        (TurnPlace("3", "4"), "team", "turn", "r-1"),
+        (TurnPlace("3", None), "team", "routine", None),
+        (TurnPlace("3", None), "team", "", None),
+        (TurnPlace("3", None), "team", "turn", None),
+        (None, None, "turn", None),
+        (TurnPlace("3", "4"), "team", "timer", None),
+        (TurnPlace("3", None), None, "timer", None),
+        (TurnPlace("3", None), "dm", "timer", None),
+        (None, "team", "timer", None),
+    ],
+    ids=[
+        "with-routine", "turn-with-routine", "unknown", "blank", "turn-without-msg",
+        "turn-without-place", "reason-with-msg", "reason-without-room", "reason-in-dm",
+        "reason-without-channel",
+    ],
+)  # fmt: skip
+def test_a_wake_claim_is_refused_in_any_mix_a_server_would_refuse(
+    place: TurnPlace | None, room: SignedRoom | None, wake: str, routine: str | None
+) -> None:
+    with pytest.raises(ValueError):
+        _wake(place, room, wake, routine)
+
+
+def test_a_turn_wake_keeps_the_person_and_a_continuation_wake_names_none() -> None:
+    turn = _wake(TurnPlace("3", "4"), "team", "turn").payload(now=NOW)
+    assert (turn["wake"], turn["sub"], turn["msg"]) == ("turn", "discord:2", "4")
+    reason = _wake(TurnPlace("3", None), "narrow", "watch_report").payload(now=NOW)
+    assert (reason["wake"], reason["channel"], reason["room"]) == ("watch_report", "3", "narrow")
+    assert not {"sub", "msg", "routine"} & set(reason), "the requester's account is not the asker"

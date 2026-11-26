@@ -2363,6 +2363,10 @@ class SignedIdentityServer(BaseModel):
     # room's kind (`daimon.core.signed_room.routine_room`). Off by default: a server that
     # does not know the `routine` claim would read such a call as a person's.
     routine_claims: bool = False
+    # Sign a call with no fresh message with why it runs (`wake`): a person's turn still
+    # running, or a queued continuation posting to its own thread, as a routine there would
+    # (`daimon.adapters.mcp.identity_relay`). Off by default, independent of routine_claims.
+    wake_claims: bool = False
 
     @model_validator(mode="after")
     def _wake_needs_requester(self) -> SignedIdentityServer:
@@ -2372,6 +2376,8 @@ class SignedIdentityServer(BaseModel):
             raise ValueError("agent_chat_requester needs requester_meta")
         if self.routine_claims and self.auth != "signed":
             raise ValueError("routine_claims needs a signed server")
+        if self.wake_claims and self.auth != "signed":
+            raise ValueError("wake_claims needs a signed server")
         return self
 
     @model_validator(mode="after")
@@ -2458,6 +2464,11 @@ class McpIdentitySettings(BaseModel):
             "Set routine_claims to true for a signed server that accepts the routine claim: "
             "a routine run that posts to a Discord room then names its routine, that room "
             "and the room's kind, and no person. "
+            "Set wake_claims to true for a signed server that accepts the wake claim: a "
+            "person's turn still running signs wake turn, and a continuation that runs in its "
+            "own Discord thread signs its reason, that thread and its kind, and no person. "
+            "The two settings are independent: with wake_claims on, the server can answer a "
+            "call that has no fresh message even with routine_claims off. "
             "An agent using a server stays in its channel with no long-term memory, a fresh "
             "session per channel turn and no handoffs, because the server answers with what "
             "the channel's readers can read. Set channel_scoped to false for a server that "
