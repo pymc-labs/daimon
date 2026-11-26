@@ -50,11 +50,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after a restore. The default Postgres image is unchanged; `docker-compose.data.yml` swaps
   in one with pgvector ([Data sources](docs/data-sources.md)).
 
-- **Agents can be set to read data sources, sealed to the conversation that asked.** The
-  `data_reads` feature (off by default) starts such an agent fresh for each message in a
-  channel with no memory, refuses helper, agent chat and hand-off requests into it, and offers
-  it no data tool where people outside the team can read. Other sessions' transcripts hide its
-  data results ([Features](docs/features.md#data-source-reads)).
+- **Agents can be set to read data sources.** The `data_reads` feature (off by default) turns
+  it on; other sessions' transcripts hide its data results
+  ([Features](docs/features.md#data-source-reads)).
 
 - **Agents that read data sources get tools to search and read them.** `data_sources`,
   `data_search`, `data_get`, `data_file` and `data_sql` answer only with what everyone who

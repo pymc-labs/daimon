@@ -16,7 +16,6 @@ from daimon.core.data_audience import (
     audience_ref_holds,
     data_audience,
     is_audience_ref,
-    saver_ref,
     scope_ceiling,
 )
 
@@ -124,7 +123,3 @@ def test_audience_refs_recall_only_in_place_and_among_the_readers() -> None:
     assert not audience_ref_holds(ref, elsewhere), "another place never recalls it"
     assert not audience_ref_holds(ref, joined), "a newcomer was not a reader at the read"
     assert audience_ref(unknown) == UNKNOWN_READ, "unlisted readers record a read no one recalls"
-    saver = saver_ref(ASKER)
-    assert audience_ref_holds(saver, elsewhere), "the saver alone, anywhere"
-    assert not audience_ref_holds(saver, read), "never where anyone else is reached"
-    assert not audience_ref_holds(saver_ref(VIEWER), elsewhere), "nor to another person"

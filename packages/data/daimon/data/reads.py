@@ -17,6 +17,7 @@ from uuid import UUID
 from daimon.data import access, recheck, redaction
 from daimon.data.access import ReadContext
 from daimon.data.schema import Schemas
+from daimon.data.sync.attachments import text_of
 from daimon.data.sync.connector import CONNECTORS
 from daimon.data.sync.engine import Env, build_source
 from psycopg import AsyncConnection
@@ -54,6 +55,20 @@ class Attachment:
     name: str
     content_type: str
     size: int
+
+
+@dataclass(frozen=True)
+class File:
+    content_type: str
+    size: int
+    data: bytes | None
+    """Its bytes, a text file's through its source's rules; None under answer-time rules,
+    which reach only text."""
+    text: str | None
+    """Its text as the sync extracts it, through its source's rules best effort; asked for,
+    or under answer-time rules. None for other files."""
+    best_effort: bool = False
+    """Whether answer-time rules, which are best effort, reached its text."""
 
 
 @dataclass(frozen=True)
@@ -248,11 +263,13 @@ async def read_file(
     record_id: UUID,
     index: int,
     answer: Mapping[UUID, redaction.Redactor] | None = None,
-) -> tuple[bytes, str] | None:
-    """The bytes and content type of a record's attached file, asked of its source now with
-    the source's own credential (the store keeps no bytes). None when the reader may not see
-    the record, it has no such file, or the source no longer shows it. A text file goes
-    through its source's ingest rules and, best effort, its `answer` rules."""
+    *,
+    text: bool = False,
+) -> File | None:
+    """A record's attached file, asked of its source now with the source's own credential
+    (the store keeps no bytes). None when the reader may not see the record, it has no such
+    file, or the source no longer shows it. Its text, when `text` or under `answer` rules,
+    goes through its source's ingest rules and, best effort, its answer rules."""
     record = await get(conn, schemas, ctx, record_id, env)
     file = next((a for a in record.attachments if a.ord == index), None) if record else None
     if record is None or file is None:
@@ -285,15 +302,24 @@ async def read_file(
         got = await connector.fetch_file(
             source, payload, record.item.external_id, file.name, file.ord
         )
-        rules = [r for r in (redactor, (answer or {}).get(record.item.source_id)) if r]
-        if got is None or not rules or not textual(got[1]):
-            return got
-        text = got[0].decode("utf-8", "replace")
-        for r in rules:
-            text = r.text(text)
-        return text.encode(), got[1]
     finally:
         await connector.release(source)
+    if got is None:
+        return None
+    raw, kind = got
+    ruled = (answer or {}).get(record.item.source_id)
+    data: bytes | None = raw
+    if textual(kind):
+        plain: str | None = raw.decode("utf-8", "replace")
+    else:
+        plain = await text_of(file.name, kind, raw) if text or ruled else None
+        data = None if ruled else raw
+    for rules in (redactor, ruled):
+        if rules and plain:
+            plain = rules.text(plain)
+    if textual(kind) and (redactor or ruled):
+        data = (plain or "").encode()
+    return File(kind, len(raw), data, plain, best_effort=ruled is not None)
 
 
 async def datasets(
