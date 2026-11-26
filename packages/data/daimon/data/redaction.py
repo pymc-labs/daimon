@@ -468,17 +468,15 @@ def _info(r: DictRow) -> SetInfo:
     )  # fmt: skip
 
 
-async def _admin(
-    conn: AsyncConnection[DictRow], schemas: Schemas, tenant_id: uuid.UUID, by: uuid.UUID
-) -> None:
-    if not await identity.is_data_admin(conn, schemas, tenant_id, by):
-        raise identity.NotAllowed("Only a data admin can do this. Ask the owner.")
-
-
 async def list_sets(
-    conn: AsyncConnection[DictRow], schemas: Schemas, tenant_id: uuid.UUID, *, by: uuid.UUID
+    conn: AsyncConnection[DictRow],
+    schemas: Schemas,
+    tenant_id: uuid.UUID,
+    *,
+    by: uuid.UUID,
+    admin: bool = False,
 ) -> list[SetInfo]:
-    await _admin(conn, schemas, tenant_id, by)
+    await identity.require_admin(conn, schemas, tenant_id, by, admin=admin)
     cur = await conn.execute(
         f"select * from {schemas.data}.redaction_sets where tenant_id = %s order by name".encode(),
         (tenant_id,),
@@ -493,8 +491,9 @@ async def show_set(
     name: str,
     *,
     by: uuid.UUID,
+    admin: bool = False,
 ) -> SetDetail:
-    await _admin(conn, schemas, tenant_id, by)
+    await identity.require_admin(conn, schemas, tenant_id, by, admin=admin)
     cur = await conn.execute(
         f"select * from {schemas.data}.redaction_sets where tenant_id = %s and name = %s".encode(),
         (tenant_id, name),
@@ -517,11 +516,12 @@ async def approve(
     sha: str,
     *,
     by: uuid.UUID,
+    admin: bool = False,
 ) -> SetInfo:
     """Approve the pending file `sha` of set `name`: its rules replace the approved ones and
     the sources using the set sync again from the start."""
     async with conn.transaction():
-        await _admin(conn, schemas, tenant_id, by)
+        await identity.require_admin(conn, schemas, tenant_id, by, admin=admin)
         cur = await conn.execute(
             f"update {schemas.data}.redaction_sets set rules = pending, approved_sha = pin_sha,"
             " pending = null, approved_by = %s, approved_at = now() where tenant_id = %s"
@@ -551,10 +551,11 @@ async def set_redacted(
     redacted: bool,
     *,
     by: uuid.UUID,
+    admin: bool = False,
 ) -> None:
     """Mark a person, by their account, as one whose reads always hide what a guest's would."""
     async with conn.transaction():
-        await _admin(conn, schemas, tenant_id, by)
+        await identity.require_admin(conn, schemas, tenant_id, by, admin=admin)
         await conn.execute(
             f"update {schemas.data}.identities set redacted = %s where tenant_id = %s"
             " and account_id = %s".encode(),

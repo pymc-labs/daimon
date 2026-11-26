@@ -143,11 +143,18 @@ async def _row(
     return await cur.fetchone()
 
 
-async def _require_admin(
-    conn: AsyncConnection[DictRow], schemas: Schemas, tenant_id: uuid.UUID, account_id: uuid.UUID
+async def require_admin(
+    conn: AsyncConnection[DictRow],
+    schemas: Schemas,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    *,
+    admin: bool,
 ) -> None:
-    if not await is_data_admin(conn, schemas, tenant_id, account_id):
-        raise NotAllowed("Only a data admin can do this. Ask the owner.")
+    """Refuse anyone but a data admin; `admin` (a workspace admin or owner, which the caller
+    checks) counts as one."""
+    if not admin and not await is_data_admin(conn, schemas, tenant_id, account_id):
+        raise NotAllowed("Only a data admin or a workspace admin can do this.")
 
 
 async def _decide(
@@ -501,14 +508,12 @@ async def grant_data_admin(
     tenant_id: uuid.UUID,
     by: uuid.UUID,
     account_id: uuid.UUID,
-    by_owner: bool,
+    admin: bool = False,
 ) -> None:
-    """Make `account_id` a data admin: only the tenant's owner (`by_owner`, which the caller
-    checks) or another data admin may."""
+    """Make `account_id` a data admin: only a workspace admin or another data admin may."""
     async with conn.transaction():
         await fence_account(conn, schemas, by, account_id)
-        if not by_owner:
-            await _require_admin(conn, schemas, tenant_id, by)
+        await require_admin(conn, schemas, tenant_id, by, admin=admin)
         await conn.execute(
             f"insert into {schemas.data}.data_admins (tenant_id, account_id, granted_by)"
             " values (%s, %s, %s) on conflict do nothing".encode(),
@@ -531,12 +536,11 @@ async def revoke_data_admin(
     tenant_id: uuid.UUID,
     by: uuid.UUID,
     account_id: uuid.UUID,
-    by_owner: bool,
+    admin: bool = False,
 ) -> None:
     async with conn.transaction():
         await fence_account(conn, schemas, by)
-        if not by_owner:
-            await _require_admin(conn, schemas, tenant_id, by)
+        await require_admin(conn, schemas, tenant_id, by, admin=admin)
         await conn.execute(
             f"delete from {schemas.data}.data_admins where tenant_id = %s"
             " and account_id = %s".encode(),
@@ -560,14 +564,15 @@ async def admin_link(
     by: uuid.UUID,
     key: IdentityKey,
     account_id: uuid.UUID,
+    admin: bool = False,
 ) -> LinkProof:
     """A data admin links a known identity to someone else: proof `email` when it is that
     person's open candidate, else `admin`. The person gets a notice; the trail gets a row."""
     if by == account_id:
-        raise NotAllowed("You can't link an account to yourself. Ask another data admin.")
+        raise NotAllowed("You can't link an account to yourself. Ask another admin.")
     async with conn.transaction():
         await fence_account(conn, schemas, by, account_id)
-        await _require_admin(conn, schemas, tenant_id, by)
+        await require_admin(conn, schemas, tenant_id, by, admin=admin)
         row = await _row(conn, schemas, tenant_id, key)
         if row is None:
             raise Missing("No such account.")
@@ -608,11 +613,12 @@ async def reject_candidate(
     by: uuid.UUID,
     key: IdentityKey,
     account_id: uuid.UUID,
+    admin: bool = False,
 ) -> None:
     """The pair is never proposed again, and neither side is auto-linked in that workspace."""
     async with conn.transaction():
         await fence_account(conn, schemas, by, account_id)
-        await _require_admin(conn, schemas, tenant_id, by)
+        await require_admin(conn, schemas, tenant_id, by, admin=admin)
         await _decide(conn, schemas, tenant_id, key, account_id, "rejected", by)
         await record_audit(
             conn,
@@ -632,6 +638,7 @@ async def unlink(
     tenant_id: uuid.UUID,
     by: uuid.UUID,
     key: IdentityKey,
+    admin: bool = False,
 ) -> uuid.UUID:
     """A data admin ends a link; the pair is not linked automatically again. A platform
     principal's link is who that user is here, so it stays. Returns who was unlinked."""
@@ -643,7 +650,7 @@ async def unlink(
     seen = await cur.fetchone()
     async with conn.transaction():
         await fence_account(conn, schemas, by, seen["account_id"] if seen else None)
-        await _require_admin(conn, schemas, tenant_id, by)
+        await require_admin(conn, schemas, tenant_id, by, admin=admin)
         row = await _row(conn, schemas, tenant_id, key)
         if row is None or row["account_id"] is None or seen is None:
             raise Missing("That account is not linked.")
