@@ -36,6 +36,7 @@ from daimon.core.scope import ChannelScopeRef
 from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, set_access_policy
 from daimon.core.stores.accounts import set_role
+from daimon.core.stores.data_memory import note_reads
 from daimon.core.stores.domain import FeatureTarget, FundingMode, Role, TenantRow
 from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -656,6 +657,7 @@ async def test_a_session_that_read_data_stays_data_reading_but_unsealed_until_a_
         db_session, tenant_id=tenant.id, platform="discord", thread_id="chan-1",
         account_id=principal.account_id, ma_session_id="ses_1", effective_config=snapshot,
     )  # fmt: skip
+    await note_reads(db_session, tenant_id=tenant.id, chat_session_id="chat-1", refs=["sql"])
     await db_session.commit()
     router = resolved_agent_env_router(
         ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),

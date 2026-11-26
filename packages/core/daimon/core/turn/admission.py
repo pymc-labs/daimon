@@ -149,6 +149,7 @@ from daimon.core.stores import agent_backends, mux_state
 from daimon.core.stores.access_policy import PolicyBusyError, load_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.channel_skills import list_channel_skills
+from daimon.core.stores.data_memory import tenant_has_reads
 from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, Role
 from daimon.core.stores.identity import (
     find_platform_principal,
@@ -1643,15 +1644,20 @@ async def _admit_gates(
         data_reading, data_unknown = False, True
     if not data_reading and (deps.settings is None or data_sources_on(deps.settings)):
         # A session that read data counts as data-reading until `/new`, whatever
-        # `data_reads` says now: its context holds what it read.
+        # `data_reads` says now: its context holds what it read. A workspace that never
+        # read data skips the lookup.
         try:
             async with deps.sessionmaker() as session:
-                live = await get_live_thread_session(
-                    session,
-                    tenant_id=tenant_id,
-                    platform=platform,
-                    thread_id=slot_thread_id or channel_id,
-                    account_id=principal.account_id,
+                live = (
+                    await get_live_thread_session(
+                        session,
+                        tenant_id=tenant_id,
+                        platform=platform,
+                        thread_id=slot_thread_id or channel_id,
+                        account_id=principal.account_id,
+                    )
+                    if await tenant_has_reads(session, tenant_id=tenant_id)
+                    else None
                 )
         except Exception:
             if not data_unknown:
