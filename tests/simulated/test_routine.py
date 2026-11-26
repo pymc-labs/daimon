@@ -4,16 +4,20 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import httpx
+from daimon.adapters.mcp.server import create_mcp_app  # pyright: ignore[reportUnknownVariableType]
 from daimon.adapters.scheduler.main import _build_fire  # pyright: ignore[reportPrivateUsage]
 from daimon.core.authz import build_subject
 from daimon.core.routine_service import NewRoutine, RoutineCaller, RoutineEnv, create_routine
 from daimon.core.scheduler import run_one_tick
 from daimon.core.stores.routines import get_routine
+from daimon.testing.asgi import asgi_lifespan
 from daimon.testing.sim.discord import DiscordAPI
 from daimon.testing.sim.script import Tool, Turn
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from .discord import GUILD, PERSON, Discord
+from .test_without_anthropic import MCP, _Daimon  # pyright: ignore[reportPrivateUsage]
 from .world import metering, world
 
 
@@ -66,4 +70,63 @@ async def test_a_routine_fires_and_records_its_answer(
         assert "Found the launch notes." in (fired.last_result_tail or ""), fired.last_result_tail
         metered, billed = await metering(w, tenant_id, "anthropic")
         assert metered == billed, f"the routine's turn is metered: {metered} != {billed}"
+        w.network.assert_clean()
+
+
+async def test_a_gemini_routine_runs_on_gemini_under_the_unattended_rule(
+    db_preflight: None, db_nullpool_engine: AsyncEngine
+) -> None:
+    """A Gemini-only install's routine is admitted on Gemini through the chat path, with
+    no Anthropic request. The seeded agent's automatic code execution cannot be switched
+    off for one turn there, so the unattended rule refuses it before any model call."""
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    async with world(sessions, keyed=("gemini",), mcp=MCP) as w:
+        rest = DiscordAPI(guild=GUILD, owner=PERSON)
+        w.network.fakes[rest.host] = rest
+        app = create_mcp_app(settings=w.settings, sessionmaker=w.sessions, anthropic=w.anthropic)
+        daimon = _Daimon(httpx.ASGITransport(app=app))  # pyright: ignore[reportArgumentType]
+        w.network.fakes[daimon.host] = daimon
+        async with asgi_lifespan(app):
+            discord = Discord(w)
+            await discord.install()
+            tenant_id = discord.tenant_id
+            caller = RoutineCaller(
+                tenant_id=tenant_id,
+                subject=build_subject(is_admin=True, platform_user_id=str(PERSON)),
+                platform="discord",
+                is_admin=True,
+            )
+            new = NewRoutine(
+                agent_name=w.deps.deployment_default.agent_name or "",
+                cron_expr="0 9 * * *",
+                timezone="UTC",
+                trigger_message="find the launch notes",
+            )
+            routine = await create_routine(RoutineEnv(w.sessions, w.anthropic), caller, new)
+            assert routine.next_fire_at is not None, "a new routine is scheduled"
+            fire = await _build_fire(
+                client=w.anthropic,
+                sm=w.sessions,
+                settings=w.settings,
+                deployment_default=w.deps.deployment_default,
+                resolver_cache=w.deps.resolver_cache,
+                dm_turn_deps=w.deps,
+            )
+            await run_one_tick(
+                now=routine.next_fire_at + timedelta(seconds=1),
+                sm=w.sessions,
+                fire=fire,
+                max_age=timedelta(minutes=15),
+                max_concurrent_fires=1,
+                dispatch_timeout_s=60,
+                wait_for_completion=True,
+            )
+        async with w.sessions() as db:
+            fired = await get_routine(db, routine.id, tenant_id=tenant_id)
+        assert fired is not None and fired.last_error == (
+            "backend_unsupported: Automatic sandbox or custom tools cannot run without "
+            "someone watching."
+        ), "refused by the unattended rule, not as Anthropic-only"
+        assert not w.gemini.reported, "nothing reached the model"
+        assert not w.api.seen, f"no Anthropic request on a keyless install: {w.api.seen}"
         w.network.assert_clean()
