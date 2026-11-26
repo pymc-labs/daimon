@@ -7,13 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **A server admin can share one MCP server with the whole workspace.** Turn on the
-  `shared_connections` feature, then add the server's URL and token under Integrations, Shared
-  connections. Daimon shows each tool's description and input schema, and a tool stays off
+- **A server admin can share one MCP server with the whole workspace.** Add the server's URL
+  and token under Integrations, Shared connections; admins can also manage it from chat, which
+  never asks for the token. The `shared_connections` feature is on by default. Daimon shows each tool's description and input schema, and a tool stays off
   until an admin turns it on; one that changes upstream is held until approved again. Tools appear
   as `<name>_<tool>` on Daimon's MCP server and the hub, so agents and outside MCP clients use
-  them without their own sign-in. A tool marked as changing data asks for approval on a card,
-  outside MCP clients get read tools only, agent tool rules apply, and every call is audited
+  them without their own sign-in. A tool marked as changing data asks for approval on a card
+  (`shared_write_approval` can skip it per workspace or agent); an outside MCP client may call it
+  and is told to ask its user first. Admins turn tools off for the workspace, or for one agent
+  with its tool rules, and every call is audited
   ([MCP servers](docs/mcp-servers.md#share-a-server-with-the-workspace)).
 
 - **The web app gets pages for data sources, with the feature on.** A Data section searches

@@ -29,18 +29,23 @@ Ask it to disconnect the server or connect again.
 ## Share a server with the workspace
 
 A server admin can share one MCP server with the whole workspace, so agents and
-outside MCP clients use it without a sign-in of their own. Turn on the
-[`shared_connections`](features.md) feature, then open Integrations, Shared
-connections, and add the server's name, URL and token. The token is stored
-encrypted.
+outside MCP clients use it without a sign-in of their own. Open Integrations,
+Shared connections, and add the server's name, URL and token. The token is stored
+encrypted. The [`shared_connections`](features.md) feature is on by default and
+turns them all off.
 
 Daimon lists the server's tools and shows each one's description and full input
 schema. Turn on the tools you want. A tool whose text changes
 upstream stays off until you approve it again, and one named like a Daimon tool is
 left out. Each tool appears as `<name>_<tool>` on Daimon's MCP server, for
-members, not web guests. Daimon marks a tool that changes data by its name, and you
-can change the mark: chat users approve each call on a card, and outside MCP
-clients can only use read tools. Agent tool rules apply, and every call is audited.
+members, not web guests.
+
+Daimon marks a tool that changes data by its name, and you can change the mark.
+In chat a change waits for the asker's card, unless
+[`shared_write_approval`](features.md) is Skip for the workspace or agent. An
+outside MCP client may call it; its description tells the client to ask its user
+first. Turn a tool off for the workspace here, or for one agent with its tool
+rules. Every call is audited. Admins can do all of this from chat too.
 
 ## Register a client for servers without dynamic registration
 
