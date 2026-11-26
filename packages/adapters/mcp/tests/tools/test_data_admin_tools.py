@@ -109,7 +109,7 @@ class Rig:
             yield object()
 
         mp.setattr(_data_admin, "data_is_on", on)
-        mp.setattr(_data_admin, "web_admin_of", actor)
+        mp.setattr(_data_admin, "web_actor_of", actor)
         mp.setattr(data_admin, "require_card", card)
         mp.setattr(data_admin, "names_of", names)
         mp.setattr(data_admin, "private_details", details)
