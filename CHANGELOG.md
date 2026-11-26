@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Switching a conversation or an agent to OpenAI or Gemini now behaves like changing models
+  within one provider.** A provider is on for a workspace as soon as the operator has set its
+  key, with no per-workspace step, and choosing a model for one conversation is on by default,
+  as is the connector relay (a provider receives what a connector returns). The "Working on
+  it" card names the model the reply runs on, and effort per conversation now works on OpenAI
+  (low, medium, high). Refusing to switch the server's default agent also offers switching
+  just that conversation. A copy made to switch continues from a summary, and says so.
+  Word, PowerPoint, Excel and PDF skills, which run only on Anthropic, come as short open
+  equivalents on the other providers ([Providers](docs/providers.md)).
+
 - **A finished command no longer sends a second message when the conversation already has its
   result, or when its machine was stopped from the conversation.** Reading the result there,
   or stopping the machine from the conversation it started in, withdraws a message nobody has
