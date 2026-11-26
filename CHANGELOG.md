@@ -32,7 +32,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   limit what it returns to what that place may read
   ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).
 
-||||||| parent of de496c9a2 (feat(mcp): wait for a turn on its event stream, and add await_turn)
 - **Each request to a signed-identity MCP server carries a new token with its own `jti`.**
   A server can accept each token once, so a copied token cannot be replayed
   ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).

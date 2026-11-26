@@ -260,6 +260,8 @@ async def test_hub_continue_turn_resumes_the_owners_agent_chat_turn(
     db_session: AsyncSession, db_nullpool_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(safety, "_REOPEN_S", 0.01)
+    # This fake's stream brings an idle event its event list never shows.
+    monkeypatch.setattr(safety, "_CATCH_UP_GAP_S", 0.001)
     app, daimon_id, paused, _ = await _hub(
         db_session, db_nullpool_engine, owner_is_caller=True, recorded=True
     )
@@ -284,6 +286,8 @@ async def test_hub_await_turn_resumes_the_owners_paused_turn_and_returns_its_ans
     """Issue 1894, through the registered tool, admission included: the caller that
     waits needs no `get_session` loop and no `continue_turn`."""
     monkeypatch.setattr(safety, "_REOPEN_S", 0.01)
+    # This fake's stream brings an idle event its event list never shows.
+    monkeypatch.setattr(safety, "_CATCH_UP_GAP_S", 0.001)
     app, daimon_id, paused, _ = await _hub(
         db_session, db_nullpool_engine, owner_is_caller=True, recorded=True
     )
@@ -360,6 +364,8 @@ async def test_hub_start_turn_gates_the_new_session_and_refuses_its_write(
     from daimon.adapters.mcp.tools import agent_chat
 
     monkeypatch.setattr(safety, "_REOPEN_S", 0.01)
+    # This fake's stream brings an idle event its event list never shows.
+    monkeypatch.setattr(safety, "_CATCH_UP_GAP_S", 0.001)
     app, daimon_id, paused, _ = await _hub(
         db_session, db_nullpool_engine, owner_is_caller=True, recorded=False, fresh=True
     )
@@ -384,6 +390,8 @@ async def test_hub_ask_with_a_handle_resumes_then_answers_the_new_message(
     db_session: AsyncSession, db_nullpool_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(safety, "_REOPEN_S", 0.01)
+    # This fake's stream brings an idle event its event list never shows.
+    monkeypatch.setattr(safety, "_CATCH_UP_GAP_S", 0.001)
     app, daimon_id, paused, _ = await _hub(
         db_session, db_nullpool_engine, owner_is_caller=True, recorded=True
     )

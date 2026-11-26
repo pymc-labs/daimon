@@ -145,8 +145,8 @@ cannot continue, cancel or archive a platform conversation, even for the same
 account and agent.
 
 To wait for a turn, call `await_turn`. It returns when the agent says something,
-when the turn ends, or after about four minutes, so nothing is polled. One call
-per return carries a long job to its end.
+when the turn ends, or after about four minutes, so the caller polls nothing.
+One call per return carries a long job to its end.
 
 Reading a session with `get_session` or `list_events` never answers a tool
 call. If the service restarts while an agent-chat turn waits on one,
