@@ -19,13 +19,14 @@ import pytest
 from daimon.adapters.mcp import data_access, server
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools import agent_chat, data, sessions, task_continuity
+from daimon.adapters.mcp.tools import agent_chat, data, repo_memory, sessions, task_continuity
 from daimon.core.capability_tools import CAPABILITY_TOOLS
 from daimon.core.data_audience import user_subject
 from daimon.core.data_tools import DATA_READS, DATA_TOOLS, REDACTED_DATA_RESULT, mark_data_result
 from daimon.core.features import toolset
 from daimon.core.features.registry import FEATURES
 from daimon.core.stores.domain import Role
+from daimon.core.stores.repo_memory import MemoryEntry
 from daimon.core.turn import admission
 from daimon.core.turn_hold import TurnHold
 from daimon.data.identity import IdentityKey
@@ -60,6 +61,8 @@ _GUARDS: list[tuple[str, Callable[..., Any], str]] = [
     ("Slack rooms: members read per call", data_access._room, "_slack_viewers"),  # pyright: ignore[reportPrivateUsage]
     ("helper turns: the asking agent reads data here", data_access._turn_origin, "reads_data"),  # pyright: ignore[reportPrivateUsage]
     ("the data tools register in one place", server.create_mcp_app, "register_data_tools"),  # pyright: ignore[reportUnknownMemberType]
+    ("a memory saved after a data read records it", repo_memory.repo_memory_impl, "reads_of"),
+    ("a memory that recorded data shows to its audience only", repo_memory.repo_memory_impl, "_shown"),
 ]  # fmt: skip
 
 
@@ -88,6 +91,8 @@ def test_every_data_tool_reads_as_its_audience_and_marks_its_result() -> None:
     assert set(defs) >= DATA_TOOLS, "every data tool registers in register_data_tools"
     for name in DATA_TOOLS:
         assert {"reading", "_text"} <= _names(defs[name]), f"{name} skips the audience or mark"
+        if name != "data_sources":
+            assert "noted" in _names(defs[name]), f"{name} leaves its reads out of memory"
     assert {"data_audience_for", "open_read"} <= _names(defs["reading"])
 
 
@@ -175,3 +180,27 @@ def test_a_transcript_read_elsewhere_hides_data_results() -> None:
 def test_readers_take_the_form_of_mirrored_platform_identities() -> None:
     mirrored = IdentityKey("discord", "1", "7").ref()
     assert user_subject("discord", "1", "7") == mirrored == "discord/1:user:7"
+
+
+async def test_a_memory_that_recorded_data_shows_only_where_all_of_it_is_readable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Untagged memories show as before; a tagged one only where its items are readable."""
+    now = datetime.now(UTC)
+    tenant = uuid.uuid4()
+    plain, ok, hidden = (
+        MemoryEntry(tenant_id=tenant, repo_id=1, name=n, title=n, body="b", kind="reference",
+                    scope="repo", created_by_account_id=None, created_at=now, updated_at=now,
+                    data_refs=refs)
+        for n, refs in (("plain", None), ("ok", ["record:a"]), ("hidden", ["record:b"]))
+    )  # fmt: skip
+    asked: list[list[list[str]]] = []
+
+    async def readable(_runtime: object, _auth: object, ref_sets: list[list[str]]) -> list[bool]:
+        asked.append(ref_sets)
+        return [refs == ["record:a"] for refs in ref_sets]
+
+    monkeypatch.setattr(repo_memory, "readable_by_audience", readable)
+    shown = await repo_memory._shown(_NO_RUNTIME, _auth(), [plain, ok, hidden])  # pyright: ignore[reportPrivateUsage]
+    assert [e.name for e in shown] == ["plain", "ok"]
+    assert asked == [[["record:a"], ["record:b"]]], "untagged memories are not checked"

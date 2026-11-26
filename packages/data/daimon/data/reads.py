@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -152,6 +153,39 @@ async def browse(
         ok = await recheck.allowed(conn, schemas, env, ctx.readers, refs)
         items = [i for i in items if (i.source_id, i.external_id) in ok]
     return Page(items, after_page)
+
+
+async def readable(
+    conn: AsyncConnection[DictRow],
+    schemas: Schemas,
+    ctx: ReadContext,
+    refs: Sequence[str],
+    env: Env | None = None,
+) -> bool:
+    """Whether this reader may read every item in `refs` (`daimon.core.stores.data_memory`).
+    Only a stored record (`record:<id>`) can be told; anything else, or a record gone or
+    hidden, is not readable."""
+    ids: set[UUID] = set()
+    for ref in refs:
+        kind, _, value = ref.partition(":")
+        if kind != "record":
+            return False
+        try:
+            ids.add(UUID(value))
+        except ValueError:
+            return False
+    async with access.scoped(conn, schemas, ctx):
+        cur = await conn.execute(
+            f"select source_id, external_id from {schemas.data}.records"
+            " where id = any(%s)".encode(),
+            (list(ids),),
+        )
+        found = [(r["source_id"], r["external_id"]) for r in await cur.fetchall()]
+    if len(found) != len(ids):
+        return False
+    return env is None or len(await recheck.allowed(conn, schemas, env, ctx.readers, found)) == len(
+        found
+    )
 
 
 async def get(
