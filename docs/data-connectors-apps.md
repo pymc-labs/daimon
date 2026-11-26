@@ -80,8 +80,9 @@ is not linked, or whose account is inactive, gets nothing; with several readers 
 shows only if every one may read it.
 
 A reader whose linked account is a Toggl admin of the workspace also sees each entry's hourly
-rate, billable amount and labor cost, stored or live. They are read from Toggl when shown and
-never stored. With several readers, they show only when every one is an admin.
+rate, billable amount and labor cost: in a live search, and on a stored entry when it is
+opened. They are read from Toggl when shown and never stored. With several readers, they show
+only when every one is an admin. A memory saved after them is hidden, as after a live read.
 
 ## Linear
 

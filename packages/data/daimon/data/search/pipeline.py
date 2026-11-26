@@ -5,8 +5,7 @@ in a savepoint with a statement timeout, so the time the request has left bounds
 cut arm costs only itself. The query's embedding is fetched while full text runs. A payer out
 of balance, a model the rate table does not price or an embedder that fails leave the
 full-text answer, with a note. With the deployment's `Env`, stored hits whose source re-checks
-reads are asked again (`recheck`), gain what their source adds live (`extras`), and live sources
-answer beside the rerank (`federated`).
+reads are asked again (`recheck`) and live sources answer beside the rerank (`federated`).
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Final
 from uuid import UUID
@@ -22,7 +21,7 @@ from uuid import UUID
 import psycopg
 import structlog
 from daimon.core.config import DataSettings
-from daimon.data import access, embed, extras, federated, recheck
+from daimon.data import access, embed, federated, recheck
 from daimon.data.access import ReadContext
 from daimon.data.metering import Meter, Payer, can_spend
 from daimon.data.schema import Schemas
@@ -221,11 +220,6 @@ async def search(
             seconds=max(1.0, _left(end)),
         )  # fmt: skip
         hits = [h for h in hits if (h.source_id, h.external_id) in ok]
-        more = await extras.added(
-            conn, schemas, env, ctx.readers, [(h.source_id, h.external_id) for h in hits],
-            seconds=max(1.0, _left(end)),
-        )  # fmt: skip
-        hits = [replace(h, text=h.text + more.get((h.source_id, h.external_id), "")) for h in hits]
     status = "off"
     # The live sources answer beside the rerank, and never outlive this search's connection.
     try:

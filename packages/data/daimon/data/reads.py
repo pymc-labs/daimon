@@ -61,6 +61,8 @@ class Record:
     item: Item
     body: str
     attachments: list[Attachment]
+    live: bool = False
+    """The body gained text its source added now (`extras`), which no stored record holds."""
 
 
 @dataclass(frozen=True)
@@ -224,7 +226,7 @@ async def get(
     if ref not in await recheck.allowed(conn, schemas, env, ctx.readers, [ref]):
         return None
     more = await extras.added(conn, schemas, env, ctx.readers, [ref])
-    return Record(_item(row), row["body"] + more.get(ref, ""), files)
+    return Record(_item(row), row["body"] + more.get(ref, ""), files, ref in more)
 
 
 async def read_file(

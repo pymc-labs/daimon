@@ -1,4 +1,4 @@
-"""Live text added to stored records as they are read, never stored (Toggl rates and costs).
+"""Live text added to a stored record as it is opened, never stored (Toggl rates and costs).
 
 A source whose connector implements `live_extra` is asked, for the records about to be shown,
 what it adds for the people the caller reads for, as their own subjects in the source. It

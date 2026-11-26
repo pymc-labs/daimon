@@ -146,7 +146,8 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             record = await reads.get(conn, schemas, r.ctx, _uuid(record_id), env)
         if record is None:
             raise ToolError(NOT_FOUND)
-        await noted(auth, [f"record:{record.item.id}"])
+        live = [f"live:{record.item.source_id}"] if record.live else []
+        await noted(auth, [f"record:{record.item.id}", *live])
         start = max(start, 0)
         end = start + PAGE
         body = r.show(record.body)  # whole, so a name never straddles a page

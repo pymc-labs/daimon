@@ -291,6 +291,7 @@ async def test_toggl_rates_reach_only_an_admin_live_or_stored_and_are_never_stor
             store.env,
         )  # fmt: skip
         assert got is not None, "every reader may read the entry"
+        assert got.live == ("EUR" in got.body), "added text marks the read live, for memory"
         return got.body
 
     assert (await body(admin)).endswith("Billing: rate 99.00 EUR/h, billable 99.00 EUR."), (

@@ -7,8 +7,8 @@ changed since the last run, newest edit first. A full pass reads every entry in 
 `RANGE_DAYS` calendar days (each fetched a day wider at both ends, since a report's days are
 its authors' own) and removes the entries of a range it no longer lists: a daily pass over
 the last year, and a weekly one back to `config.history_from`. A pass continues over runs.
-Rates, amounts, costs and currency are never read into a record. A read, live or of stored
-entries, adds them from Toggl at that moment when the person's linked Toggl account is an
+Rates, amounts, costs and currency are never read into a record. A live search, or opening a
+stored entry, adds them from Toggl then (members cached a minute) when the linked account is an
 admin of the workspace (as Toggl lists it then), and only when everyone the answer is for is one.
 
 Credential `{"token": "..."}`: a workspace admin's API token. Configuration: `workspace` (the
@@ -18,6 +18,8 @@ numeric id), `history_from` (YYYY-MM-DD).
 from __future__ import annotations
 
 import re
+import time
+import uuid
 from collections.abc import AsyncGenerator, Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import ClassVar, Final
@@ -75,6 +77,9 @@ OVERLAP: Final = timedelta(minutes=10)
 EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 LIVE_DAYS: Final = 90
 LIVE_PAGES: Final = 3
+USERS_SECONDS: Final = 60.0
+"""How long a source's member list answers the admin check of stored entries' rates."""
+_users_seen: dict[uuid.UUID, tuple[float, dict[str, Json]]] = {}
 """Report pages one live search reads at most."""
 WORD: Final = re.compile(r"\w+")
 
@@ -495,6 +500,17 @@ class TogglConnector(Connector):
         hits.sort(key=lambda h: h.occurred_at or EPOCH, reverse=True)
         return hits[:limit]
 
+    async def _users(self, source: Source, cfg: Config) -> dict[str, Json]:
+        """The workspace's members by id, read again after `USERS_SECONDS`."""
+        seen = _users_seen.get(source.id)
+        if seen and time.monotonic() - seen[0] < USERS_SECONDS:
+            return seen[1]
+        async with client_of(source, self.transport) as client:
+            api = Api(client, source, cfg.workspace, live=True)
+            users = {str(u["uid"]): u for u in await api.users()}
+        _users_seen[source.id] = (time.monotonic(), users)
+        return users
+
     async def live_extra(
         self, source: Source, external_ids: Sequence[str], subjects: Sequence[tuple[str, ...]]
     ) -> dict[str, str]:
@@ -509,14 +525,14 @@ class TogglConnector(Connector):
         if not entries or not subjects:
             return {}
         cfg = Config(source.config)
+        users = await self._users(source, cfg)
+        if not all(
+            any(i in users and is_active(users[i]) and users[i].get("admin") is True for i in s)
+            for s in subjects
+        ):
+            return {}
         async with client_of(source, self.transport) as client:
             api = Api(client, source, cfg.workspace, live=True)
-            users = {str(u["uid"]): u for u in await api.users()}
-            if not all(
-                any(i in users and is_active(users[i]) and users[i].get("admin") is True for i in s)
-                for s in subjects
-            ):
-                return {}
             days = [d for _, d in entries.values()]
             lines, _ = await api.report(
                 {
