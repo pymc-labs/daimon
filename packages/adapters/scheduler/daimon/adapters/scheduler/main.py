@@ -54,10 +54,7 @@ from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.bot_access import BOT_ACCESS_UNAVAILABLE, bot_access_blocked, bot_access_wait_on
 from daimon.core.channel_audience import requester_standing
 from daimon.core.channel_backend import (
-    agent_native_provider,
     backend_refusal_causes,
-    channel_provider,
-    effective_thread_backend,
 )
 from daimon.core.compute_provider import compute_provider_for
 from daimon.core.compute_sessions import ComputeSessions
@@ -135,6 +132,7 @@ from daimon.core.routine_delivery import (
 )
 from daimon.core.routine_files import collect_routine_files
 from daimon.core.routine_hold import delivery_hold_value, routine_hold
+from daimon.core.routine_provider import routine_provider
 from daimon.core.routine_sandbox import routine_sandbox
 from daimon.core.routines import mounts_personal_memory
 from daimon.core.rule_views import (
@@ -804,7 +802,12 @@ async def _build_fire(
         deps = _turn_deps()
         try:
             admission = await admit_provider_routine(
-                deps, row, platform=platform, owner=owner, subject=subject
+                deps,
+                row,
+                platform=platform,
+                owner=owner,
+                subject=subject,
+                sandbox=await routine_sandbox(sm, settings, row, platform=platform),
             )
         except AdmissionDenied as error:
             log.info(
@@ -851,6 +854,7 @@ async def _build_fire(
             run = await run_provider_routine(
                 deps,
                 admission,
+                routine_id=row.id,
                 tenant_id=row.tenant_id,
                 platform=platform,
                 owner=owner,
@@ -897,48 +901,11 @@ async def _build_fire(
             # A thread, channel or agent on another provider is decided before anything
             # is resolved at Anthropic: OpenAI and Gemini run through the chat path
             # (`provider_routine`), never quietly on Claude.
-            target = delivery_target(row, platform=platform)
             if is_routine_parent_unknown(row):
                 await _refuse(s, row, "routine_destination_parent_unknown", fault=True)
                 return
-            parent_channel = routine_destination_channel(row)
-            provider: Provider | None = None
-            if row.destination_kind == "thread" and parent_channel is not None:
-                thread_id = (
-                    target.thread_ts
-                    if platform == "slack" and target is not None
-                    else row.destination_id
-                )
-                provider = await effective_thread_backend(
-                    s,
-                    tenant_id=row.tenant_id,
-                    platform=platform,
-                    channel_id=parent_channel,
-                    thread_id=thread_id,
-                    caller_id=row.created_by_user_id,
-                )
-            channels = {
-                channel
-                for channel in (
-                    row.channel_id,
-                    routine_destination_channel(row),
-                    target.channel_id if target is not None else None,
-                )
-                if channel is not None
-            }
-            for routine_channel in channels:
-                if provider in (None, DEFAULT_BACKEND):
-                    provider = await channel_provider(
-                        s, tenant_id=row.tenant_id, platform=platform, channel_id=routine_channel
-                    )
-            if provider in (None, DEFAULT_BACKEND):
-                provider = await agent_native_provider(
-                    s,
-                    tenant_id=row.tenant_id,
-                    agent_id=row.agent_id,
-                    agent_name=row.agent_name,
-                )
-            native = provider if provider not in (None, DEFAULT_BACKEND) else None
+            provider = await routine_provider(s, row, platform=platform)
+            native = provider if provider != DEFAULT_BACKEND else None
             if native is not None and (native == "selfhosted" or row.destination_kind == "dm"):
                 await _refuse(
                     s, row, "routines_unsupported", error=routines_unsupported_error(native)
