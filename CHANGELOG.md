@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A Gemini reply that thinks quietly for minutes is no longer reconnected every two
+  minutes.** Google says pauses between chunks are normal, that the connection should stay
+  open, and to allow 15 to 20 minutes between chunks
+  ([long decode](https://aistudio.google.com/docs/long-decode)). Daimon now keeps a silent
+  Gemini stream open for up to 15 minutes instead of 2. Every minute while the stream is
+  silent it checks the reply's status, so a reply that has ended is still answered within
+  about a minute. The turn's time limit is unchanged. Claude turns are unchanged.
+
 - **A server admin can let an agent used through agent chat use cloud computers for the
   person.** Turn on [Cloud computers from agent chat](docs/compute.md#use-it-from-agent-chat)
   for the workspace or one agent; it is off by default. The agent then starts a machine with no
