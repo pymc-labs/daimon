@@ -21,6 +21,7 @@ from daimon.core.github_app_session import (
     rotate_live_app_tokens,
 )
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.github_panel import connect_root
 from daimon.core.github_repo_auth import normalize_owner_repo
 from daimon.core.github_retirement import (
     RETIREMENT_AFFECTED_AGENTS_SQL,
@@ -539,17 +540,8 @@ def connect_link(
 ) -> None:
     """Print a single-use connection invitation on a workspace admin's behalf."""
     settings = load_settings()
-    config = settings.github_app
-    root = settings.mcp.app_root_url
-    if (
-        root is None
-        or config.app_id is None
-        or config.app_slug is None
-        or config.private_key is None
-        or config.client_id is None
-        or config.client_secret is None
-        or not settings.crypto.keys
-    ):
+    root = connect_root(settings)
+    if root is None:
         raise typer.BadParameter("GitHub connection is not configured")
     console = Console(highlight=False)
 
