@@ -171,12 +171,14 @@ async def effective_thread_backend(
     channel_id: str,
     thread_id: str | None,
     caller_id: str | None,
+    agent_id: uuid.UUID | None = None,
 ) -> Provider:
     """Honor the retained shared/caller binding before the current channel selection.
 
     Slot order and legacy-session fallback match admission. Only local facts
     are read, so deciding whether provider access is allowed cannot itself
-    send conversation content to a provider.
+    send conversation content to a provider. With `agent_id`, a revision kept for
+    another agent is passed over, as admission passes it (`resolve_preference`).
     """
     channel = channel_ref(tenant_id, platform, channel_id)
     latest, ever_shared = await current_backend_and_sharing(session, channel)
@@ -192,7 +194,7 @@ async def effective_thread_backend(
 
         thread = ThreadRef(channel=channel, thread_id=thread_id)
         slots = [Slot(thread=thread)] if ever_shared else []
-        released = False
+        released = passed_own = False
         if principal is not None:
             slots.append(Slot(thread=thread, account_id=str(principal.account_id)))
             # A confirmed switch from this thread: its next turn selects afresh.
@@ -218,8 +220,21 @@ async def effective_thread_backend(
                 or retained.profile != binding.profile
             ):
                 raise BackendUnsupported("retained_binding_mismatch")
-            return retained.backend
-        if principal is not None and not released:
+            # A channel's own pin keeps every thread's revision, as in admission.
+            pinned = latest is not None and (
+                await mux_state.config_origin(session, channel, latest.local) != "channel_clear"
+            )
+            owner = (
+                await mux_state.config_agent_id(session, channel, binding.config_revision)
+                if agent_id is not None and not pinned
+                else None
+            )
+            if owner is None or owner == agent_id:
+                return retained.backend
+            # Kept for another agent: the shared slot gives way to the caller's own,
+            # and the caller's own to a fresh selection.
+            passed_own = slot.account_id is not None
+        if principal is not None and not released and not passed_own:
             previous = await get_thread_session_at(
                 session,
                 tenant_id=tenant_id,

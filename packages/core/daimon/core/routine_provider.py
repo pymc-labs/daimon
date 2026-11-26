@@ -7,6 +7,7 @@ from daimon.core.channel_backend import (
     channel_provider,
     effective_thread_backend,
 )
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.routine_delivery import delivery_target
 from daimon.core.rule_views import routine_destination_channel
 from daimon.core.stores.domain import RoutineRow
@@ -32,6 +33,10 @@ async def routine_provider(session: AsyncSession, row: RoutineRow, *, platform: 
             channel_id=parent_channel,
             thread_id=routine_thread_id(row, platform=platform),
             caller_id=row.created_by_user_id,
+            # A revision the thread kept for another agent is not this routine's, as in admission.
+            agent_id=derive_agent_uuid(tenant_id=row.tenant_id, ma_agent_id=row.agent_id)
+            if row.agent_id
+            else None,
         )
     channels = {
         channel
