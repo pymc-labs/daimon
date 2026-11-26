@@ -44,7 +44,7 @@ _DONE: dict[str, Any] = {"done": True}
 
 def _key(provider: str, workspace: str, subject: str) -> IdentityKey:
     if not (provider and workspace and subject):
-        raise ToolError("Give the provider, workspace and subject as listed.")
+        raise ToolError("Give the `provider`, `workspace` and `subject` as listed.")
     return IdentityKey(provider, workspace, subject)
 
 

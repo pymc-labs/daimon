@@ -27,7 +27,7 @@ from psycopg.rows import DictRow
 from pydantic_core import to_jsonable_python
 
 NOT_ON: Final = "Data sources aren't turned on here."
-NOT_ADMIN: Final = "Only a workspace admin or owner manages data sources."
+NOT_ADMIN: Final = "Only an admin or owner manages data sources."
 ERROR_CHARS: Final = 300
 """A failed run's text is shown cut to this, as on the web."""
 
