@@ -37,6 +37,7 @@ async def test_an_openai_routine_without_the_sandbox_opt_in_is_refused_in_words(
         return SimpleNamespace(backend_revision=revision)
 
     monkeypatch.setattr(provider_routine, "admit", admitted)
+    monkeypatch.setattr(provider_routine, "at_fire_place", lambda admission, **_: admission)
     row: Any = SimpleNamespace(tenant_id=None, agent_name="analyst", channel_id="1", id=None)
     row.destination_kind = row.destination_id = row.destination_parent_id = None
     subject: Any = SimpleNamespace(is_admin=True, role_ids=(), verified_membership=True)
