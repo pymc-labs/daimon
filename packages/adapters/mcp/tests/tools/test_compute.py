@@ -1181,12 +1181,15 @@ async def test_a_failed_read_keeps_the_commands_message(owned_machine, monkeypat
 
 @pytest.mark.parametrize(("asked", "waited"), [(45, 40), (40, 40), (5, 5), (0, 0), (-3, 0)])
 @pytest.mark.parametrize("state", ["running", "succeeded"])
+@pytest.mark.parametrize("agent_chat", [False, True])
 async def test_a_status_check_waits_at_most_40_seconds_and_says_to_end_the_reply(
-    monkeypatch, asked, waited, state
+    monkeypatch, asked, waited, state, agent_chat
 ):
     """Older calls pass 45: it is not refused. A command still running after the wait
-    tells the agent to end its reply, so it does not check again in a loop."""
+    tells the agent to end its reply, so it does not check again in a loop. Agent chat
+    gets no message when it ends, so it is told to check again later."""
     from daimon.core.compute_models import ComputeTask
+    from daimon.core.compute_sessions import ComputePlace
 
     now = datetime.now(UTC)
     task = ComputeTask(
@@ -1208,7 +1211,9 @@ async def test_a_status_check_waits_at_most_40_seconds_and_says_to_end_the_reply
         task_status=AsyncMock(return_value=task),
     )
     monkeypatch.setattr(compute, "ComputeSessions", lambda *a, **k: service)
-    monkeypatch.setattr(compute, "_caller", AsyncMock(return_value=(None, "caller")))
+    place = ComputePlace("discord", "agentchat:grant", "agent", "Daimon", None)
+    caller = SimpleNamespace(origin=place if agent_chat else None)
+    monkeypatch.setattr(compute, "_caller", AsyncMock(return_value=(None, caller)))
     monkeypatch.setattr(compute, "source_metadata_readable", AsyncMock(return_value=True))
     mcp = FastMCP("test")
     runtime = SimpleNamespace(
@@ -1222,7 +1227,10 @@ async def test_a_status_check_waits_at_most_40_seconds_and_says_to_end_the_reply
     passed = service.task_status.await_args.kwargs
     assert passed["wait_seconds"] == waited
     assert (passed["deadline"] is None) == (waited == 0), "one deadline for the whole call"
-    if state == "running":
+    if state == "running" and agent_chat:
+        assert view["note"] == compute._ASK_AGAIN
+        assert view["note"] == "Still running. Ask again later and I will check it."
+    elif state == "running":
         assert view["note"] == compute._STILL_RUNNING
         assert view["note"] == (
             "Still running. End your reply; this conversation gets a message when it ends."
@@ -1330,3 +1338,252 @@ async def test_with_the_setting_on_a_wake_turn_reaches_core_to_run_write_and_sto
     assert await woken.call("compute_write_file") == woken.fake.result
     assert (await woken.call("compute_stop_session"))["state"] == "deleted"
     assert woken.fake.deleted == [woken.session.id]
+
+
+# --- An agent-chat session, which has no origin -------------------------------
+
+_GRANT = "agent-chat-grant"
+#: What a call with no origin always got, and still gets when agent chat's rule fails.
+_NO_ORIGIN = "Use the origin_context_id and signed conversation grant from this active reply."
+#: What a machine of another conversation says (`compute_sessions.ELSEWHERE`).
+_ELSEWHERE = "This machine belongs to another of your conversations."
+_STARTS = frozenset({"compute_launch_session", "compute_extend_session"})
+
+
+def _agent_chat_calls(session, task):
+    """One call of every compute tool, as an agent-chat session's agent makes it: with no
+    `origin_context_id`, which it does not have."""
+    return {
+        name: {k: v for k, v in arguments.items() if k != "origin_context_id"}
+        for name, arguments in _wake_calls(session, task, uuid.uuid4()).items()
+    }
+
+
+@pytest.fixture
+async def agent_chatting(committing_sessionmaker, monkeypatch):
+    """The owner's agent-chat session, recorded by a send, with cloud computers and cloud
+    computers from agent chat on: a machine started in it with a finished command, and a
+    machine the same owner started in a chat thread."""
+    from daimon.adapters.mcp.middleware.capability_gate import ExecutingAgent
+    from daimon.core.agent_chat_requester import UNREAD, record_driver
+    from daimon.core.compute_sessions import ComputeCaller, ComputeSessions, agent_chat_owner
+    from daimon.core.config import ComputeProfile
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores.domain import FeatureTarget
+    from daimon.core.stores.feature_values import set_feature_value
+    from daimon.core.stores.session_settle_state import SessionProvenance
+    from daimon.core.stores.turn_origins import bind_origin_session, create_origin
+    from daimon.testing.compute import FakeComputeProvider
+    from daimon.testing.factories import make_account, make_tenant
+    from pydantic import SecretStr
+
+    sm = committing_sessionmaker
+    settings = ComputeSettings(
+        enabled=True,
+        deployment_id="test-deployment",
+        cloud_run_project="test-project",
+        cloud_run_service_account="session@test-project.iam.gserviceaccount.com",
+        session_auth_key=SecretStr("session-secret-test-only"),
+        profiles={
+            "mmm": ComputeProfile(image="registry.example/mmm@sha256:abc", regions=["us-central1"])
+        },
+    )
+    fake = FakeComputeProvider()
+    async with sm.begin() as db:
+        tenant = await make_tenant(db)
+        account = await make_account(db, tenant=tenant)
+        other = await make_account(db, tenant=tenant)
+
+    async def switch(key, value):
+        async with sm.begin() as db:
+            await set_feature_value(
+                db, tenant_id=tenant.id, target=FeatureTarget("workspace"), key=key,
+                value=value, set_by=None, surface="cli",
+            )  # fmt: skip
+
+    await switch("compute", "on")
+    await switch("compute_agent_chat", "on")
+    await record_driver(
+        sm,
+        managed_session_id="sesn_chat",
+        signed_in_person=False,
+        session_status="idle",
+        earlier=UNREAD,
+        provenance=SessionProvenance(grant=_GRANT, channel_id=None, account_id=account.id),
+    )
+    async with sm() as db:
+        place = await agent_chat_owner(
+            db, tenant_id=tenant.id, account_id=account.id, chat_session_id=_GRANT,
+            platform="discord", agent_id="agent", agent_name="Daimon",
+        )  # fmt: skip
+    assert place is not None
+    service = ComputeSessions(sm, settings, fake)
+    owner = ComputeCaller(tenant.id, account.id, place, _GRANT, "owner")
+    here = await service.launch(
+        owner, profile="mmm", region="us-central1", ttl_hours=None,
+        approval_key="agentchat:launch", source_metadata={},
+    )  # fmt: skip
+    task = await service.start_task(
+        owner, here.id, command="python fit.py", timeout_minutes=60, request_key="agentchat:1"
+    )
+    fake.tasks[task.id.hex].status, fake.tasks[task.id.hex].exit_code = "exit", 0
+    await service.poll_tasks()
+    now = datetime.now(UTC)
+    async with sm.begin() as db:
+        origin = await create_origin(
+            db, tenant_id=tenant.id, account_id=account.id, platform="discord",
+            parent_channel_id="parent", thread_id="thread", responder_ma_agent_id="agent",
+            responder_name="Daimon", configuration_target_ma_agent_id=None,
+            configuration_target_name=None, role=Role.USER, expires_at=now + timedelta(minutes=5),
+            now=now, sender_foreign=False, shared_channel=False, attended=True,
+        )  # fmt: skip
+        await bind_origin_session(
+            db, origin_id=origin.id, chat_session_id="thread-grant", human_invocation=True
+        )
+    in_thread = origin.model_copy(
+        update={"chat_session_id": "thread-grant", "human_invocation": True}
+    )
+    thread_owner = ComputeCaller(tenant.id, account.id, in_thread, "thread-grant", "owner")
+    elsewhere = await service.launch(
+        thread_owner, profile="mmm", region="us-central1", ttl_hours=None,
+        approval_key="thread:launch", source_metadata={},
+    )  # fmt: skip
+
+    identity = dict(
+        role=Role.USER,
+        is_chat_execution=True,
+        chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent"),
+        chat_session_id=_GRANT,
+        platform_user_id="owner",
+        platform="discord",
+    )
+    auth = AsyncMock(return_value=auth_identity(account.id, tenant.id, **identity))
+    monkeypatch.setattr(compute, "_auth", auth)
+    agent = AsyncMock(return_value=ExecutingAgent("agent", "Daimon"))
+    monkeypatch.setattr(compute, "find_executing_agent", agent)
+    readable = AsyncMock(return_value=True)
+    monkeypatch.setattr(compute, "source_metadata_readable", readable)
+    clock = {"now": datetime.now(UTC)}
+
+    async def sleep(seconds):
+        clock["now"] += timedelta(seconds=seconds)
+
+    monkeypatch.setattr(
+        compute,
+        "ComputeSessions",
+        functools.partial(ComputeSessions, clock=lambda: clock["now"], sleep=sleep),
+    )
+    mcp = FastMCP("test")
+    runtime = SimpleNamespace(
+        session_factory=sm,
+        settings=SimpleNamespace(compute=settings),
+        compute_provider=fake,
+        client=None,
+    )
+    compute.register_compute_tools(mcp, runtime)
+    tools = {tool.name: tool for tool in await mcp.list_tools()}
+    calls = _agent_chat_calls(here, task)
+
+    async def call(name, **changes):
+        return await tools[name].fn(ctx=None, **{**calls[name], **changes})
+
+    def become(account_id=account.id, **fields):
+        """Make the caller another credential: `fields` change the owner's."""
+        auth.return_value = auth_identity(account_id, tenant.id, **{**identity, **fields})
+
+    return SimpleNamespace(
+        call=call, tools=set(tools), calls=calls, fake=fake, here=here, elsewhere=elsewhere,
+        readable=readable, become=become, switch=switch, other=other, tenant_id=tenant.id,
+        account_id=account.id,
+    )  # fmt: skip
+
+
+async def test_the_owners_agent_chat_session_uses_its_own_machine_with_no_origin(agent_chatting):
+    """Every tool but launch and extend runs on the session's own machine; those two stay
+    refused here, and nothing reaches the machine for them."""
+    chat = agent_chatting
+    assert chat.tools == set(chat.calls), "say what a new compute tool does in agent chat"
+    for name in sorted(_STARTS):
+        with pytest.raises(ToolError, match="can't be started or given more time from agent"):
+            await chat.call(name)
+    ran = await chat.call("compute_run_bash", wait_seconds=0)
+    assert ran["note"] == "Still running. Ask again later and I will check it."
+    assert (await chat.call("compute_task_result"))["state"] == "succeeded"
+    assert (await chat.call("compute_task_status"))["exit_code"] == 0
+    assert (await chat.call("compute_get_session_status")).state == "running"
+    for name in ("compute_write_file", "compute_read_file", "compute_list_files"):
+        assert await chat.call(name) == chat.fake.result
+    listed = {row["id"]: row["here"] for row in await chat.call("compute_list_sessions")}
+    assert listed == {str(chat.here.id): True, str(chat.elsewhere.id): False}
+    assert set(await chat.call("compute_list_templates")) == {"mmm"}
+    tools = [tool for _, tool, _ in chat.fake.calls]
+    assert {"write_file", "read_file", "list_files", "run_bash"} <= set(tools)
+    assert (await chat.call("compute_stop_session"))["state"] == "deleted"
+    # The owner may read only what they can still read of its source.
+    chat.readable.return_value = False
+    with pytest.raises(ToolError, match="can no longer read the source conversation"):
+        await chat.call("compute_read_file")
+
+
+async def test_a_background_command_in_agent_chat_is_keyed_afresh_each_time(agent_chatting):
+    """No tool use is on record to key it by: a retried call is a new command, as an
+    inline one always is."""
+    chat = agent_chatting
+    first = await chat.call("compute_run_bash", run_in_background=True)
+    again = await chat.call("compute_run_bash", run_in_background=True)
+    assert first["task_id"] != again["task_id"]
+    assert first["note"] == "Still running. Ask again later and I will check it."
+
+
+async def test_agent_chat_lists_and_stops_but_never_uses_the_owners_other_machines(
+    agent_chatting,
+):
+    chat = agent_chatting
+    sent = len(chat.fake.calls)
+    elsewhere = {"session_id": chat.elsewhere.id}
+    for name in ("compute_run_bash", "compute_read_file", "compute_get_session_status"):
+        with pytest.raises(ToolError, match=_ELSEWHERE):
+            await chat.call(name, **elsewhere)
+    assert len(chat.fake.calls) == sent
+    assert (await chat.call("compute_stop_session", **elsewhere))["state"] == "deleted"
+
+
+_OTHERS = {
+    "agent_key": {"agent_id": uuid.uuid4()},
+    "routine": {"routine_id": uuid.uuid4()},
+    "helper": {"execution_id": uuid.uuid4()},
+    "client": {"foreign_home_id": "other-organisation"},
+    "held_turn": {"hold": SimpleNamespace(client=False)},
+    "chat_thread_without_its_origin": {"chat_session_id": "thread-grant"},
+    "session_no_send_recorded": {"chat_session_id": "unrecorded-grant"},
+    "no_platform_user": {"platform_user_id": None},
+    "not_a_chat_execution": {"is_chat_execution": False},
+}
+
+
+@pytest.mark.parametrize("other", [*_OTHERS, "another_account"])
+async def test_every_other_caller_without_an_origin_is_refused_every_compute_tool(
+    agent_chatting, other
+):
+    """With the switches on: only the owner's recorded agent-chat session is admitted."""
+    chat = agent_chatting
+    if other == "another_account":
+        # The same grant, signed for another account of the workspace.
+        chat.become(account_id=chat.other.id)
+    else:
+        chat.become(**_OTHERS[other])
+    sent, deleted = len(chat.fake.calls), list(chat.fake.deleted)
+    for name in sorted(chat.tools):
+        with pytest.raises(ToolError):
+            await chat.call(name)
+    assert len(chat.fake.calls) == sent and chat.fake.deleted == deleted
+
+
+@pytest.mark.parametrize("key", ["compute_agent_chat", "compute"])
+async def test_with_a_switch_off_agent_chat_gets_the_refusal_it_always_got(agent_chatting, key):
+    chat = agent_chatting
+    await chat.switch(key, "off")
+    for name in sorted(chat.tools):
+        with pytest.raises(ToolError) as refused:
+            await chat.call(name)
+        assert str(refused.value) == _NO_ORIGIN, name

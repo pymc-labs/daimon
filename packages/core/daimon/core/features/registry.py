@@ -996,6 +996,26 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         combine_override="most_specific",
     ),
     FeatureSpec(
+        key="compute_agent_chat",
+        name="Cloud computers from agent chat",
+        category="guardrails",
+        effect="guardrail",
+        values=_ON_OFF,
+        default="off",
+        tiers=("workspace", "agent"),
+        binds="turn",
+        doc=(
+            "Agent chat from an MCP client may list and stop the person's cloud computers, and "
+            "run commands and use files on those started in that session. Any key of that "
+            "person that drives it can too. Only a server admin can change it."
+        ),
+        platforms=EVERY_PLATFORM,
+        depends_on=("compute",),
+        authority=_SERVER_ADMIN,
+        # As `compute_wake_runs`: Off is the strict default, so the nearer tier decides.
+        combine_override="most_specific",
+    ),
+    FeatureSpec(
         key="require_routine_destination",
         name="Routines must say where they post",
         category="guardrails",

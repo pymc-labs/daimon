@@ -24,8 +24,10 @@ from daimon.core.compute_sessions import (
     _INLINE_EXTRA_TASKS,
     ELSEWHERE,
     ComputeCaller,
+    ComputePlace,
     ComputeSessions,
     Polled,
+    agent_chat_owner,
 )
 from daimon.core.compute_tasks import WAKE_OUTPUT_CHARS, wake_key
 from daimon.core.config import ComputeProfile, ComputeSettings
@@ -33,6 +35,7 @@ from daimon.core.continuity.wakes import WAKE_RUN_LEASE, claim_wake, settle_wake
 from daimon.core.errors import StoreError
 from daimon.core.stores import compute_sessions as session_store
 from daimon.core.stores import compute_tasks as task_store
+from daimon.core.stores import session_settle_state as settle_store
 from daimon.core.stores.domain import FeatureTarget, Role
 from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.task_continuations import get_continuation, record_continuation
@@ -2270,3 +2273,151 @@ async def test_an_owner_write_between_a_wake_start_and_its_run_still_counts_the_
     started = await _next(waking, woken, session, "woken")
     assert started.task.state == "running"
     assert await _wake_list(sm, owner, session) == [woken.origin.id.hex], "the run counts"
+
+
+# --- An agent-chat session's machines (`agent_chat_owner`) -------------------
+
+GRANT = "agent-chat-grant"
+
+
+async def _switch(sm, tenant_id, key, value, target=None):
+    async with sm.begin() as db:
+        await set_feature_value(
+            db,
+            tenant_id=tenant_id,
+            target=target or FeatureTarget("workspace"),
+            key=key,
+            value=value,
+            set_by=None,
+            surface="cli",
+        )
+
+
+async def agent_chat(sm, tenant, account, *, channel=None):
+    """The caller of an agent-chat session whose send was recorded (`record_driver`), with
+    `compute_agent_chat` on; None when the rule does not hold."""
+    async with sm.begin() as db:
+        await settle_store.record_agent_chat_driver(
+            db,
+            managed_session_id=f"sesn-{account.id}",
+            signed_in=False,
+            send=True,
+            provenance=settle_store.SessionProvenance(
+                grant=GRANT, channel_id=channel, account_id=account.id
+            ),
+        )
+    await _switch(sm, tenant.id, "compute_agent_chat", "on")
+    return await _agent_chat_caller(sm, tenant.id, account.id)
+
+
+async def _agent_chat_caller(sm, tenant_id, account_id, grant=GRANT):
+    async with sm() as db:
+        place = await agent_chat_owner(
+            db,
+            tenant_id=tenant_id,
+            account_id=account_id,
+            chat_session_id=grant,
+            platform="discord",
+            agent_id="agent",
+            agent_name="Daimon",
+        )
+    return None if place is None else ComputeCaller(tenant_id, account_id, place, grant, "user")
+
+
+async def test_an_agent_chat_place_needs_its_recorded_session_and_both_switches(
+    db_engine, db_clean
+):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    _, tenant, account = await caller(sm)
+    async with sm.begin() as db:
+        other = await make_account(db, tenant=tenant)
+    assert await _agent_chat_caller(sm, tenant.id, account.id) is None, "no send recorded yet"
+    owner = await agent_chat(sm, tenant, account, channel="chan-k")
+    assert owner is not None and owner.origin == ComputePlace(
+        "discord", "agentchat:" + GRANT, "agent", "Daimon", "chan-k"
+    )
+    assert await _agent_chat_caller(sm, tenant.id, other.id) is None, "another account's grant"
+    assert await _agent_chat_caller(sm, tenant.id, account.id, "other-grant") is None
+    off = FeatureTarget("channel", channel_id="chan-k")
+    await _switch(sm, tenant.id, "compute", "off", off)
+    assert await _agent_chat_caller(sm, tenant.id, account.id) is None, "off for its channel"
+    await _switch(sm, tenant.id, "compute", "on", off)
+    await _switch(sm, tenant.id, "compute_agent_chat", "off", FeatureTarget("agent", "agent"))
+    assert await _agent_chat_caller(sm, tenant.id, account.id) is None, "off for its agent"
+
+
+async def test_an_agent_chat_machine_is_used_from_its_session_and_never_queues_a_notice(
+    db_engine, db_clean
+):
+    """Nothing serves an agent-chat scope, so a command's end, the expiry warning and a
+    failed start queue nothing there; the end, the warning marker and clean-up are kept."""
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    thread, tenant, account = await caller(sm)
+    owner = await agent_chat(sm, tenant, account)
+    fake = FakeComputeProvider()
+    service, clock = _waiting(sm, fake)
+    session = await launch(service, owner)
+    assert (session.platform, session.parent_channel_id, session.thread_id) == (
+        "discord",
+        "",
+        "agentchat:" + GRANT,
+    )
+    assert not task_store.wake_reads_in(session)
+    task = await service.start_task(
+        owner, session.id, command="python fit.py", timeout_minutes=60, request_key="use"
+    )
+    fake.tasks[task.id.hex].status, fake.tasks[task.id.hex].exit_code = "exit", 0
+    await service.poll_tasks()
+    assert (await peek(sm, owner, task.id)).state == "succeeded"
+    clock["now"] += timedelta(hours=23, minutes=30)
+    await service.reconcile()
+    assert (await service.get(owner, session.id)).warned_for == session.expires_at
+    fake.starts_after = 10**9
+    failed = await launch(service, owner, key="second")
+    fake.fail_start = True
+    await service.reconcile()
+    await service.reconcile()
+    assert await _state(sm, owner, failed.id) == "deleted"
+    async with sm.begin() as db:
+        queued = await pending_wakes(
+            db, tenant_id=tenant.id, platform="discord", thread_id=session.thread_id
+        )
+    assert queued == [], "no notice is queued where nothing can deliver it"
+    # The same owner's chat thread lists and stops it, and may not use it.
+    with pytest.raises(StoreError, match=ELSEWHERE):
+        await service.get(thread, session.id)
+    assert [s.id for s in await service.list(thread)] == [session.id]
+    assert (await service.stop(thread, session.id)).state == "deleted"
+
+
+async def test_agent_chat_uses_only_its_own_machines_and_lists_and_stops_the_rest(
+    db_engine, db_clean
+):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    thread, tenant, account = await caller(sm)
+    owner = await agent_chat(sm, tenant, account)
+    fake = FakeComputeProvider()
+    service = ComputeSessions(sm, settings(), fake, clock=lambda: NOW)
+    elsewhere = await launch(service, thread)
+    with pytest.raises(StoreError, match=ELSEWHERE):
+        await service.get(owner, elsewhere.id)
+    with pytest.raises(StoreError, match=ELSEWHERE):
+        await service.start_task(
+            owner, elsewhere.id, command="id", timeout_minutes=1, request_key="steal"
+        )
+    assert [s.id for s in await service.list(owner)] == [elsewhere.id]
+    assert (await service.stop(owner, elsewhere.id)).state == "deleted"
+    assert fake.calls == [], "nothing ran on the other conversation's machine"
+
+
+async def test_turning_agent_chat_off_refuses_its_next_call(db_engine, db_clean):
+    """The rule is checked again in core on every call, not only when the tool admits it."""
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    _, tenant, account = await caller(sm)
+    owner = await agent_chat(sm, tenant, account)
+    service = ComputeSessions(sm, settings(), FakeComputeProvider(), clock=lambda: NOW)
+    session = await launch(service, owner)
+    await _switch(sm, tenant.id, "compute_agent_chat", "off")
+    for refused in (service.get(owner, session.id), service.list(owner)):
+        with pytest.raises(StoreError, match="Cloud computers from agent chat are turned off"):
+            await refused

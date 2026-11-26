@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime
 
 from daimon.core._models import Account, ComputeSessionRecord, Tenant
+from daimon.core.access_policy import AGENT_CHAT_SCOPE_PREFIX
 from daimon.core.compute_models import ComputeSession
 from daimon.core.errors import StoreError
 from sqlalchemy import func, select, update
@@ -14,6 +15,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 async def scope(db: AsyncSession, tenant_id: uuid.UUID) -> None:
     await db.execute(select(func.set_config("daimon.tenant_id", str(tenant_id), True)))
+
+
+def notices_reach(session: ComputeSession) -> bool:
+    """Whether a notice queued for the session's conversation can reach it: the one rule for
+    every notice (a command's end, the expiry warning and a failed start). Not for an
+    agent-chat session's machine: no poller serves its scope, so it checks again itself."""
+    return not session.thread_id.startswith(AGENT_CHAT_SCOPE_PREFIX)
 
 
 async def get(
@@ -111,9 +119,13 @@ async def save(db: AsyncSession, session: ComputeSession) -> None:
 
 
 async def warn(db: AsyncSession, session: ComputeSession, now: datetime) -> None:
-    """Queue one expiry notice atomically with its marker; no completion job is involved."""
+    """Queue one expiry notice atomically with its marker; no completion job is involved.
+    The marker is kept where no notice can reach (`notices_reach`)."""
     from daimon.core.stores.task_continuations import record_continuation
 
+    if not notices_reach(session):
+        await save(db, session.model_copy(update={"warned_for": session.expires_at}))
+        return
     await record_continuation(
         db,
         tenant_id=session.tenant_id,
@@ -136,9 +148,12 @@ async def warn(db: AsyncSession, session: ComputeSession, now: datetime) -> None
 
 
 async def start_failed(db: AsyncSession, session: ComputeSession, now: datetime) -> None:
-    """Queue the one notice that a machine never started, for an owner who is not in the call."""
+    """Queue the one notice that a machine never started, for an owner who is not in the call,
+    where a notice can reach (`notices_reach`)."""
     from daimon.core.stores.task_continuations import record_continuation
 
+    if not notices_reach(session):
+        return
     await record_continuation(
         db,
         tenant_id=session.tenant_id,

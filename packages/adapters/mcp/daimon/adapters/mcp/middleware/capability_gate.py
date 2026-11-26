@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Final
 
 import structlog
@@ -25,6 +26,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, list_running_origins
 from daimon.core.anthropic_guard import anthropic_disabled
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.snapshot import FeaturePlace, resolve_features, server_setup_met
 from daimon.core.features.surface import ask_to_turn_on
@@ -164,6 +166,36 @@ async def _key_agent_id(runtime: McpRuntime, auth: AuthIdentity, derived: uuid.U
         return None
 
 
+@dataclass(frozen=True)
+class ExecutingAgent:
+    """The provider agent behind a derived agent uuid: its id and its name."""
+
+    id: str
+    name: str
+
+
+async def find_executing_agent(
+    runtime: McpRuntime, auth: AuthIdentity, derived: uuid.UUID
+) -> ExecutingAgent | None:
+    """The agent behind `derived`, read as fresh as the provider listing; None when there is
+    none (deleted, archived or another tenant's)."""
+    if auth.anthropic_disabled or anthropic_disabled():
+        record = await SelfHostedAgents(runtime.session_factory).find_by_derived_uuid(
+            resource_scope(tenant_id=str(auth.tenant_id)), derived
+        )
+        return None if record is None else ExecutingAgent(record.ref.id, record.spec.name)
+    agent = await find_agent_by_derived_uuid_cached(
+        runtime.client,
+        runtime.resolver_cache,
+        tenant_id=auth.tenant_id,
+        agent_id=derived,
+        records=runtime.session_factory,
+    )
+    if agent is None:
+        return None
+    return ExecutingAgent(agent.id, agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name)
+
+
 async def _derived_agent_id(
     runtime: McpRuntime, auth: AuthIdentity, derived: uuid.UUID
 ) -> str | None:
@@ -171,23 +203,10 @@ async def _derived_agent_id(
     key = (auth.tenant_id, derived)
     if (cached := runtime.resolver_cache.derived_agent_ids.get(key)) is not None:
         return cached
-    if auth.anthropic_disabled or anthropic_disabled():
-        record = await SelfHostedAgents(runtime.session_factory).find_by_derived_uuid(
-            resource_scope(tenant_id=str(auth.tenant_id)), derived
-        )
-        found = None if record is None else record.ref.id
-    else:
-        agent = await find_agent_by_derived_uuid_cached(
-            runtime.client,
-            runtime.resolver_cache,
-            tenant_id=auth.tenant_id,
-            agent_id=derived,
-            records=runtime.session_factory,
-        )
-        found = None if agent is None else agent.id
-    if found is not None:
-        runtime.resolver_cache.derived_agent_ids[key] = found
-    return found
+    agent = await find_executing_agent(runtime, auth, derived)
+    if agent is not None:
+        runtime.resolver_cache.derived_agent_ids[key] = agent.id
+    return None if agent is None else agent.id
 
 
 def _lists_everything(auth: AuthIdentity) -> bool:

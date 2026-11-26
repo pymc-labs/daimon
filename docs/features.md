@@ -120,6 +120,7 @@ Where each feature can be set, and its default.
 | Approval for watches | `watch_approval` | Guardrail | Ask |  | ✓ | ✓ |  |  |  |  |
 | Approval for cloud computers | `compute_approval` | Guardrail | Ask |  | ✓ | ✓ |  |  |  |  |
 | Cloud computers continue after a job | `compute_wake_runs` | Guardrail | Off |  | ✓ | ✓ |  |  |  |  |
+| Cloud computers from agent chat | `compute_agent_chat` | Guardrail | Off |  | ✓ | ✓ |  |  |  |  |
 | Routines must say where they post | `require_routine_destination` | Guardrail | Optional | ✓ | ✓ |  |  |  |  |  |
 | Monitor direct messages | `monitor_direct_messages` | Guardrail | Off | ✓ | ✓ | ✓ |  |  |  |  |
 | Monitor coding tools | `monitor_mcp` | Guardrail | Off | ✓ | ✓ | ✓ |  |  |  |  |
@@ -1326,6 +1327,18 @@ When a background command ends with nobody in the conversation, the agent may ru
 | | |
 | --- | --- |
 | Key | `compute_wake_runs` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Workspace, Agent |
+| Combines | Most specific wins |
+
+## Cloud computers from agent chat
+
+Agent chat from an MCP client may list and stop the person's cloud computers, and run commands and use files on those started in that session. Any key of that person that drives it can too. Only a server admin can change it.
+
+| | |
+| --- | --- |
+| Key | `compute_agent_chat` |
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
 | Levels | Workspace, Agent |
