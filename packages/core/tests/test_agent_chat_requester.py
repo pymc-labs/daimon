@@ -11,7 +11,11 @@ from daimon.core.agent_chat_requester import (
     record_driver,
 )
 from daimon.core.stores import session_settle_state
+from daimon.core.stores.session_settle_state import SessionProvenance
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+#: A send whose session carries no provenance stamp.
+NO_PROVENANCE = SessionProvenance(grant=None, channel_id=None, account_id=None)
 
 SESSION = "sesn_driver"
 
@@ -54,6 +58,7 @@ async def _record(
     await record_driver(
         factory,
         managed_session_id=SESSION,
+        provenance=NO_PROVENANCE,
         signed_in_person=signed_in,
         session_status="idle",
         earlier=EarlierTurn(open=False, sends=await _sends(factory, SESSION)),
@@ -84,6 +89,7 @@ async def _start(factory: async_sessionmaker[AsyncSession], session_id: str) -> 
     await record_driver(
         factory,
         managed_session_id=session_id,
+        provenance=NO_PROVENANCE,
         signed_in_person=True,
         session_status=None,
         earlier=EarlierTurn(open=False),
@@ -101,6 +107,7 @@ async def test_a_start_names_its_person_only_if_its_write_created_the_row(
     await record_driver(
         db_session_factory,
         managed_session_id=SESSION,
+        provenance=NO_PROVENANCE,
         signed_in_person=False,
         session_status=None,
         earlier=UNREAD,
@@ -119,6 +126,7 @@ async def test_a_send_names_its_person_only_if_no_send_began_since_its_read(
     await record_driver(  # a key's send, between the person's read and write
         db_session_factory,
         managed_session_id=SESSION,
+        provenance=NO_PROVENANCE,
         signed_in_person=False,
         session_status="idle",
         earlier=UNREAD,
@@ -126,6 +134,7 @@ async def test_a_send_names_its_person_only_if_no_send_began_since_its_read(
     await record_driver(
         db_session_factory,
         managed_session_id=SESSION,
+        provenance=NO_PROVENANCE,
         signed_in_person=True,
         session_status="idle",
         earlier=read,
@@ -140,6 +149,7 @@ async def test_each_send_is_numbered_and_a_resume_is_not(
         return await record_driver(
             db_session_factory,
             managed_session_id=SESSION,
+            provenance=NO_PROVENANCE,
             signed_in_person=person,
             session_status="idle",
             earlier=UNREAD,
@@ -162,6 +172,7 @@ async def test_the_store_names_nobody_on_a_resume(
         await session_settle_state.record_agent_chat_driver(
             db,
             managed_session_id=SESSION,
+            provenance=NO_PROVENANCE,
             signed_in=True,
             send=False,
             sends_read=await _sends(db_session_factory, SESSION),

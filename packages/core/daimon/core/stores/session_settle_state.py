@@ -1,12 +1,14 @@
 """Store for per-session settle state: pending settle requests, the billing cutoffs,
-which turn an agent-chat send started (`unattended_turn`) and whether its driver is
-a person signed in to the hub (`is_agent_chat_signed_in`).
+which turn an agent-chat send started (`unattended_turn`), whether its driver is
+a person signed in to the hub (`is_agent_chat_signed_in`) and which session a
+credential's grant belongs to (`find_agent_chat_session`).
 
 Per `guideline:architecture`: this module does NOT swallow exceptions.
 """
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -274,12 +276,32 @@ async def count_agent_chat_sends(
     return AgentChatSends(begun=row[0], recorded=row[1], turn_event_id=row[2])
 
 
+@dataclass(frozen=True)
+class SessionProvenance:
+    """Where an agent-chat session came from, as Daimon stamped its metadata at creation:
+    the grant its Daimon credential signs (`chat_session_id`), the channel its tools were
+    chosen for, and the account that created it. Each is None when the stamp has none."""
+
+    grant: str | None
+    channel_id: str | None
+    account_id: uuid.UUID | None
+
+
+@dataclass(frozen=True)
+class AgentChatSession:
+    """The agent-chat session a credential's grant belongs to (`find_agent_chat_session`)."""
+
+    managed_session_id: str
+    channel_id: str | None
+
+
 async def record_agent_chat_driver(
     session: AsyncSession,
     *,
     managed_session_id: str,
     signed_in: bool,
     send: bool,
+    provenance: SessionProvenance,
     new_session: bool = False,
     sends_read: int | None = None,
 ) -> int | None:
@@ -292,17 +314,26 @@ async def record_agent_chat_driver(
     session its caller just created (`new_session`), only if this write creates the
     row; on any other, only if `agent_chat_sends` is still `sends_read`, the count the
     decision read, so another send begun in between names nobody.
+
+    `provenance` is copied on each write, whoever drives, so a session created before it
+    was recorded is found from its next send on (`find_agent_chat_session`).
     """
+    where = {
+        "agent_chat_grant": provenance.grant,
+        "agent_chat_channel": provenance.channel_id,
+        "agent_chat_account_id": provenance.account_id,
+    }
     stmt = insert(SessionSettleState).values(
         managed_session_id=managed_session_id,
         agent_chat_signed_in=signed_in and send and new_session,
         agent_chat_sends=1 if send else None,
+        **where,
     )
     named: object = False
     if signed_in and send and not new_session and sends_read is not None:
         # Read before this row is updated: the count as it stood when the send began.
         named = case((SessionSettleState.agent_chat_sends == sends_read, True), else_=False)
-    set_: dict[str, object] = {"agent_chat_signed_in": named, "updated_at": func.now()}
+    set_: dict[str, object] = {"agent_chat_signed_in": named, "updated_at": func.now(), **where}
     if send:
         set_["agent_chat_sends"] = func.coalesce(SessionSettleState.agent_chat_sends, 0) + 1
     number = await session.scalar(
@@ -321,3 +352,23 @@ async def is_agent_chat_signed_in(session: AsyncSession, *, managed_session_id: 
         )
     )
     return value is True
+
+
+async def find_agent_chat_session(
+    session: AsyncSession, *, grant: str, account_id: uuid.UUID
+) -> AgentChatSession | None:
+    """The agent-chat session whose Daimon credential signs `grant`, created by `account_id`.
+
+    None for any other session: a chat thread's, one no send recorded since provenance was
+    kept, or another account's."""
+    row = (
+        await session.execute(
+            select(
+                SessionSettleState.managed_session_id, SessionSettleState.agent_chat_channel
+            ).where(
+                SessionSettleState.agent_chat_grant == grant,
+                SessionSettleState.agent_chat_account_id == account_id,
+            )
+        )
+    ).one_or_none()
+    return None if row is None else AgentChatSession(managed_session_id=row[0], channel_id=row[1])

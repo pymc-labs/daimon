@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A feature set for one agent or channel now also applies when that agent is used through
+  agent chat.** Before, the server checked those calls against the workspace setting only, so
+  an agent's own Off was missed and its own On was refused. A session started before this
+  release reads its agent and channel from its next message on. If Daimon can't find the
+  agent, the call is refused ([Features](docs/features.md)).
+
 - **A finished command no longer sends a second message when the conversation already has its
   result, or when its machine was stopped from the conversation.** Reading the result there,
   or stopping the machine from the conversation it started in, withdraws a message nobody has
