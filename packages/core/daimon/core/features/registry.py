@@ -335,11 +335,9 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         tiers=TIERS,
         binds="session_mutable",
         doc=(
-            "The agent's saved keys as a .env file in its working files. Off leaves the file "
-            "out; the keys stay saved. Applies from the next message. "
-            "Claude agents only."
+            "The agent's saved keys as a .env file in its sandbox; Off leaves it out. "
+            "Applies from the next message."
         ),
-        backend_tiers=_MANAGED_AGENTS_ONLY,
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
@@ -881,11 +879,8 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         default="on",
         tiers=("deployment",),
         binds="turn",
-        doc=(
-            "An agent's saved keys go with it to OpenAI and Gemini, as a .env file in that "
-            "provider's sandbox, so that provider receives them. Off leaves the file out."
-        ),
-        platforms=_CALL_GATE_PLATFORMS,
+        doc="Sends the keys file to OpenAI and Gemini.",
+        platforms=EVERY_PLATFORM,
         authority=_ADMIN,
     ),
     FeatureSpec(

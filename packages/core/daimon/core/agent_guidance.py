@@ -45,6 +45,7 @@ look for keys that don't exist.
    Keys set for you are mounted as a dotenv file at
    /mnt/session/uploads/.env. Before using any skill/tool that needs an API
    key, load it: set -a; source /mnt/session/uploads/.env; set +a
+   On OpenAI or Gemini the same file is at /workspace/.daimon/.env instead.
    NEVER say a credential is missing without first reading that file. Do not
    assume a key is already loaded into this session — that file is the only
    ground truth.
