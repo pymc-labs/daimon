@@ -1357,6 +1357,7 @@ class TurnOriginRow(BaseModel):
     helper_key: str | None = None
     own_dm_reach: bool = False
     reach_read: bool = False
+    public_thread: bool = False
 
     @property
     def session_thread_id(self) -> str:
