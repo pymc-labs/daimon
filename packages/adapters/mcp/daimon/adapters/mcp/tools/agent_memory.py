@@ -24,9 +24,9 @@ from daimon.core.host_memory import (
     choose_store,
 )
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.stores.data_memory import has_read
 from daimon.core.provider_routine import routine_of_scope
 from daimon.core.routines import mounts_personal_memory
+from daimon.core.stores.data_memory import has_read
 from daimon.core.stores.routines import get_routine
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
