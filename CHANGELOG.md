@@ -17,6 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Word, PowerPoint, Excel and PDF skills, which run only on Anthropic, come as short open
   equivalents on the other providers ([Providers](docs/providers.md)).
 
+- **Agents with tool rules, and channels that switch a built-in tool off, now answer on GPT
+  and Gemini instead of refusing the reply.** An `ask` rule, or one scoped to a channel, posts
+  Daimon's Approve card there as on Claude: only the asker answers, an approved call runs once,
+  and an unattended reply runs only what its rules allow. A built-in a channel or thread
+  switches off leaves that reply; one of the six file and shell tools off removes all six,
+  since the provider has one execution tool. A channel's own fixed deployment is still refused
+  there ([Providers](docs/providers.md#what-is-not-supported-yet)).
+
 - **A finished command no longer sends a second message when the conversation already has its
   result, or when its machine was stopped from the conversation.** Reading the result there,
   or stopping the machine from the conversation it started in, withdraws a message nobody has

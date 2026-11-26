@@ -40,9 +40,10 @@ pypdf) instead.
   spend limit, workspace export and import. An agent can pick it only with
   its own runtime file row (`daimon selfhosted init --agent`).
 - **OpenAI and Gemini:** routines (one whose agent or channel is on them stops
-  with a message saying so). A channel or thread that switches a built-in
-  tool off is refused, since only the agent's own tool settings apply. An agent with an `ask` rule or a channel-scoped `deny` on a Daimon
-  tool is refused, and so is workspace export and import. A connector that
+  with a message saying so), and a channel's own deployment where a channel or
+  thread switches a built-in tool off. Workspace export and import. Switching
+  off one of bash, read, edit, write, grep or glob removes all six, since the
+  provider has one execution tool. A connector that
   OpenAI's size limit cannot hold, or whose tool names clash with Gemini's own,
   is off there, and so is a web search that must ask first.
 - **Without an Anthropic key:** memory.
@@ -139,8 +140,10 @@ Memory settings show as needing setup.
   `mcp_connector_relay` feature off to keep them out of OpenAI and Gemini.
 - **Confirmations.** A tool that needs one posts an Approve and Deny card on
   Discord, Slack, Teams and the web. Only the asker answers, and an approved
-  call runs once. An unattended reply runs only what its rules allow. Turn it off
-  with the `host_call_gate` feature.
+  call runs once. An unattended reply runs only what its rules allow. An agent's
+  `ask` and channel tool rules use the same card, and a built-in tool a channel
+  or thread switches off leaves the reply. Turn the card off with the
+  `host_call_gate` feature; an `ask` rule then refuses the call.
 - **Copies of itself.** `ask_helper` with `self` starts a fresh copy per ask.
   All copies of one message stop at $10 of spend together, and share no files.
 - **Effort.** OpenAI takes low, medium or high, kept with the model or set for one
