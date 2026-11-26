@@ -76,7 +76,12 @@ async def turn_room(
     sessionmaker: async_sessionmaker[AsyncSession], origin: TurnOriginRow, *, now: datetime
 ) -> SignedRoom | None:
     """The kind of place a turn's answer goes to: its thread, or its channel when they are
-    the same. None off Discord."""
+    the same. None off Discord.
+
+    When Daimon opens a thread for the answer, the signed `channel` stays the channel the
+    message was posted in, so the server can still fetch that message, while this judges
+    the new thread. A new public thread takes its parent's facts, so the two agree.
+    """
     if origin.platform not in ROOM_PLATFORMS:
         return None
     if origin_place(origin) == "dm":
@@ -102,7 +107,11 @@ async def routine_room(
     """The room a routine posts to and its kind, from its `routine_conversation`.
 
     None off Discord, for a DM destination and for no destination: such a run names no
-    room. The thread kind is not recorded, so a thread with no fact of its own is narrow.
+    room. A routine does not record whether its thread is public, so a thread with no fact
+    of its own (an archived one) is narrow, where a turn in a public thread takes its
+    parent's kind. The difference only ever reads less; recording the kind would take a
+    field on every path that saves a destination, and routines saved before would still
+    read narrow. `packages/adapters/mcp/tests/test_identity_relay_room.py` records it.
     """
     if platform not in ROOM_PLATFORMS or destination is None:
         return None
