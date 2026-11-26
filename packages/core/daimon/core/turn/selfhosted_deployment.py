@@ -7,7 +7,7 @@ import logging
 import os
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -35,9 +35,11 @@ from pydantic import (
 if TYPE_CHECKING:
     from daimon.core.config import SelfHostedSettings
     from daimon.core.pricing import ProviderPrice
+    from daimon.core.stores.domain import ChannelSkillRow
     from daimon.core.stores.neutral_catalog import AgentRevision
     from daimon.core.tool_safety import ToolSafetyPolicy
     from mux.drivers.selfhosted import HarnessConfig
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 PROFILE = SELFHOSTED.profile
 
@@ -192,6 +194,23 @@ def _all_deployments(tenant_id: str) -> tuple[SelfHostedDeployment, ...]:
     from daimon.core.turn.runtime_manifest import tenant_deployments
 
     return tenant_deployments(SelfHostedDeployment, PROFILE, tenant_id)
+
+
+async def mountable_skills(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    withheld: frozenset[str] | None,
+    skills: tuple[SkillRef, ...],
+    rows: Sequence[ChannelSkillRow],
+) -> tuple[tuple[SkillRef, ...], list[ChannelSkillRow]]:
+    """The record's and channel's skills a turn mounts: a scoped one only where its audience
+    holds the scope (`daimon.core.skill_audience`)."""
+    from daimon.core.skill_audience import skills_to_drop
+
+    drop = await skills_to_drop(
+        sessionmaker, tenant_id, withheld, [*(s.id for s in skills), *(r.skill_id for r in rows)]
+    )
+    return tuple(s for s in skills if s.id not in drop), [r for r in rows if r.skill_id not in drop]
 
 
 def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedHostRuntime:
@@ -393,12 +412,19 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                 platform=request.platform,
                 channel_id=revision.channel.channel_id,
             )
+        agent_skills, channel_rows = await mountable_skills(
+            request.deps.sessionmaker,
+            request.tenant_id,
+            preparation.admission.withheld_skills,
+            tuple(agent.spec.skills or ()),
+            channel_rows,
+        )
         names = tuple(
             dict.fromkeys(
                 name for name in (agent.spec.name, preparation.admission.config.agent_name) if name
             )
         )
-        refs = tuple(agent.spec.skills or ()) + platform_refs
+        refs = agent_skills + platform_refs
         held = {skill.id for skill in refs}
         refs += tuple(
             SkillRef(id=row.skill_id, version=row.version)
@@ -443,7 +469,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                 connection.model_copy(update={"tool_policy": {}})
                 for connection in agent.spec.mcp_servers or ()
             ),
-            agent_skills=agent.spec.skills or (),
+            agent_skills=agent_skills,
             platform_skills=platform_refs,
             channel_skills=channel_rows,
         )

@@ -34,6 +34,7 @@ from daimon.core.agent_pins import agent_pin_names
 from daimon.core.anthropic_guard import anthropic_configured
 from daimon.core.authz import Action, AgentReach, Subject, Surface, authorize, build_agent_ref
 from daimon.core.channel_rules import ChannelRuleRefused, set_agent_rule
+from daimon.core.config import Settings
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.mcp_merge import DAIMON_MCP_SERVER_NAME, get_reserved_mcp_rejection
@@ -157,6 +158,8 @@ class AgentEditDeps:
     resolver_cache: ResolverCache | None = None
     # The deployment's own default agent: an agent rule is judged against it.
     deployment_default: DeploymentDefault = DeploymentDefault()
+    # Reads the data scopes a person holds; without it only admins open a scoped skill.
+    settings: Settings | None = None
 
 
 @dataclass(frozen=True)

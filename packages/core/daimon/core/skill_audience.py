@@ -87,6 +87,49 @@ async def scoped_skill_audience(
         return scoped, frozenset()
 
 
+async def skills_to_drop(
+    sessions: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    withheld: frozenset[str] | None,
+    skill_ids: Collection[str],
+) -> frozenset[str]:
+    """Which of `skill_ids` a session leaves out: the turn's withheld skills, or every
+    scoped one when the turn's audience was not checked (`Admission.withheld_skills`)."""
+    if withheld is not None or not skill_ids:
+        return withheld or frozenset()
+    async with sessions() as session:
+        return frozenset(
+            await workspace_skills.scopes_among(session, tenant_id=tenant_id, skill_ids=skill_ids)
+        )
+
+
+async def person_may_open(
+    sessions: async_sessionmaker[AsyncSession],
+    settings: Settings | None,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    skill_id: str,
+) -> bool:
+    """Whether one person alone may read `skill_id`: unscoped, or its scope held."""
+    async with sessions() as session:
+        scope = (
+            await workspace_skills.scopes_among(session, tenant_id=tenant_id, skill_ids=[skill_id])
+        ).get(skill_id)
+    if scope is None:
+        return True
+    if settings is None:
+        return False
+    found = data_audience(DataOrigin("private", Reader("", account_id)), agent_owner=None)
+    if isinstance(found, DataRefusal):
+        return False
+    try:
+        return scope in await held_scopes(settings, tenant_id, found)
+    # Boundary: a scope that can't be checked opens nothing.
+    except Exception:
+        log.warning("skill_audience.unreadable", tenant_id=str(tenant_id), exc_info=True)
+        return False
+
+
 async def _origin(session: AsyncSession, place: TurnPlace, *, now: datetime) -> DataOrigin | None:
     """The turn's data origin; None when its readers can't be named."""
     tenant = await get_tenant(session, place.tenant_id)

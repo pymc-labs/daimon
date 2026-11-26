@@ -5,14 +5,21 @@ from __future__ import annotations
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from daimon.core import skill_audience
 from daimon.core.data_audience import DataAudience, user_subject
 from daimon.core.skill_audience import TurnPlace, scoped_skill_audience
 from daimon.core.stores import audience_facts, room_viewers, workspace_skills
+from daimon.core.stores.domain import ChannelSkillRow
+from daimon.core.turn import runtime_manifest, session_skills
+from daimon.core.turn.selfhosted_deployment import mountable_skills
 from daimon.testing.factories import make_platform_principal, make_tenant
 from daimon.testing.shared_helpers import settings
+from mux.contracts.ids import SkillRef
+from mux.profiles import PERSISTENT_WORKSPACE
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 NOW = datetime(2026, 5, 1, tzinfo=UTC)
@@ -140,3 +147,79 @@ async def test_a_failed_scope_check_holds_no_scope(
         db_session_factory, settings(), place, ["skill_fin"], now=NOW
     )
     assert found == ({"skill_fin": "finance"}, frozenset())
+
+
+# None is a turn whose audience was not checked: every scoped skill stays off.
+_WITHHELD = [frozenset({"skill_fin"}), None]
+
+
+@pytest.mark.parametrize("withheld", _WITHHELD, ids=["withheld", "unchecked"])
+async def test_another_providers_session_copies_no_withheld_skill(
+    withheld: frozenset[str] | None,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent-origin template pins the agent's capture, scoped skills included."""
+    place = await _place(db_session, "4105")
+    pins = (SkillRef(id="skill_fin", version="v1"), SkillRef(id="skill_open", version="v1"))
+    monkeypatch.setattr(
+        runtime_manifest,
+        "represented_source",
+        lambda *_a: SimpleNamespace(session_skills=pins, skill_names={}),
+    )
+    copied: list[tuple[SkillRef, ...]] = []
+
+    async def copy(*_a: object, pins: tuple[SkillRef, ...], **_k: object) -> tuple[Any, ...]:
+        copied.append(pins)
+        return pins, ()
+
+    monkeypatch.setattr(session_skills, "copy_skills", copy)
+    request = SimpleNamespace(
+        admission=SimpleNamespace(backend_revision_origin="agent", withheld_skills=withheld),
+        source=SimpleNamespace(source=None),
+        target_spec=None,
+        tenant_id=place.tenant_id,
+        deps=SimpleNamespace(sessionmaker=db_session_factory, anthropic=None),
+    )
+    await session_skills.turn_session_skills(
+        cast(Any, request),
+        lambda: cast(Any, None),
+        profile=PERSISTENT_WORKSPACE,
+        scope=cast(Any, None),
+        account_scope_id="project",
+    )
+    assert copied == [(SkillRef(id="skill_open", version="v1"),)], f"copied {copied}"
+
+
+@pytest.mark.parametrize("withheld", _WITHHELD, ids=["withheld", "unchecked"])
+async def test_a_self_hosted_turn_mounts_no_withheld_skill(
+    withheld: frozenset[str] | None,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The record's skills and the channel's rows both drop a skill the audience lacks."""
+    place = await _place(db_session, "4106")
+
+    def row(skill_id: str) -> ChannelSkillRow:
+        return ChannelSkillRow(
+            tenant_id=place.tenant_id,
+            platform="discord",
+            channel_id="10",
+            skill_id=skill_id,
+            version="v1",
+            name=skill_id,
+            owner_agent_name=None,
+            added_by_account_id=None,
+            added_at=NOW,
+        )
+
+    skills, rows = await mountable_skills(
+        db_session_factory,
+        place.tenant_id,
+        withheld,
+        (SkillRef(id="skill_fin"), SkillRef(id="skill_open")),
+        [row("skill_fin"), row("skill_open")],
+    )
+    assert skills == (SkillRef(id="skill_open"),), f"the record mounts {skills}"
+    assert [r.skill_id for r in rows] == ["skill_open"], "the channel's scoped row stays off"

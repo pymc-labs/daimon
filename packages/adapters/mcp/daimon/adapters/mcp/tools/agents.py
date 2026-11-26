@@ -399,6 +399,7 @@ def _edit_deps(runtime: McpRuntime) -> agent_editing.AgentEditDeps:
         session_factory=runtime.session_factory,
         public_url=public_url,
         denied_tools=runtime.settings.tool_safety.denied,
+        settings=runtime.settings,
     )
 
 

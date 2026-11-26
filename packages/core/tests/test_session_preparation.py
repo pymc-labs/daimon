@@ -1460,26 +1460,37 @@ async def test_a_scoped_skill_withheld_from_a_new_audience_never_reaches_its_nex
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """An idle session is replaced without the skill; an active one is never handed back."""
+    """An idle session is replaced without the agent's own skill and carries none of its
+    work; an active one is never handed back. The provider mounts an agent's stored skills
+    for a bare id, so the withheld one must go as an override even in a DM."""
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     await db_session.commit()
     transport = _Transport()
     deps = _deps(db_session_factory, transport)
     scoped = BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_fin", version="v1")
-    holding = replace(
-        _admission(account=account), channel_skills=(scoped,), withheld_skills=frozenset()
-    )
+    transport.state.ma.agents[_AGENT_ID]["skills"] = [scoped.model_dump(mode="json")]
+    carrying = _agent().model_copy(update={"skills": [scoped]})
+    holding = replace(_admission(account=account, agent=carrying), withheld_skills=frozenset())
     first = await _prepare(deps, holding, tenant=tenant, account=account)
     assert isinstance(first, PreparedTurn)
+    assert [s.skill_id for s in transport.state.sessions[first.ma_session_id].agent.skills] == [
+        "skill_fin"
+    ], "a holding audience mounts the agent's skill"
     row = await _live_row(db_session_factory, tenant=tenant, account=account)
     assert row is not None
     if active:
         async with db_session_factory.begin() as session:
             await mark_turn_active(session, id=row.id, active_turn_message_id="in-flight", now=_NOW)
+    transfers: list[str] = []
 
+    async def _transfer(*, old_session_id: str, **_kwargs: Any) -> PreparedReplacement:
+        transfers.append(old_session_id)
+        raise AssertionError("work done with the skill must not be carried")
+
+    # Admission hands over the agent without the skill it withholds.
     lacking = replace(_admission(account=account), withheld_skills=frozenset({"skill_fin"}))
-    second = await _prepare(deps, lacking, tenant=tenant, account=account)
+    second = await _prepare(deps, lacking, tenant=tenant, account=account, transfer=_transfer)
 
     if active:
         assert isinstance(second, PreparationBusy)
@@ -1488,7 +1499,10 @@ async def test_a_scoped_skill_withheld_from_a_new_audience_never_reaches_its_nex
     else:
         assert isinstance(second, PreparedTurn)
         assert second.ma_session_id != first.ma_session_id
-        assert transport.state.sessions[second.ma_session_id].agent.skills == []
+        assert transport.state.sessions[second.ma_session_id].agent.skills == [], (
+            "the replacement runs without the agent's stored skill"
+        )
+        assert transfers == [], "nothing of the old session is carried over"
 
 
 def _with_features(admission: Admission, **values: str) -> Admission:

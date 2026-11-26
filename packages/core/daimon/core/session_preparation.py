@@ -1127,6 +1127,11 @@ async def _prepare_session_for_turn_locked(
             if handed_over
             else _leaves_memory_store(recorded, desired)
         )
+        withholding = (
+            isinstance(decision, ReplaceSession)
+            and "skills" in decision.reasons
+            and bool(admission.withheld_skills)
+        )
         if (
             isinstance(decision, ReplaceSession)
             and (
@@ -1135,7 +1140,7 @@ async def _prepare_session_for_turn_locked(
                 or tightening_memory
                 or leaving_memory
                 # The old session may mount a scoped skill this audience may not read.
-                or ("skills" in decision.reasons and bool(admission.withheld_skills))
+                or withholding
             )
             and await turn_is_active(row, now=moment, sessionmaker=deps.sessionmaker)
         ):
@@ -1236,7 +1241,10 @@ async def _prepare_session_for_turn_locked(
                 # A checkpoint executes the old session. Never run it with
                 # a writable mount after the origin has become read-only, and
                 # never carry what it read from a store the place has left.
-                transfer=None if tightening_memory or leaving_memory or not carry else transfer,
+                # Nor carry what a session read with a skill this audience may not read.
+                transfer=None
+                if tightening_memory or leaving_memory or withholding or not carry
+                else transfer,
                 tenant_id=tenant_id,
                 platform=platform,
                 thread_id=thread_id,

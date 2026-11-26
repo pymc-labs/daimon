@@ -18,6 +18,7 @@ from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError,
 from daimon.core.agent_view import AgentConfigDoc, SkillDoc
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.mux_compat import download_skill_version, list_skill_versions
+from daimon.core.skill_audience import person_may_open
 from daimon.core.skills.add import add_agent_skill
 from daimon.core.skills.ingest import (
     SkillIngestError,
@@ -64,6 +65,10 @@ class SkillFilesDoc(BaseModel):
     files: list[SkillFileDoc]
 
 
+def _not_on_agent() -> AgentEditError:
+    return AgentEditError("This skill is not on the agent.", kind="not_found")
+
+
 def _refused(exc: Exception) -> AgentEditError:
     return AgentEditError(str(exc), kind="invalid")
 
@@ -99,7 +104,16 @@ async def _attached_skill(
     for skill in agent.skills:
         if skill.skill_id == skill_id:
             return skill.version or ""
-    raise AgentEditError("This skill is not on the agent.", kind="not_found")
+    raise _not_on_agent()
+
+
+async def _refuse_unheld(deps: AgentEditDeps, *, actor: AgentActor, skill_id: str) -> None:
+    """A scoped skill opens only for an admin or a holder of its scope, refused as missing."""
+    if actor.subject.is_admin or await person_may_open(
+        deps.session_factory, deps.settings, actor.tenant_id, actor.account_id, skill_id
+    ):
+        return
+    raise _not_on_agent()
 
 
 def _version_order(version: str) -> tuple[int, str]:
@@ -170,6 +184,7 @@ async def read_skill_files(
     """The files of a custom skill the agent (or the actor's draft of it) holds."""
     agent = await agent_editing.load_editable_agent(deps, actor=actor, ma_agent_id=ma_agent_id)
     pinned = await _attached_skill(deps, actor=actor, agent=agent, skill_id=skill_id)
+    await _refuse_unheld(deps, actor=actor, skill_id=skill_id)
     held = await concrete_version(deps, actor=actor, skill_id=skill_id, version=version or pinned)
     files = await download_files(deps, actor=actor, skill_id=skill_id, version=held)
     return files_doc(skill_id, held, files)
@@ -192,6 +207,8 @@ async def save_skill_files(
     returned version in its draft. A SKILL.md that names another skill creates that one instead.
     """
     agent = await agent_editing.load_editable_agent(deps, actor=actor, ma_agent_id=ma_agent_id)
+    if skill_id is not None:
+        await _refuse_unheld(deps, actor=actor, skill_id=skill_id)
     kept = {path for path, body in files.items() if body is None}
     bodies: dict[str, bytes] = {
         path: body.encode("utf-8") for path, body in files.items() if body is not None

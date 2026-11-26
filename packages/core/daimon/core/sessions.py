@@ -758,7 +758,7 @@ async def create_session(
     relay_owner: str | None = None,
     github_mcp_router: bool = False,
     identity: SessionIdentity = DEFAULT_IDENTITY,
-    skill_scopes_checked: bool = False,
+    withheld_skills: frozenset[str] | None = None,
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -804,8 +804,10 @@ async def create_session(
     channel's), added after the agent's own (`session_skills`, the shape the
     drift check hashes too).
 
-    ``skill_scopes_checked`` says the caller kept only the scoped skills the audience holds
-    (a chat turn, `daimon.core.skill_audience`); otherwise the agent's scoped skills are left out.
+    ``withheld_skills`` are the scoped skills the caller checked and the audience may not
+    read (a chat turn, `daimon.core.skill_audience`); None leaves out every scoped skill
+    of the agent's. Either way the skills are sent as an override, so the provider does
+    not mount the agent's stored ones.
 
     ``identity`` is the session's identity features: a memory store whose feature
     is off is not mounted (personal memory still needs ``personal_memory``), and
@@ -1309,14 +1311,12 @@ async def create_session(
         )
         gated = list(tools) != list(visible_tools(agent, hidden))
         healed = list(servers) != list(visible_mcp_servers(agent, hidden))
-        scoped = (
-            set[str]()
-            if skill_scopes_checked
-            or session_factory is None
-            or tenant_id is None
-            or not agent.skills
-            else await _scoped_skills(session_factory, tenant_id, agent)
-        )
+        if withheld_skills is not None:
+            scoped = set(withheld_skills)
+        elif session_factory is None or tenant_id is None or not agent.skills:
+            scoped = set[str]()
+        else:
+            scoped = await _scoped_skills(session_factory, tenant_id, agent)
         if scoped:
             _log.warning("session.scoped_skills_withheld", agent_id=agent.id, skills=sorted(scoped))
         if (

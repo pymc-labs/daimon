@@ -5,22 +5,23 @@ from __future__ import annotations
 import io
 import re
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import httpx
 import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.skills import VersionCreateResponse, VersionListResponse
-from daimon.core import agent_skill_files
+from daimon.core import agent_skill_files, skill_audience
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
 from daimon.core.authz import Subject, Surface
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.stores import agent_drafts, agent_owners
+from daimon.core.stores import agent_drafts, agent_owners, workspace_skills
 from daimon.testing.builders import skill_listed
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
+from daimon.testing.shared_helpers import settings
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
@@ -334,3 +335,54 @@ async def test_files_of_a_skill_pinned_at_latest_come_from_its_newest_version(
 
     assert saved.version == "4", "a save publishes a new version"
     assert fake.versions["4"]["new.md"] == b"newest", "kept files come from the newest version"
+
+
+@pytest.mark.parametrize("who", ["member", "holder", "admin"])
+async def test_a_scoped_skill_opens_only_for_an_admin_or_a_holder_of_its_scope(
+    who: str,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member who pins a scoped skill on their own agent neither reads nor republishes it."""
+    fake, deps, actor = await _setup(db_session, db_session_factory, live_pin="1")
+    await workspace_skills.record_version(
+        db_session,
+        tenant_id=actor.tenant_id,
+        skill_id="sk_1",
+        name="notes",
+        version="1",
+        digest="d",
+        files={"SKILL.md": b"x"},
+        scope="finance",
+    )
+    await db_session.commit()
+
+    async def held(*_args: object) -> frozenset[str]:
+        return frozenset({"finance"}) if who == "holder" else frozenset()
+
+    monkeypatch.setattr(skill_audience, "held_scopes", held)
+    deps = replace(deps, settings=settings())
+    if who == "admin":
+        actor = replace(actor, subject=replace(actor.subject, is_admin=True))
+
+    if who != "member":
+        doc = await agent_skill_files.read_skill_files(
+            deps, actor=actor, ma_agent_id="ag_1", skill_id="sk_1"
+        )
+        assert doc.version == "1", f"the {who} reads the skill"
+        return
+    with pytest.raises(AgentEditError) as read:
+        await agent_skill_files.read_skill_files(
+            deps, actor=actor, ma_agent_id="ag_1", skill_id="sk_1"
+        )
+    with pytest.raises(AgentEditError) as save:
+        await agent_skill_files.save_skill_files(
+            deps,
+            actor=actor,
+            ma_agent_id="ag_1",
+            skill_id="sk_1",
+            files={"SKILL.md": _SKILL_MD, "ref.md": None},
+        )
+    assert (read.value.kind, save.value.kind) == ("not_found", "not_found"), "refused as missing"
+    assert fake.downloads == [] and sorted(fake.versions) == ["1", "2"], "nothing read or written"
