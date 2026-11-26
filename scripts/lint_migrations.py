@@ -622,6 +622,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f.format(), file=sys.stderr)
     if findings:
         print(f"\n{len(findings)} failing finding(s)", file=sys.stderr)
+        print(
+            "Fix: set the docstring `downgrade:` and `schema:` lines to the true value. "
+            'Read: CLAUDE.md "Migrations" item 2, CONTRIBUTING.md "Migrations".',
+            file=sys.stderr,
+        )
         return 1
     return 0
 

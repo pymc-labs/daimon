@@ -13,6 +13,10 @@ Keep one logical change per PR, fill in the `## Summary` and `## Checklist`
 sections of the PR template, and make `pytest`, `pyright`, `ruff` and
 `lint-imports` pass locally before asking for review.
 
+CI's `conventions` job enforces the Migrations, Changelog and Documentation
+rules below. When it fails, read its message and the section it names on
+latest main before changing anything.
+
 ## Make it dumb simple
 
 The people who use Daimon are members of a team in a chat app. Most are not

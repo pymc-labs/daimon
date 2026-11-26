@@ -18,6 +18,10 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _LEAD_RE = re.compile(r"^- \*\*[^*\n]+\*\*")
 _HEADING = "## [Unreleased]"
+_HINT = (
+    "Fix: one '- **Bold lead.**' paragraph, wrapped lines indented two spaces, "
+    'ending in a newline. Read: CLAUDE.md "Changelog", changes/README.md.'
+)
 
 
 def fragments(root: Path) -> list[Path]:
@@ -43,6 +47,8 @@ def check(root: Path) -> int:
     failed = [(p, why) for p in fragments(root) for why in problems(p)]
     for path, why in failed:
         print(f"{path.relative_to(root)}: {why}", file=sys.stderr)
+    if failed:
+        print(_HINT, file=sys.stderr)
     return 1 if failed else 0
 
 

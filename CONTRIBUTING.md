@@ -106,6 +106,14 @@ them under `docs/`. `CLAUDE.md` says which hand-written page a change belongs
 on and how to write it; `scripts/check_docs.py` keeps those pages within their
 length budgets.
 
+MCP tool schema snapshots are one JSON file per tool under
+`packages/adapters/mcp/tests/__snapshots__/`; never commit an `.ambr` file there.
+Regenerate with `uv run pytest packages/adapters/mcp/tests/test_tool_schema_snapshot.py
+--snapshot-update` (not under `-n auto`) and review the diff.
+
+CI's `conventions` job (`scripts/check_conventions.py`) enforces the changelog,
+migration and generated-page rules in `CLAUDE.md`; each failure names the section.
+
 CI splits the Postgres-backed pytest run into parallel jobs, and the largest
 suites (`core`, `mcp`, `discord`) into shards by test file with
 `-p daimon.testing.ci_shard --ci-shard-by=file --ci-shard-suite=S --ci-shard-index=N --ci-shard-count=M`.

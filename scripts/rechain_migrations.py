@@ -23,6 +23,7 @@ from pathlib import Path
 VERSIONS = Path("packages/core/alembic/versions")
 HEAD_FILE = Path("packages/core/alembic/head.txt")
 MERGE = "0168_merge_main_preview"
+_STALE = 'merge main, run scripts/rechain_migrations.py (CLAUDE.md "Migrations" item 3)'
 MAX_ID = 32  # alembic_version.version_num is varchar(32)
 _NUMBERED = re.compile(r"^(\d+)([a-z]?)_")
 
@@ -70,10 +71,12 @@ def check(root: Path) -> list[str]:
     parents_of_any = {p for parents in links.values() for p in parents}
     heads = sorted(set(links) - parents_of_any)
     if len(heads) != 1:
-        return [*errors, f"expected one head, found {len(heads)}: {', '.join(heads)}"]
+        return [*errors, f"expected one head, found {len(heads)}: {', '.join(heads)}; {_STALE}"]
     declared = (root / HEAD_FILE).read_text(encoding="utf-8").strip()
     if declared != heads[0]:
-        errors.append(f"{HEAD_FILE} says {declared!r} but the head is {heads[0]!r}")
+        errors.append(
+            f"{HEAD_FILE} says {declared!r} but the head is {heads[0]!r}: stale head.txt; {_STALE}"
+        )
     after = {r for r, parents in links.items() if MERGE in parents}
     queue = list(after)
     while queue:
@@ -89,7 +92,7 @@ def check(root: Path) -> list[str]:
         if len(parents) != 1:
             errors.append(f"{stems[revision]}: needs exactly one parent after {MERGE}")
         elif _number(stems[parents[0]]) >= _number(stems[revision]):
-            errors.append(f"{stems[revision]}: parent {parents[0]} is not numbered lower")
+            errors.append(f"{stems[revision]}: parent {parents[0]} is not numbered lower; {_STALE}")
     return errors
 
 

@@ -92,6 +92,13 @@ repos:
         pass_filenames: false
         files: ^packages/core/alembic/(versions/.*\.py|head\.txt)$
 
+      - id: conventions
+        name: delivery-flow conventions
+        entry: python3 scripts/check_conventions.py --staged
+        language: system
+        pass_filenames: false
+        always_run: true
+
       - id: lint-designators
         name: lint companion-repo leakage
         entry: bash scripts/lint_designators.sh
