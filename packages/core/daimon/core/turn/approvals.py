@@ -218,12 +218,14 @@ async def rule_for(
     rules_for: RuleLookup | None,
     *,
     skip: bool = False,
+    always: bool = False,
 ) -> tuple[ResolvedAgentToolRule | None, bool]:
-    """`skip` leaves the lookup out: daimon's own server for an agent with no rule on it."""
+    """`skip` leaves the lookup out: daimon's own server for an agent with no rule on it.
+    `always` reads the rule even with the policy or its agent rules off, for a call that a
+    rule may only refuse there (`owner_tools`)."""
     if (
         skip
-        or not policy.enabled
-        or not policy.agent_rules
+        or (not always and not (policy.enabled and policy.agent_rules))
         or rules_for is None
         or call.server_name is None
     ):
@@ -549,7 +551,11 @@ def unattended_decider(
         if (refusal := _proxied_approval_refusal(call, sent_as, attended=False)) is not None:
             return refusal
         rule, read_error = await rule_for(
-            policy, call, rules_for, skip=_skips_daimon_rules(call, trusted_servers, daimon_rules)
+            policy,
+            call,
+            rules_for,
+            skip=_skips_daimon_rules(call, trusted_servers, daimon_rules),
+            always=call.tool_name in owner_tools and call.server_name in trusted_servers,
         )
         verdict = await tool_call_verdict(
             policy,
