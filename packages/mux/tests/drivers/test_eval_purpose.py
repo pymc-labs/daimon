@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, Provider, Revision
 from mux.contracts.resources import (
     AgentPatch,
@@ -83,6 +84,33 @@ async def test_gemini() -> None:
     again = await ma.environments.create(SCOPE, _env("eval"), key="eval")
     assert again.native == {"id": "environment-1"}, "the worker key is returned once"
     assert len(transport.environments) == 1, "a retried key makes no second environment"
+    agent = await ma.agents.create(SCOPE, _agent("gemini", "eval", ()), key="a")
+    session = await ma.sessions.create(
+        SCOPE,
+        SessionSpec(
+            agent=agent.ref,
+            agent_revision=agent.revision,
+            environment=env.ref,
+            config_revision=1,
+            extensions={
+                "gemini.session": ExtensionConfig(
+                    namespace="gemini.session",
+                    version=1,
+                    value={
+                        "thread": {
+                            "channel": {"tenant_id": "t", "platform": "discord", "channel_id": "c"},
+                            "thread_id": "th",
+                        },
+                        "binding_id": "b",
+                    },
+                )
+            },
+        ),
+        key="s",
+    )
+    assert not await ma.sessions.place_file(SCOPE, session.ref, ".daimon/.env", b"K=v\n"), (
+        "a self-hosted environment takes no placed file"
+    )
     names = ("google_search", "url_context", "code_execution")
     sent = json.dumps(compile_agent(_agent("gemini", "eval", names))["tools"])
     assert "google_search" not in sent and "url_context" not in sent, "no Google web tools"

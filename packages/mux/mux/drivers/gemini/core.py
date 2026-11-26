@@ -1258,6 +1258,8 @@ class GeminiSessions(Base):
         directory, name = posixpath.split(relative_path(path))
         async with self._storage.read(session_keys(ref.id)) as records:
             record = self._record(records, scope, ref)
+            if isinstance(record.request["environment"], str):
+                return False  # a self-hosted environment is the worker's, not a workspace
             environment_id, placed = record.environment_id, record.placed.get(path)
             config, fresh = self._environment_config(record), record.current is None
         if content is None and (placed is None or environment_id is None):
