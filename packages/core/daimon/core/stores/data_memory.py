@@ -44,6 +44,19 @@ async def reads_of(
     return list(found)
 
 
+async def has_read(session: AsyncSession, *, tenant_id: uuid.UUID, chat_session_id: str) -> bool:
+    """Whether the session read any data item."""
+    found = await session.scalar(
+        select(literal(True))
+        .where(
+            SessionDataRead.tenant_id == tenant_id,
+            SessionDataRead.chat_session_id == chat_session_id,
+        )
+        .limit(1)
+    )
+    return bool(found)
+
+
 async def carry_reads(
     session: AsyncSession, *, tenant_id: uuid.UUID, source: str, target: str
 ) -> None:

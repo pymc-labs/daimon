@@ -41,6 +41,7 @@ from daimon.core.mcp_identity import matching_turn
 from daimon.core.ports.gate import data_sources_on
 from daimon.core.stores.agent_owners import owner_of
 from daimon.core.stores.direct_messages import is_dm_thread
+from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.identity import accounts_of
 from daimon.core.stores.room_viewers import read_viewers
 from daimon.core.stores.routines import get_routine
@@ -138,13 +139,25 @@ async def data_origin(runtime: McpRuntime, auth: AuthIdentity, *, now: datetime)
     return DataOrigin("private", asker)
 
 
-async def _turn_origin(runtime: McpRuntime, auth: AuthIdentity, *, now: datetime) -> DataOrigin:
-    """A chat turn's origin by its execution grant: exactly one live turn of this agent."""
+async def ledgers(runtime: McpRuntime, auth: AuthIdentity) -> list[str]:
+    """The chat sessions a data read by `auth` lands on: its own, and for a helper's turn
+    the asking turn's too, so what either saves after records it."""
+    if auth.chat_session_id is None:
+        return []
+    found = await _turn_and_parent(runtime, auth, now=datetime.now(UTC))
+    parent = None if found is None else found[1]
+    asker = None if parent is None else parent.chat_session_id
+    return [auth.chat_session_id, *([asker] if asker and asker != auth.chat_session_id else [])]
+
+
+async def _turn_and_parent(
+    runtime: McpRuntime, auth: AuthIdentity, *, now: datetime
+) -> tuple[TurnOriginRow, TurnOriginRow | None] | None:
+    """The live turn by its execution grant, and the asking turn when it is a helper's; None
+    when either cannot be found."""
     grant = auth.chat_session_id
     if grant is None or auth.chat_agent_id is None or auth.platform is None:
-        return DataOrigin("none")
-    if auth.platform_user_id is None:
-        return DataOrigin("none")
+        return None
     async with runtime.session_factory() as session:
         held = await get_session_origin(
             session,
@@ -177,7 +190,18 @@ async def _turn_origin(runtime: McpRuntime, auth: AuthIdentity, *, now: datetime
             )
         )
     if turn is None or (turn.helper_of is not None and parent is None):
+        return None
+    return turn, parent
+
+
+async def _turn_origin(runtime: McpRuntime, auth: AuthIdentity, *, now: datetime) -> DataOrigin:
+    """A chat turn's origin by its execution grant: exactly one live turn of this agent."""
+    if auth.platform_user_id is None:
         return DataOrigin("none")
+    found = await _turn_and_parent(runtime, auth, now=now)
+    if found is None:
+        return DataOrigin("none")
+    turn, parent = found
     asker = Reader(
         user_subject(turn.platform, auth.external_id or "", auth.platform_user_id),
         turn.account_id,

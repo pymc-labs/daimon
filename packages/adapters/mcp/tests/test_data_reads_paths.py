@@ -51,6 +51,8 @@ _GUARDS: list[tuple[str, Callable[..., Any], str]] = [
     ("routine, agent chat and CLI sessions card writes out", toolset.place_session, "replace"),
     ("handoff into a data-reading agent", task_continuity._hand_off_task_impl, "reads_data"),  # pyright: ignore[reportPrivateUsage]
     ("agent chat start", agent_chat._start_turn_impl, "_refuse_data_agent"),  # pyright: ignore[reportPrivateUsage]
+    ("agent chat out of a conversation that read data", agent_chat._refuse_data_agent, "has_read"),  # pyright: ignore[reportPrivateUsage]
+    ("handoff out of a conversation that read data", task_continuity._hand_off_task_impl, "has_read"),  # pyright: ignore[reportPrivateUsage]
     ("agent chat follow-up", agent_chat._continue_turn_impl, "_refuse_data_agent"),  # pyright: ignore[reportPrivateUsage]
     ("agent chat ask starts or follows up", agent_chat._ask_impl, "_start_turn_impl"),  # pyright: ignore[reportPrivateUsage]
     ("hub and session transcripts", sessions.SessionEventOut.from_event, "redact_data_results"),
@@ -95,6 +97,7 @@ def test_every_data_tool_reads_as_its_audience_and_marks_its_result() -> None:
         if name != "data_sources":
             assert "noted" in _names(defs[name]), f"{name} leaves its reads out of memory"
     assert {"data_audience_for", "open_read"} <= _names(defs["reading"])
+    assert "ledgers" in _names(defs["noted"]), "a helper's reads must land on its asker too"
 
 
 def _attrs(node: ast.AST) -> set[str]:
