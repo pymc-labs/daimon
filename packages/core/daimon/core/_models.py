@@ -5984,24 +5984,6 @@ class OpsIssueState(Base):
     at: Mapped[datetime]
 
 
-def _install_erased_account_guards() -> None:
-    """Create the guards (`_erasure_guards`) wherever the schema is built from the models.
-
-    Production gets the same statements from migrations 0142 and 0206; this keeps a schema built
-    by `create_all` (the test schemas) behaving the same.
-    """
-    for table_name in _erasure_guards.GUARDED_TABLES:
-        table = Base.metadata.tables[table_name]
-        for statement in (
-            *_erasure_guards.ALL_FUNCTIONS,
-            _erasure_guards.create_trigger(table_name),
-        ):
-            event.listen(table, "after_create", DDL(statement))
-
-
-_install_erased_account_guards()
-
-
 # ---------- Evals (`daimon.core.evals`) ----------
 # Documents are stored whole as the JSON they arrived as; columns hold what queries need.
 _EvalSuiteFK = Annotated[uuid.UUID, mapped_column(ForeignKey("eval_suites.id", ondelete="CASCADE"))]
