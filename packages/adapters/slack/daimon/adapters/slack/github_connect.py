@@ -18,7 +18,7 @@ from daimon.core.defaults.ma_index import find_agent_by_derived_uuid, list_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.github_connect_cards import connect_attachment, resolve_connect_card
 from daimon.core.github_credentials import build_multifernet, encrypt_token
-from daimon.core.github_panel import can_manage_agent_github
+from daimon.core.github_panel import can_manage_agent_github, connect_root
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.native_admins import AdminCaller
 from daimon.core.roster import load_roster
@@ -76,17 +76,8 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
         if user.get("team_id") != team_id or user.get("is_stranger"):
             await reply("GitHub setup is for members of this workspace.")
             return
-        root = runtime.settings.mcp.app_root_url
-        config = runtime.settings.github_app
-        if root is None or not all(
-            (
-                config.app_id,
-                config.app_slug,
-                config.private_key,
-                config.client_id,
-                config.client_secret,
-            )
-        ):
+        root = connect_root(runtime.settings)
+        if root is None:
             await reply("GitHub setup is unavailable.")
             return
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
