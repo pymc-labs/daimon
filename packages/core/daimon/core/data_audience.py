@@ -14,6 +14,10 @@ is bounded by everyone who will see it: the agent's owner, the asker and every v
 - Access-list rows are read as every person and guest named, and only when the agent
   has an owner, the asker is a known person among the viewers, and at most `CAP` are named.
 - A guest, a person marked redacted, or a `public` cap turns on read-time redaction.
+
+A read no stored record can re-check later (a live answer, SQL) is recorded for memory as an
+audience ref (`audience_ref`): where it was read and who was reached. A memory recalls it only
+there and only while everyone reached is among them; an unlisted audience records none.
 """
 
 from __future__ import annotations
@@ -30,6 +34,10 @@ PUBLIC: Final = "public"
 
 OriginKind = Literal["room", "private", "agent_request", "none"]
 RefusalReason = Literal["no_person", "contained", "agent_request"]
+UNKNOWN_READ: Final = "unknown"
+"""A read no one may recall: who read it could not be told."""
+_AUDIENCE: Final = "audience:"
+_ANYWHERE: Final = "*"
 
 
 def subject(provider: str, workspace: str, kind: str, id_: str) -> str:
@@ -59,7 +67,9 @@ class DataOrigin:
     `viewers` is everyone who can view a room or shared thread; None when unknown or
     more than `CAP` (they cannot all be named). `contained` is a room outsiders may read,
     or a turn held for an outsider. `caller_reads_data` is, for an agent asking a
-    data-reading agent, whether the asking agent reads data in the same room.
+    data-reading agent, whether the asking agent reads data in the same room. `place` is
+    the room or private conversation (`<platform>:<id>`; None outside a chat), `notice` what
+    the answer tells the asker about how its readers were found.
     """
 
     kind: OriginKind
@@ -67,17 +77,23 @@ class DataOrigin:
     viewers: frozenset[Reader] | None = frozenset()
     contained: bool = False
     caller_reads_data: bool = False
+    place: str | None = None
+    notice: str | None = None
 
 
 @dataclass(frozen=True)
 class DataAudience:
-    """Everyone the answer must be readable by. `people` bound the scopes."""
+    """Everyone the answer must be readable by. `people` bound the scopes; `reached` are those
+    of them who see it (all but an agent owner who is not asking or viewing)."""
 
     people: frozenset[uuid.UUID]
     guests: frozenset[str]
     public_only: bool
     list_rows: bool
     redact: bool
+    place: str | None = None
+    notice: str | None = None
+    reached: frozenset[uuid.UUID] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -106,6 +122,7 @@ def data_audience(
     if origin.kind != "private" and origin.viewers:
         readers |= origin.viewers
     people = {r.account_id for r in readers if r.account_id is not None}
+    reached = frozenset(people)
     if agent_owner is not None:
         people.add(agent_owner)
     guests = frozenset(r.subject for r in readers if r.account_id is None)
@@ -124,6 +141,41 @@ def data_audience(
         and counted
         and len(people) + len(guests) <= CAP,
         redact=public_only or bool(people & redacted),
+        place=origin.place,
+        notice=origin.notice,
+        reached=reached,
+    )
+
+
+def audience_ref(audience: DataAudience) -> str:
+    """How a memory records a read by `audience`: its place and its people. An audience capped
+    at `public` (a guest, unlisted viewers) or with no place records `UNKNOWN_READ`."""
+    if audience.public_only or not audience.people or audience.place is None:
+        return UNKNOWN_READ
+    return f"{_AUDIENCE}{','.join(sorted(map(str, audience.people)))}@{audience.place}"
+
+
+def saver_ref(account_id: uuid.UUID) -> str:
+    """How a memory saved with no chat session records its saver: recalled only where the
+    saver is the only person reached, anywhere."""
+    return f"{_AUDIENCE}{account_id}@{_ANYWHERE}"
+
+
+def is_audience_ref(ref: str) -> bool:
+    return ref.startswith(_AUDIENCE)
+
+
+def audience_ref_holds(ref: str, audience: DataAudience) -> bool:
+    """Whether `audience` may recall an `audience_ref` (same place, all its people among those
+    who read it) or a `saver_ref` (the saver is the only person reached)."""
+    ids, _, where = ref.removeprefix(_AUDIENCE).partition("@")
+    readers = set(ids.split(","))
+    present = audience.reached if where == _ANYWHERE else audience.people
+    return (
+        not audience.public_only
+        and where in (_ANYWHERE, audience.place)
+        and bool(present)
+        and {str(p) for p in present} <= readers
     )
 
 

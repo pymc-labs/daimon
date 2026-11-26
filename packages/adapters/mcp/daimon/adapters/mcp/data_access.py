@@ -32,7 +32,9 @@ from daimon.core.data_audience import (
     DataRefusal,
     Reader,
     RefusalReason,
+    audience_ref_holds,
     data_audience,
+    is_audience_ref,
     user_subject,
 )
 from daimon.core.data_reading import reads_data
@@ -70,8 +72,9 @@ _REFUSALS: Final[dict[RefusalReason, str]] = {
     "agent_request": "Only the agent's own conversations can read data sources. Nothing was read.",
 }
 _NO_TEAMS_CONSENT: Final = (
-    "Daimon may not read who is in this conversation, so data sources stay closed here. "
-    "A team owner or chat member grants that consent by updating the app."
+    "Daimon may not read who is in this conversation, so answers hold only what everyone may "
+    "read. A team owner or chat member grants that consent by updating the app, or a tenant "
+    "admin for the whole organisation."
 )
 #: Members a Slack room may page through before its viewers count as unknown.
 _SLACK_PAGE_LIMIT: Final = 4 * CAP
@@ -111,8 +114,9 @@ async def readable_by_audience(
     runtime: McpRuntime, auth: AuthIdentity, ref_sets: Sequence[Sequence[str]]
 ) -> list[bool]:
     """For each set of data items a memory recorded, whether everyone a call by `auth` answers
-    for could read every one (`daimon.core.stores.data_memory`). Closed when unsure: data
-    sources off or down, no audience here, or names hidden from someone."""
+    for could read every one (`daimon.core.stores.data_memory`): each record now, and each
+    audience ref by where and by whom it was read. Closed when unsure: data sources off or
+    down, no audience here, or names hidden from someone."""
     if not ref_sets:
         return []
     settings = runtime.settings
@@ -126,7 +130,14 @@ async def readable_by_audience(
             if r.entities is not None:  # what it saw may name what someone here may not see
                 return [False] * len(ref_sets)
             env = Env.of(settings)
-            return [await reads.readable(conn, schemas, r.ctx, refs, env) for refs in ref_sets]
+            out: list[bool] = []
+            for refs in ref_sets:
+                kept = [ref for ref in refs if not is_audience_ref(ref)]
+                out.append(
+                    all(audience_ref_holds(ref, audience) for ref in refs if is_audience_ref(ref))
+                    and (not kept or await reads.readable(conn, schemas, r.ctx, kept, env))
+                )
+            return out
     except (ToolError, psycopg.Error):
         log.info("data.memory_audience_unknown", tenant_id=str(auth.tenant_id))
         return [False] * len(ref_sets)
@@ -233,7 +244,7 @@ async def _turn_origin(runtime: McpRuntime, auth: AuthIdentity, *, now: datetime
     if turn.sender_foreign or turn.shared_channel:
         return DataOrigin("room", asker, contained=True)
     if is_dm_thread(turn.platform, turn.thread_id) or turn.platform == "web":
-        origin = DataOrigin("private", asker)
+        origin = DataOrigin("private", asker, place=f"{turn.platform}:{turn.thread_id}")
     elif turn.platform not in ("discord", "slack", "teams"):
         return DataOrigin("none")
     else:
@@ -252,8 +263,9 @@ async def _turn_origin(runtime: McpRuntime, auth: AuthIdentity, *, now: datetime
     # From a DM (or web chat) the helper answers the asker alone, with their own access.
     viewers = origin.viewers if origin.kind == "room" else frozenset({asker})
     return DataOrigin(
-        "agent_request", asker, viewers, origin.contained, caller_reads_data=caller_reads
-    )
+        "agent_request", asker, viewers, origin.contained, caller_reads, origin.place,
+        origin.notice,
+    )  # fmt: skip
 
 
 async def _room(
@@ -268,6 +280,8 @@ async def _room(
     """A room or thread: contained when outsiders may read it; its viewers, or None."""
     platform = cast(str, auth.platform)
     workspace = auth.external_id or ""
+    place = f"{platform}:{channel_id}"
+    notice = None
     async with runtime.session_factory() as session:
         audience = await channel_has_outsiders(
             session,
@@ -300,13 +314,12 @@ async def _room(
                     channel_id=channel_id,
                     source="platform",
                 )
-        if found == "no_consent":
-            raise ToolError(_NO_TEAMS_CONSENT)
-        if isinstance(found, str):
             return DataOrigin("room", asker, contained=True)
-        users = found
+        # Members that cannot be read cap the answer at public (unknown viewers).
+        notice = _NO_TEAMS_CONSENT if found == "no_consent" else None
+        users = None if isinstance(found, str) else found
     if users is None:
-        return DataOrigin("room", asker, None)
+        return DataOrigin("room", asker, None, place=place, notice=notice)
     async with runtime.session_factory() as session:
         linked = await accounts_of(
             session, tenant_id=auth.tenant_id, platform=platform, external_ids=users
@@ -314,11 +327,11 @@ async def _room(
     if platform == "slack" and auth.external_id is not None:
         users = await _slack_people(runtime, auth.external_id, users, linked)
         if users is None:
-            return DataOrigin("room", asker, None)
+            return DataOrigin("room", asker, None, place=place)
     viewers = frozenset(
         Reader(user_subject(platform, workspace, user), linked.get(user)) for user in users
     )
-    return DataOrigin("room", asker, viewers if len(viewers) <= CAP else None)
+    return DataOrigin("room", asker, viewers if len(viewers) <= CAP else None, place=place)
 
 
 async def _slack_viewers(

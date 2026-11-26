@@ -1,7 +1,8 @@
 """What a chat session read from data sources, and the data a repository memory records.
 
 `session_data_reads` holds each data item a chat session read; `repo_memory.data_refs` the
-items read before a memory was saved (None: none). Additive only.
+items read before a memory was saved (None: none). Credential forms gain the `data_source`
+kind. Additive only.
 
 downgrade: destructive
 """
@@ -14,6 +15,16 @@ revision: str = "0244_data_memory"
 down_revision: str | None = "0243_data_redaction"
 branch_labels: str | None = None
 depends_on: str | None = None
+
+_KINDS = "'env', 'env_file', 'mcp', 'mcp_oauth', 'repo', 'skill_repo', 'watch_credential'"
+
+
+def _kinds(kinds: str) -> None:
+    op.execute("ALTER TABLE credential_requests DROP CONSTRAINT ck_credential_requests_kind")
+    op.execute(
+        "ALTER TABLE credential_requests ADD CONSTRAINT ck_credential_requests_kind "
+        f"CHECK (kind IN ({kinds}))"
+    )
 
 
 def upgrade() -> None:
@@ -34,8 +45,11 @@ def upgrade() -> None:
         ),
     )
     op.add_column("repo_memory", sa.Column("data_refs", postgresql.ARRAY(sa.Text()), nullable=True))
+    _kinds(f"{_KINDS}, 'data_source'")
 
 
 def downgrade() -> None:
+    op.execute("DELETE FROM credential_requests WHERE kind = 'data_source'")
+    _kinds(_KINDS)
     op.drop_column("repo_memory", "data_refs")
     op.drop_table("session_data_reads")

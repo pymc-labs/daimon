@@ -176,9 +176,10 @@ from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.mutation_gate import send_prefix
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import finish_with_error, observe_turn, record_refusal
-from daimon.core.turn.prepare import ContinuityOutcome, bind_session
+from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn, bind_session
 from daimon.core.turn.protection import ProtectionState, protection_state
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
+from daimon.core.turn.shown_model import shown_model
 from daimon.core.turn.slots import (
     QUEUE_TIMED_OUT_TEXT,
     holding,
@@ -196,7 +197,11 @@ from daimon.core.turn.thread_queue import (
     release_thread,
 )
 from daimon.core.turn_hold import RequesterOrg
-from daimon.core.turn_keys import list_mounted_key_names, render_keys_element
+from daimon.core.turn_keys import (
+    answering_env_sha256,
+    list_mounted_key_names,
+    render_keys_element,
+)
 from daimon.core.turn_origin import (
     HandoffNotice,
     build_handoff_notice,
@@ -1722,7 +1727,7 @@ class TeamsApp:
                 direct_chat=inbound.kind == "dm",
                 foreign=inbound.is_foreign,
                 agent_name=admission.display_name(admission.agent.name),
-                model_id=admission.agent.model.id,
+                model_id=shown_model(admission).id,
                 markup=self.runtime.turn_deps.markup,
                 sessionmaker=self.runtime.sessionmaker,
                 budget_channel_id=admission.budget_channel_id,
@@ -2018,7 +2023,9 @@ class TeamsApp:
                 controls,
                 inbound,
                 is_admin=admission.is_admin,
-                keys=render_keys_element(await self._key_names(tenant_id, inbound, admission)),
+                keys=render_keys_element(
+                    await self._key_names(tenant_id, inbound, admission, prepared)
+                ),
                 prefix=attachments.prefix,
                 channel_files=await self._files_reachable(inbound),
                 own_posts=await self._own_posts(
@@ -2174,7 +2181,11 @@ class TeamsApp:
         )
 
     async def _key_names(
-        self, tenant_id: uuid.UUID, inbound: TeamsInbound, admission: Admission
+        self,
+        tenant_id: uuid.UUID,
+        inbound: TeamsInbound,
+        admission: Admission,
+        prepared: PreparedTurn,
     ) -> tuple[str, ...]:
         """This agent's stored key names while the mounted `.env` still matches them."""
         async with self.runtime.sessionmaker() as session:
@@ -2185,14 +2196,13 @@ class TeamsApp:
                 thread_id=inbound.thread_id,
                 account_id=admission.account_id,
             )
-            config = None if live is None else live.effective_config
             return await list_mounted_key_names(
                 session,
                 tenant_id=tenant_id,
                 agent_id=derive_agent_uuid(
                     tenant_id=tenant_id, ma_agent_id=str(admission.agent.id)
                 ),
-                env_sha256=None if config is None else config.env_sha256,
+                env_sha256=answering_env_sha256(prepared, live),
             )
 
     def _release(self, key: str) -> None:

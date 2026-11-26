@@ -9,6 +9,7 @@ from typing import Any, Final, cast
 from anthropic.types.beta import BetaManagedAgentsAgent
 from anthropic.types.beta.agent_create_params import Tool
 from daimon.core.capability_tools import CAPABILITY_KEYS
+from daimon.core.data_tools import DATA_SETUP_TOOLS, DATA_SOURCES
 from daimon.core.features.registry import BUILTIN_TOOLS, limit_int
 from daimon.core.features.snapshot import FeatureSnapshot
 from daimon.core.features.tool_gate import gated_tools, hides_tools
@@ -153,6 +154,8 @@ class SessionToolset:
     are not offered. Platform, backend and dependency gaps at the default tier hide nothing."""
     data_reads: bool = False
     """`data_reads` is On: the sandbox's bash and web_fetch ask (`with_sandbox_egress_asking`)."""
+    data_setup: bool = False
+    """Data sources are on with no source yet: `DATA_SETUP_TOOLS` stay offered to add one."""
 
     @classmethod
     def of(
@@ -177,6 +180,7 @@ class SessionToolset:
         memory = features.features.get("repo_memory")
         env = features.features.get("agent_env_file")
         web = features.features.get("web_awareness")
+        data = features.features.get(DATA_SOURCES)
         return cls(
             daimon_tools=not isolated,
             builtins=builtins,
@@ -189,6 +193,7 @@ class SessionToolset:
                 for key in CAPABILITY_KEYS
                 if (cap := features.features.get(key)) is not None and hides_tools(cap)
             ),
+            data_setup=data is not None and data.unavailable == "no_source",
         )
 
     @property
@@ -211,7 +216,8 @@ class SessionToolset:
         """Daimon tools this place turns off on the session's `daimon-mcp` toolset."""
         memory = () if self.repo_memory else ("repo_memory",)
         web = () if self.web_app else ("web_awareness",)
-        return gated_tools((*self.off_capabilities, *memory, *web))
+        hidden = gated_tools((*self.off_capabilities, *memory, *web))
+        return hidden - DATA_SETUP_TOOLS if self.data_setup else hidden
 
     def apply_builtins(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """`tools` with the overrides applied; turning off a tool the agent lacks adds nothing."""

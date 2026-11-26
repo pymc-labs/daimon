@@ -13,7 +13,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from daimon.adapters.mcp.tools import _data_admin, data_admin, data_connect
+from cryptography.fernet import Fernet, MultiFernet
+from daimon.adapters.mcp.tools import _data_admin, _private_values, data_admin, data_connect
 from daimon.core.web_admin import WebAdmin
 from daimon.data import identity, manage, redaction
 from daimon.data.identity import NotAllowed
@@ -22,7 +23,8 @@ from fastmcp.exceptions import ToolError
 
 from .parity_fakes import fake_runtime, make_auth
 
-TENANT, ADMIN, MAYA = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+TENANT, ADMIN, MAYA, SOURCE = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+KEYS = MultiFernet([Fernet(Fernet.generate_key())])
 # What every change tool is called with, and the `daimon.data` call it must end in.
 CHANGES: list[tuple[str, dict[str, Any], Any, str]] = [
     ("change_data_source", {"action": "pause", "source_id": str(uuid.uuid4())}, manage, "act"),
@@ -79,6 +81,7 @@ class Rig:
         self.card_ok = True
         self.calls: list[tuple[str, list[Any]]] = []
         self.details = "direct_message"
+        self.auth = make_auth()
         mp = monkeypatch
 
         async def on(*_: object) -> None:
@@ -106,7 +109,7 @@ class Rig:
         mp.setattr(_data_admin, "web_actor_of", actor)
         mp.setattr(data_admin, "require_card", card)
         mp.setattr(data_admin, "names_of", names)
-        mp.setattr(data_admin, "private_details", details)
+        mp.setattr(_private_values, "private_details", details)
         mp.setattr(data_admin, "store", store)
         mp.setattr(data_admin, "schemas_of", _schemas)
         mp.setattr(data_admin, "keys_of", _keys)
@@ -127,8 +130,9 @@ class Rig:
         return call
 
     async def call(self, tool: str, **args: Any) -> Any:
-        tools = await _tools(data_admin.register_data_admin_tools, fake_runtime())
-        return await tools[tool].fn(ctx=_Ctx(make_auth()), **args)
+        runtime = SimpleNamespace(**vars(fake_runtime()), fernet=KEYS)
+        tools = await _tools(data_admin.register_data_admin_tools, runtime)
+        return await tools[tool].fn(ctx=_Ctx(self.auth), **args)
 
 
 @pytest.fixture
@@ -175,17 +179,37 @@ async def test_a_change_runs_only_on_the_card(
         )
 
 
-async def test_a_source_that_needs_a_credential_is_added_on_the_web(rig: Rig) -> None:
-    with pytest.raises(ToolError, match="web app"):
+async def test_a_source_credential_goes_only_through_the_askers_private_form(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A credential in the tool's arguments is refused; a source that needs one is made paused
+    and its form posted, and set_credential posts the form for an existing source."""
+    with pytest.raises(ToolError, match="Never pass a credential"):
         await rig.call(
-            "change_data_source",
-            action="create",
-            kind="postgres",
-            name="Orders",
-            settings={"dsn": "postgresql://u:p@db.example.com/app"},
-            origin_context_id="o",
-        )
+            "change_data_source", action="create", kind="postgres", name="Orders",
+            settings={"dsn": "postgresql://u:p@db.example.com/app"}, origin_context_id="o",
+        )  # fmt: skip
     assert not rig.calls, "a credential never goes through chat"
+    posted: list[str] = []
+
+    async def form(*_: object, name: str, **__: object) -> Any:
+        posted.append(name)
+        return SimpleNamespace(instruction="Point at the form.")
+
+    async def listed(*_: object) -> list[Any]:
+        return [SimpleNamespace(id=SOURCE, name="Orders", kind="postgres")]
+
+    monkeypatch.setattr(data_admin, "request_data_source_credential", form)
+    monkeypatch.setattr(manage, "sources", listed)
+    made = await rig.call(
+        "change_data_source", action="create", kind="postgres", name="Orders",
+        origin_context_id="o",
+    )  # fmt: skip
+    assert rig.calls[0][0] == "create_source" and True in rig.calls[0][1], "made credential_later"
+    again = await rig.call(
+        "change_data_source", action="set_credential", source_id=str(SOURCE), origin_context_id="o"
+    )
+    assert posted == ["Orders", "Orders"] and made["credential_form"] == again["credential_form"]
 
 
 async def test_a_refusal_of_the_store_reads_as_its_message(
@@ -215,10 +239,12 @@ async def test_access_lists_holders_by_name(rig: Rig, monkeypatch: pytest.Monkey
     assert "data_admins" not in out, "workspace admins manage data access"
 
 
-@pytest.mark.parametrize(("details", "email"), [("direct_message", None), ("shown", "m@x.example")])
+@pytest.mark.parametrize("details", ["direct_message", "shown"])
 async def test_emails_show_only_in_a_direct_message(
-    rig: Rig, monkeypatch: pytest.MonkeyPatch, details: str, email: str | None
+    rig: Rig, monkeypatch: pytest.MonkeyPatch, details: str
 ) -> None:
+    """In a room an email is a placeholder that opens only for the admin who listed it."""
+
     async def found(*_: object, **__: object) -> list[manage.IdentityView]:
         return [
             manage.IdentityView(
@@ -232,8 +258,15 @@ async def test_emails_show_only_in_a_direct_message(
     monkeypatch.setattr(manage, "identities", found)
     monkeypatch.setattr(identity, "list_candidates", none)
     rig.details = details
-    out = await rig.call("list_data_links")
-    assert out["accounts"][0]["email"] == email, f"emails with {details}"
+    email = (await rig.call("list_data_links"))["accounts"][0]["email"]
+    if details == "shown":
+        assert email == "m@x.example", "a direct message shows it as it is"
+        return
+    assert "m@x.example" not in email
+    opened, _ = _private_values.open_placeholders(f"Mail {email}", rig.auth, KEYS)
+    assert opened == "Mail m@x.example", "it opens for the admin it was fetched for"
+    other, n = _private_values.open_placeholders(email, make_auth(), KEYS)
+    assert (other, n) == (_private_values.WITHHELD, 0), "and for no one else"
 
 
 # ---- a person's own accounts -------------------------------------------------------------
@@ -252,8 +285,11 @@ async def test_a_sign_in_goes_to_direct_messages_not_the_answer(
     async def person(*_: object) -> WebAdmin:
         return WebAdmin(tenant_id=TENANT, account_id=ADMIN, role="member")
 
-    async def dm(_rt: object, _auth: object, text: str) -> None:
-        sent.append(text)
+    async def dm(_rt: object, _auth: object, *, recipient_id: str, content: str) -> None:
+        sent.append(f"{recipient_id}: {content}")
+
+    async def in_a_room(*_: object) -> str:
+        return "direct_message"
 
     class Started:
         flow, source, url, user_code = "device", "Shared drive", "https://x.example/d", "WXYZ-1"
@@ -273,13 +309,20 @@ async def test_a_sign_in_goes_to_direct_messages_not_the_answer(
     mp = monkeypatch
     mp.setattr(data_connect, "require_card", card)
     mp.setattr(data_connect, "person", person)
-    mp.setattr(data_connect, "send_privately", dm)
+    mp.setattr(data_connect, "send_direct_message_impl", dm)
+    mp.setattr(_private_values, "private_details", in_a_room)
     mp.setattr(data_connect, "store", store)
     mp.setattr(data_connect, "_connector", _connector)
-    tools = await _tools(data_connect.register_data_connect_tools, SimpleNamespace())
+    tools = await _tools(data_connect.register_data_connect_tools, SimpleNamespace(fernet=KEYS))
+    asker = make_auth(admin=False)
     out = await tools["connect_my_data"].fn(
-        ctx=_Ctx(make_auth(admin=False)), source_id=str(uuid.uuid4()), origin_context_id="o"
+        ctx=_Ctx(asker), source_id=str(uuid.uuid4()), origin_context_id="o"
     )
     assert cards == ["connect_my_data"], "starting a sign-in asks for the card"
-    assert "WXYZ-1" in sent[0] and "WXYZ-1" not in str(out), "the code reaches only their DMs"
-    assert out["pending_id"] == str(pending)
+    assert "WXYZ-1" not in str(out) and out["pending_id"] == str(pending), "a room sees no code"
+    send = tools["send_private_details"].fn
+    note = f"Enter {out['code']} at {out['url']}"
+    with pytest.raises(ToolError, match="none of your private details"):
+        await send(ctx=_Ctx(make_auth(admin=False)), message=note)
+    assert await send(ctx=_Ctx(asker), message=note) == {"sent": "direct_message", "opened": 2}
+    assert sent == ["u1: Enter WXYZ-1 at https://x.example/d"], "only the asker's DM opens it"

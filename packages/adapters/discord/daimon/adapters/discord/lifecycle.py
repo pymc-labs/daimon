@@ -62,13 +62,13 @@ from daimon.core.outbound.opt_out import tag_opt_outs
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
 from daimon.core.provider_turn_cost import LATE_TURN_COSTS
 from daimon.core.tenant_balance import debit_amount
-from daimon.core.thread_models import model_label
 from daimon.core.turn.card_state import CardState as EmbedState
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.lifecycle import Acknowledgment, InterruptSource, ReconnectReason
 from daimon.core.turn.notices import RefusalNouns, ended_label, render_termination_notice
 from daimon.core.turn.output import OutputGate
 from daimon.core.turn.provider_events import ProviderDraft
+from daimon.core.turn.shown_model import card_label
 from daimon.core.turn.state import (
     ToolUseBlock,
     TurnState,
@@ -477,7 +477,7 @@ class DiscordTurnLifecycle(OutputGate):
             phase=TurnPhase.THINKING,
             agent_name=agent_name,
             started_at=self._clock(),
-            model_label=model_label(model_id) if model_id else "",
+            model_label=card_label(model_id) if model_id else "",
             timed=card_timer,
         )
         # Seeded only by dead-session recovery, which hands over the message the

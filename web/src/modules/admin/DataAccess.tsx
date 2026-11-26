@@ -288,7 +288,7 @@ function SetPanel({ name }: { name: string }) {
         <div>
           <PanelHead title={info.name} subtitle={<SetState s={info} />} actions={info.pending && info.pin_sha && <Button size="sm" disabled={approve.isPending} onClick={() => approve.mutate(info.pin_sha!)}>Approve</Button>} />
           <PanelSection>
-            <Facts rows={[["Repository", info.repo], ["Path", info.path], ["Ref", info.ref], ["Approved", info.approved_sha?.slice(0, 10)], ["Waiting", info.pending ? info.pin_sha?.slice(0, 10) : null], ["Error", info.error]]} />
+            <Facts rows={[["Repository", info.repo], ["Path", info.path], ["Ref", info.ref], ["Approved", info.approved_sha?.slice(0, 10)], ["Waiting", info.pending ? info.pin_sha?.slice(0, 10) : null], ["SQL and file results", rules?.at === "answer" ? "Redacted best effort" : null], ["Error", info.error]]} />
           </PanelSection>
           {count(rules) && <PanelSection title="Rules"><Facts rows={count(rules)!.map(([k, n]) => [k, String(n)])} /></PanelSection>}
           {count(pending_rules) && <PanelSection title="Waiting rules"><Facts rows={count(pending_rules)!.map(([k, n]) => [k, String(n)])} /></PanelSection>}

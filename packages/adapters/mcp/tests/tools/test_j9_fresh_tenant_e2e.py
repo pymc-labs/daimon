@@ -51,8 +51,8 @@ def test_j9_the_channel_backends_switch_stops_backend_selection(no_flags):
     assert not backend_selection_enabled(settings.turn)
 
 
-def test_j9_a_new_tenant_is_on_anthropic_and_keyed_providers_have_code_default_rows(monkeypatch):
-    """No rows: Anthropic only until an admin opts in; each keyed provider has code-default rows."""
+def test_j9_a_new_tenant_follows_the_keys_and_keyed_providers_have_code_default_rows(monkeypatch):
+    """No rows: Anthropic alone until a provider is keyed, then it is on; each has code-default rows."""
     from daimon.core.turn.runtime_defaults import default_rows
 
     tenant = str(uuid.uuid4())
@@ -63,7 +63,7 @@ def test_j9_a_new_tenant_is_on_anthropic_and_keyed_providers_have_code_default_r
     assert default_rows(tenant) == []
     for provider in ("openai", "gemini"):
         monkeypatch.setenv(DEFAULT_KEY_ENV[provider], "offline")
-    assert default_enabled_backends() == ("anthropic",), "keys never enable a provider"
+    assert default_enabled_backends() == ("anthropic", "openai", "gemini"), "a key enables it"
     rows = default_rows(tenant)
     assert {row["profile"] for row in rows} == {"gemini.inline_reuse"}
     assert all(row["tenant_id"] == tenant for row in rows)

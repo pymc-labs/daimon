@@ -56,6 +56,7 @@ from daimon.core.credential_requests import (
     split_skill_repo_target,
 )
 from daimon.core.credential_submit import (
+    apply_data_source_submit,
     begin_oauth_submit,
     consume_credential_submit,
     credential_card_edit,
@@ -98,6 +99,7 @@ from daimon.core.operation_policy import (
     TargetFacts,
     decide_operation,
 )
+from daimon.core.ports.data_credentials import SourceCredentialRefused
 from daimon.core.posted_controls import (
     ALREADY_USED_MESSAGE,
     NO_LONGER_VALID_MESSAGE,
@@ -149,7 +151,7 @@ SUBMIT = "credential_submit"
 Dispatch = Callable[[uuid.UUID, str, str | None], Awaitable[None]]
 Refusal = Literal["invalid", "wrong_org", "wrong_requester", "expired", "used"]
 
-_FORM_KINDS = ("env", "env_file", "mcp", "repo", "skill_repo")
+_FORM_KINDS = ("env", "env_file", "mcp", "repo", "skill_repo", "data_source")
 _REPO_KINDS = ("repo", "skill_repo")
 #: Slack's cap: a GitHub token is short.
 _MAX_GITHUB_TOKEN_CHARS = 255
@@ -207,7 +209,7 @@ def refusal(
 
 def _secret_input(kind: str) -> TextInput:
     """The one input a kind collects, sized as on Slack."""
-    if kind == "env":
+    if kind in ("env", "data_source"):
         return TextInput(
             id="secret",
             label="Value",
@@ -243,6 +245,8 @@ def _title(row: CredentialRequestRow) -> str:
         return f"{row.target} for {row.target_name or 'the agent'}"
     if row.kind == "mcp":
         return f"{row.target} token"
+    if row.kind == "data_source":
+        return f"Credential for {row.target}"
     return "Keys from a file" if row.kind == "env_file" else "Your GitHub token"
 
 
@@ -426,6 +430,8 @@ class TeamsCredentialRequests:
             return credential_form(row, f"That is too big. Max {MAX_ENV_FILE_BYTES // 1024} KB.")
         if row.kind != "env_file" and len(secret.encode()) > MAX_SECRET_VALUE_BYTES:
             return credential_form(row, f"Value is too large. Max {MAX_SECRET_VALUE_BYTES} bytes.")
+        if row.kind == "data_source":
+            return await self._save_data_source(row, secret.strip(), activity.service_url)
         mcp = self._runtime.settings.mcp
         if row.kind == "mcp" and (mcp.public_url is None or mcp.jwt_secret is None):
             return dialog_message(_UNCONFIGURED)
@@ -500,6 +506,29 @@ class TeamsCredentialRequests:
                 row, agent, secret.strip(), is_admin=is_admin, service_url=url
             )
         self._spawn(self._background(work, kind=row.kind), name="teams.cred.save")
+        return TaskModuleResponse()
+
+    async def _save_data_source(
+        self, row: CredentialRequestRow, secret: str, service_url: str | None
+    ) -> TaskModuleResponse:
+        """Seal the value onto the row's data source as the requester; the dialog says how."""
+        try:
+            consumed = await apply_data_source_submit(
+                self._runtime.sessionmaker, self._runtime.settings, row=row, value=secret,
+                now=datetime.now(UTC),
+            )  # fmt: skip
+        except SourceCredentialRefused as refused:
+            return dialog_message(str(refused))
+        except Exception as err:
+            log.error("teams.credential.save_failed", kind=row.kind, err_type=type(err).__name__)
+            return dialog_message("Something went wrong. Nothing was saved. Try again.")
+        if consumed is None:
+            return dialog_message(NO_LONGER_VALID_MESSAGE)
+        done = ConfigurationChange(
+            target_name=consumed.target_name or "Daimon", kind="data_source_credential",
+            availability="saved", detail=consumed.target,
+        )  # fmt: skip
+        self._spawn(self._edit(consumed, "applied", service_url, outcome=done), name="teams.cred")
         return TaskModuleResponse()
 
     async def _repo_refusal(

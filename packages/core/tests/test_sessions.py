@@ -2573,6 +2573,7 @@ async def test_source_projection_requires_app_vault_only_for_a_live_grant(
     db_preflight, db_committing_engine
 ):
     from daimon.core._models import TenantGitHubRepo
+    from daimon.core.caller_resources import CALLER_RESOURCES_ID
     from daimon.core.channel_backend import load_backend_agent
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.mux_backend import resource_scope
@@ -2595,7 +2596,7 @@ async def test_source_projection_requires_app_vault_only_for_a_live_grant(
             client, sessions, tenant_id=tenant.id, agent_name="source", actual_agent=agent
         )
 
-    async def project():
+    async def project(**extra: Any):
         return await project_session_resources(
             source,
             agent=agent,
@@ -2607,6 +2608,7 @@ async def test_source_projection_requires_app_vault_only_for_a_live_grant(
             memory_read_only=False,
             resource_scope=scope,
             tool_safety=OPEN_TOOL_SAFETY,
+            **extra,
         )
 
     empty = await project()
@@ -2643,6 +2645,13 @@ async def test_source_projection_requires_app_vault_only_for_a_live_grant(
     assert [repo.repository_url for repo in granted.repository_sources] == [
         "https://github.com/example/widgets"
     ]
+    # Natively the requester's GitHub access is an opaque carry; a provider host's relay
+    # reaches GitHub on the turn's own credential instead (`github_turn_router`).
+    app = {"agent_github_app": GithubAppSettings()}
+    native = await project(**app)
+    provider = await project(**app, caller_resources_on_credential=True)
+    assert any(r.id == CALLER_RESOURCES_ID for r in native.resource_requirements)
+    assert not any(r.id == CALLER_RESOURCES_ID for r in provider.resource_requirements)
 
 
 @pytest.mark.parametrize(

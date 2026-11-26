@@ -89,7 +89,7 @@ from daimon.core.turn.prepare import PreparedTurn, bind_session
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.termination import TerminationReason
-from daimon.core.turn.unattended import dm_routine_sandbox
+from daimon.core.turn.unattended import dm_routine_sandbox, is_provider_turn
 from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_origin import render_turn_origin, turn_origin
 from mux.profiles import MANAGED_AGENTS
@@ -1305,10 +1305,15 @@ class DmRoutineReply:
     text: str
     session_id: str
     producing_agent_id: str
+    #: False for an OpenAI or Gemini routine, whose session has no Anthropic files.
+    on_managed_agents: bool = True
+    #: That other provider's session outputs, staged for delivery while it is live.
+    outputs: OutputRuntime | None = None
 
 
-#: Recorded on the routine when its agent runs on another provider.
-MANAGED_AGENTS_ONLY = "DM routines need a Managed Agents agent"
+#: Recorded on a watch whose agent runs on another provider, or a fire on the
+#: self-hosted harness.
+MANAGED_AGENTS_ONLY = "This needs a Managed Agents agent"
 
 
 async def run_dm_routine(
@@ -1327,7 +1332,7 @@ async def run_dm_routine(
 
     Ordinary cold-DM admission and session (personal memory included), in a new
     scope with no history. Every session is gated, so a call needing Approve is
-    refused; only Managed Agents agents run (`MANAGED_AGENTS_ONLY`). `source` is
+    refused; it runs on Managed Agents, OpenAI or Gemini. `source` is
     rechecked for a seal whenever the session is built; `budget_channel_id` only
     bills. `requester_org` is the owner's standing at this fire, so an owner who lost the
     internal role starts no private turn. Nothing is posted here: the caller queues the
@@ -1363,8 +1368,8 @@ async def run_dm_watch(
 ) -> DmRoutineReply:
     """Run a DM watch's fire as a fresh private DM turn of its owner, under watch posture.
 
-    The same cold-DM admission, `dm_enabled` and Managed-Agents-only rules as a DM
-    routine, serialised per owner the same way. The turn reads and reports only
+    The same cold-DM admission and `dm_enabled` rules as a DM routine, on Managed
+    Agents only, serialised per owner the same way. The turn reads and reports only
     (`watch_turn.watch_posture`), never routine posture. The fresh session is
     recorded on the firing before anything is sent, and each send checks it.
     `source` is the DM conversation's own source (`dm_watch_source`), None for a cold
@@ -1403,8 +1408,8 @@ async def run_dm_timer(
 ) -> DmRoutineReply:
     """Run a due DM timer as a fresh private DM turn of its owner.
 
-    The same admission and Managed-Agents-only rules as a DM routine, in a new
-    scope with no history. Nothing is posted here. While the owner has a DM turn
+    The same admission and provider rules as a DM routine, without its sandbox
+    opt-in, in a new scope with no history. Nothing is posted here. While the owner has a DM turn
     running it raises `SessionBusyError` so the timer is offered again later.
     """
     if row.reason != "timer":
@@ -1481,11 +1486,25 @@ async def run_channel_timer(
             raise DirectMessageAccessRevoked(
                 "invoker_not_allowed", message="The timer's agent changed."
             )
+        provider = is_provider_turn(admission)
         if (
             admission.backend_revision is not None
             and admission.backend_revision.profile != MANAGED_AGENTS.profile_id
+            and not provider
         ):
             raise DirectMessageAccessRevoked(MANAGED_AGENTS_ONLY, message=MANAGED_AGENTS_ONLY)
+        if provider:
+            from daimon.core.provider_routine import TIMER_NEEDS_NO_SHELL, with_routine_sandbox
+
+            # A timer has no sandbox opt-in: no built-ins, and OpenAI refuses.
+            admission = await with_routine_sandbox(
+                deps,
+                admission,
+                None,
+                tenant_id=row.tenant_id,
+                platform="discord",
+                refusal=TIMER_NEEDS_NO_SHELL,
+            )
         deadline = turn_deadline(now=now, ceiling_s=admission.turn_ceiling_s)
         prepared = await bind_session(
             deps,
@@ -1500,7 +1519,7 @@ async def run_channel_timer(
         )
     except (BoundAgentUnavailable, AccessPolicyUnreadable, MAResolverMissError) as error:
         raise _revoked(error) from error
-    if prepared.backend is not None:
+    if (prepared.backend is not None) != provider:
         raise DirectMessageAccessRevoked(MANAGED_AGENTS_ONLY, message=MANAGED_AGENTS_ONLY)
     return await _run_unattended_turn(
         deps,
@@ -1557,11 +1576,30 @@ async def _run_dm_fire(
                 dm_agent_name=agent_name,
                 cold_dm=True,
             )
+            # A routine or timer also runs on OpenAI or Gemini, gated at the host
+            # (`run_prepared_turn`); a watch's read-only posture needs Managed Agents.
+            provider = is_provider_turn(admission) and watch_row is None
             if (
                 admission.backend_revision is not None
                 and admission.backend_revision.profile != MANAGED_AGENTS.profile_id
+                and not provider
             ):
                 raise DirectMessageAccessRevoked(MANAGED_AGENTS_ONLY, message=MANAGED_AGENTS_ONLY)
+            if provider:
+                from daimon.core.provider_routine import (
+                    SHELL_NEEDS_SANDBOX,
+                    TIMER_NEEDS_NO_SHELL,
+                    with_routine_sandbox,
+                )
+
+                admission = await with_routine_sandbox(
+                    deps,
+                    admission,
+                    dm_routine_sandbox.get(),
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    refusal=SHELL_NEEDS_SANDBOX if timer_row is None else TIMER_NEEDS_NO_SHELL,
+                )
             if admission.grant is None:
                 raise DirectMessageAccessRevoked(
                     "authorization_missing", message="Private authority unavailable."
@@ -1572,7 +1610,7 @@ async def _run_dm_fire(
                 # Re-asked by `reauthorize` right before the session is built.
                 grant=replace(admission.grant, dm_source=source, act_for_creator=True),
             )
-            if deps.backend is not None:
+            if deps.backend is not None and not provider:
                 from mux.drivers.anthropic import (
                     SESSION_READS_NAMESPACE,
                     SessionReads,
@@ -1607,7 +1645,7 @@ async def _run_dm_fire(
         except (BoundAgentUnavailable, AccessPolicyUnreadable, MAResolverMissError) as error:
             raise _revoked(error) from error
         grant = prepared.admission.grant
-        if prepared.backend is not None or grant is None:
+        if grant is None or (prepared.backend is not None) != provider:
             raise DirectMessageAccessRevoked(MANAGED_AGENTS_ONLY, message=MANAGED_AGENTS_ONLY)
         if timer_row is not None and prepared.admission.agent.id != timer_row.target_ma_agent_id:
             raise DirectMessageAccessRevoked(
@@ -1706,6 +1744,8 @@ async def _run_unattended_turn(
         text=done.text,
         session_id=done.session_id,
         producing_agent_id=prepared.admission.agent.id,
+        on_managed_agents=prepared.backend is None,
+        outputs=None if prepared.backend is None else done.outputs,
     )
 
 

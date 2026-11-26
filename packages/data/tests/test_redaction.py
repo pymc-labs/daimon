@@ -143,8 +143,8 @@ def test_a_set_applies_every_rule_at_storage_or_at_answer_time() -> None:
         {"source_id": str(other), "t": text},
     ], "only its own source"
     assert shown.show(text, other) == text and shown.show({"t": text})["t"] != text
-    assert shown.redacted and shown.names_hidden("Acme"), "sql, files and naming queries refused"
-    assert not Reading(ctx, None).redacted, "no answer set: nothing refused"
+    assert shown.names_hidden("Acme"), "a query naming a ruled term finds nothing"
+    assert not shown.redacted, "answer rules alone refuse no sql or file: they redact them"
 
 
 async def test_changed_rules_apply_to_answers_until_their_source_syncs_again(

@@ -51,6 +51,7 @@ from daimon.core.caller_resources import (
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.credential_env import (
+    ENV_REQUIREMENT_PREFIX,
     github_repo_map_sha256,
     github_repo_script_sha256,
     session_env_key,
@@ -513,7 +514,7 @@ async def project_session_resources(
     generations: list[tuple[str, dt.datetime]] = []
     for key, updated in keys:
         if session_env_key(key, exclude_github=app_mode):
-            identity = f"agent-env:{tenant_id}:{agent_uuid}:{key}"
+            identity = f"{ENV_REQUIREMENT_PREFIX}{tenant_id}:{agent_uuid}:{key}"
             requirements.append(
                 ResourceBinding(
                     id=identity, kind="credential", target_path=".env", credential_ref=identity
@@ -558,7 +559,13 @@ async def project_session_resources(
         or carried_natively
         or app_session_unmapped
         or (requester_is_headless and app_mode)
-        or (app_mode and agent_github_app is not None and repos)
+        # A provider host reaches GitHub through the relay, on the turn's own credential.
+        or (
+            app_mode
+            and agent_github_app is not None
+            and repos
+            and not caller_resources_on_credential
+        )
     ):
         # Opaque carry resources and private credentials are not absent obligations.
         requirements.append(ResourceBinding(id=CALLER_RESOURCES_ID, kind="native"))

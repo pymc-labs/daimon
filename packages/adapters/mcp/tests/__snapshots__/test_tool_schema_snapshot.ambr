@@ -115,8 +115,8 @@
         'description': '''
           Read a file attached to a record (`index` from `data_get`'s files), fetched now from
           its source with the source's permissions and never stored. Text files return their
-          text; other files only their type and size. Refused when names are hidden from someone
-          the answer is for.
+          text, through the source's redaction rules best effort; other files only their type
+          and size. Refused when names are hidden from someone the answer is for.
           <blank line>
           `workspace`: the chat space to use, by name or id as `list_daimons` shows them; leave it out when you reach only one.
         ''',
@@ -301,8 +301,9 @@
       'data_sql': dict({
         'description': '''
           Read-only SQL over the data views and datasets (`data_sources` lists them), by plain
-          names. One statement, at most 500 rows, five seconds. Refused when names are hidden
-          from someone the answer is for.
+          names. One statement, at most 500 rows, five seconds. Values go through every
+          source's redaction rules best effort. Refused when names are hidden from someone the
+          answer is for.
           <blank line>
           `workspace`: the chat space to use, by name or id as `list_daimons` shows them; leave it out when you reach only one.
         ''',
@@ -1445,10 +1446,12 @@
     }),
     'change_data_source': dict({
       'description': '''
-        Add a data source (create: kind, name, settings by the kind's fields) or pause,
-        resume, retire, publish, unpublish or sync one (source_id). Runs on the asker's
-        Approve card. A source whose kind needs a credential can't be added here, so a
-        credential never passes through chat. Admin-only.
+        Add a data source (create: kind, name, settings by the kind's non-secret fields),
+        post the asker's private form for a source's credential (set_credential: source_id),
+        or pause, resume, retire, publish, unpublish or sync one (source_id). Runs on the
+        asker's Approve card. Never ask for a credential in chat or pass one in settings: a
+        source that needs one waits, paused, for the private form this posts, and only the
+        asker can fill it in. Admin-only.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -1456,6 +1459,7 @@
           'action': dict({
             'enum': list([
               'create',
+              'set_credential',
               'pause',
               'resume',
               'retire',
@@ -1954,11 +1958,11 @@
       'description': '''
         Set your session's expiry to this many hours from now.
         <blank line>
-        Needs the owner in the conversation; a card asks first unless an admin turned the
-        card off. Without the card, as in agent chat, hours cannot exceed the default time.
-        Use the
-        original attended conversation. Hours cannot exceed the operator TTL. This does
-        not change the idle window used by subsequent command/file writes.
+        Use this from the owner's conversation, or from the owner's agent-chat session.
+        Daimon shows a card by itself when one is needed: do not tell the person to expect
+        an approval step. Where no card shows, hours cannot exceed the default time. Use
+        the original attended conversation. Hours cannot exceed the operator TTL. This
+        does not change the idle window used by subsequent command/file writes.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -1994,7 +1998,8 @@
         Read your session's machine state, capacity and expiry without renewing it.
         <blank line>
         State `launching` means the machine is still starting and cannot run commands
-        yet. `running` means it has started.
+        yet. `running` means it has started. The machine's size is the result's cpus and
+        memory_mb; nproc on the machine can show more, so size parallel work from cpus.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2025,12 +2030,13 @@
       'description': '''
         Launch your own temporary machine from an operator image profile.
         <blank line>
-        Needs the owner in the conversation; a card asks first unless an admin turned the
-        card off. Without the card, as in agent chat, leave ttl_hours out: only the default
-        time runs. List profiles first: each names its fixed CPU/RAM, image and the regions
-        you may pass. Leave `region` out to use the profile's first region. No shared
-        credentials are mounted. Sessions are deleted after their idle lease; export files
-        before stopping or expiry.
+        Use this from the owner's conversation, or from the owner's agent-chat session.
+        Daimon shows a card by itself when one is needed: do not tell the person to expect
+        an approval step. Leave ttl_hours out unless the owner asked for longer: where no
+        card shows, only the default time runs. List profiles first: each names its fixed
+        CPU/RAM, image and the regions you may pass. Leave `region` out to use the
+        profile's first region. No shared credentials are mounted. Sessions are deleted
+        after their idle lease; export files before stopping or expiry.
         <blank line>
         Do not retry an uncertain response automatically: check compute_list_sessions first.
         In agent chat a retried launch starts a second machine.
@@ -2039,6 +2045,8 @@
         it is still starting: read compute_get_session_status until it says `running`
         before you run a command, and do not tell the owner it is ready before then.
         The result's profile_description says what the image holds and how to use it.
+        The machine's size is the result's cpus and memory_mb; nproc on the machine can
+        show more, so size parallel work from cpus.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -2463,8 +2471,9 @@
     'connect_my_data': dict({
       'description': '''
         Start your own sign-in at a data source; source_id is one list_my_data offers.
-        Runs on your Approve card. The link or code comes by direct message, never shown
-        here; after you approve it there, check_my_data_connection finishes it.
+        Runs on your Approve card. In a shared conversation (a channel or group) the link and code
+        are [[private:...]] placeholders: send them with send_private_details and say here
+        that they went by direct message. Once signed in, check_my_data_connection finishes it.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4305,8 +4314,8 @@
       'description': '''
         Read a file attached to a record (`index` from `data_get`'s files), fetched now from
         its source with the source's permissions and never stored. Text files return their
-        text; other files only their type and size. Refused when names are hidden from someone
-        the answer is for.
+        text, through the source's redaction rules best effort; other files only their type
+        and size. Refused when names are hidden from someone the answer is for.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -4435,8 +4444,9 @@
     'data_sql': dict({
       'description': '''
         Read-only SQL over the data views and datasets (`data_sources` lists them), by plain
-        names. One statement, at most 500 rows, five seconds. Refused when names are hidden
-        from someone the answer is for.
+        names. One statement, at most 500 rows, five seconds. Values go through every
+        source's redaction rules best effort. Refused when names are hidden from someone the
+        answer is for.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -6731,9 +6741,10 @@
     'list_data_links': dict({
       'description': '''
         List the accounts the data sources know, each linked to a person or not, and the
-        open suggestions (an account whose verified email matches a person). Emails show only
-        in a direct message with the admin. Pass this active turn's origin_context_id.
-        Admin-only.
+        open suggestions (an account whose verified email matches a person). Pass this active
+        turn's origin_context_id. In a shared conversation (a channel or group), emails are
+        [[private:...]] placeholders: answer here without them, and send any the admin needs
+        with send_private_details. Admin-only.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -6767,8 +6778,9 @@
     'list_data_rule_sets': dict({
       'description': '''
         List the redaction rule sets, or show one (name) with its approved and waiting
-        rules. The rules name what is hidden, so they show only in a direct message with the
-        admin. Pass this active turn's origin_context_id. Admin-only.
+        rules. Pass this active turn's origin_context_id. The rules name what is hidden, so
+        in a shared conversation (a channel or group) they are [[private:...]] placeholders:
+        answer here without them, and send them with send_private_details. Admin-only.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -9148,8 +9160,9 @@
         its expected_revision, and the person confirms on a card that names the
         provider. A model change within the provider applies at once. The
         server's default or built-in agent switches only when the person says
-        it's for everyone (for_everyone=true); otherwise offer the copy
-        below. For "make a copy of yourself on Gemini": copy the agent with
+        it's for everyone (for_everyone=true); otherwise offer to switch just
+        this conversation (set_thread_model) or the copy below.
+        For "make a copy of yourself on Gemini": copy the agent with
         fork_agent and new_copy_if_taken=true (always a NEW copy, never an earlier
         one; use the name it returns from here on), then switch the copy here.
         Don't hand_off_task first: the switch hands this conversation to the copy
@@ -9713,9 +9726,8 @@
         Preview and confirm the server's allowed model providers. Admin-only.
         <blank line>
         providers is the complete replacement list, not an addition. A server no
-        admin configured uses Anthropic only, or this install's keyed providers when it
-        has no Anthropic key; adding another provider is the admin's opt-in to send
-        this server's conversations to that company.
+        admin configured uses Anthropic and this install's keyed providers; saving a list
+        narrows or widens that, and decides which companies get this server's conversations.
         Preview first, explain the server-wide scope and full list, then call with
         the same providers and returned expected_revision and preview_digest for
         the admin's Confirm card. Pass this active turn's origin_context_id.
@@ -10544,6 +10556,26 @@
         'required': list([
           'channel_id',
           'content',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'send_private_details': dict({
+      'description': '''
+        Send yourself (the asker) a direct message holding the [[private:...]] placeholders
+        a data tool gave you this turn, written around them. Each opens there, only for the
+        person it was fetched for. Keep answering in this conversation and say what went by
+        direct message.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'message': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'message',
         ]),
         'type': 'object',
       }),
@@ -11482,8 +11514,9 @@
         model) or a model from ``list_models`` as ``provider:id``. ``effort`` is
         ``low``, ``medium``, ``high``, ``xhigh``, ``max`` or ``default`` (the
         agent's own), and may be given alone: "think harder" means a higher
-        ``effort``, not another model. A model pick keeps the chosen effort; only
-        Claude models take one, and the note says when it was not set. The
+        ``effort``, not another model. A model pick keeps the chosen effort; Claude
+        models and OpenAI (low, medium, high) take one, Gemini none, and the note
+        says when it was not set. The
         conversation keeps the choice for every later reply until someone
         changes it; the reply in progress keeps its model. Other conversations
         are unaffected.

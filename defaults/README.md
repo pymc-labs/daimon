@@ -64,7 +64,7 @@ are unsupported. Running timers must be stopped in Toggl itself because a shared
 key cannot verify their owner through Reports.
 
 `image-workflow` generates and edits images through OpenAI and validates PNG
-attachments in `/mnt/session/outputs`, using a limited project key on `image-maker`.
+attachments in the reply's outputs directory, using a limited project key on `image-maker`.
 The retired optional Gemini Imagen endpoint is refused.
 
 Opt-in agent specs live in `agents-optional/workspace-writer.yaml`,

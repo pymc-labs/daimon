@@ -2,8 +2,9 @@
 the sources open to them and the notices about links an admin changed (`list_my_data` lists
 them; `remove_my_data` disconnects one).
 
-Starting a sign-in runs on the person's card. Its link or code goes to their direct messages,
-never into the conversation: anyone who enters a device code connects their own account to it.
+Starting a sign-in runs on the person's card. Outside their direct message or web chat its link
+and code are placeholders (`_private_values`) that `send_private_details` opens in their direct
+message: anyone who enters a device code connects their own account to it.
 """
 
 from __future__ import annotations
@@ -25,7 +26,8 @@ from daimon.adapters.mcp.tools._data_admin import (
     store,
     uuid_of,
 )
-from daimon.adapters.mcp.tools._web_admin import send_privately
+from daimon.adapters.mcp.tools._private_values import open_placeholders, privately
+from daimon.adapters.mcp.tools.direct_messages import send_direct_message_impl
 from daimon.data import identity, manage
 from daimon.data.connect import (
     PROVIDERS,
@@ -111,14 +113,16 @@ def register_data_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context, source_id: str, origin_context_id: str
     ) -> dict[str, Any]:
         """Start your own sign-in at a data source; source_id is one list_my_data offers.
-        Runs on your Approve card. The link or code comes by direct message, never shown
-        here; after you approve it there, check_my_data_connection finishes it."""
+        Runs on your Approve card. In a shared conversation (a channel or group) the link and code
+        are [[private:...]] placeholders: send them with send_private_details and say here
+        that they went by direct message. Once signed in, check_my_data_connection finishes it."""
         auth = await _auth(ctx)
         own(auth)
         actor = await person(runtime, auth)
         await require_card(
             runtime, auth, tool_name="connect_my_data", origin_context_id=origin_context_id
         )
+        hide = await privately(runtime, auth, origin_context_id)
         async with httpx.AsyncClient(timeout=10.0) as http, store(runtime) as conn:
             try:
                 begun = await _connector(runtime, http).start(
@@ -131,12 +135,31 @@ def register_data_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 raise ToolError(_NOT_SET_UP) from None
             except (Failed, httpx.HTTPError):
                 raise ToolError(_UNREACHABLE) from None
-        words = f"Code {begun.user_code}, then open" if begun.flow == "device" else "Open"
-        await send_privately(runtime, auth, f"Sign in to {begun.source}: {words} {begun.url}")
         return {
             "flow": begun.flow, "source": begun.source, "pending_id": str(begun.pending_id),
-            "delivered": "direct_message", "expires_at": begun.expires_at,
+            "url": hide(begun.url), "code": hide(begun.user_code) if begun.user_code else None,
+            "expires_at": begun.expires_at,
         }  # fmt: skip
+
+    @mcp.tool
+    async def send_private_details(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, message: str
+    ) -> dict[str, Any]:
+        """Send yourself (the asker) a direct message holding the [[private:...]] placeholders
+        a data tool gave you this turn, written around them. Each opens there, only for the
+        person it was fetched for. Keep answering in this conversation and say what went by
+        direct message."""
+        auth = await _auth(ctx)
+        own(auth)
+        text, opened = open_placeholders(message, auth, runtime.fernet)
+        if not opened:
+            raise ToolError("That message holds none of your private details. Nothing was sent.")
+        if not auth.platform_user_id:
+            raise ToolError("You have no direct message to send to here. Nothing was sent.")
+        await send_direct_message_impl(
+            runtime, auth, recipient_id=auth.platform_user_id, content=text
+        )
+        return {"sent": "direct_message", "opened": opened}
 
     @mcp.tool
     async def check_my_data_connection(  # pyright: ignore[reportUnusedFunction]

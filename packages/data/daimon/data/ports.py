@@ -1,10 +1,10 @@
 """What the store registers with core at startup (the `daimon.ports` entry point).
 
-Erasure statements, the `data` audit source, whether a workspace has a source, the scopes
-an audience holds and the declared skill repositories; M5 fills `GATED_TOOLS`. Everything
-here is read only where the package is installed and does nothing for a deployment that
-never set the store up: erasure skips a schema that does not exist, the audit source reads
-no rows.
+Erasure statements, the `data` audit source, whether a workspace has a source, putting a
+private form's credential onto a source, the scopes an audience holds and the declared skill
+repositories; M5 fills `GATED_TOOLS`. Everything here is read only where the package is
+installed and does nothing for a deployment that never set the store up: erasure skips a
+schema that does not exist, the audit source reads no rows.
 """
 
 from __future__ import annotations
@@ -12,23 +12,27 @@ from __future__ import annotations
 import uuid
 from typing import Final
 
+import psycopg
 from daimon.core.config import Settings, load_data_settings
 from daimon.core.data_audience import DataAudience
 from daimon.core.ports.audit import register_audit_source
+from daimon.core.ports.data_credentials import SourceCredentialRefused, register_set_credential
 from daimon.core.ports.data_ready import Sessions, register_has_sources
 from daimon.core.ports.data_scopes import register_held_scopes
 from daimon.core.ports.erasure import ErasureStatement, register_erasure
 from daimon.core.ports.skill_repos import register_skill_repo_loader
 from daimon.core.ports.tool_gate import register_gated_tools
-from daimon.data import pool
+from daimon.data import manage, pool
 from daimon.data.audit import AUDIT_SOURCE
 from daimon.data.declared import DeclaredSkillRepos
+from daimon.data.identity import IdentityError
 from daimon.data.migrate import STORE_FILES
 from daimon.data.reading import open_read
 from daimon.data.schema import Schemas
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+_UNREACHABLE: Final = "The data store can't be reached. Nothing was saved."
 GATED_TOOLS: Final[dict[str, frozenset[str]]] = {}
 
 _PERSON: Final = "'account:' || cast(cast(:account_id as uuid) as text)"
@@ -142,9 +146,28 @@ async def _held_scopes(
     return frozenset(read.ctx.scopes)
 
 
+async def _set_credential(
+    settings: Settings, tenant_id: uuid.UUID, source_id: uuid.UUID, by: uuid.UUID, value: str
+) -> None:
+    keys = tuple(k.get_secret_value() for k in settings.crypto.keys)
+    try:
+        async with pool.connection(settings) as conn:
+            await manage.set_credential(
+                conn, Schemas.of(settings.data), keys, tenant_id=tenant_id, by=by,
+                source_id=source_id, value=value,
+            )  # fmt: skip
+    except IdentityError as e:
+        raise SourceCredentialRefused(f"{e} Nothing was saved.") from None
+    except psycopg.Error:
+        raise SourceCredentialRefused(
+            "The data store can't be reached. Nothing was saved."
+        ) from None
+
+
 def register() -> None:
     register_has_sources(_has_sources)
     register_held_scopes(_held_scopes)
+    register_set_credential(_set_credential)
     register_erasure(erasure(Schemas.of(load_data_settings())))
     register_audit_source("data", AUDIT_SOURCE)
     register_skill_repo_loader(DeclaredSkillRepos)

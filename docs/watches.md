@@ -34,7 +34,8 @@ field paths) picks what each new item reports. Projections accept `.`,
 A firing queues a turn that may only read and report. Shell, built-in tools,
 skills, management tools and writes are unavailable. Every model call,
 approval card and report rechecks the owner's access, balance, spend allowance
-and channel budget.
+and channel budget. Reports run only on Anthropic, which enforces this on the
+session: an agent on OpenAI or Gemini has its reports refused.
 
 ## Where a watch reports
 

@@ -25,6 +25,7 @@ from daimon.core.mux_backend import managed_agents
 from daimon.core.mux_compat import legacy_call, retrieve_agent, retrieve_environment
 from daimon.core.output_delivery import poll_output_files
 from daimon.core.output_ports_compat import read_output_record
+from daimon.core.sandbox_paths import CLAUDE
 from daimon.core.session_ports_compat import (
     archive_session_record,
     create_session_record,
@@ -54,7 +55,8 @@ _WORKER_SYSTEM = (
 def worker_prompt(job: LongJob) -> str:
     """Fixed launch/wait/manifest protocol; shell input is quoted data."""
     root = f"/tmp/long-job-{job.id}"
-    output = f"/mnt/session/outputs/long-job-{job.id}.json"
+    # Managed Agents only: a Claude session collects outputs under /mnt/session.
+    output = f"{CLAUDE.outputs}/long-job-{job.id}.json"
     program = f"""import subprocess, pathlib, json
 p = pathlib.Path({root!r})
 p.mkdir(parents=True, exist_ok=True)
@@ -68,7 +70,7 @@ manifest = dict(exit_code=result.returncode, summary=summary, output_files=[])
 (p / "done.json").write_text(json.dumps(manifest))
 """
     launch = (
-        f"mkdir -p {root} /mnt/session/outputs; "
+        f"mkdir -p {root} {CLAUDE.outputs}; "
         f"if [ ! -f {root}/started ]; then touch {root}/started; "
         f"nohup python3 -c {shlex.quote(program)} >{root}/worker.log 2>&1 </dev/null & "
         f"echo $! >{root}/job.pid; fi"
@@ -91,7 +93,7 @@ manifest = dict(exit_code=result.returncode, summary=summary, output_files=[])
         + "\n3. Once done.json exists, use Bash to copy it to "
         + output
         + ". Populate output_files with names of files the approved command actually wrote under "
-        "/mnt/session/outputs, excluding the manifest; keep at most 100. "
+        f"{CLAUDE.outputs}, excluding the manifest; keep at most 100. "
         "Keep summary to at most 4000 characters. Print the manifest, then end with one line. "
         "If the process exits without done.json, write the same manifest with exit_code=null, "
         "a short failure summary and output_files=[] at the output path. "

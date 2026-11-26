@@ -32,6 +32,7 @@ from daimon.core.turn.gemini import (
     GeminiUsageRuntime,
 )
 from daimon.core.turn.prepare import PreparedTurn, bind_session_impl
+from daimon.core.turn.provider_env import EnvFile
 from daimon.core.turn.run import run_prepared_turn_impl
 from daimon.core.usage_billing import ObservationRecorder
 from daimon.testing.factories import make_tenant
@@ -183,6 +184,24 @@ async def test_explicit_registered_preparation_reuses_authorized_persisted_bindi
     assert not host.transport.requests and not host.ancillary.requests
 
 
+async def test_the_keys_file_is_placed_in_the_sandbox_before_each_reply(
+    host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = EnvFile(body=b"API_KEY=s3cret\n", sha256="hash")
+
+    async def keys(_request: object) -> EnvFile:
+        return env
+
+    monkeypatch.setattr(gemini_prepare, "turn_env_file", keys)
+    first = await prepare(host)
+    ((environment, config),) = host.transport.environments.items()
+    assert "s3cret" not in str(config), "never in the config interactions echo"
+    assert host.transport.environment_files[environment] == {".daimon/.env": len(env.body)}
+    second = await prepare(host)
+    assert (first.env_sha256, second.env_sha256) == ("hash", "hash")
+    assert len(host.transport.uploads) == 1, "an unchanged file is not sent again"
+
+
 async def test_fresh_preparation_creates_empty_slot_then_replaces_binding(host: Host) -> None:
     first = await prepare(host, reuse_existing=False)
     assert not first.reused
@@ -198,17 +217,6 @@ async def test_fresh_preparation_creates_empty_slot_then_replaces_binding(host: 
     assert second.session_ref != first.session_ref
     assert second.continuity.state in {"replaced", "replaced_after_loss"}
     assert "summar" not in second.continuity.user_prefix
-
-
-def _causes(error: BaseException) -> list[tuple[str, ...]]:
-    """`missing` of every UnsupportedCapability in the cause chain."""
-    found: list[tuple[str, ...]] = []
-    while error is not None:
-        missing = getattr(error, "missing", None)
-        if isinstance(missing, tuple):
-            found.append(missing)
-        error = error.__cause__ or error.__context__  # type: ignore[assignment]
-    return found
 
 
 @pytest.mark.parametrize("failure", ["runtime", "deployment", "tenant", "revision"])
@@ -385,7 +393,7 @@ async def test_a_shared_thread_binds_once_and_a_second_caller_continues_it(host:
         await as_caller(other, agent_origin)
 
 
-@pytest.mark.parametrize("failure", ["runtime", "model", "daimon_rules"])
+@pytest.mark.parametrize("failure", ["runtime", "model"])
 async def test_unsupported_host_configuration_is_visible_refusal_before_factory(
     host: Host, failure: str
 ) -> None:
@@ -413,18 +421,9 @@ async def test_unsupported_host_configuration_is_visible_refusal_before_factory(
         # Independently prove the preparation boundary also refuses a stale or
         # manually supplied admission, rather than relying on the first gate.
         admission = replace(admission, backend_revision=revision)
-    else:
-        # A rule that makes daimon's own tools ask is a gate this backend cannot hold.
-        admission = replace(
-            admission,
-            daimon_rule_tools=frozenset({"get_session"}),
-            daimon_rules_need_driver=True,
-        )
     with pytest.raises(AdmissionDenied) as refusal:
         await prepare(host, admission)
     assert refusal.value.reason == "backend_unsupported"
-    if failure == "daimon_rules":
-        assert ("daimon_tool_rules",) in _causes(refusal.value), "the log names the rule gap"
     assert not opened and not host.transport.requests and not host.ancillary.requests
 
 

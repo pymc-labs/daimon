@@ -25,6 +25,8 @@ class _Upstream:
         key: str | None = None,
     ) -> dict[str, object]:
         self.calls.append((method, path))
+        if path.startswith("/files/") and method == "GET":
+            return {"id": "f-1", "filename": ".env", "bytes": 9, "created_at": 0}
         return {"id": "s-1", "status": "idle", "vault_ids": []} if method == "GET" else {}
 
 
@@ -41,7 +43,14 @@ async def test_each_session_is_deleted_with_its_own_key_and_project(
 
     monkeypatch.setattr(openai_deployment, "usage_transport", resolve)
     sessions = [
-        ProviderSession(tenant, "openai", "s-1", "proj-own", "openai.persistent_workspace"),
+        ProviderSession(
+            tenant,
+            "openai",
+            "s-1",
+            "proj-own",
+            "openai.persistent_workspace",
+            {"env_file": "file:f-1"},
+        ),
         ProviderSession(tenant, "openai", "s-2", "default", "openai.conversation_only"),
         ProviderSession(tenant, "gemini", "s-3", "g", "gemini.interactions"),
     ]
@@ -54,4 +63,6 @@ async def test_each_session_is_deleted_with_its_own_key_and_project(
     assert own.calls == [
         ("GET", "/agents/sessions/s-1"),
         ("DELETE", "/agents/sessions/s-1"),
-    ], "deleted on the transport its own key resolved, under the tenant's scope"
+        ("GET", "/files/f-1"),
+        ("DELETE", "/files/f-1"),
+    ], "deleted with its keys file on the transport its own key resolved, under the tenant's scope"

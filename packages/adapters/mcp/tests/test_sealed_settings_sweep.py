@@ -308,6 +308,7 @@ EXEMPT: dict[str, str] = {
     "check_my_data_connection": _OWN,
     "connect_my_data": _OWN,
     "dismiss_data_notices": _OWN,
+    "send_private_details": _LIVE,
     "list_data_access": _READS,
     "list_data_links": _READS,
     "list_data_rule_sets": _READS,

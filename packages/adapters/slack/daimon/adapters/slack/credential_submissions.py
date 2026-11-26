@@ -23,7 +23,7 @@ import dataclasses
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Final, Unpack
+from typing import Any, Final, Unpack
 
 import anthropic
 import httpx
@@ -65,6 +65,7 @@ from daimon.core.credential_requests import (
     split_skill_repo_target,
 )
 from daimon.core.credential_submit import (
+    apply_data_source_submit,
     consume_credential_submit,
     guard_credential_save,
     prepare_env_submit,
@@ -100,6 +101,7 @@ from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import update_agent
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.operation_policy import TargetFacts, decide_operation
+from daimon.core.ports.data_credentials import SourceCredentialRefused
 from daimon.core.posted_controls import (
     NO_LONGER_VALID_MESSAGE,
     CardState,
@@ -118,6 +120,7 @@ __all__ = [
     "ContinuationTrigger",
     "post_ephemeral",
     "refuse_if_shared_and_not_admin_for_request",
+    "run_data_source_credential_submission",
     "run_env_credential_submission",
     "run_env_file_credential_submission",
     "run_mcp_credential_submission",
@@ -126,6 +129,7 @@ __all__ = [
 ]
 
 log = structlog.get_logger()
+_SOMETHING_WRONG: Final = "Something went wrong. Nothing was saved. Try again."
 
 #: What a runner calls once its write is durable: run whatever continuation
 #: the origin thread now has pending. Injected rather than resolved here —
@@ -1380,3 +1384,62 @@ async def run_repo_bind_credential_submission(
         )
         if queued:
             await _dispatch_pending(dispatch_continuations, kind="repo")
+
+
+async def run_data_source_credential_submission(
+    runtime: SlackRuntime,
+    *,
+    team_id: str,
+    user_id: str,
+    channel_id: str,
+    token: str,
+    value: str,
+    **_: object,
+) -> None:
+    """Post-ack: spend the form and seal the requester's value onto its data source."""
+    client = await resolve_web_client(runtime, team_id=team_id)
+    if client is None:
+        return
+    async with runtime.sessionmaker() as session:
+        row = await credential_requests_store.peek_credential_request(session, token=token)
+    if (
+        row is None
+        or row.kind != "data_source"
+        or row.tenant_id != derive_tenant_uuid(platform="slack", workspace_id=team_id)
+        or row.platform not in (None, "slack")
+        or row.requester_platform_user_id != user_id
+    ):
+        await post_ephemeral(
+            client, channel_id=channel_id, user_id=user_id, text=NO_LONGER_VALID_MESSAGE, error=True
+        )
+        return
+    where: dict[str, Any] = {
+        "channel_id": row.parent_channel_id or channel_id,
+        "thread_ts": row.origin_thread_id,
+        "user_id": user_id,
+    }
+    try:
+        consumed = await apply_data_source_submit(
+            runtime.sessionmaker, runtime.settings, row=row, value=value, now=datetime.now(UTC)
+        )
+    except SourceCredentialRefused as refused:
+        await post_ephemeral(client, text=str(refused), error=True, **where)
+        return
+    except Exception as err:
+        log.warning("slack.credential.data_source_failed", err_type=type(err).__name__)
+        await post_ephemeral(client, text=_SOMETHING_WRONG, error=True, **where)
+        return
+    if consumed is None:
+        await post_ephemeral(client, text=NO_LONGER_VALID_MESSAGE, error=True, **where)
+        return
+    await edit_posted_card(
+        client,
+        row=consumed,
+        state="applied",
+        outcome=ConfigurationChange(
+            target_name=consumed.target_name or "Daimon",
+            kind="data_source_credential",
+            availability="saved",
+            detail=consumed.target,
+        ),
+    )
