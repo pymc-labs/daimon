@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -60,6 +60,8 @@ MAX_CARRIED_TOTAL_BYTES = 50 * 1024 * 1024
 CARRIED_FILES_DIR = "/workspace/previous"
 #: The binding ref holding the hash of the keys file its session mounted (`provider_env`).
 ENV_REF = "env_sha256"
+#: The provider file holding those keys: it lives with the session (`retire_session`).
+ENV_FILE_REF = "env_file"
 
 BindingField = Literal[
     "profile", "provider", "config_revision", "agent", "account_scope", "model", "plan_digest"
@@ -330,9 +332,30 @@ async def end_session(
     return False
 
 
+async def retire_session(
+    scope: Scope,
+    backend: ManagedAgents | None,
+    ref: ResourceRef | None,
+    refs: Mapping[str, str],
+    *,
+    key: str,
+) -> bool:
+    """End a session, then delete the keys file it mounted (`ENV_FILE_REF`), if any."""
+    ended = await end_session(scope, backend, ref, key=key)
+    if backend is not None and ref is not None and (file_id := refs.get(ENV_FILE_REF)):
+        try:
+            await backend.artifacts.delete(
+                scope, ref.model_copy(update={"id": file_id, "kind": "artifact"}), key=key + ":env"
+            )
+        except MuxError as error:
+            # Left at the provider; logged by category, never content.
+            log.warning("binding.env_file_kept", error=type(error).__name__)
+    return ended
+
+
 async def _terminate(scope: Scope, old: OldSession, key: str) -> bool:
     """End the replaced session: the successor is already published."""
-    return await end_session(scope, old.backend, old.ref, key=key)
+    return await retire_session(scope, old.backend, old.ref, old.binding.native_refs, key=key)
 
 
 def carry_framing(

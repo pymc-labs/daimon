@@ -118,6 +118,9 @@ class Wire:
         self.saved_delegation = False
         self.session_delegation = False
         self.expected_spend_limit = 4
+        # Uploaded files (`/files`) by id, holding the size each upload reports.
+        self.files: dict[str, int] = {}
+        self.upload_size = 0
 
     def session(self):
         return {
@@ -138,10 +141,26 @@ class Wire:
             "created_at": 0,
         }
 
+    def file(self, req: httpx.Request, path: str) -> httpx.Response:
+        if req.method == "POST":
+            file_id = f"file-{len(self.files) + 1}"
+            self.files[file_id] = self.upload_size
+        else:
+            file_id = path.removeprefix("/files/")
+            if file_id not in self.files:
+                return httpx.Response(404, json={"error": {"message": "no file"}})
+            if req.method == "DELETE":
+                del self.files[file_id]
+                return httpx.Response(200, json={"id": file_id, "deleted": True})
+        raw = {"id": file_id, "filename": ".env", "bytes": self.files[file_id], "created_at": 0}
+        return httpx.Response(200, json=raw)
+
     def handle(self, req: httpx.Request) -> httpx.Response:
         self.requests.append(req)
         assert req.headers["OpenAI-Beta"] == "agents=v1"
         path = req.url.path.removeprefix("/v1")
+        if path.startswith("/files"):
+            return self.file(req, path)
         if path == "/agents/sessions/" + self.session_id:
             if req.method == "DELETE":
                 self.deleted = True
@@ -610,6 +629,34 @@ async def test_changed_plan_replaces_and_foreign_plan_refuses(composed):
     with pytest.raises(ScopeViolation):
         await prepare_openai(next_request)
     assert len(wire.requests) == count
+
+
+async def test_keys_file_mounts_and_lives_until_its_session_is_replaced(composed, monkeypatch):
+    """The real preparation mounts the keys file, keeps it past the turn, deletes it on replace."""
+    from daimon.core.turn.provider_env import PATH, EnvFile
+
+    request, wire, store, _, runtime = composed
+    env = [EnvFile(body=b"API_KEY=one\n", sha256="h1")]
+    wire.upload_size = len(env[0].body)
+
+    async def keys(_request):
+        return env[-1]
+
+    monkeypatch.setattr(openai_host, "turn_env_file", keys)
+    prepared = await prepare_openai(request)
+    (create,) = [r for r in wire.requests if r.url.path.endswith("/agents/sessions")]
+    mount = {"type": "file_id", "file_id": "file-1", "path": PATH}
+    assert mount in json.loads(create.content)["environment"]["files"]
+    assert prepared.env_sha256 == "h1"
+    finalize = prepared._finalize  # pyright: ignore[reportPrivateUsage]
+    if finalize is not None:
+        await finalize()
+    assert "file-1" in wire.files, "the turn's end leaves the session's file in place"
+
+    env.append(EnvFile(body=b"API_KEY=two\n", sha256="h2"))
+    replaced = await prepare_openai(request)
+    assert replaced.continuity.state == "replaced" and replaced.env_sha256 == "h2"
+    assert list(wire.files) == ["file-2"], "the replaced session's file went with it"
 
 
 async def test_restart_replays_same_claim_without_second_post(composed):

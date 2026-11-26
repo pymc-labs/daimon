@@ -15,13 +15,11 @@ from daimon.core.self_helpers import self_helper_thread_key
 from daimon.core.session_compat import ReplaceSession
 from daimon.core.session_snapshot import hash_env_bytes
 from daimon.core.stores.domain import AgentFileRow
-from daimon.core.turn import openai_host, provider_env
+from daimon.core.turn import provider_env
 from daimon.core.turn.replace_binding import BindingFacts, binding_decision
 from daimon.core.turn_keys import answering_env_sha256
-from mux.contracts.ids import ResourceRef
 
 TENANT, AGENT = uuid.uuid4(), uuid.uuid4()
-FILE = ResourceRef(id="file_1", kind="file", provider="openai", account_scope_id="s", tenant_id="t")
 
 
 def row(key: str, content: str) -> AgentFileRow:
@@ -111,37 +109,6 @@ def test_a_changed_keys_file_replaces_an_openai_session() -> None:
 
 
 @pytest.mark.asyncio
-async def test_openai_mounts_the_uploaded_file_and_deletes_it_after_the_turn() -> None:
-    calls: list[tuple[str, object]] = []
-
-    class Artifacts:
-        async def upload(self, scope, body, *, filename, media_type, key):
-            calls.append(("upload", b"".join([chunk async for chunk in body])))
-            return SimpleNamespace(ref=FILE)
-
-        async def delete(self, scope, ref, *, key):
-            calls.append(("delete", ref.id))
-
-    backend = cast(Any, SimpleNamespace(artifacts=Artifacts()))
-    spec = cast(Any, SimpleNamespace(resources=()))
-    spec.model_copy = lambda update: SimpleNamespace(**update)
-    env = provider_env.EnvFile(body=b"API_KEY=s3cret\n", sha256="h")
-    mounted, ref = await openai_host._with_env(cast(Any, "scope"), backend, spec, env, key="k")
-    (mount,) = mounted.resources
-    assert (mount.target_path, mount.resource) == (provider_env.PATH, ref)
-    ended: list[bool] = []
-
-    async def end() -> None:
-        ended.append(True)
-
-    finalize = openai_host._finalized(
-        cast(Any, "scope"), cast(Any, SimpleNamespace(end_of_turn=end)), [(backend, ref)]
-    )
-    assert finalize is not None
-    await finalize()
-    assert calls == [("upload", env.body), ("delete", "file_1")] and ended == [True]
-
-
 def test_the_guidance_names_where_the_provider_file_is() -> None:
     from daimon.core.agent_guidance import CREDENTIAL_GUIDANCE_BLOCK
 
