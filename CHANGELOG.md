@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cases, share them, and move them between deployments as signed or encrypted
   bundles. `daimon evals bundle validate` checks a bundle offline.
 
+- **A signed-identity MCP server learns what kind of Discord place the answer goes to.**
+  The token's new `room` claim says `dm`, `team`, `narrow` or `contained`, so the server can
+  limit what it returns to what that place may read
+  ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).
+
 - **Each request to a signed-identity MCP server carries a new token with its own `jti`.**
   A server can accept each token once, so a copied token cannot be replayed
   ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).
