@@ -1005,9 +1005,9 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         tiers=("workspace", "agent"),
         binds="turn",
         doc=(
-            "Agent chat from an MCP client may list and stop the person's cloud computers, and "
-            "run commands and use files on those started in that session. Any key of that "
-            "person that drives it can too. Only a server admin can change it."
+            "Agent chat from an MCP client may start the person's cloud computers for the "
+            "default time, list and stop them, and use those started in that session. Any key "
+            "of that person driving it can too. Only a server admin can change it."
         ),
         platforms=EVERY_PLATFORM,
         depends_on=("compute",),

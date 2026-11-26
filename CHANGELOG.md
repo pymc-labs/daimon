@@ -7,11 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **A server admin can let an agent used through agent chat work on the person's cloud
-  computers.** Turn on [Cloud computers from agent chat](docs/features.md#cloud-computers-from-agent-chat)
-  for the workspace or one agent; it is off by default. The agent then lists and stops the
-  person's machines, and runs commands and reads and writes files on the ones started in that
-  session. A command there gets no message when it ends: the agent checks it again later.
+- **A server admin can let an agent used through agent chat use cloud computers for the
+  person.** Turn on [Cloud computers from agent chat](docs/compute.md#use-it-from-agent-chat)
+  for the workspace or one agent; it is off by default. The agent then starts a machine for the
+  default time, runs commands and reads and writes files on it, and lists and stops the
+  person's machines. A command there gets no message when it ends: the agent checks it again
+  later. Any key of that person that drives the session can do the same.
 
 - **A feature set for one agent or channel now also applies when that agent is used through
   agent chat.** Before, the server checked those calls against the workspace setting only, so

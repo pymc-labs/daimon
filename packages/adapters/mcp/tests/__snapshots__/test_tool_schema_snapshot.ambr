@@ -1374,7 +1374,8 @@
         Set your session's expiry to this many hours from now.
         <blank line>
         Needs the owner in the conversation; a card asks first unless an admin turned the
-        card off. Without the card, hours cannot exceed the default time. Use the
+        card off. Without the card, as in agent chat, hours cannot exceed the default time.
+        Use the
         original attended conversation. Hours cannot exceed the operator TTL. This does
         not change the idle window used by subsequent command/file writes.
       ''',
@@ -1444,7 +1445,8 @@
         Launch your own temporary machine from an operator image profile.
         <blank line>
         Needs the owner in the conversation; a card asks first unless an admin turned the
-        card off. Without the card, leave ttl_hours out: only the default time runs. List
+        card off. Without the card, as in agent chat, leave ttl_hours out: only the default
+        time runs. List
         profiles first: each names its fixed CPU/RAM, image and the regions you may pass.
         Leave `region` out to use the profile's first region. No shared credentials are
         mounted. Sessions are deleted after their idle lease; export files before

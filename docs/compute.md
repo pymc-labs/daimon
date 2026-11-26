@@ -99,9 +99,9 @@ confirms. Keep the scheduler running while any session remains. A Discord
 server admin can emergency-stop a session without seeing its files.
 
 Daimon waits up to 40 seconds for a command's result. A command that needs
-longer keeps running, and the scheduler posts one message in the conversation
-when it ends, unless the conversation already read the result or stopped the
-machine. In a thread, Daimon can read the command's output and the machine's
+longer keeps running. In a chat, the scheduler posts one message in the
+conversation when it ends, unless the conversation already read the result or
+stopped the machine. In a thread, Daimon can read the command's output and the machine's
 files for that message. Outside a thread it reports only the end of the output.
 
 For that message Daimon cannot run commands or change the machine until the
@@ -116,6 +116,26 @@ on that machine; a chat message alone does not reset it.
 Google can restart a machine at any time. A restart clears its files and ends
 running commands. Each is reported as stopped, with the last output Daimon
 saved, and is never rerun.
+
+## Use it from agent chat
+
+A person who uses an agent through agent chat, from an MCP client such as Claude
+Code, can use cloud computers there too. A server admin turns on [Cloud computers
+from agent chat](features.md#cloud-computers-from-agent-chat) for a workspace or
+one agent. The `compute` feature must be on as well.
+
+No card can show in agent chat, so a machine starts and gets more time only for
+the default lifetime. The per-person limit applies. Each agent-chat session uses
+only the machines it started; the person lists and stops all their machines from
+any conversation.
+
+Agent chat gets no message when a command ends and no expiry warning. The agent
+checks a command again in a later turn. A running command keeps its machine
+alive up to `DAIMON_COMPUTE__MAX_TTL_HOURS` from its start; after the last
+command, the machine ends at its idle time.
+
+Any key of the same person that drives the session can use these machines too,
+not only their own sign-in. Turn the feature on only where that is acceptable.
 
 ## Bound the cost
 

@@ -724,7 +724,23 @@ class ComputeSessions:
     async def _allowed(self, db: AsyncSession, session: ComputeSession) -> bool | None:
         """Whether a session still waiting to launch may: the deployment switch and the
         `compute` feature at its place. Off here stops it instead of provisioning; None
-        when the feature cannot be read, so this tick leaves the session as it is."""
+        when the feature cannot be read, so this tick leaves the session as it is. An
+        agent-chat session's machine needs its rule to hold still (`agent_chat_owner`),
+        read for the session's owner and agent; a switch that can't be read counts as off.
+        """
+        if not self.settings.enabled:
+            return False
+        if session.thread_id.startswith(AGENT_CHAT_SCOPE_PREFIX):
+            held = await agent_chat_owner(
+                db,
+                tenant_id=session.tenant_id,
+                account_id=session.owner_account_id,
+                chat_session_id=session.thread_id.removeprefix(AGENT_CHAT_SCOPE_PREFIX),
+                platform=session.platform,
+                agent_id=session.agent_id,
+                agent_name=session.agent_name,
+            )
+            return held is not None
         place = FeaturePlace.of(
             session.tenant_id,
             session.platform,
@@ -732,8 +748,6 @@ class ComputeSessions:
             session.thread_id,
             agent_id=session.agent_id,
         )
-        if not self.settings.enabled:
-            return False
         found = await feature_in_or_none(db, None, place, "compute")
         return None if found is None else found.on
 

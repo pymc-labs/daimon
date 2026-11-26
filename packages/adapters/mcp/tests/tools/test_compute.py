@@ -1347,7 +1347,6 @@ _GRANT = "agent-chat-grant"
 _NO_ORIGIN = "Use the origin_context_id and signed conversation grant from this active reply."
 #: What a machine of another conversation says (`compute_sessions.ELSEWHERE`).
 _ELSEWHERE = "This machine belongs to another of your conversations."
-_STARTS = frozenset({"compute_launch_session", "compute_extend_session"})
 
 
 def _agent_chat_calls(session, task):
@@ -1499,13 +1498,10 @@ async def agent_chatting(committing_sessionmaker, monkeypatch):
 
 
 async def test_the_owners_agent_chat_session_uses_its_own_machine_with_no_origin(agent_chatting):
-    """Every tool but launch and extend runs on the session's own machine; those two stay
-    refused here, and nothing reaches the machine for them."""
+    """Every tool runs on the session's own machine; launch and extend have a test of their
+    own (`test_agent_chat_starts_and_extends_a_machine_for_the_default_time_only`)."""
     chat = agent_chatting
     assert chat.tools == set(chat.calls), "say what a new compute tool does in agent chat"
-    for name in sorted(_STARTS):
-        with pytest.raises(ToolError, match="can't be started or given more time from agent"):
-            await chat.call(name)
     ran = await chat.call("compute_run_bash", wait_seconds=0)
     assert ran["note"] == "Still running. Ask again later and I will check it."
     assert (await chat.call("compute_task_result"))["state"] == "succeeded"
@@ -1523,6 +1519,33 @@ async def test_the_owners_agent_chat_session_uses_its_own_machine_with_no_origin
     chat.readable.return_value = False
     with pytest.raises(ToolError, match="can no longer read the source conversation"):
         await chat.call("compute_read_file")
+
+
+_DEFAULT_ONLY = "From agent chat, a cloud computer gets only the default time. Nothing was done."
+
+
+async def test_agent_chat_starts_and_extends_a_machine_for_the_default_time_only(agent_chatting):
+    """No card shows in agent chat, so it gets what `compute_approval` skip gives: the
+    default time, within the per-person limit. The machine is the session's own."""
+    chat = agent_chatting
+    with pytest.raises(ToolError, match="Your session limit is reached"):
+        await chat.call("compute_launch_session")
+    await chat.call("compute_stop_session", session_id=chat.elsewhere.id)
+    with pytest.raises(ToolError) as longer:
+        await chat.call("compute_launch_session", ttl_hours=48)
+    assert str(longer.value) == _DEFAULT_ONLY
+    started = await chat.call("compute_launch_session")
+    assert (started["thread_id"], started["parent_channel_id"]) == ("agentchat:" + _GRANT, "")
+    assert started["ttl_hours"] == 24 and started["request_key"].startswith(f"agentchat:{_GRANT}:")
+    assert started["source_metadata"] == {
+        "daimon_tenant": str(chat.tenant_id),
+        "daimon_account": str(chat.account_id),
+        "daimon_agent_chat": "true",
+    }
+    with pytest.raises(ToolError) as longer:
+        await chat.call("compute_extend_session", hours=25)
+    assert str(longer.value) == _DEFAULT_ONLY
+    assert (await chat.call("compute_extend_session", hours=24)).id == chat.here.id
 
 
 async def test_a_background_command_in_agent_chat_is_keyed_afresh_each_time(agent_chatting):

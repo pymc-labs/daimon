@@ -2421,3 +2421,22 @@ async def test_turning_agent_chat_off_refuses_its_next_call(db_engine, db_clean)
     for refused in (service.get(owner, session.id), service.list(owner)):
         with pytest.raises(StoreError, match="Cloud computers from agent chat are turned off"):
             await refused
+
+
+@pytest.mark.parametrize("key", ["compute_agent_chat", "compute"])
+async def test_an_agent_chat_launch_stops_where_its_rule_no_longer_holds(db_engine, db_clean, key):
+    """A machine still launching is provisioned only while both switches are on for its
+    agent-chat session, read again by the scheduler (`_allowed`)."""
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    _, tenant, account = await caller(sm)
+    owner = await agent_chat(sm, tenant, account)
+    fake = FakeComputeProvider()
+    fake.starts_after = 10**9
+    service, _ = _waiting(sm, fake)
+    session = await launch(service, owner)
+    assert session.state == "launching"
+    await service.reconcile()
+    assert await _state(sm, owner, session.id) == "launching", "still allowed: it waits"
+    await _switch(sm, tenant.id, key, "off")
+    await service.reconcile()
+    assert await _state(sm, owner, session.id) == "deleted"

@@ -33,15 +33,18 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _policy_gate  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._session_access import hub_access_mode
 from daimon.core.agent_chat_requester import UNREAD, EarlierTurn
+from daimon.core.compute_sessions import agent_chat_owner
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_AGENT_CHAT,
     MA_METADATA_KEY_CHANNEL,
+    MA_METADATA_KEY_CHAT_SESSION,
     MA_METADATA_KEY_PRIVATE_DM,
 )
 from daimon.core.headless_runner import unattended_ceiling_s
 from daimon.core.mcp_tool_annotations import relay_catalogues
 from daimon.core.stores import session_settle_state
+from daimon.core.tool_safety import COMPUTE_APPROVAL_TOOLS
 from daimon.core.turn.approvals import (
     AnnotationLookup,
     build_decision_events,
@@ -441,6 +444,31 @@ async def _watch(
         return False
 
 
+async def owner_tools(
+    runtime: McpRuntime, auth: AuthIdentity, session: BetaManagedAgentsSession
+) -> frozenset[str]:
+    """The protected tools whose owner counts as present in this turn: starting a cloud
+    computer and giving it more time, where the agent-chat rule holds for the session
+    (`agent_chat_owner`), read from the grant Daimon stamped on it; none otherwise.
+
+    The sender drives the session (`require_session_driver`) as a person's account. The
+    session's own credential is checked again when the call reaches the server."""
+    grant = (session.metadata or {}).get(MA_METADATA_KEY_CHAT_SESSION)
+    if not grant or not auth.platform_user_id or auth.client or auth.hold is not None:
+        return frozenset()
+    async with runtime.session_factory() as db:
+        place = await agent_chat_owner(
+            db,
+            tenant_id=auth.tenant_id,
+            account_id=auth.account_id,
+            chat_session_id=grant,
+            platform=auth.platform or "mcp",
+            agent_id=session.agent.id,
+            agent_name=session.agent.name,
+        )
+    return COMPUTE_APPROVAL_TOOLS if place is not None else frozenset()
+
+
 async def _answer(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -459,6 +487,7 @@ async def _answer(
         channel_id=rules_channel_id,
         annotations_for=annotations_for,
         entry_point="mcp_chat",
+        owner_tools=await owner_tools(runtime, auth, session),
     )
     decisions = [
         (call.tool_use_id, await posture.decide(call)) for call in tool_calls_for(turn.state, ids)

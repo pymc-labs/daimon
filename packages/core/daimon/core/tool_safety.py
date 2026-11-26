@@ -138,6 +138,9 @@ VerdictReason = Literal[
     #: A confirmed write whose card an admin's approval setting skips, in an attended
     #: turn, after every deny and ask rule had its say (`approval_skipped_tools`).
     "approval_skipped",
+    #: A confirmed write in a run nobody watches, whose owner a verified rule counts as
+    #: present (`owner_tools`), after every deny and ask rule had its say.
+    "owner_present",
 ]
 
 
@@ -941,6 +944,7 @@ def decide_tool_call(
     annotations: ToolAnnotations | None = None,
     confirmed_tools: frozenset[str] = frozenset(),
     agent_rule: ResolvedAgentToolRule | None = None,
+    owner_tools: frozenset[str] = frozenset(),
 ) -> ToolVerdict:
     """Provider permission can tighten a host verdict, never grant consent."""
     verdict = _decide_tool_call(
@@ -951,6 +955,7 @@ def decide_tool_call(
         annotations=annotations,
         confirmed_tools=confirmed_tools,
         agent_rule=agent_rule,
+        owner_tools=owner_tools,
     )
     if call.permission == "deny":
         return ToolVerdict(outcome="deny", effect=verdict.effect, reason="agent_rule_deny")
@@ -978,6 +983,7 @@ def _decide_tool_call(
     annotations: ToolAnnotations | None = None,
     confirmed_tools: frozenset[str] = frozenset(),
     agent_rule: ResolvedAgentToolRule | None = None,
+    owner_tools: frozenset[str] = frozenset(),
 ) -> ToolVerdict:
     """Decide one blocked call.
 
@@ -995,6 +1001,10 @@ def _decide_tool_call(
     what daimon already enforces: `deny` wins over the fixed gates (not over an
     operator deny of a confirmed write), `ask` pauses a tool that would
     otherwise run, and `allow`, or no rule, leaves the fixed gates as they are.
+
+    `owner_tools` are daimon's own confirmed tools whose owner a verified rule counts as
+    present in a run nobody watches (`compute_sessions.agent_chat_owner`). Only there is
+    one let through without a card, and last, so every deny and ask above still decides.
     """
     trusted = call.server_name is not None and call.server_name in trusted_servers
     trusted_rule = agent_rule if trusted and policy.enabled and policy.agent_rules else None
@@ -1022,6 +1032,7 @@ def _decide_tool_call(
         not policy.enabled
         and call.server_name in trusted_servers
         and call.tool_name in confirmed_tools
+        and not (not attended and call.tool_name in owner_tools)
         and _confirmed_daimon_write(
             call, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools
         )
@@ -1092,6 +1103,12 @@ def _decide_tool_call(
         if trusted_rule is not None and trusted_rule.rule == "ask":
             return ToolVerdict(outcome="ask", effect=effect, reason="agent_rule_ask")
         return ToolVerdict(outcome="allow", effect=effect, reason="approval_skipped")
+    if not attended and trusted and call.tool_name in owner_tools:
+        # Its owner is present by a verified rule. Last, so an operator deny and an agent
+        # rule's deny above still win; an agent rule that asks refuses, as nobody can answer.
+        if trusted_rule is not None and trusted_rule.rule == "ask":
+            return ToolVerdict(outcome="deny", effect=effect, reason="agent_rule_ask")
+        return ToolVerdict(outcome="allow", effect=effect, reason="owner_present")
     if attended:
         return ToolVerdict(outcome="ask", effect=effect, reason="write_needs_confirmation")
     if not _confirmed_daimon_write(

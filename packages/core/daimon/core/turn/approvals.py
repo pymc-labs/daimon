@@ -504,6 +504,7 @@ async def tool_call_verdict(
     confirmed_tools: frozenset[str],
     agent_rule: ResolvedAgentToolRule | None,
     annotations_for: AnnotationLookup | None = None,
+    owner_tools: frozenset[str] = frozenset(),
 ) -> ToolVerdict:
     """Decide one attended or unattended call; both deciders come through here.
 
@@ -520,6 +521,7 @@ async def tool_call_verdict(
         confirmed_tools=confirmed_tools,
         agent_rule=agent_rule,
         annotations=hints,
+        owner_tools=owner_tools,
     )
     _log_annotation_allow(policy, call, verdict, hints, attended=attended)
     return verdict
@@ -533,9 +535,11 @@ def unattended_decider(
     rules_for: RuleLookup | None = None,
     daimon_rules: bool = False,
     annotations_for: AnnotationLookup | None = None,
+    owner_tools: frozenset[str] = frozenset(),
 ) -> ToolCallDecider:
     """Decider for runs nobody is watching: reads run, writes are refused
-    unless the operator allowed them there."""
+    unless the operator allowed them there. `owner_tools` run as their owner's
+    (`tool_safety._decide_tool_call`)."""
 
     async def _decide(call: ToolCall) -> ToolConfirmationResult:
         if _is_unseen(call):
@@ -555,6 +559,7 @@ def unattended_decider(
             confirmed_tools=confirmed_tools,
             agent_rule=rule,
             annotations_for=annotations_for,
+            owner_tools=owner_tools,
         )
         if read_error:
             verdict = read_error_verdict(verdict, attended=False)

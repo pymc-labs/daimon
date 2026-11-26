@@ -49,8 +49,14 @@ from daimon.core.compute_sessions import (
 )
 from daimon.core.compute_thin_mcp import MAX_READ_BYTES
 from daimon.core.confirmation import compute_card_skipped
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_ACCOUNT,
+    MA_METADATA_KEY_AGENT_CHAT,
+    MA_METADATA_KEY_SEALED,
+    MA_METADATA_KEY_TENANT,
+)
 from daimon.core.errors import StoreError
-from daimon.core.session_seal import child_seal_ids, origin_stamp
+from daimon.core.session_seal import child_seal_ids, format_seal_ids, origin_stamp
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import COMPUTE_APPROVAL_TOOLS, DAIMON_SERVER_NAME, PROXY_TOOL_NAME
@@ -242,10 +248,28 @@ def _agent_chat_key(caller: ComputeCaller) -> str:
     return f"{agent_chat_thread(caller.chat_session_id)}:{uuid.uuid4().hex}"
 
 
-#: What launch and extend say in agent chat, where nobody can approve their time.
-_NOT_FROM_AGENT_CHAT = (
-    "A cloud computer can't be started or given more time from agent chat. Nothing was done."
+#: What launch and extend say in agent chat for more than the default time: no card can
+#: show there, so only what `compute_approval` skip allows runs.
+_DEFAULT_TIME_ONLY = (
+    "From agent chat, a cloud computer gets only the default time. Nothing was done."
 )
+
+
+def _agent_chat_source(auth: AuthIdentity, place: ComputePlace) -> dict[str, str]:
+    """What a launch from agent chat records as its source: the person's account and tenant,
+    and the channel and seal its session runs under, as a chat launch records its own."""
+    stamp = {
+        MA_METADATA_KEY_TENANT: str(auth.tenant_id),
+        MA_METADATA_KEY_ACCOUNT: str(auth.account_id),
+        MA_METADATA_KEY_AGENT_CHAT: "true",
+    }
+    if place.feature_channel_id is not None:
+        stamp |= origin_stamp(
+            channel_id=place.feature_channel_id, thread_id=None, seal=auth.seal_ids
+        )
+    elif auth.seal_ids:
+        stamp[MA_METADATA_KEY_SEALED] = format_seal_ids(auth.seal_ids)
+    return stamp
 
 
 async def _readable(
@@ -343,7 +367,8 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Launch your own temporary machine from an operator image profile.
 
         Needs the owner in the conversation; a card asks first unless an admin turned the
-        card off. Without the card, leave ttl_hours out: only the default time runs. List
+        card off. Without the card, as in agent chat, leave ttl_hours out: only the default
+        time runs. List
         profiles first: each names its fixed CPU/RAM, image and the regions you may pass.
         Leave `region` out to use the profile's first region. No shared credentials are
         mounted. Sessions are deleted after their idle lease; export files before
@@ -355,22 +380,27 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         The result's profile_description says what the image holds and how to use it.
         """
         auth, caller = await _caller(runtime, ctx, origin_context_id)
-        if isinstance(caller.origin, ComputePlace):
-            raise ToolError(_NOT_FROM_AGENT_CHAT)
-        key, metadata = await _approved(
-            runtime,
-            auth,
-            caller.origin,
-            "compute_launch_session",
-            {
-                "template": template,
-                "origin_context_id": origin_context_id,
-                "region": region,
-                "ttl_hours": ttl_hours,
-            },
-            {"ttl_hours": None, "region": None},
-            default_time=ttl_hours is None,
-        )
+        origin = caller.origin
+        if isinstance(origin, ComputePlace):
+            # No card shows in agent chat: only the default time runs.
+            if ttl_hours is not None:
+                raise ToolError(_DEFAULT_TIME_ONLY)
+            key, metadata = _agent_chat_key(caller), _agent_chat_source(auth, origin)
+        else:
+            key, metadata = await _approved(
+                runtime,
+                auth,
+                origin,
+                "compute_launch_session",
+                {
+                    "template": template,
+                    "origin_context_id": origin_context_id,
+                    "region": region,
+                    "ttl_hours": ttl_hours,
+                },
+                {"ttl_hours": None, "region": None},
+                default_time=ttl_hours is None,
+            )
         if not await source_metadata_readable(
             runtime, auth, metadata, origin_context_id=origin_context_id
         ):
@@ -400,29 +430,34 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Set your session's expiry to this many hours from now.
 
         Needs the owner in the conversation; a card asks first unless an admin turned the
-        card off. Without the card, hours cannot exceed the default time. Use the
+        card off. Without the card, as in agent chat, hours cannot exceed the default time.
+        Use the
         original attended conversation. Hours cannot exceed the operator TTL. This does
         not change the idle window used by subsequent command/file writes.
         """
         auth, caller = await _caller(runtime, ctx, origin_context_id)
-        if isinstance(caller.origin, ComputePlace):
-            raise ToolError(_NOT_FROM_AGENT_CHAT)
         origin = caller.origin
+        default_time = hours <= runtime.settings.compute.default_idle_ttl_hours
+        if isinstance(origin, ComputePlace) and not default_time:
+            raise ToolError(_DEFAULT_TIME_ONLY)
         try:
             await _readable(runtime, auth, origin_context_id, await service.get(caller, session_id))
-            key, _ = await _approved(
-                runtime,
-                auth,
-                origin,
-                "compute_extend_session",
-                {
-                    "session_id": str(session_id),
-                    "hours": hours,
-                    "origin_context_id": origin_context_id,
-                },
-                {},
-                default_time=hours <= runtime.settings.compute.default_idle_ttl_hours,
-            )
+            if isinstance(origin, ComputePlace):
+                key = _agent_chat_key(caller)
+            else:
+                key, _ = await _approved(
+                    runtime,
+                    auth,
+                    origin,
+                    "compute_extend_session",
+                    {
+                        "session_id": str(session_id),
+                        "hours": hours,
+                        "origin_context_id": origin_context_id,
+                    },
+                    {},
+                    default_time=default_time,
+                )
             return await service.extend(caller, session_id, hours=hours, approval_key=key)
         except (StoreError, ComputeProviderError) as exc:
             raise ToolError(str(exc)) from None

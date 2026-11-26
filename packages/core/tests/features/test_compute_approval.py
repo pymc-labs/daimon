@@ -23,6 +23,7 @@ from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
     WATCH_APPROVAL_TOOLS,
     WATCH_CONFIRMED_TOOLS,
+    ResolvedAgentToolRule,
     ToolCall,
     ToolSafetyPolicy,
     decide_tool_call,
@@ -30,6 +31,7 @@ from daimon.core.tool_safety import (
     session_tools_for_policy,
 )
 from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn.unattended_capabilities import protected_tools
 from daimon.testing.factories import make_tenant
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -203,3 +205,53 @@ async def test_only_the_skippable_tools_ever_leave_a_turns_set(
     both = await confirmed_tools_for_tenant(deps, tenant.id, AGENT)
     assert every - both == APPROVAL_SKIPPABLE_TOOLS
     assert both >= WATCH_CONFIRMED_TOOLS - APPROVAL_SKIPPABLE_TOOLS
+
+
+def _unattended(
+    policy: ToolSafetyPolicy,
+    tool: str,
+    *,
+    owner: frozenset[str],
+    rule: ResolvedAgentToolRule | None = None,
+) -> str:
+    """The unattended outcome, as an agent-chat turn's worker decides it."""
+    call = ToolCall(
+        tool_use_id="tu", server_name=DAIMON_SERVER_NAME, tool_name=tool,
+        input={CONFIRMED_DAIMON_TOOLS[tool] or "": "x"},
+    )  # fmt: skip
+    return decide_tool_call(
+        policy,
+        call,
+        attended=False,
+        trusted_servers=_DAIMON,
+        confirmed_tools=protected_tools(policy),
+        agent_rule=rule,
+        owner_tools=owner,
+    ).outcome
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_an_owner_present_by_rule_starts_and_extends_with_nobody_watching(enabled: bool) -> None:
+    """Only launch and extend, only for an owner a verified rule counts as present
+    (`agent_chat_owner`): every other protected tool, and the same turn without the rule,
+    is refused as before."""
+    policy = ToolSafetyPolicy(enabled=enabled, agent_rules=True)
+    for tool in sorted(COMPUTE_APPROVAL_TOOLS):
+        assert _unattended(policy, tool, owner=COMPUTE_APPROVAL_TOOLS) == "allow", tool
+        assert _unattended(policy, tool, owner=frozenset()) == "deny", f"{tool}: as before"
+    for tool in sorted(STILL_ASK):
+        assert _unattended(policy, tool, owner=COMPUTE_APPROVAL_TOOLS) == "deny", tool
+
+
+@pytest.mark.parametrize("rule", ["deny", "ask"])
+def test_an_agent_rule_or_an_operator_deny_still_refuses_the_owners_start(rule: str) -> None:
+    on = ToolSafetyPolicy(enabled=True, agent_rules=True)
+    denied = ToolSafetyPolicy(
+        enabled=True,
+        agent_rules=True,
+        denied=tuple(f"daimon-mcp/{t}" for t in COMPUTE_APPROVAL_TOOLS),
+    )
+    for tool in sorted(COMPUTE_APPROVAL_TOOLS):
+        held = ResolvedAgentToolRule(rule=rule)  # type: ignore[arg-type]
+        assert _unattended(on, tool, owner=COMPUTE_APPROVAL_TOOLS, rule=held) == "deny", tool
+        assert _unattended(denied, tool, owner=COMPUTE_APPROVAL_TOOLS) == "deny", tool
