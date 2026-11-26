@@ -29,6 +29,7 @@ from daimon.core.turn.gemini import (
 )
 from daimon.core.turn.gemini_state import HoldSettlement, interaction_of
 from daimon.core.turn.prepare import CONTINUED, PreparedTurn, ProviderPreparationRequest
+from daimon.core.turn.provider_env import PATH, turn_env_file
 from daimon.core.turn.replace_binding import (
     BindingFacts,
     OldSession,
@@ -399,6 +400,11 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         or current.backend_revision != config
     ):
         raise UnsupportedCapability(("gemini_changed_admission",), PROFILE)
+    # The keys file each reply reads, placed (or emptied) by hash before the send.
+    env = await turn_env_file(request)
+    placed = await backend.sessions.place_file(
+        scope, session_ref, PATH.removeprefix("/workspace/"), env.body if env else None
+    )
 
     async def record(*, observation: UsageObservation) -> bool:
         if observation.session != session_ref or observation.model is None:
@@ -445,6 +451,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         _finalize=runtime.end_of_turn,
         continuity=continuity,
         _builtins_withheld=withheld and not (prior is not None and binding is prior),
+        env_sha256=env.sha256 if env is not None and placed else None,
     )
 
 

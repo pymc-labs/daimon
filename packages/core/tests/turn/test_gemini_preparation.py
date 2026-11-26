@@ -19,6 +19,7 @@ from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.shared_threads import shared_owner
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+from daimon.core.turn import gemini_prepare
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.binding import prepared_persistence
 from daimon.core.turn.deps import TurnDeps
@@ -31,6 +32,7 @@ from daimon.core.turn.gemini import (
     GeminiUsageRuntime,
 )
 from daimon.core.turn.prepare import PreparedTurn, bind_session_impl
+from daimon.core.turn.provider_env import EnvFile
 from daimon.core.turn.run import run_prepared_turn_impl
 from daimon.core.usage_billing import ObservationRecorder
 from daimon.testing.factories import make_tenant
@@ -179,6 +181,24 @@ async def test_explicit_registered_preparation_reuses_authorized_persisted_bindi
     assert binding is not None and binding.native_refs["session"] == first.ma_session_id
     assert binding.profile == PROFILE and binding.legacy_account_id == str(ACCOUNT)
     assert not host.transport.requests and not host.ancillary.requests
+
+
+async def test_the_keys_file_is_placed_in_the_sandbox_before_each_reply(
+    host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = EnvFile(body=b"API_KEY=s3cret\n", sha256="hash")
+
+    async def keys(_request: object) -> EnvFile:
+        return env
+
+    monkeypatch.setattr(gemini_prepare, "turn_env_file", keys)
+    first = await prepare(host)
+    ((environment, config),) = host.transport.environments.items()
+    assert "s3cret" not in str(config), "never in the config interactions echo"
+    assert host.transport.environment_files[environment] == {".daimon/.env": len(env.body)}
+    second = await prepare(host)
+    assert (first.env_sha256, second.env_sha256) == ("hash", "hash")
+    assert len(host.transport.uploads) == 1, "an unchanged file is not sent again"
 
 
 async def test_fresh_preparation_creates_empty_slot_then_replaces_binding(host: Host) -> None:
