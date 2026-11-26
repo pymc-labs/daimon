@@ -327,6 +327,7 @@ from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import protection_state, turn_target_protected
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
+from daimon.core.turn.shown_model import shown_model
 from daimon.core.turn.slots import (
     QUEUE_TIMED_OUT_TEXT,
     holding,
@@ -2573,7 +2574,7 @@ class SlackApp:
 
         agent = admission.agent
         _lc_agent_name: str = admission.display_name(agent.name)
-        _lc_model_id: str = agent.model.id
+        _lc_model_id: str = shown_model(admission).id
         turn_identity: AgentIdentity | None = None
         try:
             async with self.runtime.sessionmaker.begin() as identity_session:
@@ -3563,7 +3564,7 @@ class SlackApp:
             requester_foreign=standing.foreign,
             notify_on_completion=follow_admission.shown("completion_pings", "slack"),
             agent_name=follow_admission.display_name(follow_admission.agent.name),
-            model_id=follow_admission.agent.model.id,
+            model_id=shown_model(follow_admission).id,
             markup=self.runtime.turn_deps.markup,
             register=functools.partial(self._register_cancel, team_id=team_id, channel=channel),
             deregister=functools.partial(self._deregister_cancel, team_id=team_id, channel=channel),
@@ -3666,7 +3667,7 @@ class SlackApp:
                 requester_foreign=standing.foreign,
                 notify_on_completion=follow_admission.shown("completion_pings", "slack"),
                 agent_name=follow_admission.display_name(follow_admission.agent.name),
-                model_id=follow_admission.agent.model.id,
+                model_id=shown_model(follow_admission).id,
                 markup=self.runtime.turn_deps.markup,
                 register=functools.partial(self._register_cancel, team_id=team_id, channel=channel),
                 deregister=functools.partial(

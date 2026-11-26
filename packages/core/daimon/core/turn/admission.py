@@ -3200,14 +3200,10 @@ async def require_tool_limits_hold(deps: TurnDeps, admission: Admission) -> None
 def running_on(admission: Admission) -> dict[str, str]:
     """The model provider and model this message actually runs on: what the card's
     footer and the metering say, never the agent's settings (M03)."""
-    from mux.profiles import get_profile
+    from daimon.core.turn.shown_model import shown_model
 
-    revision = admission.backend_revision
-    provider = (
-        get_profile(revision.profile).provider if revision is not None else MANAGED_AGENTS.provider
-    )
-    model = (revision.model if revision is not None else None) or admission.agent.model.id
-    return {"provider": provider, "model": model}
+    shown = shown_model(admission)
+    return {"provider": shown.provider, "model": shown.id}
 
 
 async def _web_links(

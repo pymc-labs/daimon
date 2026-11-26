@@ -214,7 +214,11 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
         avatars = await faces(caller, list(listed.values()))
         return [
             session_json(
-                t, listed[t.id], running=is_running(t.id), avatar=avatars.get(t.agent_id, "")
+                t,
+                listed[t.id],
+                running=is_running(t.id),
+                avatar=avatars.get(t.agent_id, ""),
+                model=await thread_model(runtime, caller, t, listed[t.id]),
             )
             for t in threads
         ]

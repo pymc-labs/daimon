@@ -179,6 +179,7 @@ from daimon.core.turn.outcomes import finish_with_error, observe_turn, record_re
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
 from daimon.core.turn.protection import ProtectionState, protection_state
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
+from daimon.core.turn.shown_model import shown_model
 from daimon.core.turn.slots import (
     QUEUE_TIMED_OUT_TEXT,
     holding,
@@ -1722,7 +1723,7 @@ class TeamsApp:
                 direct_chat=inbound.kind == "dm",
                 foreign=inbound.is_foreign,
                 agent_name=admission.display_name(admission.agent.name),
-                model_id=admission.agent.model.id,
+                model_id=shown_model(admission).id,
                 markup=self.runtime.turn_deps.markup,
                 sessionmaker=self.runtime.sessionmaker,
                 budget_channel_id=admission.budget_channel_id,
