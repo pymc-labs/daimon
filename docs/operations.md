@@ -310,8 +310,8 @@ database access and is not an MCP tool.
 
 The scheduler deletes audit rows after
 [`DAIMON_RETENTION__SECURITY_AUDIT_DAYS`](configuration.md#daimon_retention__security_audit_days)
-(90 days); `daimon audit prune` prunes one tenant now. Erasure
-clears a person's identifiers, and deleting a tenant removes its rows. Database
+(90 days), or `daimon audit prune` for one tenant. Erasure
+clears a person's identifiers; tenant deletion removes its rows. Database
 triggers block ordinary updates and deletes against application mistakes.
 
 ## Set retention
@@ -322,8 +322,8 @@ setting is the age in days at which the scheduler deletes a record; `0` keeps it
 [feature](features.md#conversation-history-kept).
 
 Reports expire after [`DAIMON_REPORT__RETENTION_DAYS`](configuration.md#daimon_report__retention_days)
-and notebooks at their expiry. Give chart buckets, backups and logs an expiry
-no longer than the shortest age you promise users.
+and notebooks at their expiry. Expire chart buckets, backups and logs within
+the shortest age you promise users.
 
 ## Manage operator tokens
 

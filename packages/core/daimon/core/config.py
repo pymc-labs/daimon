@@ -3250,7 +3250,7 @@ class RetentionSettings(BaseModel):
         ),
     )
     admin_history_days: int = Field(
-        default=90, ge=0, description="Days to keep the web admin audit and channel changes."
+        default=90, ge=0, description="Days to keep the admin page audit and channel changes."
     )
     task_continuations_days: int = Field(
         default=30,
@@ -3357,7 +3357,7 @@ class Settings(BaseSettings):
     privacy_policy_url: HttpUrl = Field(
         default=HttpUrl("https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md"),
         description=(
-            "URL of the privacy policy, linked from the web app and the privacy "
+            "URL of the privacy policy, linked from the browser pages and the privacy "
             "panels' Policy button. "
             "Override via DAIMON_PRIVACY_POLICY_URL if you host your own policy page."
         ),
@@ -3366,7 +3366,7 @@ class Settings(BaseSettings):
         default=None,
         description=(
             "URL of the terms page. Set DAIMON_TERMS_URL to show a Terms link beside "
-            "the privacy policy in the web app and the privacy panels; unset, no "
+            "the privacy policy in the browser pages and the privacy panels; unset, no "
             "Terms link appears."
         ),
     )
