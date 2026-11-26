@@ -122,6 +122,7 @@ Where each feature can be set, and its default.
 | Approval for watches | `watch_approval` | Guardrail | Ask |  | ✓ | ✓ |  |  |  |  |
 | Approval for cloud computers | `compute_approval` | Guardrail | Ask |  | ✓ | ✓ |  |  |  |  |
 | Cloud computers continue after a job | `compute_wake_runs` | Guardrail | Off |  | ✓ | ✓ |  |  |  |  |
+| Cloud computers from agent chat | `compute_agent_chat` | Guardrail | Off |  | ✓ | ✓ |  |  |  |  |
 | Routines must say where they post | `require_routine_destination` | Guardrail | Optional | ✓ | ✓ |  |  |  |  |  |
 | Monitor direct messages | `monitor_direct_messages` | Guardrail | Off | ✓ | ✓ | ✓ |  |  |  |  |
 | Monitor coding tools | `monitor_mcp` | Guardrail | Off | ✓ | ✓ | ✓ |  |  |  |  |
@@ -966,7 +967,7 @@ Work for a channel Daimon cannot reach waits, without failing, and runs once it 
 
 ## Cloud computers
 
-The agent can start a short-lived cloud computer to run code and keep files. Only a server admin turns it on; Off removes its tools here.
+A short-lived cloud computer to run code. Only a server admin turns it on; Off removes its tools.
 
 | | |
 | --- | --- |
@@ -1335,7 +1336,7 @@ Ask shows a card with the destination and duration before a watch is made or res
 
 ## Approval for cloud computers
 
-Ask shows a card before a cloud computer starts or gets more time. Skip runs both without it, for the default time only. OpenAI and Gemini agents still get the card. Only a server admin can change it.
+Ask shows a card to start or extend a cloud computer. Skip: no card, default time only; OpenAI and Gemini still ask. Only a server admin sets it.
 
 | | |
 | --- | --- |
@@ -1347,11 +1348,23 @@ Ask shows a card before a cloud computer starts or gets more time. Skip runs bot
 
 ## Cloud computers continue after a job
 
-When a background command ends with nobody in the conversation, the agent may run the next command on that cloud computer. After a set number in a row it waits for the owner to run a command or write a file there; a message does not count. Off: it only reports the result. Only a server admin can change it.
+After an unwatched command ends, the agent may run the next, up to a set number in a row; then it waits for the owner to run a command or write a file (not a message). Off: it only reports. Only a server admin sets it.
 
 | | |
 | --- | --- |
 | Key | `compute_wake_runs` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Workspace, Agent |
+| Combines | Most specific wins |
+
+## Cloud computers from agent chat
+
+Agent chat may start cloud computers without a card and use them; it lists and stops all the person's. So may their keys driving it. Only a server admin sets it.
+
+| | |
+| --- | --- |
+| Key | `compute_agent_chat` |
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
 | Levels | Workspace, Agent |

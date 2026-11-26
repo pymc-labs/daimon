@@ -110,6 +110,7 @@ _NARROWED: dict[str, str] = {
     "require_routine_destination": "read when a routine is created, at the workspace",
     "data_sources": "the store is shared by the whole server, so the deployment and a workspace set it",
     "compute_wake_runs": "a server admin's choice for the team or one agent, read by a wake turn",
+    "compute_agent_chat": "a server admin's choice for the team or one agent; agent chat has no thread",
     "watch_approval": "an operator's choice for the team or one agent; a channel or thread cannot loosen it",
     "compute_approval": "an operator's choice for the team or one agent; a channel or thread cannot loosen it",
     "secret_sharing": "a workspace or agent choice: a share has no channel or thread",
@@ -591,6 +592,7 @@ _CONFIG_SWITCHES: dict[str, str] = {
     "CryptoSettings.allow_plaintext": _OPS,
     "HarnessAuthBinding.auth_mode": _SHAPE,
     "SignedIdentityServer.requester_meta": _SHAPE,
+    "SignedIdentityServer.agent_chat_requester": _SHAPE,
     "SignedIdentityServer.channel_scoped": _OPS,  # how a server scopes its answers, a per-server trust setting
     "SelfHostedSettings.admission_enabled": _OPS,
     "SelfHostedSettings.single_tenant": _OPS,

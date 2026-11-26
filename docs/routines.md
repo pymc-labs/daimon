@@ -223,7 +223,7 @@ files. Failure notices never carry files.
 | `DAIMON_SCHEDULER__TICK_INTERVAL_S` | 30 s |
 | `DAIMON_SCHEDULER__MAX_AGE_S` | 900 s |
 | `DAIMON_SCHEDULER__MAX_CONCURRENT_FIRES` | 10 |
-| Read timeout per call | 120 s |
+| Read timeout per call | 120 s; for Gemini, 15 minutes, with a status check every minute |
 
 The ceiling covers session assembly and the run. The dispatch
 timeout cannot be set below it. Settings are in [configuration.md](configuration.md#scheduler).
