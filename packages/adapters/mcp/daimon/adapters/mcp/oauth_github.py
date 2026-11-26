@@ -1,333 +1,65 @@
-"""Browser-bound GitHub App repository connection flow."""
+"""Server-rendered pages for the GitHub App repository connection flow.
+
+The flow itself is `daimon.core.github_connect_flow`; this module maps its
+routes to it and renders the views it returns as HTML.
+"""
 
 from __future__ import annotations
 
-import asyncio
-import base64
-import hashlib
-import hmac
 import html
 import json
-import logging
 import re
-import secrets
-import time
-import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from contextlib import nullcontext
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import Literal, cast
-from urllib.parse import parse_qs, quote, urlencode
 
-import httpx
-from anthropic import APIError, AsyncAnthropic
-from anthropic.types.beta import BetaManagedAgentsAgent
-from cryptography.fernet import InvalidToken, MultiFernet
+from anthropic import AsyncAnthropic
+from cryptography.fernet import MultiFernet
 from daimon.adapters.mcp.github_pages import github_page
-from daimon.adapters.mcp.oauth_github_follow import (
-    FollowOffer,
-    confirmed_offer,
-    follow_offers,
-    follow_offers_html,
-    following_note_html,
-)
-from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
+from daimon.adapters.mcp.oauth_github_follow import follow_offers_html, following_note_html
 from daimon.adapters.mcp.web_icons import icon, platform_mark
-from daimon.core.agent_ownership import owns_agent
 from daimon.core.config import Settings
-from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
-from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
-from daimon.core.features.service import set_agent_feature
-from daimon.core.github_app_auth import (
-    build_app_jwt,
-    get_app_installation_details,
-    installation_supports_write,
-    list_installation_repository_details,
-    mint_installation_listing_token,
-)
+from daimon.core.github_connect_admin import teams_admin_owner_ids
 from daimon.core.github_connect_cards import (
     NEEDED,
     NEEDS_WRITE,
     audience_line,
 )
-from daimon.core.github_credentials import decrypt_token, encrypt_token
-from daimon.core.github_requester_access import list_github_pages
-from daimon.core.native_admins import (
-    AdminAttestationUnavailable,
-    attest_discord_membership,
+from daimon.core.github_connect_flow import ClientFactory, GitHubConnectFlow
+from daimon.core.github_connect_views import (
+    FLOW_COOKIE,
+    MAX_CONFIRM_BODY_BYTES,
+    SELECTION_FIELDS,
+    STATE_COOKIE,
+    AgentEditorView,
+    AlreadyConnectedView,
+    CancelledView,
+    ChatReturn,
+    ConnectErrorView,
+    ConnectInstallation,
+    ConnectOutcome,
+    ConnectRedirect,
+    ConnectTransientErrorView,
+    ConnectView,
+    DoneView,
+    ExpiredView,
+    InstallView,
+    NoReposView,
+    PendingView,
+    SavedAgentView,
+    WorkspacePickerView,
+    read_capped,
+    selection_from_form,
+    selection_too_large,
 )
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores import github_access, github_app_installations, github_connect
-from daimon.core.stores.accounts import get_account_with_tenant
-from daimon.core.stores.domain import AccountIdentityRow, Role
-from daimon.core.stores.github_access import list_agent_repos
-from daimon.core.stores.github_follow_org import FEATURE_KEY as FOLLOW_ORG_FEATURE
-from daimon.core.stores.github_follow_org import agent_follows
-from daimon.core.stores.github_installation_reconciliation import enqueue as enqueue_reconciliation
-from daimon.core.stores.github_request_actions import (
-    finish_confirmed_requests,
-    lock_confirmed_request_repos,
-)
-from daimon.core.stores.security_audit import append_event
-from daimon.core.stores.slack_bot_tokens import get_slack_bot_token
-from daimon.core.teams_graph import GraphClient, GraphUnavailable
-from mux.drivers import isolated_ssl_context
-from pydantic import BaseModel, Field, TypeAdapter
-from sqlalchemy import text as sql_text
-from sqlalchemy.exc import DBAPIError, SQLAlchemyError
+from daimon.core.stores import github_access
+from daimon.core.web_links import WebLinks
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
 
 RouteHandler = Callable[[Request], Awaitable[Response]]
-ClientFactory = Callable[[], httpx.AsyncClient]
-_COOKIE = "daimon_gh_connect"
-# GitHub drops `state` from the setup redirect after some installation changes, so the
-# browser keeps it too. It still has to match the flow cookie in `get_flow`.
-_STATE_COOKIE = "daimon_gh_connect_state"
-_log = logging.getLogger(__name__)
-_ADMIN_RETRY = "Couldn't confirm you're still an admin. Try again in a minute."
-# A save posts one `repo=<id>` per addition plus one shared `access=write`,
-# so 256 KiB covers several thousand repos while bounding what one request can
-# make the server read and parse. The cap is checked before any other work.
-_MAX_CONFIRM_BODY_BYTES = 256 * 1024
-# Handed to `parse_qs` so a body of nothing but `&` cannot allocate a huge field list.
-_MAX_CONFIRM_FIELDS = 10_000
-# One wall-clock budget for listing every installation and its repos. Each GitHub
-# call already times out at 20 s, but they run one after another, so many
-# installations or pages could hold the request open indefinitely. 60 s leaves
-# room for large organizations and stays well inside Cloud Run's request timeout
-# (the mcp service sets none, so the platform default of 300 s applies; see the
-# `timeoutSeconds` fallback in .github/workflows/deploy.yml).
-_INSTALLATIONS_DEADLINE_SECONDS = 60.0
-# Form fields a failed save re-posts from its error page. Anything else a client
-# sent is dropped rather than echoed back into HTML.
-_RETRY_FIELD_NAMES = frozenset(
-    {
-        "state",
-        "invitation",
-        "receipt",
-        "snapshot",
-        "snapshot_sig",
-        "visibility",
-        "visibility_sig",
-        "repo",
-        "remove",
-        "access",
-        "working",
-        "follow_org",
-    }
-)
 _RETRY_FIELD_SCOPED_ACCESS = re.compile(r"access_\d+")
-
-
-async def _attest_native_admin(
-    *,
-    requester: AccountIdentityRow,
-    settings: Settings,
-    sessionmaker: async_sessionmaker[AsyncSession],
-    fernet: MultiFernet,
-    http_client: httpx.AsyncClient | None = None,
-    db_session: AsyncSession | None = None,
-) -> bool:
-    """Attest live platform authority; GitHub never accepts delegated authority."""
-    user_id = requester.platform_user_id
-    if user_id is None:
-        raise AdminAttestationUnavailable("platform principal unavailable")
-    if requester.platform == "discord":
-        facts = await attest_discord_membership(
-            guild_id=requester.external_id,
-            platform_user_id=user_id,
-            settings=settings,
-            http_client=http_client,
-        )
-        return facts.is_admin
-    if requester.platform == "slack":
-        try:
-            async with (
-                nullcontext(db_session) if db_session is not None else sessionmaker()
-            ) as session:
-                row = await get_slack_bot_token(session, team_id=requester.external_id)
-        except SQLAlchemyError as exc:
-            raise AdminAttestationUnavailable("workspace bot token lookup failed") from exc
-        if row is None:
-            raise AdminAttestationUnavailable("workspace bot token unavailable")
-        try:
-            token = decrypt_token(fernet, row.encrypted_token)
-        except InvalidToken as exc:
-            raise AdminAttestationUnavailable("workspace bot token unavailable") from exc
-
-        async def slack_lookup(client: httpx.AsyncClient) -> object:
-            response = await client.get(
-                "https://slack.com/api/users.info",
-                params={"user": user_id},
-                headers={"Authorization": f"Bearer {token}"},
-                follow_redirects=False,
-                timeout=5,
-            )
-            response.raise_for_status()
-            return cast(object, response.json())
-
-        try:
-            async with asyncio.timeout(10):
-                if http_client is None:
-                    async with httpx.AsyncClient(
-                        trust_env=False, verify=isolated_ssl_context()
-                    ) as client:
-                        payload = await slack_lookup(client)
-                else:
-                    payload = await slack_lookup(http_client)
-            if (
-                not isinstance(payload, dict)
-                or cast(dict[str, object], payload).get("ok") is not True
-            ):
-                raise ValueError("Slack lookup did not succeed")
-            user = cast(dict[str, object], payload).get("user")
-            if not isinstance(user, dict) or cast(dict[str, object], user).get("id") != user_id:
-                raise ValueError("Unbound Slack user")
-            user = cast(dict[str, object], user)
-            if user.get("deleted"):
-                return False
-            flags = ("is_admin", "is_owner", "is_primary_owner")
-            if any(type(user.get(flag)) is not bool for flag in flags):
-                raise ValueError("Missing Slack admin facts")
-            return any(user[flag] for flag in flags)
-        except (httpx.HTTPError, TimeoutError, ValueError) as exc:
-            raise AdminAttestationUnavailable("Slack lookup failed") from exc
-    if requester.platform == "teams":
-        teams = settings.teams
-        if teams is None or teams.admin_team_id is None:
-            raise AdminAttestationUnavailable("Teams admin team unavailable")
-        if requester.external_id.lower() != teams.tenant_id.lower():
-            return False
-        admin_team_id = teams.admin_team_id
-
-        async def teams_lookup(client: httpx.AsyncClient) -> frozenset[str]:
-            bot = TeamsBotClient(
-                client,
-                client_id=teams.client_id,
-                client_secret=teams.client_secret.get_secret_value(),
-                tenant_id=teams.tenant_id,
-            )
-            return await GraphClient(client, bot.graph_token).list_team_owner_ids(admin_team_id)
-
-        try:
-            async with asyncio.timeout(15):
-                if http_client is None:
-                    async with httpx.AsyncClient(
-                        trust_env=False, verify=isolated_ssl_context()
-                    ) as client:
-                        owners = await teams_lookup(client)
-                else:
-                    owners = await teams_lookup(http_client)
-            return user_id.lower() in owners
-        except (GraphUnavailable, httpx.HTTPError, TimeoutError, ValueError) as exc:
-            raise AdminAttestationUnavailable("Teams lookup failed") from exc
-    raise AdminAttestationUnavailable("unsupported platform")
-
-
-@dataclass(frozen=True)
-class _Repo:
-    id: int
-    owner_id: int
-    installation_id: int
-    full_name: str
-    # The signed-in person's GitHub permission on the repo; None when GitHub
-    # reports none the flow can use.
-    permission: github_connect.GitHubPermission | None
-    private: bool = False
-    archived: bool = False
-
-    @property
-    def usable(self) -> bool:
-        return self.permission is not None
-
-    @property
-    def max_access(self) -> Literal["read", "write"]:
-        """The App grants write on any usable installed repository."""
-        return "write" if self.usable else "read"
-
-
-def _repo_confirmation(
-    repo: _Repo,
-    *,
-    requested: Literal["read", "write"],
-    needs_write: bool,
-    installation_writes: Mapping[int, bool],
-) -> github_connect.RepoConfirmation:
-    """Confirm write access from the App installation for a usable repo."""
-    if not repo.usable or not installation_writes.get(repo.installation_id, False):
-        raise ValueError("The GitHub App needs write access to connect this repo.")
-    return github_connect.RepoConfirmation(
-        repo_id=repo.id,
-        owner_id=repo.owner_id,
-        installation_id=repo.installation_id,
-        full_name=repo.full_name,
-        max_access="write",
-        authorizer_permission=repo.permission,
-    )
-
-
-@dataclass(frozen=True)
-class _Installation:
-    id: int
-    owner_id: int
-    owner_login: str
-    repository_selection: str
-    repos: tuple[_Repo, ...]
-    owner_type: str = ""
-    avatar_url: str | None = None
-    state: Literal["active", "suspended"] = "active"
-    total: int = 0
-    truncated: bool = False
-    fetch_state: Literal["ok", "error"] = "ok"
-
-
-class _OwnerPayload(BaseModel):
-    id: int
-    login: str = ""
-    type: str = ""
-    avatar_url: str | None = None
-
-
-class _InstallationPayload(BaseModel):
-    id: int
-    account: _OwnerPayload
-    repository_selection: str = "all"
-    suspended_at: str | None = None
-
-
-class _RepoPayload(BaseModel):
-    id: int
-    owner: _OwnerPayload
-    full_name: str = ""
-    permissions: dict[str, bool] = Field(default_factory=dict)
-    private: bool = False
-    archived: bool = False
-
-
-class _TokenPayload(BaseModel):
-    access_token: str
-
-
-class _UserPayload(BaseModel):
-    id: int
-
-
-class _AccountLoginPayload(BaseModel):
-    login: str = ""
-
-
-class _InstallationRequestPayload(BaseModel):
-    requester: _UserPayload
-    account: _AccountLoginPayload | None = None
-
-
-@dataclass(frozen=True)
-class _PendingInstallationRequest:
-    found: bool
-    account_login: str | None = None
 
 
 def _retry_hidden_inputs(fields: Mapping[str, Sequence[str]]) -> str:
@@ -336,7 +68,7 @@ def _retry_hidden_inputs(fields: Mapping[str, Sequence[str]]) -> str:
         f'<input type="hidden" name="{html.escape(name, quote=True)}" '
         f'value="{html.escape(value, quote=True)}">'
         for name, values in fields.items()
-        if name in _RETRY_FIELD_NAMES or _RETRY_FIELD_SCOPED_ACCESS.fullmatch(name)
+        if name in SELECTION_FIELDS or _RETRY_FIELD_SCOPED_ACCESS.fullmatch(name)
         for value in values
     )
 
@@ -384,34 +116,6 @@ def _error(
         ),
         status=status,
         error=True,
-    )
-
-
-async def _read_capped_body(request: Request, limit: int) -> bytes | None:
-    """Read the request body, or return None as soon as it exceeds `limit` bytes.
-
-    The declared Content-Length is checked first so an honest oversize request
-    costs nothing. The streamed total is checked too, because a chunked body has
-    no Content-Length and a declared length can be wrong.
-    """
-    declared = request.headers.get("content-length")
-    if declared is not None and declared.isascii() and declared.isdigit() and int(declared) > limit:
-        return None
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > limit:
-            return None
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
-def _selection_too_large() -> Response:
-    return _error(
-        "That selection is too large to save.",
-        413,
-        action="Go back, choose fewer repos, and save again.",
     )
 
 
@@ -526,9 +230,9 @@ def _install_page(install_url: str, cancel_url: str) -> Response:
             '<p class="gh-action-line">Choose the GitHub organization and repos you want '
             "to connect.</p>"
             '<div class="gh-actions">'
-            f'<a class="gh-primary" href="{install_url}">'
+            f'<a class="gh-primary" href="{html.escape(install_url, quote=True)}">'
             f"{icon('github')}Continue to GitHub</a>"
-            f'<a class="gh-link" href="{cancel_url}">Cancel</a></div>'
+            f'<a class="gh-link" href="{html.escape(cancel_url, quote=True)}">Cancel</a></div>'
         ),
     )
 
@@ -548,8 +252,9 @@ def _pending_page(check_url: str, cancel_url: str, organization: str | None = No
             f'<p class="gh-status-line">{who}</p>'
             '<p class="gh-action-line">Check again after approval.</p>'
             '<div class="gh-actions">'
-            f'<a class="gh-primary" href="{check_url}">Check again{icon("chevron-right")}</a>'
-            f'<a class="gh-link" href="{cancel_url}">Cancel</a></div>'
+            f'<a class="gh-primary" href="{html.escape(check_url, quote=True)}">'
+            f"Check again{icon('chevron-right')}</a>"
+            f'<a class="gh-link" href="{html.escape(cancel_url, quote=True)}">Cancel</a></div>'
         ),
     )
 
@@ -612,31 +317,7 @@ def _expired_page(requester_label: str) -> Response:
     )
 
 
-def _receipt_signature(state: str, invitation_hash: str, secret: str) -> str:
-    message = f"{state}:{invitation_hash}".encode()
-    return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
-
-
-def _snapshot_signature(state: str, invitation_hash: str, snapshot: str, secret: str) -> str:
-    message = json.dumps([state, invitation_hash, snapshot], separators=(",", ":")).encode()
-    return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
-
-
-def _visibility_digest(installations: Sequence[_Installation]) -> str:
-    """Bind the form to the GitHub repo lists it presented."""
-    inventory = [
-        (
-            item.id,
-            item.state,
-            item.fetch_state,
-            sorted(repo.id for repo in item.repos if repo.usable),
-        )
-        for item in installations
-    ]
-    return hashlib.sha256(json.dumps(inventory, sort_keys=True).encode()).hexdigest()
-
-
-def _owner_avatar(item: _Installation | None) -> str:
+def _owner_avatar(item: ConnectInstallation | None) -> str:
     is_person = item is not None and item.owner_type.lower() == "user"
     if (
         item is not None
@@ -658,7 +339,7 @@ def _saved_agent_page(
     grants: list[github_access.AgentRepo],
     visible_ids: set[int] | None = None,
     back_url: str | None = "https://discord.com/app",
-    installations: Sequence[_Installation] = (),
+    installations: Sequence[ConnectInstallation] = (),
     following: bool = False,
 ) -> Response:
     owner_installations = {item.owner_login.casefold(): item for item in installations}
@@ -1228,87 +909,23 @@ class _PickerOption:
     installation_id: int
 
 
-def _agent_editor_page(
-    *,
-    root: str,
-    state: str,
-    invitation_hash: str,
-    secret: str,
-    agent_name: str,
-    workspace: str,
-    platform: str,
-    grants: list[github_access.AgentRepo],
-    installations: list[_Installation],
-    snapshot: str,
-    cancel_url: str,
-    install_url: str,
-    needed: Mapping[int, bool] | None = None,
-    requested_repo: str | None = None,
-    missing_names: tuple[str, ...] = (),
-    selection_error: str | None = None,
-    pending_installation: _PendingInstallationRequest | None = None,
-    github_user_id: int | None = None,
-    follow: tuple[FollowOffer, ...] = (),
-    following: bool = False,
-) -> Response:
-    """Render one agent's grants and an optional staged add dialog.
-
-    `follow` offers the checkbox that gives the agent new repos of a whole org;
-    `following` says it already has them."""
+def _agent_editor_page(view: AgentEditorView) -> Response:
+    """Render one agent's grants and an optional staged add dialog."""
     esc = html.escape
-
-    snapshot_digest = hashlib.sha256(snapshot.encode()).hexdigest()
-    visibility = _visibility_digest(installations)
-    needed = needed or {}
-    usable = {
-        repo.id: repo
-        for installation in installations
-        for repo in installation.repos
-        if repo.usable
-    }
-    current = {repo.repo_id for repo in grants}
-    available = sorted(
-        (repo for repo_id, repo in usable.items() if repo_id not in current),
-        key=lambda repo: repo.full_name.casefold(),
-    )
-    requested_id = next(
-        (
-            repo.id
-            for repo in available
-            if requested_repo and repo.full_name.casefold() == requested_repo.casefold()
-        ),
-        None,
-    )
-    repairable = [repo for repo in grants if repo.repo_id in usable and repo.repo_id in needed]
-    working = next((repo for repo in grants if repo.is_working_repo), None)
+    agent_name = view.agent_name
+    grants = view.grants
+    installations = view.installations
+    needed = view.needs_write
+    usable = {repo.id: repo for repo in view.visible_repos}
+    available = view.available
+    requested_id = view.requested_repo_id
+    repairable_ids = set(view.repairable_repo_ids)
+    repairable = [repo for repo in grants if repo.repo_id in repairable_ids]
+    working = next((repo for repo in grants if repo.repo_id == view.working_repo_id), None)
     may_change_working = True
     owner_by_login = {item.owner_login.casefold(): item for item in installations}
-    past_cap_ids = {
-        repo.repo_id
-        for repo in grants
-        if (
-            (item := owner_by_login.get(repo.full_name.partition("/")[0].casefold()))
-            and item.state == "active"
-            and item.fetch_state == "ok"
-            and item.truncated
-            and repo.repo_id not in usable
-        )
-    }
-    owner_logins = {repo.full_name.partition("/")[0] for repo in grants}
-    owner_logins.update(item.owner_login for item in installations)
-    ordered_owners = sorted(
-        owner_logins,
-        key=lambda login: (
-            not any(
-                repo.is_working_repo
-                and repo.full_name.partition("/")[0].casefold() == login.casefold()
-                for repo in grants
-            ),
-            owner_by_login.get(login.casefold()) is None
-            or owner_by_login[login.casefold()].owner_id != github_user_id,
-            login.casefold(),
-        ),
-    )
+    past_cap_ids = set(view.past_cap_repo_ids)
+    github_user_id = view.github_user_id
     options = [
         _PickerOption(
             repo_id=repo.repo_id,
@@ -1337,23 +954,20 @@ def _agent_editor_page(
         f'data-working="{working.repo_id if working else ""}" '
         f'data-may-change-working="{str(may_change_working).lower()}" '
         f'data-agent="{esc(agent_name, quote=True)}" '
-        f'data-owner-limit="{github_access.MAX_AGENT_INSTALLATIONS}" '
-        f'action="{esc(root, quote=True)}/oauth/github/confirm">',
-        f'<input type="hidden" name="state" value="{esc(state, quote=True)}">',
-        f'<input type="hidden" name="invitation" value="{esc(invitation_hash, quote=True)}">',
-        f'<input type="hidden" name="receipt" '
-        f'value="{_receipt_signature(state, invitation_hash, secret)}">',
-        f'<input type="hidden" name="snapshot" value="{snapshot_digest}">',
-        f'<input type="hidden" name="snapshot_sig" '
-        f'value="{_snapshot_signature(state, invitation_hash, snapshot_digest, secret)}">',
-        f'<input type="hidden" name="visibility" value="{visibility}">',
-        f'<input type="hidden" name="visibility_sig" '
-        f'value="{_snapshot_signature(state, invitation_hash, visibility, secret)}">',
+        f'data-owner-limit="{view.owner_limit}" '
+        f'action="{esc(view.confirm_url, quote=True)}">',
+        f'<input type="hidden" name="state" value="{esc(view.state, quote=True)}">',
+        f'<input type="hidden" name="invitation" value="{esc(view.invitation_hash, quote=True)}">',
+        f'<input type="hidden" name="receipt" value="{view.receipt}">',
+        f'<input type="hidden" name="snapshot" value="{view.snapshot}">',
+        f'<input type="hidden" name="snapshot_sig" value="{view.snapshot_sig}">',
+        f'<input type="hidden" name="visibility" value="{view.visibility}">',
+        f'<input type="hidden" name="visibility_sig" value="{view.visibility_sig}">',
         '<input type="hidden" name="access" value="write">',
         '<input id="working-input" type="hidden" name="working" value="keep" disabled>',
     ]
-    if pending_installation is not None and pending_installation.found:
-        organization = pending_installation.account_login
+    if view.pending_installation is not None and view.pending_installation.found:
+        organization = view.pending_installation.account_login
         parts.append(
             '<p class="gh-editor-notice">'
             + (
@@ -1362,13 +976,12 @@ def _agent_editor_page(
                 else "A GitHub owner"
             )
             + ' must approve Daimon. Check again after approval. <a href="'
-            + f"{esc(root, quote=True)}/oauth/github/confirm?"
-            + f'{urlencode({"state": state})}">Check again</a></p>'
+            + f'{esc(view.check_url, quote=True)}">Check again</a></p>'
         )
-    if selection_error:
+    if view.selection_error:
         parts.append(
             f'<p class="gh-inline-error" role="alert">{icon("triangle-alert")}'
-            f"{esc(selection_error)}</p>"
+            f"{esc(view.selection_error)}</p>"
         )
     working_name = (
         '<span class="gh-working-owner">'
@@ -1393,7 +1006,7 @@ def _agent_editor_page(
     parts.append('<div id="connected-repos" class="gh-connected-list">')
     if not grants:
         parts.append('<p class="gh-editor-empty">No repos connected yet.</p>')
-    for owner in ordered_owners:
+    for owner in view.owner_order:
         installation = owner_by_login.get(owner.casefold())
         owner_grants = [
             repo
@@ -1477,7 +1090,7 @@ def _agent_editor_page(
                     "Needs read and write to finish setup.</p>"
                 )
             parts.append(f'<input type="hidden" name="remove" value="{repo.repo_id}" disabled>')
-            if editable and repo in repairable:
+            if editable and repo.repo_id in repairable_ids:
                 parts.append(
                     f'<input type="hidden" name="repo" value="{repo.repo_id}" disabled>'
                     f'<input class="gh-scoped-access" type="hidden" '
@@ -1490,8 +1103,8 @@ def _agent_editor_page(
         '<button id="open-repo-picker" class="gh-add-button gh-js" type="button">'
         f"{icon('plus')}Add repos</button>"
     )
-    parts.append(follow_offers_html(follow, agent_name=agent_name))
-    if following:
+    parts.append(follow_offers_html(view.follow_offers, agent_name=agent_name))
+    if view.following:
         parts.append(following_note_html(agent_name=agent_name))
     owner_choice_rows: list[str] = []
     for item in installations:
@@ -1530,8 +1143,7 @@ def _agent_editor_page(
             row += (
                 f'<a class="gh-link gh-owner-retry" '
                 f'data-owner="{esc(item.owner_login, quote=True)}" '
-                f'href="{esc(root, quote=True)}/oauth/github/confirm?'
-                f'{urlencode({"state": state})}">Try again</a>'
+                f'href="{esc(view.check_url, quote=True)}">Try again</a>'
             )
         owner_choice_rows.append(row + "</div>")
     parts.append(
@@ -1547,7 +1159,7 @@ def _agent_editor_page(
         + "".join(owner_choice_rows)
         + f'<p class="gh-dialog-link gh-not-listed"><span>{icon("info")}Not listed?</span>'
         '<a class="gh-add-button" href="'
-        + esc(install_url, quote=True)
+        + esc(view.install_url, quote=True)
         + '">Open GitHub setup</a></p>'
         '<div class="gh-dialog-footer" hidden><span id="owner-picker-count">0 selected</span>'
         '<button id="owner-clear-selection" class="gh-link-button" '
@@ -1598,7 +1210,7 @@ def _agent_editor_page(
             + "</span></label></div>"
         )
     for repo in grants:
-        if repo.repo_id not in usable or repo in repairable:
+        if repo.repo_id not in usable or repo.repo_id in repairable_ids:
             continue
         parts.append(
             f'<div class="gh-picker-choice gh-picker-connected" '
@@ -1655,7 +1267,7 @@ def _agent_editor_page(
             f'<label><input type="checkbox" name="remove" value="{repo.repo_id}">'
             f"Remove {esc(repo.full_name) if repo.repo_id in usable else 'Hidden repo'}</label>"
         )
-        if repo in repairable:
+        if repo.repo_id in repairable_ids:
             parts.append(
                 f'<label><input type="checkbox" name="repo" value="{repo.repo_id}">'
                 f"Finish setup for {esc(repo.full_name)}</label>"
@@ -1673,7 +1285,7 @@ def _agent_editor_page(
             + ">"
             f"Add {esc(repo.full_name)}</label>"
         )
-    for offer in follow:
+    for offer in view.follow_offers:
         parts.append(
             f'<label><input type="checkbox" name="follow_org" value="{offer.installation_id}">'
             f"Also give {esc(agent_name)} new repos added to {esc(offer.owner)}</label>"
@@ -1703,7 +1315,7 @@ def _agent_editor_page(
         "Discard changes</button>"
         '<button id="save-repos" class="gh-primary" type="submit">Save changes</button>'
         f'<a id="cancel-editor" class="gh-editor-cancel" '
-        f'href="{esc(cancel_url, quote=True)}">Cancel</a>'
+        f'href="{esc(view.cancel_url, quote=True)}">Cancel</a>'
         "</div></div></div></form>"
     )
     parts.append(_EDITOR_SCRIPT)
@@ -1811,34 +1423,21 @@ def _access_choices(*, agent: bool) -> str:
     return '<input type="radio" name="access" value="write" checked hidden>'
 
 
-def _confirmation_page(
-    *,
-    root: str,
-    state: str,
-    invitation_hash: str,
-    secret: str,
-    cancel_url: str,
-    installations: list[_Installation],
-    platform: str,
-    workspace: str,
-    agent_name: str | None,
-    selection_error: str | None = None,
-    already_added: frozenset[int] = frozenset(),
-    needed: Mapping[int, bool] | None = None,
-    requested_repo: str | None = None,
-    install_url: str = "",
-) -> Response:
+def _confirmation_page(view: WorkspacePickerView) -> Response:
     """Render the same picker used by the live route and screenshot capture.
 
-    Repos in `already_added` show ticked and greyed; only new ticks are sent.
-    Repos in `needed` (repo id: needs write) are what the agent still needs
-    before it can drop its old GitHub token: ticked, and still changeable.
+    Repos already added show ticked and greyed; only new ticks are sent. Repos
+    the agent still needs before it can drop its old GitHub token are ticked,
+    and still changeable.
     """
-    needed = needed or {}
+    needed = view.needs_write
+    already_added = set(view.already_added_repo_ids)
+    agent_name = view.agent_name
+    platform = view.platform
     place = _place_label(platform)
     context = (
         f'<div class="gh-context">{platform_mark(platform)}'
-        f"<span>{place}: {html.escape(workspace)}</span></div>"
+        f"<span>{place}: {html.escape(view.workspace_label)}</span></div>"
     )
     parts = [
         f'<p class="gh-status-line">Connect repos to {html.escape(agent_name)}.</p>'
@@ -1846,12 +1445,11 @@ def _confirmation_page(
         else '<p class="gh-status-line">Connect GitHub repos.</p>',
         '<p class="gh-action-line">Choose repos the agent can read and change.</p>',
         f'<form id="github-connect-form" method="post" '
-        f'action="{html.escape(root, quote=True)}/oauth/github/confirm">',
-        f'<input type="hidden" name="state" value="{html.escape(state, quote=True)}">',
+        f'action="{html.escape(view.confirm_url, quote=True)}">',
+        f'<input type="hidden" name="state" value="{html.escape(view.state, quote=True)}">',
         '<input type="hidden" name="invitation" '
-        f'value="{html.escape(invitation_hash, quote=True)}">',
-        '<input type="hidden" name="receipt" '
-        f'value="{_receipt_signature(state, invitation_hash, secret)}">',
+        f'value="{html.escape(view.invitation_hash, quote=True)}">',
+        f'<input type="hidden" name="receipt" value="{view.receipt}">',
         context,
     ]
     parts.extend(
@@ -1867,12 +1465,12 @@ def _confirmation_page(
             '<button class="gh-link-button" type="button" '
             'id="select-all-repos" hidden></button></div>',
             '<div class="gh-repo-list" aria-label="Repos you can connect">',
-            f'<p class="gh-inline-error" role="alert">{html.escape(selection_error)}</p>'
-            if selection_error
+            f'<p class="gh-inline-error" role="alert">{html.escape(view.selection_error)}</p>'
+            if view.selection_error
             else "",
         ]
     )
-    for installation in installations:
+    for installation in view.installations:
         owned = [repo for repo in installation.repos if repo.usable]
         if not owned:
             continue
@@ -1902,11 +1500,7 @@ def _confirmation_page(
                     " checked disabled"
                     if added
                     else " checked"
-                    if repo.id in needed
-                    or (
-                        requested_repo is not None
-                        and repo.full_name.casefold() == requested_repo.casefold()
-                    )
+                    if repo.id in needed or repo.id == view.requested_repo_id
                     else ""
                 )
                 + ">"
@@ -1922,8 +1516,8 @@ def _confirmation_page(
             + '<p class="gh-dialog-link">Missing a repo? Add it to the Daimon GitHub App '
             "on GitHub."
             + (
-                f' <a href="{html.escape(install_url, quote=True)}">Open GitHub setup</a>'
-                if install_url
+                f' <a href="{html.escape(view.install_url, quote=True)}">Open GitHub setup</a>'
+                if view.install_url
                 else ""
             )
             + "</p>"
@@ -1943,7 +1537,8 @@ def _confirmation_page(
             '<button class="gh-primary" id="connect-repos" type="submit">'
             f'{icon("github")}<span class="gh-button-label">'
             "Connect selected repos</span></button>"
-            f'<a class="gh-link" href="{cancel_url}">Cancel</a></div></div>',
+            f'<a class="gh-link" href="{html.escape(view.cancel_url, quote=True)}">Cancel</a>'
+            "</div></div>",
             "</form>",
             _PICKER_SCRIPT,
         ]
@@ -1955,173 +1550,75 @@ def _confirmation_page(
     )
 
 
-type OrgProof = Literal["org_admin", "full_listing"]
+def _back(target: ChatReturn | None) -> str:
+    return _back_to_chat(target.platform, target.workspace_id) if target is not None else ""
 
 
-async def _org_membership(
-    client: httpx.AsyncClient, token: str, org: str
-) -> Literal["admin", "other", "unknown"]:
-    """The signer's standing in `org`, asked live: an active admin, anything else GitHub says
-    about a member, or unknown when GitHub refuses the call. An App without the org members
-    permission is refused with 403 ("Resource not accessible by integration"); a 404 may be
-    that or a person who is no member, so both leave the answer unknown."""
-    response = await client.get(
-        f"https://api.github.com/user/memberships/orgs/{quote(org, safe='')}",
-        headers=_github_headers(token),
-    )
-    if response.status_code in (403, 404):
-        return "unknown"
-    response.raise_for_status()
-    body = TypeAdapter(dict[str, object]).validate_python(response.json())
-    return "admin" if body.get("state") == "active" and body.get("role") == "admin" else "other"
-
-
-async def _org_proof(
-    client: httpx.AsyncClient, token: str, offer: FollowOffer, *, app_jwt: str
-) -> OrgProof | None:
-    """Which proof shows the signer may hand over the whole org, or None.
-
-    First proof: GitHub says they are an active admin of the org. Second, when GitHub will
-    not say: the repos GitHub shows the signer are every repo the App's installation lists
-    (the listing the agent will follow), and neither listing was cut short. Someone who sees
-    every repo of the org passes; a client's admin who sees one of them does not. The offer's
-    repos are the signer's complete listing: an installation whose listing was cut short or
-    failed is never offered.
-    """
-    standing = await _org_membership(client, token, offer.owner)
-    if standing == "admin":
-        return "org_admin"
-    if standing == "other":
-        return None
-    listing_token = await mint_installation_listing_token(
-        client, jwt=app_jwt, installation_id=offer.installation_id
-    )
-    # `list_installation_repository_details` raises on any page it cannot complete.
-    everything = await list_installation_repository_details(client, token=listing_token)
-    ids = {repo.repo_id for repo in everything}
-    if None in ids or not ids <= offer.repo_ids:
-        return None
-    return "full_listing"
-
-
-async def _org_admin_offers(
-    factory: Callable[[], httpx.AsyncClient],
-    token: str,
-    offers: Sequence[FollowOffer],
-    *,
-    app_jwt: str,
-) -> tuple[FollowOffer, ...]:
-    """The offers the signer can prove an org for, so nobody is shown a box that would refuse
-    them. A GitHub error hides the offer; the save asks again."""
-    kept: list[FollowOffer] = []
-    if offers:
-        async with factory() as client:
-            for offer in offers:
-                try:
-                    if await _org_proof(client, token, offer, app_jwt=app_jwt) is not None:
-                        kept.append(offer)
-                except (httpx.HTTPError, ValueError):
-                    continue
-    return tuple(kept)
-
-
-def _github_headers(token: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
-
-
-async def _installations(
-    client: httpx.AsyncClient,
-    token: str,
-    *,
-    before_repo_fetch: Callable[[int], Awaitable[None]] | None = None,
-) -> list[_Installation]:
-    raw = await list_github_pages(client, "/user/installations", token, "installations")
-    result: list[_Installation] = []
-    for item in raw:
-        parsed = _InstallationPayload.model_validate(item)
-        installation_id = parsed.id
-        owner_id = parsed.account.id
-        repos: list[_Repo] = []
-        total = 0
-        truncated = False
-        last_page_full = False
-        fetch_state: Literal["ok", "error"] = "ok"
-        if parsed.suspended_at is None:
-            if before_repo_fetch is not None:
-                await before_repo_fetch(installation_id)
-            try:
-                for page in range(1, 21):
-                    response = await client.get(
-                        f"https://api.github.com/user/installations/{installation_id}/repositories",
-                        params={"per_page": 100, "page": page},
-                        headers=_github_headers(token),
-                    )
-                    response.raise_for_status()
-                    payload = TypeAdapter(dict[str, object]).validate_python(response.json())
-                    batch = TypeAdapter(list[dict[str, object]]).validate_python(
-                        payload["repositories"]
-                    )
-                    if page == 1:
-                        count = payload.get("total_count", 0)
-                        total = count if type(count) is int else 0
-                    for raw_repo in batch:
-                        repo = _RepoPayload.model_validate(raw_repo)
-                        if repo.owner.id != owner_id:
-                            continue
-                        repos.append(
-                            _Repo(
-                                id=repo.id,
-                                owner_id=owner_id,
-                                installation_id=installation_id,
-                                full_name=repo.full_name,
-                                permission=github_connect.github_permission(repo.permissions),
-                                private=repo.private,
-                                archived=repo.archived,
-                            )
-                        )
-                    last_page_full = len(batch) == 100
-                    if not last_page_full:
-                        break
-                truncated = total > 2000 or (last_page_full and total == 0)
-                total = max(total, len(repos))
-            except (httpx.HTTPError, ValueError, KeyError, TypeError):
-                # An owner's partial list is unsafe for selection; keep the owner visible.
-                repos.clear()
-                fetch_state = "error"
-        result.append(
-            _Installation(
-                id=installation_id,
-                owner_id=owner_id,
-                owner_login=parsed.account.login,
-                repository_selection=parsed.repository_selection,
-                repos=tuple(repos),
-                owner_type=parsed.account.type,
-                avatar_url=parsed.account.avatar_url,
-                state="suspended" if parsed.suspended_at is not None else "active",
-                total=total,
-                truncated=truncated,
-                fetch_state=fetch_state,
+def _render(view: ConnectView) -> Response:
+    """Render one flow view as its page."""
+    match view:
+        case ConnectErrorView():
+            return _error(view.message, view.status, view.retry_url, action=view.action)
+        case ConnectTransientErrorView():
+            retry_fields = view.retry_selection.form_fields() if view.retry_selection else None
+            return _error(view.message, view.status, view.retry_url, retry_fields=retry_fields)
+        case CancelledView():
+            return _cancelled_page(_back(view.back_to_chat))
+        case ExpiredView():
+            return _expired_page(view.requester_label)
+        case AlreadyConnectedView():
+            return _already_connected_page(
+                view.count, _back(view.back_to_chat), agent_name=view.agent_name
             )
-        )
-    return result
+        case InstallView():
+            return _install_page(view.install_url, view.cancel_url)
+        case PendingView():
+            return _pending_page(view.check_url, view.cancel_url, view.organization)
+        case NoReposView():
+            return _no_repos_page(view.share_link, view.install_url)
+        case AgentEditorView():
+            return _agent_editor_page(view)
+        case WorkspacePickerView():
+            return _confirmation_page(view)
+        case SavedAgentView():
+            target = view.back_to_chat
+            return _saved_agent_page(
+                view.agent_name,
+                view.grants,
+                set(view.visible_repo_ids),
+                f"https://discord.com/channels/{target.workspace_id}"
+                if target is not None and target.platform == "discord"
+                else None,
+                installations=view.installations,
+                following=view.following,
+            )
+        case DoneView():
+            return _done_page(
+                count=view.count,
+                platform=view.back_to_chat.platform,
+                external_id=view.back_to_chat.workspace_id,
+                requester_label=view.requester_label,
+                same_person=view.same_person,
+                agent_name=view.agent_name,
+            )
 
 
-async def has_pending_installation_request(
-    client: httpx.AsyncClient, *, app_id: str, private_key: str, github_user_id: int
-) -> _PendingInstallationRequest:
-    app_token = build_app_jwt(private_key, app_id, now=int(time.time()))
-    requests = await list_github_pages(
-        client, "/app/installation-requests", app_token, "installation_requests"
+def _respond(outcome: ConnectOutcome) -> Response:
+    response = (
+        RedirectResponse(outcome.url)
+        if isinstance(outcome, ConnectRedirect)
+        else _render(outcome.view)
     )
-    matching = [
-        parsed
-        for request in requests
-        if (parsed := _InstallationRequestPayload.model_validate(request)).requester.id
-        == github_user_id
-    ]
-    if len(matching) == 1 and matching[0].account and matching[0].account.login:
-        return _PendingInstallationRequest(True, matching[0].account.login)
-    return _PendingInstallationRequest(bool(matching))
+    for cookie in outcome.cookies:
+        response.set_cookie(
+            cookie.name,
+            cookie.value,
+            max_age=cookie.max_age,
+            httponly=True,
+            secure=cookie.secure,
+            samesite="lax",
+        )
+    return response
 
 
 def build_oauth_github_routes(
@@ -2133,1323 +1630,71 @@ def build_oauth_github_routes(
     deployment_default: DeploymentDefault | None = None,
     anthropic: AsyncAnthropic | None = None,
 ) -> tuple[RouteHandler, RouteHandler, RouteHandler, RouteHandler]:
-    """Build connect, callback, setup and confirmation handlers."""
-    config = settings.github_app
+    """Build connect, callback, setup and confirmation handlers.
+
+    With the web app on, connect and setup send the browser to the same page there
+    (old links, and a GitHub App whose setup URL still names this host). Callback and
+    confirm stay for flows started here and for personal account links.
+    """
     root = settings.mcp.app_root_url
-    if (
-        root is None
-        or config.client_id is None
-        or config.client_secret is None
-        or config.app_slug is None
-        or config.app_id is None
-        or config.private_key is None
-    ):
+    web = WebLinks.from_settings(settings.web)
+    if root is None:
         raise ValueError("GitHub connection is not configured")
-    factory = client_factory or (lambda: httpx.AsyncClient(timeout=20.0, follow_redirects=False))
-    client_id = config.client_id
-    secret = config.client_secret.get_secret_value()
-    app_id = config.app_id
-    private_key = config.private_key.get_secret_value()
-    callback_url = f"{root}/oauth/github/callback"
-
-    async def revoke_user_token(token: str) -> bool:
-        try:
-            async with factory() as client:
-                revocation = await client.request(
-                    "DELETE",
-                    f"https://api.github.com/applications/{client_id}/token",
-                    auth=(client_id, secret),
-                    json={"access_token": token},
-                    headers={"Accept": "application/vnd.github+json"},
-                )
-                revocation.raise_for_status()
-        except httpx.HTTPError:
-            _log.warning("GitHub connection token revocation failed")
-            return False
-        return True
-
-    async def live_agent(invitation: github_connect.Invitation) -> BetaManagedAgentsAgent | None:
-        """The link's agent as Managed Agents has it now; None if it can't be read."""
-        if anthropic is None or invitation.agent_id is None or not invitation.agent_ma_id:
-            return None
-        try:
-            return await find_agent_by_derived_uuid(
-                anthropic,
-                tenant_id=invitation.tenant_id,
-                agent_id=invitation.agent_id,
-                records=sessionmaker,
-            )
-        except APIError:
-            return None
-
-    async def may_manage_agent(
-        session: AsyncSession,
-        invitation: github_connect.Invitation,
-        requester: AccountIdentityRow,
-        live: BetaManagedAgentsAgent | None,
-    ) -> bool:
-        if invitation.agent_id is None:
-            return True
-        if invitation.operator_issued:
-            return requester.tenant_id == invitation.tenant_id and requester.role == Role.ADMIN
-        if deployment_default is None:
-            return False
-        if live is None or requester.tenant_id != invitation.tenant_id:
-            return False
-        # A current owner manages their own agent without platform authority.
-        if await requester_owns_agent(session, invitation, live):
-            return True
-        # Only platform authority enters account roles. Preserve the existing
-        # native snapshot for viewing this link; every save separately attests
-        # live authority below. Delegates need a fresh check even to view it.
-        if requester.role is Role.ADMIN:
-            return True
-        try:
-            return await _attest_native_admin(
-                requester=requester,
-                settings=settings,
-                sessionmaker=sessionmaker,
-                fernet=fernet,
-                db_session=session,
-            )
-        except AdminAttestationUnavailable:
-            return False
-
-    async def requester_owns_agent(
-        session: AsyncSession,
-        invitation: github_connect.Invitation,
-        live: BetaManagedAgentsAgent | None,
-    ) -> bool:
-        """Whether the link's requester owns the link's agent right now, as a person.
-
-        Read from the owner tables at each call. A defaults-managed agent, an agent
-        that can't be read, an operator-issued link and a person from another
-        organisation never count.
-        """
-        if invitation.agent_id is None or invitation.operator_issued or live is None:
-            return False
-        if live.metadata.get(MA_METADATA_KEY_MANAGED) == "true":
-            return False
-        return await owns_agent(
-            session,
-            tenant_id=invitation.tenant_id,
-            ma_agent_id=invitation.agent_ma_id,
-            account_id=invitation.requester_account_id,
-        )
-
-    async def successful_page(
-        state: str,
-        cookie: str,
-        invitation_hash: str = "",
-        visible_ids: set[int] | None = None,
-        installations: Sequence[_Installation] = (),
-    ) -> Response | None:
-        async with sessionmaker() as session:
-            invitation = await github_connect.successful_confirmation(
-                session, state=state, cookie=cookie, invitation_hash=invitation_hash
-            )
-            authenticated = invitation is not None
-            if invitation is None and invitation_hash:
-                status, candidate = await github_connect.invitation_status(
-                    session, invitation_hash, settings=settings
-                )
-                if status == "used" and candidate is not None:
-                    invitation = candidate
-            if invitation is None:
-                return None
-            requester = await get_account_with_tenant(
-                session, account_id=invitation.requester_account_id
-            )
-            if invitation.agent_id is not None:
-                if not authenticated:
-                    return _already_connected_page(invitation.connected_repo_count)
-                live = await live_agent(invitation)
-                if requester is None or not await may_manage_agent(
-                    session, invitation, requester, live
-                ):
-                    return _error("You can no longer manage this agent.", 403)
-            agent_grants = (
-                await list_agent_repos(
-                    session, tenant_id=invitation.tenant_id, agent_id=invitation.agent_id
-                )
-                if invitation.agent_id is not None
-                else []
-            )
-            following = (
-                invitation.agent_id is not None
-                and invitation.agent_ma_id is not None
-                and requester is not None
-                and await agent_follows(
-                    session,
-                    settings,
-                    tenant_id=invitation.tenant_id,
-                    platform=requester.platform,
-                    ma_agent_id=invitation.agent_ma_id,
-                )
-            )
-        if invitation.agent_id is not None:
-            back_url = (
-                f"https://discord.com/channels/{requester.external_id}"
-                if requester is not None and requester.platform == "discord"
-                else None
-            )
-            return _saved_agent_page(
-                invitation.agent_name or "Agent",
-                agent_grants,
-                visible_ids,
-                back_url,
-                installations=installations,
-                following=following,
-            )
-        back = _back_to_chat(requester.platform, requester.external_id) if requester else ""
-        return _already_connected_page(
-            invitation.connected_repo_count,
-            back,
-            agent_name=invitation.agent_name,
-        )
+    flow = GitHubConnectFlow(
+        settings=settings,
+        sessionmaker=sessionmaker,
+        fernet=fernet,
+        client_factory=client_factory,
+        deployment_default=deployment_default,
+        anthropic=anthropic,
+        teams_owner_ids=teams_admin_owner_ids,
+    )
 
     async def connect(request: Request) -> Response:
-        token = request.path_params["token"]
-        invitation_hash = github_connect.digest(token)
-        async with sessionmaker() as session:
-            status, invitation = await github_connect.invitation_status(
-                session, invitation_hash, settings=settings
+        if web is not None:
+            return RedirectResponse(
+                f"{web.base}/oauth/github/connect/{request.path_params['token']}"
             )
-            if status != "active":
-                if invitation is None:
-                    return _error()
-                requester = await get_account_with_tenant(
-                    session, account_id=invitation.requester_account_id
-                )
-                back = (
-                    _back_to_chat(requester.platform, requester.external_id)
-                    if requester is not None
-                    else ""
-                )
-                if status == "used":
-                    return _already_connected_page(
-                        invitation.connected_repo_count,
-                        back,
-                        agent_name=invitation.agent_name,
-                    )
-                if status == "requester_left":
-                    return _error(
-                        "This link was made by someone who's no longer an admin here. "
-                        "Ask an admin for a new link."
-                    )
-                if status == "expired":
-                    return _expired_page(invitation.requester_label)
-                return _error()
-        state = secrets.token_urlsafe(32)
-        cookie = secrets.token_urlsafe(32)
-        verifier = secrets.token_urlsafe(48)
-        challenge = (
-            base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
-            .rstrip(b"=")
-            .decode()
-        )
-        async with sessionmaker.begin() as session:
-            if (
-                await github_connect.get_invitation(session, invitation_hash, settings=settings)
-                is None
-            ):
-                return _error()
-            await github_connect.create_flow(
-                session,
-                invitation_hash=invitation_hash,
-                state=state,
-                cookie=cookie,
-                encrypted_verifier=encrypt_token(fernet, verifier),
-                encrypted_invitation_token=encrypt_token(fernet, token),
-            )
-        params = urlencode(
-            {
-                "client_id": config.client_id,
-                "redirect_uri": callback_url,
-                "state": state,
-                "code_challenge": challenge,
-                "code_challenge_method": "S256",
-            }
-        )
-        response = RedirectResponse(f"https://github.com/login/oauth/authorize?{params}")
-        for name, value in ((_COOKIE, cookie), (_STATE_COOKIE, state)):
-            response.set_cookie(
-                name,
-                value,
-                max_age=900,
-                httponly=True,
-                secure=root.startswith("https://"),
-                samesite="lax",
-            )
-        return response
+        return _respond(await flow.start(root, request.path_params["token"]))
 
     async def callback(request: Request) -> Response:
-        state = request.query_params.get("state", "")
-        code = request.query_params.get("code", "")
-        cookie = request.cookies.get(_COOKIE, "")
-        if not code:
-            async with sessionmaker() as session:
-                refused_flow = await github_connect.get_flow(
-                    session, state=state, cookie=cookie, settings=settings
-                )
-                refused_invitation = (
-                    await github_connect.get_invitation(
-                        session, refused_flow.invitation_hash, settings=settings
-                    )
-                    if refused_flow is not None
-                    else None
-                )
-                refused_requester = (
-                    await get_account_with_tenant(
-                        session, account_id=refused_invitation.requester_account_id
-                    )
-                    if refused_invitation is not None
-                    else None
-                )
-            return _cancelled_page(
-                _back_to_chat(refused_requester.platform, refused_requester.external_id)
-                if refused_requester is not None
-                else ""
+        return _respond(
+            await flow.callback(
+                root,
+                state=request.query_params.get("state", ""),
+                code=request.query_params.get("code", ""),
+                flow_cookie=request.cookies.get(FLOW_COOKIE, ""),
             )
-        async with sessionmaker() as session:
-            flow = await github_connect.get_flow(
-                session, state=state, cookie=cookie, settings=settings
-            )
-        if flow is None or flow.encrypted_user_token is not None:
-            return _error()
-        verifier = decrypt_token(fernet, flow.encrypted_verifier)
-        try:
-            async with factory() as client:
-                token_response = await client.post(
-                    "https://github.com/login/oauth/access_token",
-                    data={
-                        "client_id": config.client_id,
-                        "client_secret": secret,
-                        "code": code,
-                        "redirect_uri": callback_url,
-                        "code_verifier": verifier,
-                    },
-                    headers={"Accept": "application/json"},
-                )
-                token_response.raise_for_status()
-                user_token = _TokenPayload.model_validate(token_response.json()).access_token
-                user_response = await client.get(
-                    "https://api.github.com/user", headers=_github_headers(user_token)
-                )
-                user_response.raise_for_status()
-                user_id = _UserPayload.model_validate(user_response.json()).id
-        except (httpx.HTTPError, ValueError):
-            retry_token = (
-                decrypt_token(fernet, flow.encrypted_invitation_token)
-                if flow.encrypted_invitation_token is not None
-                else None
-            )
-            retry_url = f"{root}/oauth/github/connect/{retry_token}" if retry_token else None
-            return _error("Couldn't reach GitHub", 502, retry_url)
-        async with sessionmaker.begin() as session:
-            if (
-                await github_connect.get_flow(
-                    session, state=state, cookie=cookie, settings=settings
-                )
-                is None
-            ):
-                return _error()
-            saved = await github_connect.set_user_token(
-                session,
-                state=state,
-                encrypted_token=encrypt_token(fernet, user_token),
-                github_user_id=user_id,
-            )
-            if not saved:
-                return _error()
-        return RedirectResponse(f"{root}/oauth/github/confirm?{urlencode({'state': state})}")
+        )
 
     async def setup(request: Request) -> Response:
-        # GitHub's installation_id is untrusted. Confirmation always re-lists as the user.
-        state = request.query_params.get("state") or request.cookies.get(_STATE_COOKIE, "")
-        async with sessionmaker() as session:
-            flow = await github_connect.get_flow(
-                session, state=state, cookie=request.cookies.get(_COOKIE, ""), settings=settings
+        if web is not None:
+            query = f"?{request.url.query}" if request.url.query else ""
+            return RedirectResponse(f"{web.base}/oauth/github/setup{query}")
+        return _respond(
+            await flow.setup(
+                root,
+                state=request.query_params.get("state") or "",
+                flow_cookie=request.cookies.get(FLOW_COOKIE, ""),
+                state_cookie=request.cookies.get(STATE_COOKIE, ""),
             )
-        if flow is None or flow.encrypted_user_token is None:
-            return _error()
-        return RedirectResponse(f"{root}/oauth/github/confirm?{urlencode({'state': state})}")
+        )
 
     async def confirm(request: Request) -> Response:
+        cookie = request.cookies.get(FLOW_COOKIE, "")
         if request.method == "POST":
-            raw_body = await _read_capped_body(request, _MAX_CONFIRM_BODY_BYTES)
+            raw_body = await read_capped(
+                request.stream(), request.headers.get("content-length"), MAX_CONFIRM_BODY_BYTES
+            )
             if raw_body is None:
-                return _selection_too_large()
-            try:
-                fields = parse_qs(
-                    raw_body.decode("utf-8"),
-                    keep_blank_values=True,
-                    max_num_fields=_MAX_CONFIRM_FIELDS,
-                )
-            except UnicodeDecodeError:
-                return _error("Selection could not be verified.")
-            except ValueError:  # parse_qs: more than _MAX_CONFIRM_FIELDS fields
-                return _selection_too_large()
-            state = fields.get("state", [""])[0]
-            invitation_hash = fields.get("invitation", [""])[0]
-            signature = fields.get("receipt", [""])[0]
-            expected = _receipt_signature(state, invitation_hash, secret)
-            if not hmac.compare_digest(signature, expected):
-                invitation_hash = ""
-        else:
-            fields = {}
-            state = request.query_params.get("state", "")
-            invitation_hash = ""
-        cookie = request.cookies.get(_COOKIE, "")
-        if request.method == "GET" and request.query_params.get("cancel") == "1":
-            async with sessionmaker.begin() as session:
-                cancelled = await github_connect.cancel_flow(session, state=state, cookie=cookie)
-            if cancelled is None:
-                used = await successful_page(state, cookie)
-                return used if used is not None else _cancelled_page()
-            async with sessionmaker() as session:
-                invitation = await github_connect.get_invitation(
-                    session, cancelled.invitation_hash, settings=settings
-                )
-                requester = (
-                    await get_account_with_tenant(
-                        session, account_id=invitation.requester_account_id
-                    )
-                    if invitation is not None
-                    else None
-                )
-            if cancelled.encrypted_user_token is not None:
-                token = decrypt_token(fernet, cancelled.encrypted_user_token)
-                if await revoke_user_token(token):
-                    async with sessionmaker.begin() as session:
-                        await github_connect.finish_cancel_revocation(
-                            session, state=state, cookie=cookie
-                        )
-            return _cancelled_page(
-                _back_to_chat(requester.platform, requester.external_id)
-                if requester is not None
-                else ""
-            )
-        used = await successful_page(state, cookie, invitation_hash)
-        if used is not None:
-            return used
-        retry_confirm_url = f"{root}/oauth/github/confirm?{urlencode({'state': state})}"
-
-        def transient_error(message: str, status: int) -> Response:
-            """An upstream failure the person can retry.
-
-            After a POST the retry re-posts what they ticked: a link would be a
-            GET, which renders the page afresh and drops the selection. The form
-            posts to the bare confirm path, so state stays out of the URL.
-            """
-            if request.method == "POST":
-                return _error(message, status, f"{root}/oauth/github/confirm", retry_fields=fields)
-            return _error(message, status, retry_confirm_url)
-
-        async with sessionmaker() as session:
-            flow = await github_connect.get_flow(
-                session, state=state, cookie=cookie, settings=settings
-            )
-            if flow is None or flow.encrypted_user_token is None or flow.github_user_id is None:
-                used = await successful_page(state, cookie, invitation_hash)
-                if used is not None:
-                    return used
-                return _error()
-            invitation = await github_connect.get_invitation(
-                session, flow.invitation_hash, settings=settings
-            )
-            if invitation is None:
-                used = await successful_page(state, cookie, invitation_hash)
-                if used is not None:
-                    return used
-                return _error()
-            requester = await get_account_with_tenant(
-                session, account_id=invitation.requester_account_id
-            )
-            if requester is None:
-                return _error()
-            agent_repos = (
-                await list_agent_repos(
-                    session, tenant_id=invitation.tenant_id, agent_id=invitation.agent_id
-                )
-                if invitation.agent_id is not None
-                else []
-            )
-            missing_access: dict[str, bool] = {}
-            missing_names: list[str] = []
-            already_added = frozenset(
-                repo.repo_id for repo in agent_repos if repo.status == "active"
-            )
-        token = decrypt_token(fernet, flow.encrypted_user_token)
-        observed_refreshes: dict[int, datetime | None] = {}
-
-        async def remember_installation_refresh(installation_id: int) -> None:
-            # Capture before GitHub's list request so a newer reconciliation
-            # cannot be overwritten by the positive evidence from this save.
-            async with sessionmaker() as session:
-                installation = await github_app_installations.get(
-                    session, installation_id=installation_id
-                )
-                observed_refreshes[installation_id] = (
-                    installation.github_refreshed_at if installation is not None else None
-                )
-
-        try:
-            async with factory() as client, asyncio.timeout(_INSTALLATIONS_DEADLINE_SECONDS):
-                installations = await _installations(
-                    client,
-                    token,
-                    before_repo_fetch=remember_installation_refresh
-                    if request.method == "POST"
-                    else None,
-                )
-        except (httpx.HTTPError, ValueError, KeyError, TypeError, TimeoutError):
-            used = await successful_page(state, cookie, invitation_hash)
-            if used is not None:
-                return used
-            return transient_error("Couldn't reach GitHub", 502)
-        needed = {
-            repo.id: missing_access[repo.full_name.casefold()]
-            for installation in installations
-            for repo in installation.repos
-            if repo.usable and repo.full_name.casefold() in missing_access
-        }
-        if invitation.agent_id is not None:
-            install_url = (
-                f"https://github.com/apps/{config.app_slug}/installations/new?"
-                f"{urlencode({'state': state})}"
-            )
-            live = await live_agent(invitation)
-            async with sessionmaker() as session:
-                await session.execute(sql_text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
-                current_requester = await get_account_with_tenant(
-                    session, account_id=invitation.requester_account_id
-                )
-                if current_requester is None or not await may_manage_agent(
-                    session, invitation, current_requester, live
-                ):
-                    return _error("You can no longer manage this agent.", 403)
-                grants = await list_agent_repos(
-                    session, tenant_id=invitation.tenant_id, agent_id=invitation.agent_id
-                )
-                snapshot = await github_connect.agent_repo_snapshot(
-                    session, tenant_id=invitation.tenant_id, agent_id=invitation.agent_id
-                )
-                following = invitation.agent_ma_id is not None and await agent_follows(
-                    session,
-                    settings,
-                    tenant_id=invitation.tenant_id,
-                    platform=requester.platform,
-                    ma_agent_id=invitation.agent_ma_id,
-                )
-            # Following hands the agent repos on its own, so only a workspace admin offers it.
-            offers = follow_offers(
-                installations,
-                grants,
-                may_follow=invitation.agent_ma_id is not None
-                and current_requester.role is Role.ADMIN,
-                following=following,
-            )
-            cancel_url = f"{root}/oauth/github/confirm?{urlencode({'state': state, 'cancel': '1'})}"
-            if request.method == "GET":
-                pending_installation = _PendingInstallationRequest(False)
-                if not any(repo.usable for item in installations for repo in item.repos) and all(
-                    item.fetch_state == "ok" for item in installations
-                ):
-                    try:
-                        async with factory() as client:
-                            pending_installation = await has_pending_installation_request(
-                                client,
-                                app_id=app_id,
-                                private_key=private_key,
-                                github_user_id=flow.github_user_id,
-                            )
-                    except (httpx.HTTPError, ValueError, KeyError, TypeError):
-                        return transient_error("Couldn't reach GitHub", 502)
-                return _agent_editor_page(
-                    root=root,
-                    state=state,
-                    invitation_hash=flow.invitation_hash,
-                    secret=secret,
-                    agent_name=invitation.agent_name or "Agent",
-                    workspace=invitation.workspace_label,
-                    platform=requester.platform,
-                    grants=grants,
-                    installations=installations,
-                    snapshot=snapshot,
-                    cancel_url=cancel_url,
-                    install_url=install_url,
-                    needed=needed,
-                    requested_repo=invitation.requested_repo,
-                    missing_names=tuple(missing_names),
-                    pending_installation=pending_installation,
-                    github_user_id=flow.github_user_id,
-                    follow=await _org_admin_offers(
-                        factory,
-                        token,
-                        offers,
-                        app_jwt=build_app_jwt(private_key, app_id, now=int(time.time())),
-                    ),
-                    following=following,
-                )
-            posted_snapshot = fields.get("snapshot", [""])[0]
-            posted_signature = fields.get("snapshot_sig", [""])[0]
-            if not hmac.compare_digest(
-                posted_signature,
-                _snapshot_signature(state, flow.invitation_hash, posted_snapshot, secret),
-            ):
-                return _error("Selection could not be verified.", 400, retry_confirm_url)
-            posted_visibility = fields.get("visibility", [""])[0]
-            if not hmac.compare_digest(
-                fields.get("visibility_sig", [""])[0],
-                _snapshot_signature(state, flow.invitation_hash, posted_visibility, secret),
-            ):
-                return _error("Selection could not be verified.", 400, retry_confirm_url)
-            if posted_visibility != _visibility_digest(installations):
-                return _error(
-                    "The agent's repos changed. Reload and try again.", 409, retry_confirm_url
-                )
-            try:
-                selected_ids = [int(value) for value in fields.get("repo", [])]
-                removed_ids = [int(value) for value in fields.get("remove", [])]
-            except ValueError:
-                return _error("Selection could not be verified.", 400, retry_confirm_url)
-            access_values = fields.get("access", [])
-            working_values = fields.get("working", [])
-            if (
-                (
-                    bool(access_values)
-                    and (len(access_values) != 1 or access_values[0] not in ("read", "write"))
-                )
-                or len(working_values) != 1
-                or len(selected_ids) != len(set(selected_ids))
-                or len(removed_ids) != len(set(removed_ids))
-            ):
-                return _error("Selection could not be verified.", 400, retry_confirm_url)
-            selected_access: dict[int, str] = {}
-            for repo_id in selected_ids:
-                scoped = fields.get(f"access_{repo_id}", [])
-                if scoped:
-                    if len(scoped) != 1 or scoped[0] not in ("read", "write"):
-                        return _error("Selection could not be verified.", 400, retry_confirm_url)
-                    selected_access[repo_id] = scoped[0]
-                elif access_values:
-                    selected_access[repo_id] = access_values[0]
-                else:
-                    return _error("Selection could not be verified.", 400, retry_confirm_url)
-            visible = {
-                repo.id: repo
-                for installation in installations
-                for repo in installation.repos
-                if repo.usable
-            }
-            old = {repo.repo_id: repo for repo in grants}
-            repairable = {repo.repo_id for repo in grants if repo.repo_id in needed}
-            allowed_fields = _RETRY_FIELD_NAMES | {f"access_{repo_id}" for repo_id in repairable}
-            if fields.keys() - allowed_fields:
-                return _error("Selection could not be verified.", 400, retry_confirm_url)
-            working_choice = working_values[0]
-            if working_choice not in ("keep", "clear"):
-                try:
-                    working_id = int(working_choice)
-                except ValueError:
-                    return _error("Selection could not be verified.", 400, retry_confirm_url)
-            else:
-                working_id = None
-            if any(repo_id in old and repo_id not in repairable for repo_id in selected_ids):
-                return _error("GitHub access could not be verified.", 403, retry_confirm_url)
-            if (
-                any(repo_id not in visible for repo_id in selected_ids)
-                or any(repo_id not in old for repo_id in removed_ids)
-                or bool(set(selected_ids) & set(removed_ids))
-                or (
-                    working_id is not None
-                    and (
-                        working_id not in visible
-                        or (working_id not in old and working_id not in selected_ids)
-                        or working_id in removed_ids
-                    )
-                )
-            ):
-                return _error("GitHub access could not be verified.", 403, retry_confirm_url)
-            follow_values = fields.get("follow_org", [])
-            follow_id: int | None = None
-            chosen: FollowOffer | None = None
-            if follow_values:
-                try:
-                    follow_id = int(follow_values[0])
-                except ValueError:
-                    follow_id = None
-                if len(follow_values) != 1 or follow_id is None:
-                    return _error("Selection could not be verified.", 400, retry_confirm_url)
-                held_after = (set(old) - set(removed_ids)) | set(selected_ids)
-                chosen = confirmed_offer(
-                    offers,
-                    installation_id=follow_id,
-                    held_after=held_after,
-                    installations_after={
-                        repo.installation_id
-                        for repo in grants
-                        if repo.repo_id in held_after and repo.installation_id is not None
-                    }
-                    | {visible[repo_id].installation_id for repo_id in selected_ids},
-                )
-                if chosen is None:
-                    return _error(
-                        "Give the agent every repo of the org first.", 400, retry_confirm_url
-                    )
-            if (
-                not selected_ids
-                and not removed_ids
-                and working_choice == "keep"
-                and follow_id is None
-            ):
-                return _agent_editor_page(
-                    root=root,
-                    state=state,
-                    invitation_hash=flow.invitation_hash,
-                    secret=secret,
-                    agent_name=invitation.agent_name or "Agent",
-                    workspace=invitation.workspace_label,
-                    platform=requester.platform,
-                    grants=grants,
-                    installations=installations,
-                    snapshot=snapshot,
-                    cancel_url=cancel_url,
-                    install_url=install_url,
-                    needed=needed,
-                    requested_repo=invitation.requested_repo,
-                    missing_names=tuple(missing_names),
-                    selection_error="Choose a change to save.",
-                    follow=await _org_admin_offers(
-                        factory,
-                        token,
-                        offers,
-                        app_jwt=build_app_jwt(private_key, app_id, now=int(time.time())),
-                    ),
-                    following=following,
-                )
-            if posted_snapshot != hashlib.sha256(snapshot.encode()).hexdigest():
-                return _error(
-                    "The agent's repos changed. Reload and try again.", 409, retry_confirm_url
-                )
-            app_jwt = build_app_jwt(private_key, app_id, now=int(time.time()))
-            by_installation = {install.id: install for install in installations}
-            try:
-                async with factory() as client:
-                    details = [
-                        await get_app_installation_details(
-                            client, jwt=app_jwt, installation_id=installation_id
-                        )
-                        for installation_id in sorted(
-                            {visible[repo_id].installation_id for repo_id in selected_ids}
-                        )
-                    ]
-            except (httpx.HTTPError, ValueError):
-                return transient_error("Couldn't reach GitHub", 502)
-            if any(
-                detail.account_id != by_installation[detail.installation_id].owner_id
-                or detail.account_login.casefold()
-                != by_installation[detail.installation_id].owner_login.casefold()
-                or detail.suspended_at is not None
-                for detail in details
-            ):
-                return _error("GitHub access could not be verified.", 403, retry_confirm_url)
-            installation_writes = {
-                detail.installation_id: installation_supports_write(detail.permissions)
-                for detail in details
-            }
-            if any(
-                not installation_writes.get(visible[repo_id].installation_id, False)
-                for repo_id in selected_ids
-            ):
-                return _error(
-                    "The GitHub App needs write access to connect these repos.",
-                    403,
-                    retry_confirm_url,
-                )
-            repos = [
-                _repo_confirmation(
-                    visible[repo_id],
-                    requested=cast(Literal["read", "write"], selected_access[repo_id]),
-                    needs_write=bool(needed.get(repo_id)),
-                    installation_writes=installation_writes,
-                )
-                for repo_id in selected_ids
-            ]
-            still_admin = False
-            acts_as_owner = False
-            if not invitation.operator_issued:
-                if (
-                    invitation.requester_platform_user_id is not None
-                    and invitation.requester_platform_user_id != requester.platform_user_id
-                ):
-                    return _error("You can no longer manage this agent.", 403, retry_confirm_url)
-                # The requester still stands as an owner of this agent, or is still a
-                # native admin on the platform. The owner is re-read in the write
-                # transaction below, so a removal in between refuses the save.
-                async with sessionmaker() as session:
-                    acts_as_owner = await requester_owns_agent(session, invitation, live)
-                # Following hands the agent every repo of the org, so an owner proves
-                # they are still an admin too.
-                if not acts_as_owner or follow_id is not None:
-                    try:
-                        still_admin = await _attest_native_admin(
-                            requester=requester,
-                            settings=settings,
-                            sessionmaker=sessionmaker,
-                            fernet=fernet,
-                        )
-                    except AdminAttestationUnavailable:
-                        return transient_error(_ADMIN_RETRY, 503)
-                    if not still_admin:
-                        return _error(
-                            "Only an admin can turn this on."
-                            if acts_as_owner
-                            else "You can no longer manage this agent.",
-                            403,
-                            retry_confirm_url,
-                        )
-            follow_proof: OrgProof | None = None
-            if chosen is not None:
-                try:
-                    async with factory() as client:
-                        follow_proof = await _org_proof(client, token, chosen, app_jwt=app_jwt)
-                except (httpx.HTTPError, ValueError):
-                    return transient_error("Couldn't reach GitHub", 502)
-                if follow_proof is None:
-                    return _error(
-                        f"Only someone who sees every repo of {chosen.owner}, or an admin of "
-                        f"{chosen.owner} on GitHub, can turn this on.",
-                        403,
-                        retry_confirm_url,
-                    )
-            save_stage = "check_authority"
-            try:
-                async with sessionmaker.begin() as session:
-                    await session.execute(sql_text("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
-                    transaction_requester = await get_account_with_tenant(
-                        session, account_id=invitation.requester_account_id
-                    )
-                    # The authority proved above is the one re-checked here: an owner
-                    # must still own the agent, never fall back to a stale stored role.
-                    manages = transaction_requester is not None and (
-                        await requester_owns_agent(session, invitation, live)
-                        if acts_as_owner
-                        else await may_manage_agent(
-                            session, invitation, transaction_requester, live
-                        )
-                    )
-                    if not manages:
-                        return _error("You can no longer manage this agent.", 403)
-                    if follow_id is not None and (
-                        transaction_requester is None
-                        or transaction_requester.role is not Role.ADMIN
-                    ):
-                        return _error("Ask an admin to turn this on.", 403)
-                    save_stage = "lock_requests"
-                    prelocked_request_ids = await lock_confirmed_request_repos(
-                        session,
-                        tenant_id=invitation.tenant_id,
-                        approved_by_account_id=invitation.requester_account_id,
-                        extra_repo_ids={repo.repo_id for repo in repos},
-                    )
-                    save_stage = "confirm"
-                    saved = await github_connect.confirm(
-                        session,
-                        state=state,
-                        cookie=cookie,
-                        github_user_id=flow.github_user_id,
-                        repos=repos,
-                        verified_platform_admin=still_admin,
-                        requester_manages_agent=manages,
-                        expected_agent_snapshot=snapshot,
-                    )
-                    if saved:
-                        save_stage = "record_installations"
-                        for detail in sorted(details, key=lambda item: item.installation_id):
-                            await github_app_installations.upsert_github_app(
-                                session,
-                                installation_id=detail.installation_id,
-                                account_id=detail.account_id,
-                                account_login=detail.account_login,
-                                account_type=detail.account_type,
-                                repository_selection=detail.repository_selection,
-                                suspended_at=detail.suspended_at,
-                                freshly_verified_repos=github_app_installations.VerifiedInstallationRepos(
-                                    names=[
-                                        repo.full_name
-                                        for repo in repos
-                                        if repo.installation_id == detail.installation_id
-                                    ],
-                                    refreshed_at=observed_refreshes[detail.installation_id],
-                                ),
-                            )
-                            await enqueue_reconciliation(
-                                session,
-                                installation_id=detail.installation_id,
-                                delivery_id=f"connect:{uuid.uuid4()}",
-                                event="connect",
-                                deleted=False,
-                                now=datetime.now(UTC),
-                            )
-                        save_stage = "remove_grants"
-                        for repo_id in removed_ids:
-                            await github_access.remove_grant(
-                                session,
-                                tenant_id=invitation.tenant_id,
-                                agent_id=invitation.agent_id,
-                                repo_id=repo_id,
-                                changed_by_account_id=invitation.requester_account_id,
-                            )
-                        if repos:
-                            save_stage = "check_agent"
-                            await github_connect.require_app_eligible_agent(
-                                session,
-                                tenant_id=invitation.tenant_id,
-                                agent_id=invitation.agent_id,
-                                agent_name=invitation.agent_name or "",
-                            )
-                            existing_grants = {
-                                grant.repo_id: grant
-                                for grant in await github_access.list_agent_grants(
-                                    session,
-                                    tenant_id=invitation.tenant_id,
-                                    agent_id=invitation.agent_id,
-                                )
-                            }
-                            for repo in repos:
-                                existing = existing_grants.get(repo.repo_id)
-                                save_stage = "stage_grant"
-                                await github_access.stage_grant(
-                                    session,
-                                    tenant_id=invitation.tenant_id,
-                                    agent_id=invitation.agent_id,
-                                    repo_id=repo.repo_id,
-                                    baseline_access="write",
-                                    ceiling_access="write",
-                                    granted_by_account_id=invitation.requester_account_id,
-                                    mount_path=existing.mount_path if existing else None,
-                                    is_working_repo=existing.is_working_repo if existing else False,
-                                    agent_name=invitation.agent_name,
-                                    repo_lock_held=True,
-                                )
-                        save_stage = "set_working_repo"
-                        if working_choice != "keep":
-                            selected_name = (
-                                None if working_id is None else visible[working_id].full_name
-                            )
-                            await github_access.set_working_repo(
-                                session,
-                                tenant_id=invitation.tenant_id,
-                                agent_id=invitation.agent_id,
-                                repo_name=selected_name,
-                                account_id=invitation.requester_account_id,
-                                agent_name=invitation.agent_name,
-                            )
-                        elif repos and not old:
-                            # Only an agent's first repos pick a working repo; later saves
-                            # keep its choice, none included, so none is ever picked by chance.
-                            await github_access.set_working_repo(
-                                session,
-                                tenant_id=invitation.tenant_id,
-                                agent_id=invitation.agent_id,
-                                repo_name=repos[0].full_name,
-                                account_id=invitation.requester_account_id,
-                                agent_name=invitation.agent_name,
-                            )
-                        if repos:
-                            save_stage = "finish_requests"
-                            resumed_requests = await finish_confirmed_requests(
-                                session,
-                                tenant_id=invitation.tenant_id,
-                                approved_by_account_id=invitation.requester_account_id,
-                                prelocked_request_ids=prelocked_request_ids,
-                            )
-                            if not resumed_requests:
-                                await github_connect.queue_connect_followup(
-                                    session, invitation=invitation, repos=repos
-                                )
-                        if follow_id is not None and invitation.agent_ma_id is not None:
-                            save_stage = "follow_org"
-                            await set_agent_feature(
-                                session,
-                                settings,
-                                tenant_id=invitation.tenant_id,
-                                platform=requester.platform,
-                                ma_agent_id=invitation.agent_ma_id,
-                                key=FOLLOW_ORG_FEATURE,
-                                value="on",
-                                account_id=invitation.requester_account_id,
-                                surface="web",
-                            )
-                            _log.info(
-                                "github_connect.follow_turned_on",
-                                extra={"proof": follow_proof, "installation_id": follow_id},
-                            )
-                            # Read the org now, so the gap is filled without waiting an hour.
-                            await enqueue_reconciliation(
-                                session,
-                                installation_id=follow_id,
-                                delivery_id=f"follow:{uuid.uuid4()}",
-                                event="follow",
-                                deleted=False,
-                                now=datetime.now(UTC),
-                            )
-                        save_stage = "audit"
-                        await append_event(
-                            session,
-                            tenant_id=invitation.tenant_id,
-                            account_id=invitation.requester_account_id,
-                            agent_id=invitation.agent_id,
-                            platform=requester.platform,
-                            platform_user_id=requester.platform_user_id,
-                            tool_name="github_connect",
-                            operation="github_connect",
-                            outcome="allowed",
-                            reason="agent repos saved"
-                            + (
-                                f"; followed the org, proved by {follow_proof}"
-                                if follow_proof
-                                else ""
-                            ),
-                            github_repo_ids=selected_ids + removed_ids,
-                        )
-            except (
-                github_connect.StaleAgentReposError,
-                github_app_installations.StaleInstallationSnapshotError,
-            ):
-                return _error(
-                    "The agent's repos changed. Reload and try again.", 409, retry_confirm_url
-                )
-            except github_access.InstallationLimitError as exc:
-                return _error(
-                    str(exc),
-                    400,
-                    retry_confirm_url,
-                    action="Go back, remove the repos from at least one account, then save again.",
-                )
-            except (
-                github_connect.GrantReassignmentError,
-                github_access.SessionVaultBudgetError,
-                github_access.ReadOnlyMultiInstallationError,
-            ) as exc:
-                return _error(str(exc), 400, retry_confirm_url)
-            except DBAPIError as exc:
-                if getattr(exc.orig, "sqlstate", None) in ("40001", "40P01"):
-                    return _error(
-                        "The agent's repos changed. Reload and try again.", 409, retry_confirm_url
-                    )
-                raise
-            except github_connect.PinnedAgentConnectionError:
-                return _error(github_connect.PINNED_AGENT_MESSAGE)
-            except ValueError as exc:
-                # Log only bounded diagnostic fields; exceptions can contain repo
-                # names, credentials, or other private request data.
-                _log.error(
-                    "github_connect.save_failed",
-                    extra={"stage": save_stage, "error_type": type(exc).__name__},
-                )
-                return _error(
-                    "Your changes weren't saved.",
-                    500,
-                    action="Return to your chat and ask an admin for help.",
-                )
-            if not saved:
-                used = await successful_page(state, cookie, invitation_hash)
-                return used if used is not None else _error()
-            await revoke_user_token(token)
-            response = await successful_page(
-                state, cookie, visible_ids=set(visible), installations=installations
-            )
-            if response is None:
-                return _error()
-            response.set_cookie(
-                _COOKIE,
-                cookie,
-                max_age=7 * 24 * 60 * 60,
-                httponly=True,
-                secure=root.startswith("https://"),
-                samesite="lax",
-            )
-            return response
-        if request.method == "POST":
-            try:
-                selected_ids = [int(value) for value in fields.get("repo", [])]
-            except ValueError:
-                return _error("Selection could not be verified.", retry_url=retry_confirm_url)
-            # Repos already on the agent keep their access; only new ticks count.
-            selected_ids = [repo_id for repo_id in selected_ids if repo_id not in already_added]
-            if not selected_ids:
-                selection_error = "Select at least one repo"
-                return _confirmation_page(
-                    root=root,
-                    state=state,
-                    invitation_hash=flow.invitation_hash,
-                    secret=secret,
-                    cancel_url=(
-                        f"{root}/oauth/github/confirm?{urlencode({'state': state, 'cancel': '1'})}"
-                    ),
-                    installations=installations,
-                    platform=requester.platform,
-                    workspace=invitation.workspace_label,
-                    agent_name=invitation.agent_name,
-                    selection_error=selection_error,
-                    already_added=already_added,
-                    needed=needed,
-                    requested_repo=invitation.requested_repo,
-                    install_url=(
-                        f"https://github.com/apps/{config.app_slug}/installations/new?"
-                        f"{urlencode({'state': state})}"
-                    ),
-                )
-            visible = {
-                repo.id: repo for install in installations for repo in install.repos if repo.usable
-            }
-            if len(set(selected_ids)) != len(selected_ids):
-                return _error("Selection could not be verified.", retry_url=retry_confirm_url)
-            if any(repo_id not in visible for repo_id in selected_ids):
-                return _error("Selection could not be verified.", 403, retry_confirm_url)
-            access = fields.get("access", ["read"])[0]
-            if access not in ("read", "write"):
-                return _error("Selection could not be verified.", retry_url=retry_confirm_url)
-            app_jwt = build_app_jwt(private_key, app_id, now=int(time.time()))
-            by_installation = {installation.id: installation for installation in installations}
-            try:
-                async with factory() as client:
-                    details = [
-                        await get_app_installation_details(
-                            client, jwt=app_jwt, installation_id=installation_id
-                        )
-                        for installation_id in sorted(
-                            {visible[repo_id].installation_id for repo_id in selected_ids}
-                        )
-                    ]
-            except (httpx.HTTPError, ValueError):
-                return transient_error("Couldn't reach GitHub", 502)
-            if any(
-                detail.account_id != by_installation[detail.installation_id].owner_id
-                or detail.account_login.casefold()
-                != by_installation[detail.installation_id].owner_login.casefold()
-                or detail.suspended_at is not None
-                for detail in details
-            ):
-                return _error("GitHub access could not be verified.", 403, retry_confirm_url)
-            installation_writes = {
-                detail.installation_id: installation_supports_write(detail.permissions)
-                for detail in details
-            }
-            if any(
-                not installation_writes.get(visible[repo_id].installation_id, False)
-                for repo_id in selected_ids
-            ):
-                return _error(
-                    "The GitHub App needs write access to connect these repos.",
-                    403,
-                    retry_confirm_url,
-                )
-            repos: list[github_connect.RepoConfirmation] = [
-                _repo_confirmation(
-                    visible[repo_id],
-                    requested=access,
-                    needs_write=bool(needed.get(repo_id)),
-                    installation_writes=installation_writes,
-                )
-                for repo_id in selected_ids
-            ]
-            live = await live_agent(invitation)
-            still_admin = False
-            if not invitation.operator_issued:
-                if (
-                    invitation.requester_platform_user_id is not None
-                    and invitation.requester_platform_user_id != requester.platform_user_id
-                ):
-                    return _error("You can no longer manage this agent.", 403, retry_confirm_url)
-                try:
-                    still_admin = await _attest_native_admin(
-                        requester=requester,
-                        settings=settings,
-                        sessionmaker=sessionmaker,
-                        fernet=fernet,
-                    )
-                except AdminAttestationUnavailable:
-                    return transient_error(_ADMIN_RETRY, 503)
-                if not still_admin:
-                    return _error("You can no longer manage this agent.", 403, retry_confirm_url)
-            try:
-                async with sessionmaker.begin() as session:
-                    prelocked_request_ids = await lock_confirmed_request_repos(
-                        session,
-                        tenant_id=invitation.tenant_id,
-                        approved_by_account_id=invitation.requester_account_id,
-                        extra_repo_ids={repo.repo_id for repo in repos},
-                    )
-                    saved = await github_connect.confirm(
-                        session,
-                        state=state,
-                        cookie=cookie,
-                        github_user_id=flow.github_user_id,
-                        repos=repos,
-                        verified_platform_admin=still_admin,
-                        requester_manages_agent=deployment_default is not None
-                        and await may_manage_agent(session, invitation, requester, live),
-                    )
-                    if saved:
-                        for detail in sorted(details, key=lambda item: item.installation_id):
-                            await github_app_installations.upsert_github_app(
-                                session,
-                                installation_id=detail.installation_id,
-                                account_id=detail.account_id,
-                                account_login=detail.account_login,
-                                account_type=detail.account_type,
-                                repository_selection=detail.repository_selection,
-                                suspended_at=detail.suspended_at,
-                                freshly_verified_repos=github_app_installations.VerifiedInstallationRepos(
-                                    names=[
-                                        repo.full_name
-                                        for repo in repos
-                                        if repo.installation_id == detail.installation_id
-                                    ],
-                                    refreshed_at=observed_refreshes[detail.installation_id],
-                                ),
-                            )
-                            await enqueue_reconciliation(
-                                session,
-                                installation_id=detail.installation_id,
-                                delivery_id=f"connect:{uuid.uuid4()}",
-                                event="connect",
-                                deleted=False,
-                                now=datetime.now(UTC),
-                            )
-                        await github_connect.activate_confirmed_agent(
-                            session, invitation=invitation, repos=repos, repo_locks_held=True
-                        )
-                        resumed_requests = await finish_confirmed_requests(
-                            session,
-                            tenant_id=invitation.tenant_id,
-                            approved_by_account_id=invitation.requester_account_id,
-                            prelocked_request_ids=prelocked_request_ids,
-                        )
-                        if not resumed_requests:
-                            await github_connect.queue_connect_followup(
-                                session, invitation=invitation, repos=repos
-                            )
-                        await append_event(
-                            session,
-                            tenant_id=invitation.tenant_id,
-                            account_id=invitation.requester_account_id,
-                            agent_id=invitation.agent_id,
-                            platform=requester.platform,
-                            platform_user_id=requester.platform_user_id,
-                            tool_name="github_connect",
-                            operation="github_connect",
-                            outcome="allowed",
-                            reason="confirmed",
-                            github_repo_ids=[repo.repo_id for repo in repos],
-                        )
-            except github_app_installations.StaleInstallationSnapshotError:
-                return _error("GitHub access changed while saving.", 409, retry_confirm_url)
-            except github_connect.PinnedAgentConnectionError:
-                await revoke_user_token(token)
-                return _error(github_connect.PINNED_AGENT_MESSAGE)
-            except (
-                github_connect.GrantReassignmentError,
-                github_access.InstallationLimitError,
-                github_access.SessionVaultBudgetError,
-                github_access.ReadOnlyMultiInstallationError,
-            ) as exc:
-                await revoke_user_token(token)
-                return _error(str(exc))
-            except ValueError:
-                await revoke_user_token(token)
-                return _error(
-                    "This connection could not be completed. Start a new GitHub connection."
-                )
-            if not saved:
-                await revoke_user_token(token)
-                used = await successful_page(state, cookie, invitation_hash)
-                if used is not None:
-                    return used
-                return _error()
-            async with sessionmaker() as session:
-                requester_github_id = await github_connect.requester_linked_github_user_id(
-                    session, account_id=invitation.requester_account_id
-                )
-            await revoke_user_token(token)
-            async with sessionmaker() as session:
-                await github_connect.successful_confirmation(session, state=state, cookie=cookie)
-            response = _done_page(
-                count=len(repos),
-                platform=requester.platform,
-                external_id=requester.external_id,
-                requester_label=invitation.requester_label,
-                same_person=requester_github_id == flow.github_user_id,
-                agent_name=invitation.agent_name,
-            )
-            response.set_cookie(
-                _COOKIE,
-                cookie,
-                max_age=7 * 24 * 60 * 60,
-                httponly=True,
-                secure=root.startswith("https://"),
-                samesite="lax",
-            )
-            return response
-
-        workspace = invitation.workspace_label
-        usable_repos = [
-            repo for installation in installations for repo in installation.repos if repo.usable
-        ]
-        install_url = (
-            f"https://github.com/apps/{html.escape(config.app_slug or '', quote=True)}"
-            f"/installations/new?{urlencode({'state': state})}"
-        )
-        cancel_url = (
-            f"{html.escape(root, quote=True)}/oauth/github/confirm?"
-            f"{urlencode({'state': state, 'cancel': '1'})}"
-        )
-        pending = _PendingInstallationRequest(False)
-        if not usable_repos and config.app_id is not None and config.private_key is not None:
-            try:
-                async with factory() as client:
-                    pending = await has_pending_installation_request(
-                        client,
-                        app_id=config.app_id,
-                        private_key=config.private_key.get_secret_value(),
-                        github_user_id=flow.github_user_id,
-                    )
-            except (httpx.HTTPError, ValueError, KeyError, TypeError):
-                return transient_error("Couldn't reach GitHub", 502)
-        if pending.found:
-            return _pending_page(
-                html.escape(retry_confirm_url, quote=True),
-                cancel_url,
-                pending.account_login,
-            )
-        if not installations:
-            return _install_page(install_url, cancel_url)
-        if not usable_repos:
-            link = (
-                f"{root}/oauth/github/connect/"
-                f"{decrypt_token(fernet, flow.encrypted_invitation_token)}"
-                if flow.encrypted_invitation_token is not None
-                else ""
-            )
-            return _no_repos_page(link, install_url)
-        return _confirmation_page(
-            root=root,
-            state=state,
-            invitation_hash=flow.invitation_hash,
-            secret=secret,
-            cancel_url=cancel_url,
-            installations=installations,
-            platform=requester.platform,
-            workspace=workspace or f"this {_place_label(requester.platform).lower()}",
-            agent_name=invitation.agent_name,
-            already_added=already_added,
-            needed=needed,
-            requested_repo=invitation.requested_repo,
-            install_url=install_url,
-        )
+                return _render(selection_too_large())
+            selection = selection_from_form(raw_body)
+            if isinstance(selection, ConnectErrorView):
+                return _render(selection)
+            return _respond(await flow.save(root, flow_cookie=cookie, selection=selection))
+        state = request.query_params.get("state", "")
+        if request.query_params.get("cancel") == "1":
+            return _respond(await flow.cancel(root, state=state, flow_cookie=cookie))
+        return _respond(await flow.load(root, state=state, flow_cookie=cookie))
 
     return connect, callback, setup, confirm
