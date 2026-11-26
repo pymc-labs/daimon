@@ -10,8 +10,10 @@
           Runs as you, in that Daimon's workspace: it reads only what you can see
           and spends that workspace's credit. Pass ``handle`` from a previous
           result to continue the same conversation. Replies require current membership
-          and invoker-policy access at delivery. On timeout the error carries
-          the handle; resume with it rather than asking again.
+          and invoker-policy access at delivery. A reply that takes longer ends
+          this call with an error that carries the handle, and the Daimon keeps
+          working: wait for it with ``await_turn`` rather than asking again. For a
+          long job (a code review, a test run), use ``start_turn`` and ``await_turn``.
           Only handles opened through agent chat can be continued here; platform
           conversations and legacy sessions without this provenance are refused.
         ''',
@@ -43,10 +45,68 @@
           'type': 'object',
         }),
       }),
+      'await_turn': dict({
+        'description': '''
+          Wait for news from the turn running on ``handle``, without polling.
+          <blank line>
+          Call this after ``start_turn`` or ``continue_turn``, and again each time
+          it returns ``running``. It returns as soon as one of these happens:
+          <blank line>
+          - the Daimon said something: ``status`` ``running``, the new text in
+            ``messages``. Pass ``cursor`` back as ``after`` on the next call;
+          - the turn ended: ``status`` ``idle``. The last of ``messages`` is the
+            final answer, with any chart images and links;
+          - the turn stopped and cannot go on: ``status`` ``paused``, and ``hint``
+            says why and what to do;
+          - the conversation is over: ``status`` ``terminated``;
+          - ``wait_seconds`` passed (at most about four minutes): ``status``
+            ``running`` with no new messages. Call it again.
+          <blank line>
+          A turn paused on tool confirmations nobody is answering is resumed by
+          this call, as ``continue_turn`` does. So a long job runs to its end
+          while you wait, with no ``get_session`` loop and no ``continue_turn``.
+          ``activity``, when set, names the tool call running now and for how
+          long. ``wait_seconds=0`` only reads where the turn stands: it waits
+          for nothing and resumes nothing.
+          Only your own conversations opened through agent chat can be waited on.
+        ''',
+        'parameters': dict({
+          'additionalProperties': False,
+          'properties': dict({
+            'after': dict({
+              'anyOf': list([
+                dict({
+                  'type': 'string',
+                }),
+                dict({
+                  'type': 'null',
+                }),
+              ]),
+              'default': None,
+            }),
+            'daimon_id': dict({
+              'type': 'string',
+            }),
+            'handle': dict({
+              'type': 'string',
+            }),
+            'wait_seconds': dict({
+              'default': 240.0,
+              'type': 'number',
+            }),
+          }),
+          'required': list([
+            'daimon_id',
+            'handle',
+          ]),
+          'type': 'object',
+        }),
+      }),
       'continue_turn': dict({
         'description': '''
           Send a follow-up on an existing session without waiting.
           <blank line>
+          Wait for the reply with ``await_turn``.
           On a session ``get_session`` reports ``paused`` with the hint to call
           ``continue_turn`` (a turn started here, waiting on tool confirmations
           after a restart), this resumes it first: the waiting calls are decided
@@ -106,7 +166,9 @@
       }),
       'get_session': dict({
         'description': '''
-          Status of one session. Poll until ``idle`` before reading ``list_events``.
+          Status of one session, read once. To wait for a turn, use ``await_turn``.
+          <blank line>
+          ``idle`` means the turn ended and ``list_events`` has its transcript.
           <blank line>
           ``paused`` means the turn waits on tool confirmations; ``hint`` says
           whether its owner resumes it with ``continue_turn`` or it waits for an
@@ -233,8 +295,9 @@
         'description': '''
           Start a turn without waiting.
           <blank line>
-          Returns ``{"handle": ...}`` for polling with ``get_session``; show the person
-          ``monitoring`` when it is set.
+          Returns ``{"handle": ...}``. Wait for the reply with ``await_turn``: it
+          returns when the Daimon says something or the turn ends, so there is
+          nothing to poll. Show the person ``monitoring`` when it is set.
         ''',
         'parameters': dict({
           'additionalProperties': False,
@@ -721,8 +784,10 @@
     'ask': dict({
       'description': '''
         Ask one question and wait for the final answer and any chart images. Starts a
-        persistent turn, waits up to about 120 seconds for idle, and
-        returns the final text plus a resumable handle. Callers need current
+        persistent turn, waits up to about 120 seconds for it to end, and
+        returns the final text plus a resumable handle. A reply that takes longer
+        ends this call with an error naming the handle while the agent keeps
+        working: wait for it with ``await_turn``. Callers need current
         membership and invoker-policy access before reply delivery where required. Chart
         images are embedded by default; short-lived download links are added when private
         artifact storage is configured. Pass ``handle`` from a previous result to
@@ -873,6 +938,60 @@
         'type': 'object',
       }),
     }),
+    'await_turn': dict({
+      'description': '''
+        Wait for news from the turn running on ``handle``, without polling.
+        <blank line>
+        Call this after ``start_turn`` or ``continue_turn``, and again each time
+        it returns ``running``. It returns as soon as one of these happens:
+        <blank line>
+        - the agent said something: ``status`` ``running``, the new text in
+          ``messages``. Pass ``cursor`` back as ``after`` on the next call;
+        - the turn ended: ``status`` ``idle``. The last of ``messages`` is the
+          final answer, with any chart images and links;
+        - the turn stopped and cannot go on: ``status`` ``paused``, and ``hint``
+          says why and what to do;
+        - the conversation is over: ``status`` ``terminated``;
+        - ``wait_seconds`` passed (at most about four minutes): ``status``
+          ``running`` with no new messages. Call it again.
+        <blank line>
+        A turn paused on tool confirmations nobody is answering is resumed by
+        this call, as ``continue_turn`` does: the waiting calls are decided by
+        the current tool policy. So a long turn runs to its end while you wait,
+        with no ``get_my_session`` loop and no ``continue_turn``. ``activity``,
+        when set, names the tool call running now and for how long.
+        ``wait_seconds=0`` only reads where the turn stands: it waits for
+        nothing and resumes nothing.
+        Use a handle opened through agent chat.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'after': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'handle': dict({
+            'type': 'string',
+          }),
+          'wait_seconds': dict({
+            'default': 240.0,
+            'type': 'number',
+          }),
+        }),
+        'required': list([
+          'handle',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'cancel_long_job': dict({
       'description': '''
         Request interrupt and archive as owner or current human tenant admin.
@@ -928,8 +1047,8 @@
         Sends an interrupt regardless of the session's current status —
         sending one to an already-idle session is harmless. Returns
         ``{"handle": "<session_id>", "status": "<observed_status>"}``
-        immediately; it does not wait for the interrupt to take effect, so
-        poll ``get_my_session`` to see the session reach ``idle`` or
+        immediately; it does not wait for the interrupt to take effect:
+        ``await_turn`` returns once the session reaches ``idle`` or
         ``terminated``. An interrupted turn is still billed for what it
         already consumed before the interrupt landed: the model work already
         done is real work and is not refunded.
@@ -1891,22 +2010,20 @@
         ``{"handle": "<session_id>", "turn_event_id": "<event_id>",
         "turn_started_at": "<iso8601>"}`` — the same three-key shape as
         ``start_turn``, with the boundary taken from THIS message's send, not
-        the session's earlier turns. Poll ``list_events`` with
-        ``created_at_gte=turn_started_at`` and discard events up to and
-        including ``turn_event_id`` to read only this turn's transcript.
+        the session's earlier turns. Wait for the reply with ``await_turn``.
         ``monitoring``, when present, is a notice to show the person.
         <blank line>
         When ``get_my_session`` reports ``status`` ``paused`` with the hint
         to call ``continue_turn``, a turn this tool started is waiting on tool
         confirmations nobody is answering (the service restarted). This call
-        resumes it: the waiting calls are decided by the current tool policy
-        (reads run; writes are refused unless the operator allowed them in
-        unattended runs). ``message`` is then optional: without one, the
-        paused turn's boundary is returned; with one, it is sent once the
-        resumed turn ends, or the call is refused if that takes more than
-        about 90 seconds. A turn waiting on someone's approval card in chat
-        is refused: only that card answers it. Any other session needs a
-        ``message``.
+        resumes it, as waiting with ``await_turn`` also does: the waiting calls
+        are decided by the current tool policy (reads run; writes are refused
+        unless the operator allowed them in unattended runs). ``message`` is
+        then optional: without one, the paused turn's boundary is returned;
+        with one, it is sent once the resumed turn ends, or the call is refused
+        if that takes more than about 90 seconds. A turn waiting on someone's
+        approval card in chat is refused: only that card answers it. Any other
+        session needs a ``message``.
         Use a handle opened through agent chat. Platform conversations and
         older sessions without headless creation provenance cannot be driven here.
         If the agent's model, prompt, skills, MCP servers or tools changed since
@@ -7161,9 +7278,10 @@
       'description': '''
         Get one session's status and metadata (no reply text, read-only).
         <blank line>
-        Use this to check whether a turn has finished (``status`` becomes
-        ``idle``/``terminated``) before reading the transcript with
-        ``list_events``. ``status`` ``paused`` means the turn waits on tool
+        A one-time status read. To wait for a turn, use ``await_turn`` instead
+        of calling this again and again. ``status`` becomes
+        ``idle``/``terminated`` when a turn has finished and the transcript can
+        be read with ``list_events``. ``status`` ``paused`` means the turn waits on tool
         confirmations; ``hint`` says whether ``continue_turn`` resumes it or
         it waits for an approval in the chat where it was asked. Reading
         never answers them.
@@ -13298,11 +13416,13 @@
         Creates a persistent MA session with vault/repo/env parity and sends
         the first user message. Returns ``{"handle": "<session_id>",
         "turn_event_id": "<event_id>", "turn_started_at": "<iso8601>"}``.
-        ``handle`` is passed to ``get_session``, ``list_events``, and
-        ``continue_turn``. ``turn_event_id`` and ``turn_started_at`` identify
-        this turn's first event: poll ``list_events`` with
-        ``created_at_gte=turn_started_at`` and discard everything up to and
-        including ``turn_event_id`` to read only this turn's transcript.
+        ``handle`` is passed to ``await_turn``, ``get_session``,
+        ``list_events``, and ``continue_turn``. Wait for the reply with
+        ``await_turn``: it returns when the agent says something or the turn
+        ends, so there is nothing to poll. ``turn_event_id`` and
+        ``turn_started_at`` identify this turn's first event, for a caller that
+        reads ``list_events`` itself: pass ``created_at_gte=turn_started_at``
+        and discard everything up to and including ``turn_event_id``.
         ``monitoring``, when present, is a notice to show the person.
         <blank line>
         ``bundle`` is an opaque handle returned by the bundle upload route.
