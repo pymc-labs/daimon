@@ -1628,8 +1628,9 @@ async def _admit_gates(
         )
     # An agent that reads data sources is offered no data tool where outsiders may read (a
     # hold); and a helper ask into it from an agent that does not read data here is refused,
-    # or its answers would land in that agent's memory. A failed read is unknown: the turn runs with no data tool, and counts
-    # as data-reading if the session read data or that cannot be told either.
+    # or its answers would land in that agent's memory. A failed read is unknown: the turn
+    # runs with no data tool, and counts as data-reading if the session read data or that
+    # cannot be told either.
     data_unknown = False
     try:
         data_reading = await reads_data(
