@@ -48,7 +48,7 @@ pypdf) instead.
   since the provider has one execution tool. A connector that
   OpenAI's size limit cannot hold, or whose tool names clash with Gemini's own,
   is off there, as is a web search that must ask first. Repository
-  checkouts and the agent's keys stay on Claude.
+  checkouts stay on Claude.
 - **Without an Anthropic key:** memory.
 
 ## Route channels to a backend
@@ -144,6 +144,9 @@ Memory settings show as needing setup.
   harness asks before an `ask` tool.
   The provider receives what the connectors return; turn the
   `mcp_connector_relay` feature off to keep them out of OpenAI and Gemini.
+- **Keys.** The agent's saved keys go with it as a `.env` file at
+  `/workspace/.daimon/.env` in the provider's sandbox, so the provider receives
+  them. Copies of itself get none. Turn it off with the `provider_keys_file` feature.
 - **Confirmations.** A tool that needs one posts an Approve and Deny card on
   Discord, Slack, Teams and the web. Only the asker answers, and an approved
   call runs once. An unattended reply runs only what its rules allow. An agent's

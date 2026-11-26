@@ -41,8 +41,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a pasted token now works on OpenAI and Gemini too. A sign-in made before this release
   for an agent on Claude needs one last Reconnect before it works off Claude. An agent
   with GitHub repositories can switch too: its `github` connector reaches them with
-  App tokens that end with the reply. The repository checkout, `gh` in the sandbox
-  and the agent's keys still stay on Claude
+  App tokens that end with the reply. The repository checkout and `gh` in the sandbox
+  still stay on Claude
+  ([Providers](docs/providers.md#what-daimon-adds-on-openai-and-gemini)).
+
+- **An agent's keys go with it to OpenAI and Gemini.** Its saved keys are a `.env` file
+  at `/workspace/.daimon/.env` in that provider's sandbox, so that provider receives them.
+  An admin can keep them on Claude with the `provider_keys_file` feature
   ([Providers](docs/providers.md#what-daimon-adds-on-openai-and-gemini)).
 
 - **A finished command no longer sends a second message when the conversation already has its
