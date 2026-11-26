@@ -81,6 +81,8 @@ class HostMemoryPlace:
     hold: TurnHold | None
     shared_thread: bool
     read_only: bool
+    # A routine fire whose result reaches more than its owner (`mounts_personal_memory`).
+    routine_posts: bool = False
 
 
 def choose_store(
@@ -102,6 +104,8 @@ def choose_store(
     if personal:
         if place.shared_thread:
             raise HostMemoryError("A shared conversation has no personal memory.")
+        if place.routine_posts:
+            raise HostMemoryError("A routine that posts for others has no personal memory.")
         if not personal_on:
             raise HostMemoryError("Personal memory is off here.")
         return "personal"

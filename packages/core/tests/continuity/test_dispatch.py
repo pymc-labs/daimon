@@ -29,6 +29,8 @@ from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ..shared_fakes import wake_origin
+
 _TARGET = "agt_stats"
 _THREAD = "19:abc@thread.tacv2;messageid=1"
 _SOON = datetime.now(UTC) + timedelta(minutes=1)
@@ -121,6 +123,38 @@ async def _dispatch(
         dispatch_errors=(RuntimeError,),
     )
     return seeds, notices
+
+
+async def test_a_dispatched_wake_names_the_turn_it_starts(
+    db_session_factory: async_sessionmaker[AsyncSession], caller: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """The turn's origin id is the running row's `lease_owner`: the binding a wake-only
+    read checks (`stores.compute_tasks.wake_turn_of`)."""
+    due = datetime.now(UTC) - timedelta(seconds=1)
+    key = await _queue(db_session_factory, caller, "report it", reason="timer", available_at=due)
+    bound: list[tuple[str, str | None]] = []
+
+    async def run_follow_up(row: TaskContinuationRow, _seed: str) -> None:
+        async with wake_origin(db_session_factory, row, caller[1]) as origin:
+            bound.append((origin.id.hex, (await _row(db_session_factory, key)).lease_owner))
+
+    async def post_notice(_text: str) -> None:
+        raise AssertionError("no notice")
+
+    async def latest_user_message_at(_row: TaskContinuationRow) -> datetime | None:
+        return None
+
+    await dispatch_pending_continuations(
+        db_session_factory,
+        _anthropic(caller[0]),
+        tenant_id=caller[0],
+        platform="teams",
+        thread_id=_THREAD,
+        run_follow_up=run_follow_up,
+        post_notice=post_notice,
+        latest_user_message_at=latest_user_message_at,
+    )
+    assert len(bound) == 1 and bound[0][0] == bound[0][1]
 
 
 async def _row(factory: async_sessionmaker[AsyncSession], key: uuid.UUID) -> TaskContinuationRow:

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import sys
 import threading
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import pytest
+import pytest_asyncio
 import structlog
 
 if TYPE_CHECKING:
@@ -88,12 +89,14 @@ def _cancel_background_work() -> Iterator[None]:  # pyright: ignore[reportUnused
         cards.cancel_pending_card_edits()
 
 
-@pytest.fixture(autouse=True)
-def _reread_anthropic_key() -> None:  # pyright: ignore[reportUnusedFunction]
-    """Tests set and unset the Anthropic key: each reads it anew, never a test's before."""
-    keys = sys.modules.get("daimon.core.provider_keys")
-    if keys is not None:
-        keys.anthropic_key_present.cache_clear()
+@pytest_asyncio.fixture(autouse=True)
+async def _drain_ops_events() -> AsyncIterator[None]:  # pyright: ignore[reportUnusedFunction]
+    """Write a test's coalesced ops events in its own teardown: on the shared loop a pending
+    write would otherwise log in, or merge with, a later test."""
+    yield
+    ops_events = sys.modules.get("daimon.core.ops_events")
+    if ops_events is not None:
+        await ops_events.drain_ops_events()
 
 
 @pytest.fixture

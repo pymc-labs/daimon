@@ -76,6 +76,7 @@ async def channel_has_outsiders(
     thread_id: str | None = None,
     mode: AudienceMode | None = None,
     now: datetime | None = None,
+    public_thread: bool = False,
 ) -> ChannelAudience:
     """The audience of a channel (`channel_id` is the parent channel; `thread_id` a thread in it).
 
@@ -83,7 +84,9 @@ async def channel_has_outsiders(
     channel is contained; one with no record is open, which is what `is_channel_shared`
     says. Discord in mode `on`: the stored room facts. An unknown room is contained and
     narrow. `mode` is the server's mode when the caller already read it; None reads it
-    here (Discord only).
+    here (Discord only). `public_thread` is the platform's word that `thread_id` is a public
+    thread: with no row of its own it then takes both facts from its parent; any other
+    thread with no row is narrow.
     """
     if platform == "discord":
         if mode is None:
@@ -95,6 +98,7 @@ async def channel_has_outsiders(
                 channel_id=channel_id,
                 thread_id=thread_id,
                 now=now,
+                public_thread=public_thread,
             )
         if mode == "shadow":
             # Shadow changes nothing: a failed facts read is logged and the registry answers.
@@ -107,6 +111,7 @@ async def channel_has_outsiders(
                         channel_id=channel_id,
                         thread_id=thread_id,
                         now=now,
+                        public_thread=public_thread,
                     )
             except Exception:
                 _log.warning(
@@ -140,6 +145,7 @@ async def _facts_audience(
     channel_id: str,
     thread_id: str | None,
     now: datetime | None,
+    public_thread: bool = False,
 ) -> ChannelAudience:
     """The stored facts of a room, a thread falling back to its parent channel."""
     room = thread_id if thread_id is not None and thread_id != channel_id else channel_id
@@ -149,6 +155,7 @@ async def _facts_audience(
         channel_id=room,
         now=now or datetime.now(UTC),
         parent_id=channel_id if room != channel_id else None,
+        public_thread=public_thread,
     )
     return ChannelAudience(
         contained=facts.contained, known=facts.known, narrow=facts.narrow, source="facts"

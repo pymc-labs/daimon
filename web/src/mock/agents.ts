@@ -18,15 +18,20 @@ const clone = <T,>(x: T): T => structuredClone(x)
 // Ids, prices and order follow the core catalog.
 const LEVELS: Effort[] = ["low", "medium", "high"]
 const MODELS: CatalogModel[] = [
+  { id: "claude-fable-5-2", label: "Fable 5.2", backend: "anthropic", in_usd: 8, out_usd: 40 },
   { id: "claude-opus-5-5", label: "Opus 5.5", backend: "anthropic", in_usd: 4, out_usd: 20, fast: true },
+  { id: "claude-opus-4-8", label: "Opus 4.8", backend: "anthropic", in_usd: 5, out_usd: 25 },
   { id: "claude-sonnet-5-5", label: "Sonnet 5.5", backend: "anthropic", in_usd: 2, out_usd: 10 },
   { id: "claude-haiku-5-5", label: "Haiku 5.5", backend: "anthropic", in_usd: 0.1, out_usd: 0.5 },
-  { id: "gpt-6-luna", label: "GPT-6 Luna", backend: "openai", in_usd: 0.1, out_usd: 0.5, efforts: LEVELS },
+  { id: "gpt-6.2-astra", label: "GPT-6.2 Astra", backend: "openai", in_usd: 8, out_usd: 40, efforts: LEVELS },
   { id: "gpt-6-astra", label: "GPT-6 Astra", backend: "openai", in_usd: 10, out_usd: 50, efforts: LEVELS },
-  { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", backend: "gemini", in_usd: 0.75, out_usd: 3.75, efforts: LEVELS },
+  { id: "gpt-6.2-sol", label: "GPT-6.2 Sol", backend: "openai", in_usd: 2, out_usd: 10, efforts: LEVELS },
+  { id: "gpt-6-luna", label: "GPT-6 Luna", backend: "openai", in_usd: 0.1, out_usd: 0.5, efforts: LEVELS },
   { id: "gemini-4-argon", label: "Gemini 4 Argon", backend: "gemini", in_usd: 2, out_usd: 10, efforts: LEVELS },
   { id: "gemini-4-carbon", label: "Gemini 4 Carbon", backend: "gemini", in_usd: 2, out_usd: 10, efforts: LEVELS },
   { id: "gemini-4-hydrogen", label: "Gemini 4 Hydrogen", backend: "gemini", in_usd: 1.5, out_usd: 7.5, efforts: LEVELS },
+  { id: "gemini-4-neon", label: "Gemini 4 Neon", backend: "gemini", in_usd: 3, out_usd: 15, efforts: LEVELS },
+  { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", backend: "gemini", in_usd: 0.75, out_usd: 3.75, efforts: LEVELS },
 ]
 const modelLabel = (m: ModelChoice) => {
   const c = MODELS.find((x) => x.id === m.id)
@@ -138,6 +143,13 @@ const SERVERS: Record<string, McpServer> = {
       { name: "merge_pull_request", description: "Merge a pull request", effect: "write", rule: "deny" },
     ],
   },
+  daimon: {
+    key: "daimon", name: "Daimon", url: "https://daimon.example.com/mcp", auth: "none", credential: null,
+    tools: [
+      { name: "read_thread", description: "Read a thread the agent is in", effect: "read", rule: "allow" },
+      { name: "schedule_routine", description: "Schedule a routine", effect: "write", rule: "ask" },
+    ],
+  },
   hubspot: {
     key: "hubspot", name: "HubSpot", url: "https://mcp.hubspot.com/", auth: "oauth", credential: "expired",
     tools: [
@@ -154,7 +166,6 @@ const CHANNELS: Place[] = [
   CH("general"), CH("analytics"), CH("mmm-larkspur"), CH("pricing"), CH("eng-reviews"), CH("sales"), CH("support"),
   CH("client-cobalt", { confidential: true }),
 ]
-const DM: Place = { id: "dm", kind: "dm", platform: "discord", name: "Direct messages" }
 const WEB: Place = { id: "web", kind: "web", platform: "web", name: "Web chat" }
 const place = (name: string, extra: Partial<Place> = {}) => ({ ...clone(CHANNELS.find((c) => c.name === name)!), ...extra })
 
@@ -282,13 +293,13 @@ function seed(): Rec[] {
     name: "MMM Analyst", purpose: "Media mix models with PyMC-Marketing", avatar: face(4), model: m("claude-sonnet-5-5"),
     system: MMM_SYSTEM.replace("\n- Log open questions as Linear issues in the client's project.", "").replace("Pull spend and outcomes with the warehouse-pulls skill. Never invent spend.", "Never invent spend."),
     skills: ["data-validation", "exploratory-data-analysis", "pymc-artifact-style"].map(skill),
-    tools: toolset(...CODE_TOOLS), mcp_servers: [server("almanac")], places: [place("mmm-larkspur", { default: true })],
+    tools: toolset(...CODE_TOOLS), mcp_servers: [server("almanac"), server("daimon")], places: [place("mmm-larkspur", { default: true })],
   }, "p_maya", 960, [
     [720, "p_priya", "Warehouse access", (c) => {
       c.mcp_servers.push(server("bigquery")); c.skills.push(skill("warehouse-pulls"), skill("pymc-marketing"))
       c.system = c.system!.replace("Never invent spend.", "Pull spend and outcomes with the warehouse-pulls skill. Never invent spend.")
     }],
-    [600, "p_maya", null, (c) => { c.places!.push(place("analytics"), clone(DM)) }],
+    [600, "p_maya", null, (c) => { c.places!.push(place("analytics")) }],
     [504, "p_maya", "Opus for model fits", (c) => { c.model = m("claude-opus-5-5") }],
     [300, "p_priya", null, (c) => { c.skills.push(skill("eda-storytelling")); c.tools = toolset(...CODE_TOOLS, "web_fetch") }],
     [216, "p_jonas", "Linear for open questions", (c) => {
@@ -307,7 +318,7 @@ function seed(): Rec[] {
   const daimon = history({
     name: "Daimon", purpose: "General assistant", avatar: face(11), model: m("claude-sonnet-5-5"), system: DAIMON_SYSTEM,
     skills: ["file-handling", "marimo_notebooks", "pymc-artifact-style", "data-validation", "data-cleaning", "exploratory-data-analysis", "eda-storytelling"].map(skill),
-    tools: toolset(...CODE_TOOLS), mcp_servers: [server("almanac")], places: [place("general", { default: true }), clone(DM), clone(WEB)],
+    tools: toolset(...CODE_TOOLS), mcp_servers: [server("almanac")], places: [place("general", { default: true }), clone(WEB)],
   }, "p_maya", 2400, [
     [1200, "p_jonas", null, (c) => { c.skills.push(skill("report-publish")) }],
     [600, "p_maya", null, (c) => { c.skills.push(skill("churn-model")) }],
@@ -335,7 +346,7 @@ function seed(): Rec[] {
     name: "Sales Desk", purpose: "Account briefs from the CRM", avatar: face(14), model: m("claude-haiku-5-5", "low"),
     system: "# Sales Desk\n\nWrite account briefs for Fernhill's sales team from HubSpot and Almanac. One page, no speculation.",
     skills: [skill("account-brief"), skill("pptx")], tools: toolset("read", "write"), mcp_servers: [server("almanac"), server("hubspot")],
-    places: [place("sales", { default: true }), clone(DM), clone(WEB)],
+    places: [place("sales", { default: true }), clone(WEB)],
   }, "p_maya", 900, [[120, "p_maya", null, (c) => { c.skills.push(skill("docx")) }]])
   const support = history({
     name: "Support Triage", purpose: "Labels and routes support tickets", avatar: face(39), model: m("gpt-6-luna", "medium"),
@@ -397,13 +408,13 @@ function summary(r: Rec, v: Viewer): AgentSummary {
   const a = view(r, v)
   const c = current(r).config
   const runs = new Set<AgentSummary["runs_in"][number]>()
-  for (const p of c.places ?? []) runs.add(p.kind === "channel" ? (p.platform as "discord") : p.kind)
+  for (const p of c.places ?? []) runs.add(p.kind === "web" ? "web" : (p.platform as "discord"))
   return {
     id: a.id, name: a.name, purpose: a.purpose, avatar: a.avatar, version: a.version, owner: a.owner, updated_at: a.updated_at,
     updated_by: a.updated_by, last_used_at: a.last_used_at, spend_usd: a.spend_usd, can_edit: a.can_edit, co_owners: a.co_owners,
     draft_changes: draftView(r, v.id)?.changes.length ?? 0,
     model_label: MODELS.find((x) => x.id === c.model.id)?.label ?? c.model.id, backend: c.model.backend,
-    runs_in: (["discord", "slack", "teams", "dm", "web"] as const).filter((k) => runs.has(k)),
+    runs_in: (["discord", "slack", "teams", "web"] as const).filter((k) => runs.has(k)),
   }
 }
 

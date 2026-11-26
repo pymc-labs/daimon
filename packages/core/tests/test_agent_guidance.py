@@ -34,7 +34,7 @@ def test_github_helper_guidance_adds_exactly_one_static_paragraph() -> None:
     assert CREDENTIAL_GUIDANCE_BLOCK.count(paragraph) == 1
     before = CREDENTIAL_GUIDANCE_BLOCK.replace(paragraph, "")
     assert hashlib.sha256(before.encode()).hexdigest() == (
-        "f0cbfd773f6fd765d6812797f9f90ccfc4d35dcf1e626eecc486712cbf42ec2b"
+        "4f3a52ef29b1cd2041d251661e9b10fe7fa3a401f471a40a4ec04623a22ad7f4"
     )
     assert apply_credential_guidance("base prompt").count(paragraph) == 1
 

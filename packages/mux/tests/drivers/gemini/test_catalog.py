@@ -298,7 +298,14 @@ async def test_opt_in_model_is_an_allowed_native_catalog_model(case: Case, model
 
 @pytest.mark.parametrize(
     "near",
-    ["gemini-4-argon-preview", "gemini-4", "gemini-4-carbon-latest", "gemini-4-hydrogen-preview"],
+    [
+        "gemini-4-argon-preview",
+        "gemini-4",
+        "gemini-4-carbon-latest",
+        "gemini-4-hydrogen-preview",
+        "gemini-4-neon-preview",
+        "gemini-neon",
+    ],
 )
 async def test_opt_in_near_miss_ids_refuse_before_native_post(case: Case, near: str) -> None:
     requested = spec().model_copy(update={"model": ModelRef(provider="gemini", id=near)})

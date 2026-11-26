@@ -37,6 +37,17 @@ def _check_history_permission(  # pyright: ignore[reportUnusedFunction]
         raise ToolError("missing read_message_history permission")
 
 
+def _history_allowed(  # pyright: ignore[reportUnusedFunction]
+    channel: discord.abc.GuildChannel | discord.Thread, member: discord.Member
+) -> bool:
+    """`_check_history_permission` as a yes or no: the evidence for own-DM reach."""
+    try:
+        _check_history_permission(channel, member)
+    except ToolError:
+        return False
+    return True
+
+
 def _bot_read_error(  # pyright: ignore[reportUnusedFunction]
     channel: discord.abc.GuildChannel | discord.Thread | str,
     *,

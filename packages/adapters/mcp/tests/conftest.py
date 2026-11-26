@@ -16,6 +16,7 @@ from collections.abc import AsyncIterator, Iterator
 import pytest
 import pytest_asyncio
 from daimon.testing.db import (  # noqa: F401
+    add_background_drain,
     db_clean,
     db_committing_engine,
     db_committing_pool,
@@ -32,6 +33,23 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from .harness import stop_confirmation_workers
+
+# A worker reads through the test's connection; stopping it only in the autouse
+# fixture below, which tears down after the database, races the rollback.
+add_background_drain(stop_confirmation_workers)
+
+
+@pytest.fixture(autouse=True)
+def org_proof_on_github(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The connect page proves the signer may hand over a whole org before offering to follow
+    it (GitHub membership, else the installation's listing). The scripted GitHubs of the route
+    tests serve neither; the follow tests set their own."""
+    from daimon.core import github_connect_follow
+
+    async def proved(*_args: object, **_kwargs: object) -> str:
+        return "org_admin"
+
+    monkeypatch.setattr(github_connect_follow, "org_proof", proved)
 
 
 @pytest_asyncio.fixture(autouse=True)

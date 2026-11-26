@@ -166,7 +166,7 @@ TOOL_MODEL_PRICING: dict[str, ModelRates] = {
     "gemini-2.5-flash": ModelRates(input=0.30, output=2.50, cache_write=0.0, cache_read=0.03),
 }
 
-_SNAPSHOT_SUFFIX = re.compile(r"-\d{8}$")
+SNAPSHOT_SUFFIX = re.compile(r"-\d{8}$")
 
 
 class _ModelPricing(dict[str, ModelRates]):
@@ -178,7 +178,7 @@ class _ModelPricing(dict[str, ModelRates]):
     """
 
     def __missing__(self, key: str) -> ModelRates:
-        alias = _SNAPSHOT_SUFFIX.sub("", key)
+        alias = SNAPSHOT_SUFFIX.sub("", key)
         if alias != key and super().__contains__(alias):
             return super().__getitem__(alias)
         raise KeyError(key)
@@ -790,6 +790,16 @@ _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
                 Decimal("1.50"),
                 Decimal("7.50"),
                 Decimal("0.075"),
+                web_search=_GEMINI_SEARCH,
+            ),
+            # Neon: checked 2026-11-24 on the pricing page. One flat tariff, no intro rate.
+            ProviderPrice(
+                INLINE_REUSE.provider,
+                "gemini-4-neon",
+                date(2026, 11, 24),
+                Decimal("3.00"),
+                Decimal("15.00"),
+                Decimal("0.15"),
                 web_search=_GEMINI_SEARCH,
             ),
         ),

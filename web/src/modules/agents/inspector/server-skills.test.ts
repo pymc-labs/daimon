@@ -19,8 +19,8 @@ describe("menuEntries", () => {
   })
 
   it("disables everything at the cap", () => {
-    const full = Array.from({ length: 20 }, (_, i) => skill(`sk_${i}`))
-    expect(menuEntries([option("notes")], full)[0]!.disabled).toBe("20 skills max")
+    const full = Array.from({ length: 50 }, (_, i) => skill(`sk_${i}`))
+    expect(menuEntries([option("notes")], full)[0]!.disabled).toBe("50 skills max")
   })
 })
 

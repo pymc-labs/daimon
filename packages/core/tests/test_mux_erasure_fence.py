@@ -586,6 +586,11 @@ async def test_the_migration_carries_the_guards_the_models_install(sm: Factory) 
             _erasure_guards.MONITORING_INSTALL,
             _erasure_guards.MONITORING_REMOVE,
         ),
+        (
+            "0224_ops_events",
+            _erasure_guards.OPS_EVENTS_INSTALL,
+            _erasure_guards.OPS_EVENTS_REMOVE,
+        ),
     ):
         path = Path(__file__).parents[1] / f"alembic/versions/{name}.py"
         spec = importlib.util.spec_from_file_location(f"guards_{name}", path)

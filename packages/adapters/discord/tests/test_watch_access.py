@@ -1,10 +1,13 @@
 """Every watch decision uses REST proof; poisoned gateway state is unreachable."""
 
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
+from daimon.adapters.discord import watch_access
 from daimon.adapters.discord.watch_access import require_watch_thread_access
+from daimon.core.bot_access import BotAccessUnavailable
 from daimon.core.stores import watches
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.turn.errors import AdmissionDenied
@@ -227,3 +230,40 @@ async def test_watch_transport_failure_only_pauses_proved_denial(
         # Refusing this output must not poison the final answer or next tick.
         rest.guild_error = None
         await delivery.check()
+
+
+@pytest.mark.fresh_schema
+@pytest.mark.parametrize(
+    "case", ["bot_locked_out", "bot_cannot_post", "bot_channel_gone", "owner_gone_bot_locked_out"]
+)
+async def test_the_bots_own_lockout_waits_but_never_hides_an_owner_who_lost_access(
+    db_session_factory, monkeypatch, case
+):
+    """With the wait on, only the bot's Missing Access or missing post right waits; the
+    owner is read first, so an owner who left still pauses, and a 404 keeps its old handling."""
+    factory, _, _, _, _, watch, key = await enrolled_page_watch(db_session_factory, monkeypatch)
+    async with factory() as db:
+        row = await get_continuation(db, idempotency_key=key)
+    client = discord.Client(intents=discord.Intents.none())
+    client._connection.user = SimpleNamespace(id=999)  # pyright: ignore[reportAttributeAccessIssue]
+    rest = WatchDiscordRest(client)
+    monkeypatch.setattr(watch_access, "bot_access_wait_on", AsyncMock(return_value=True))
+    locked = discord.Forbidden(
+        MagicMock(status=403, reason="denied"), {"code": 50001, "message": "Missing Access"}
+    )
+    if case in ("bot_locked_out", "owner_gone_bot_locked_out"):
+        rest.channel_error = locked
+    if case == "bot_cannot_post":
+        rest.bot_roles = []
+    if case == "bot_channel_gone":
+        rest.channel_error = discord.NotFound(MagicMock(status=404, reason="gone"), "gone")
+    if case == "owner_gone_bot_locked_out":
+        rest.member_error = discord.NotFound(MagicMock(status=404, reason="gone"), "gone")
+
+    waits = case in ("bot_locked_out", "bot_cannot_post")
+    with pytest.raises(BotAccessUnavailable if waits else AdmissionDenied):
+        await require_watch_thread_access(factory, row, client)
+
+    async with factory() as db:
+        current = await watches.get_watch(db, watch.id)
+    assert (current.status == "paused") is not waits, "only a wait leaves the watch running"

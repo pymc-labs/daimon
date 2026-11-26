@@ -2,9 +2,10 @@ import { useState } from "react"
 
 import { PanelSection, SettingRow } from "@/components/panel"
 import { Button } from "@/components/ui/button"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { useConfirm } from "@/lib/confirm"
 import { modelLabel } from "@/lib/format"
+import { byProvider } from "@/lib/providers"
 import { useSave, type Outcome } from "./api"
 import { Notice } from "./shared"
 import type { ChannelDetail, ChannelSettings } from "./types"
@@ -35,10 +36,15 @@ export function Model({ c, s }: { c: ChannelDetail; s: ChannelSettings }) {
             <Select value="" onValueChange={(v) => void set(v)} disabled={save.pending}>
               <SelectTrigger className="h-8 min-w-40"><SelectValue placeholder={text} /></SelectTrigger>
               <SelectContent>
-                {choices.map((x) => (
-                  <SelectItem key={x.value} value={x.value}>
-                    <span className="flex w-full items-center gap-2">{x.label}{x.price && <span className="ml-auto pl-4 text-xs text-muted-foreground tabular">{x.price}</span>}</span>
-                  </SelectItem>
+                {byProvider(choices, (x) => x.provider).map((g) => (
+                  <SelectGroup key={g.provider}>
+                    <SelectLabel>{g.name}</SelectLabel>
+                    {g.models.map((x) => (
+                      <SelectItem key={x.value} value={x.value}>
+                        <span className="flex w-full items-center gap-2">{x.label}{x.price && <span className="ml-auto pl-4 text-xs text-muted-foreground tabular">{x.price}</span>}</span>
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
                 ))}
               </SelectContent>
             </Select>

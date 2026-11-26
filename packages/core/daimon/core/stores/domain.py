@@ -14,10 +14,11 @@ from decimal import Decimal
 from typing import Annotated, Any, Final, Literal, cast
 
 from anthropic.types.beta import BetaManagedAgentsSystemContentBlockParam
+from daimon.core.ops_catalog import OpsArea, OpsCode, OpsSeverity
 from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.support_rows import SupportEscalationRow as SupportEscalationRow
 from daimon.core.windows import BudgetWindow as BudgetWindow
-from mux.contracts.config import CapabilityRequirement, ThreadMode
+from mux.contracts.config import DEFAULT_BACKEND, CapabilityRequirement, ThreadMode
 from mux.contracts.ids import PROVIDERS, Provider, Scope, SkillRef
 from mux.contracts.profile import Capability, Effort
 from mux.contracts.resources import (
@@ -264,6 +265,8 @@ class SandboxPin:
     environment_id: str
     #: Environments are edited in place; their `updated_at` is their revision.
     environment_updated_at: datetime
+    #: The provider the routine ran on when opted in; another needs a new opt-in.
+    provider: str = DEFAULT_BACKEND
 
 
 @dataclass(frozen=True)
@@ -273,6 +276,8 @@ class AgentSandboxPin:
     agent_id: str
     #: The environment's `daimon` name, resolved at each fire; edits to it are not drift.
     environment_name: str
+    #: The provider the agent ran on when opted in; another needs a new opt-in.
+    provider: str = DEFAULT_BACKEND
 
 
 AnySandboxPin = SandboxPin | AgentSandboxPin
@@ -285,10 +290,16 @@ _ROUTINE_PIN: Final = TypeAdapter(SandboxPin)
 
 
 def pin_json(pin: AnySandboxPin) -> dict[str, JsonValue]:
-    """A pin as its feature value and the change record keep it."""
-    if isinstance(pin, AgentSandboxPin):
-        return _AGENT_PIN.dump_python(pin, mode="json")
-    return _ROUTINE_PIN.dump_python(pin, mode="json")
+    """A pin as its feature value and the change record keep it; Anthropic is unnamed,
+    as in every pin stored before others existed."""
+    data: dict[str, JsonValue] = (
+        _AGENT_PIN.dump_python(pin, mode="json")
+        if isinstance(pin, AgentSandboxPin)
+        else _ROUTINE_PIN.dump_python(pin, mode="json")
+    )
+    if data.get("provider") == DEFAULT_BACKEND:
+        del data["provider"]
+    return data
 
 
 def stored_pin(row: FeatureValueRow) -> AnySandboxPin | None:
@@ -1342,6 +1353,8 @@ class TurnOriginRow(BaseModel):
     serves_helpers: bool = False
     self_helpers: bool = False
     helper_key: str | None = None
+    own_dm_reach: bool = False
+    reach_read: bool = False
 
     @property
     def session_thread_id(self) -> str:
@@ -2002,3 +2015,60 @@ class PendingCarryOverRow(BaseModel):
 
     user_prefix: str
     system_blocks: tuple[BetaManagedAgentsSystemContentBlockParam, ...]
+
+
+OpsIssueStateName = Literal["resolved", "muted"]
+
+
+class OpsEventRow(BaseModel):
+    """One stored ops event (`stores.ops_events`), coalesced: `count` occurrences."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    occurred_at: datetime
+    count: int
+    code: OpsCode
+    area: OpsArea
+    severity: OpsSeverity
+    reason: str | None
+    fingerprint: str
+    agent_id: str | None
+    routine_id: uuid.UUID | None
+    watch_id: uuid.UUID | None
+    account_id: uuid.UUID | None
+    platform: str | None
+    channel_id: str | None
+    thread_id: str | None
+    session_id: str | None
+    subject_key: str | None
+    release: str | None
+    note: str | None
+
+
+class OpsIssueStateRow(BaseModel):
+    """An admin's resolve or mute of one issue."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    fingerprint: str
+    state: OpsIssueStateName
+    by_account_id: uuid.UUID | None
+    at: datetime
+
+
+class OpsIssueGroupRow(BaseModel):
+    """One fingerprint's events grouped: counted from `since`, seen over their whole life.
+
+    `latest` is the newest event, for what varies within an issue (agent, platform, release).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    fingerprint: str
+    events: int
+    people: int
+    first_seen: datetime
+    last_seen: datetime
+    latest: OpsEventRow
+    state: OpsIssueStateRow | None

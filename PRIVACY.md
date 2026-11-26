@@ -41,6 +41,12 @@ organisation a Teams deployment serves), daimon stores:
   Database deletion triggers enforce erasure even for older privacy workers.
   Separate hub OAuth tools are not included in this audit trail. Operators can
   configure a different age or explicitly select indefinite retention.
+- **Failure records** — when an answer, direct message, routine, delivery, watch or
+  follow-up fails, Daimon keeps the kind of failure, a short reason code, the time,
+  and the agent, routine, channel and account identifiers. They exclude messages,
+  tool arguments and credentials. Only workspace owners and admins read them, and
+  they are kept 30 days by default. Account deletion removes
+  the ones tied to your account, and tenant deletion removes them all.
 - **Monitored conversations** — when an admin monitors an agent, Daimon keeps
   what people ask it in direct messages, web chat and MCP, and its answers. Only
   workspace owners and admins can read them, not an agent's owner. Over MCP it

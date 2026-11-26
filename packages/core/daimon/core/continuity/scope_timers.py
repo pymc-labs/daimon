@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 import anthropic as anthropic_pkg
 import structlog
 from daimon.core.anthropic_guard import AnthropicDisabled, independent_wake_provider_context
+from daimon.core.bot_access import BOT_ACCESS_RETRY_DELAY, BotAccessUnavailable
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.continuity.messages import render_timer_seed
 from daimon.core.continuity.wakes import (
@@ -24,6 +25,7 @@ from daimon.core.continuity.wakes import (
     claim_wake,
     is_transient_denial,
     release_wake,
+    report_wake_failed,
     settle_wake,
     start_wake,
 )
@@ -35,6 +37,7 @@ from daimon.core.turn.errors import (
     SessionPreparationFailed,
     TurnNotStarted,
 )
+from daimon.core.turn_origin import wake_turn
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -71,16 +74,32 @@ async def dispatch_scope_timer(
         if not await start_wake(sessionmaker, claim, now=now()):
             return
         skip_reason: str | None = None
+        error_class: str | None = None
         try:
             # An imported timer carries no set time; the seed leaves it out.
-            await run_timer(row, render_timer_seed(row.requested_work or ""))
+            with wake_turn(claim.owner):
+                await run_timer(row, render_timer_seed(row.requested_work or ""))
         except AnthropicDisabled:
             log.warning("scope_timer.provider_guard_denied", row_id=str(row.id))
+            report_wake_failed(
+                sessionmaker,
+                row.tenant_id,
+                row.reason,
+                "provider_guard_denied",
+                thread_id=row.thread_id,
+            )
             await release_wake(sessionmaker, claim, retry_at=busy_retry_at(row, now=now()))
             return
         except SessionBusyError as busy:
             # Nothing ran: the row goes back to pending with its claim refunded.
             retry_at = busy_retry_at(row, now=now(), not_before=busy.retry_after)
+            await release_wake(sessionmaker, claim, retry_at=retry_at)
+            return
+        except BotAccessUnavailable:
+            # The bot cannot reach the channel yet: nothing ran, so the claim is refunded and
+            # the timer looks again later, as often as it takes for the bot to be let in.
+            log.info("scope_timer.bot_access_unavailable", row_id=str(row.id))
+            retry_at = busy_retry_at(row, now=now(), delay=BOT_ACCESS_RETRY_DELAY)
             await release_wake(sessionmaker, claim, retry_at=retry_at)
             return
         except DeliveryRetry:
@@ -112,11 +131,13 @@ async def dispatch_scope_timer(
                 error_type=type(exc).__name__,
                 causes=backend_refusal_causes(exc),
             )
-            skip_reason = "dispatch_failed"
+            skip_reason, error_class = "dispatch_failed", type(exc).__name__
         await settle_wake(
             sessionmaker,
             claim,
             status="delivered" if skip_reason is None else "skipped",
             now=now(),
             skip_reason=skip_reason,
+            row=row,
+            error_class=error_class,
         )

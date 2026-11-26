@@ -13,13 +13,14 @@ from decimal import Decimal
 from typing import Literal, get_args
 
 OperatorScope = Literal[
-    "tenant:read", "channels:write", "agents:archive", "promo:redeem", "promo:create"
+    "tenant:read", "channels:write", "agents:archive", "promo:redeem", "promo:create", "issues:read"
 ]
 """``tenant:read`` reads the tenant summary and channel budgets;
 ``channels:write`` sets and clears per-channel settings; ``agents:archive``
 archives the agent copied for an isolated channel as it closes;
 ``promo:redeem`` redeems a promo code for the tenant; ``promo:create`` issues,
-lists and revokes promo codes for the whole deployment, so only the CLI mints it."""
+lists and revokes promo codes for the whole deployment, so only the CLI mints it;
+``issues:read`` reads the workspace's overview and its failures and warnings."""
 
 OPERATOR_SCOPES: tuple[OperatorScope, ...] = get_args(OperatorScope)
 DEPLOYMENT_SCOPES: frozenset[OperatorScope] = frozenset({"promo:create"})

@@ -44,7 +44,8 @@ clipping, overlap, missing images, template leftovers and readability. Fix and
 render again when necessary. Never claim completion from API success or a
 rendered file's existence alone. If rendering or inspection is unavailable,
 report the deck as edited with review incomplete. Include the deck link and
-only final useful PNGs in the reply. PNGs in `/mnt/session/outputs` attach to it.
+only final useful PNGs in the reply. PNGs in the outputs directory
+(`output_dir()` in `scripts/workflow_io.py`) attach to it.
 
 Errors retain the deck ID when known. A timeout can mean a write applied:
 read the deck before retrying. Copy failure with an unknown result also requires

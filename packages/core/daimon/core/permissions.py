@@ -509,6 +509,11 @@ def agent_permissions(
     return AgentPermissions(runs_in=rules, home=home)
 
 
+def is_barred_from_web_chat(policy: TenantAccessPolicy, agent_names: Iterable[str | None]) -> bool:
+    """Whether the agent is a channel's own, which answers only there (`authz._decide`)."""
+    return agent_permissions(policy, tuple(agent_names)).home is not None
+
+
 def rule_token(place_id: str | None) -> str | None:
     """The id an agent rule names for a place: `web` for any person's web chat place."""
     if place_id is not None and place_id.startswith(WEB_PLACE_PREFIX):
@@ -681,6 +686,16 @@ def readable_from(
     return True
 
 
+def readers_set_by_hand(
+    policy: TenantAccessPolicy, channel_id: str, parent_channel_id: str | None = None
+) -> bool:
+    """Whether a rule set by hand limits who reads this channel, or the channel a thread
+    is under. Such a limit is an admin's own choice: the room facts neither made it nor
+    lift it."""
+    ids = (channel_id,) if parent_channel_id is None else (channel_id, parent_channel_id)
+    return any(channel_rule(policy, i).readers != "any" for i in ids)
+
+
 def session_readable_from(
     policy: TenantAccessPolicy,
     origin_ids: Collection[str],
@@ -773,6 +788,7 @@ __all__ = [
     "post_refusal",
     "posts_at",
     "readable_from",
+    "readers_set_by_hand",
     "readers_limited_at",
     "ruled_agents",
     "run_refusal",

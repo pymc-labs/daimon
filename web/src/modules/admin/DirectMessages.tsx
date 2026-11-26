@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query"
 import { ArrowDown, ArrowUp, Lock, Trash2, User, Users } from "lucide-react"
-import { useEffect, useState } from "react"
+import { useState } from "react"
 import { toast } from "sonner"
 
 import { AgentAvatar } from "@/components/common"
@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { useChatAgents } from "@/lib/hooks"
+import { useChatAgents, useDebounced } from "@/lib/hooks"
 import type { AgentRef } from "@/lib/types"
 import { cn } from "@/lib/utils"
 import { useFeatureSave, useFeatures } from "@/modules/features/api"
@@ -25,15 +25,6 @@ const SUBJECT: Record<DmSubject, string> = { user: "Person", group: "Group", eve
 const DEFAULT = "__default"
 const ID = /^[\w:.@-]{1,100}$/
 
-function useDebounced(text: string) {
-  const [term, setTerm] = useState("")
-  useEffect(() => {
-    const t = setTimeout(() => setTerm(text.trim()), 200)
-    return () => clearTimeout(t)
-  }, [text])
-  return term
-}
-
 /**
  * People or groups by platform id, as chips: found by name, or a pasted id (no spaces, a digit).
  * `single` keeps one pick.
@@ -42,7 +33,7 @@ function IdPicker({ kind, value, onChange, single, disabled }: {
   kind: "user" | "group"; value: DmPerson[]; onChange: (next: DmPerson[]) => void; single?: boolean; disabled?: boolean
 }) {
   const [text, setText] = useState("")
-  const term = useDebounced(text)
+  const term = useDebounced(text.trim(), 200)
   const people = useDmPeople(kind === "user" ? term : "")
   const groups = usePlatformGroups(kind === "group")
   const named = new Map((groups.data?.groups ?? []).map((g) => [g.id, g.name]))

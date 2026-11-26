@@ -1,7 +1,7 @@
 import type { ServerSkillOption, Skill, SkillFollow } from "../types"
 
 /** The most skills one agent runs with. */
-export const SKILL_CAP = 20
+export const SKILL_CAP = 50
 
 export type MenuEntry = { option: ServerSkillOption; disabled: string | null }
 

@@ -60,10 +60,13 @@ from daimon.core.mcp_server_url import is_session_mcp_url, same_mcp_endpoint
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
+    "APPROVAL_SKIPPABLE_TOOLS",
     "APPROVAL_TOOLS",
     "CARDED_TOOLS",
+    "COMPUTE_APPROVAL_TOOLS",
     "CONFIRMED_DAIMON_TOOLS",
     "REACH_APPROVAL_TOOLS",
+    "RENAMED_DAIMON_TOOLS",
     "WATCH_APPROVAL_TOOLS",
     "WATCH_CONFIRMED_TOOLS",
     "DAIMON_SERVER_NAME",
@@ -94,6 +97,7 @@ __all__ = [
     "unwrap_daimon_call",
     "session_tools_for_policy",
     "toolset_permission_policy",
+    "with_current_tool_names",
     "trusted_servers_for",
 ]
 
@@ -131,6 +135,12 @@ VerdictReason = Literal[
     "agent_rule_allow",
     "agent_rule_ask",
     "agent_rule_deny",
+    #: A confirmed write whose card an admin's approval setting skips, in an attended
+    #: turn, after every deny and ask rule had its say (`approval_skipped_tools`).
+    "approval_skipped",
+    #: A confirmed write in a run nobody watches, whose owner the agent-chat rule counts as
+    #: present (`owner_tools`), after every deny and ask rule had its say.
+    "agent_chat_owner",
 ]
 
 
@@ -197,8 +207,8 @@ CARDED_TOOLS: Final[Mapping[str, str]] = {
 #: call only previews, and runs. With it, an unattended run is always refused.
 CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
     **CARDED_TOOLS,
-    "fly_launch_session": "template",
-    "fly_extend_session": "hours",
+    "compute_launch_session": "template",
+    "compute_extend_session": "hours",
     "start_long_job": "command",
     "create_watch": "source",
     "resume_watch": "watch_id",
@@ -223,6 +233,29 @@ CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
 }
 
 
+#: Daimon's own tools that changed name, old to new. An agent's tool list is kept by
+#: the model provider and can still name the old one. `with_current_tool_names`
+#: carries that entry over, so the tool stays enabled or held as its author set it.
+#: Tool rules were moved by migration `0226_compute_tool_names`.
+RENAMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
+    f"fly_{tool}": f"compute_{tool}"
+    for tool in (
+        "launch_session",
+        "extend_session",
+        "stop_session",
+        "run_bash",
+        "write_file",
+        "read_file",
+        "list_files",
+        "list_sessions",
+        "get_session_status",
+        "task_status",
+        "task_result",
+        "list_templates",
+    )
+}
+
+
 WATCH_CONFIRMED_TOOLS: Final[frozenset[str]] = frozenset(
     {
         "create_watch",
@@ -230,15 +263,24 @@ WATCH_CONFIRMED_TOOLS: Final[frozenset[str]] = frozenset(
         "rotate_watch_key",
         "update_watch",
         "start_long_job",
-        "fly_launch_session",
-        "fly_extend_session",
+        "compute_launch_session",
+        "compute_extend_session",
     }
 )
 
 
 #: The watch tools whose card the `watch_approval` setting can skip. Editing a watch,
-#: key rotation, long jobs and Fly sessions in `WATCH_CONFIRMED_TOOLS` always ask.
+#: key rotation and long jobs in `WATCH_CONFIRMED_TOOLS` always ask.
 WATCH_APPROVAL_TOOLS: Final[frozenset[str]] = frozenset({"create_watch", "resume_watch"})
+
+#: The cloud computer tools whose card the `compute_approval` setting can skip.
+COMPUTE_APPROVAL_TOOLS: Final[frozenset[str]] = frozenset(
+    {"compute_launch_session", "compute_extend_session"}
+)
+
+#: Every confirmed tool an approval setting can let run without its card, and no other.
+#: `confirmation.confirmed_tools_for_tenant` leaves a skipped one out of a turn's set.
+APPROVAL_SKIPPABLE_TOOLS: Final[frozenset[str]] = WATCH_APPROVAL_TOOLS | COMPUTE_APPROVAL_TOOLS
 
 
 #: Asked on every turn: the requester approves a reach over the budget (`daimon.core.outbound`).
@@ -299,6 +341,33 @@ def _always_confirmed_tools() -> frozenset[str]:
         - backend_switch_tools(enabled=True)
         - microsoft_send_tools(enabled=True, tool_safety_on=True)
     )
+
+
+def approval_skipped_tools(confirmed_tools: frozenset[str]) -> frozenset[str]:
+    """The tools whose card an approval setting skips, as a turn's `confirmed_tools` says.
+
+    Only a set built from the settings can skip (`confirmation.confirmed_tools_for_tenant`):
+    it always holds the watch tools that no setting skips, and leaves a skipped one out.
+    Any other set, such as none, the protected tools or a part, skips nothing.
+    """
+    if not confirmed_tools >= WATCH_CONFIRMED_TOOLS - APPROVAL_SKIPPABLE_TOOLS:
+        return frozenset()
+    return APPROVAL_SKIPPABLE_TOOLS - confirmed_tools
+
+
+def _session_confirmed_tools(
+    policy: ToolSafetyPolicy, confirmed_tools: frozenset[str], trusted_servers: frozenset[str]
+) -> frozenset[str]:
+    """The confirmed tools a session asks on with the policy on: all but the ones a
+    setting skips. A skipped tool the operator denies still asks, so its call reaches
+    the decider and is refused there (`_decide_tool_call`)."""
+    servers = trusted_servers | {DAIMON_SERVER_NAME}
+    skipped = {
+        tool
+        for tool in approval_skipped_tools(confirmed_tools)
+        if not any(_listed(policy.denied, server_name=s, tool_name=tool) for s in servers)
+    }
+    return _always_confirmed_tools() - skipped
 
 
 #: Daimon's own tools that put content behind a link whoever holds it opens.
@@ -875,6 +944,7 @@ def decide_tool_call(
     annotations: ToolAnnotations | None = None,
     confirmed_tools: frozenset[str] = frozenset(),
     agent_rule: ResolvedAgentToolRule | None = None,
+    owner_tools: frozenset[str] = frozenset(),
 ) -> ToolVerdict:
     """Provider permission can tighten a host verdict, never grant consent."""
     verdict = _decide_tool_call(
@@ -885,6 +955,7 @@ def decide_tool_call(
         annotations=annotations,
         confirmed_tools=confirmed_tools,
         agent_rule=agent_rule,
+        owner_tools=owner_tools,
     )
     if call.permission == "deny":
         return ToolVerdict(outcome="deny", effect=verdict.effect, reason="agent_rule_deny")
@@ -912,6 +983,7 @@ def _decide_tool_call(
     annotations: ToolAnnotations | None = None,
     confirmed_tools: frozenset[str] = frozenset(),
     agent_rule: ResolvedAgentToolRule | None = None,
+    owner_tools: frozenset[str] = frozenset(),
 ) -> ToolVerdict:
     """Decide one blocked call.
 
@@ -929,8 +1001,21 @@ def _decide_tool_call(
     what daimon already enforces: `deny` wins over the fixed gates (not over an
     operator deny of a confirmed write), `ask` pauses a tool that would
     otherwise run, and `allow`, or no rule, leaves the fixed gates as they are.
+
+    `owner_tools` are daimon's own confirmed tools whose owner a verified rule counts as
+    present in a run nobody watches (`compute_sessions.agent_chat_owner`). Such a call is
+    decided by `_owner_verdict`, with the policy on or off.
     """
     trusted = call.server_name is not None and call.server_name in trusted_servers
+    if (
+        not attended
+        and trusted
+        and call.tool_name in owner_tools
+        and _confirmed_daimon_write(
+            call, trusted_servers=trusted_servers, confirmed_tools=confirmed_tools
+        )
+    ):
+        return _owner_verdict(policy, call, agent_rule)
     trusted_rule = agent_rule if trusted and policy.enabled and policy.agent_rules else None
     if trusted_rule is not None and trusted_rule.rule == "deny":
         confirmed = _confirmed_daimon_write(
@@ -1020,6 +1105,12 @@ def _decide_tool_call(
             return ToolVerdict(outcome="allow", effect=effect, reason="agent_rule_allow")
     if effect == "read":
         return ToolVerdict(outcome="allow", effect=effect, reason="read")
+    if attended and trusted and call.tool_name in approval_skipped_tools(confirmed_tools):
+        # An admin skipped this card. Last, so an operator deny and an agent rule's deny
+        # above still win; an agent rule that asks still asks.
+        if trusted_rule is not None and trusted_rule.rule == "ask":
+            return ToolVerdict(outcome="ask", effect=effect, reason="agent_rule_ask")
+        return ToolVerdict(outcome="allow", effect=effect, reason="approval_skipped")
     if attended:
         return ToolVerdict(outcome="ask", effect=effect, reason="write_needs_confirmation")
     if not _confirmed_daimon_write(
@@ -1030,6 +1121,23 @@ def _decide_tool_call(
     ):
         return ToolVerdict(outcome="allow", effect=effect, reason="unattended_write_allowed")
     return ToolVerdict(outcome="deny", effect=effect, reason="unattended_write")
+
+
+def _owner_verdict(
+    policy: ToolSafetyPolicy, call: ToolCall, agent_rule: ResolvedAgentToolRule | None
+) -> ToolVerdict:
+    """A confirmed write in a run nobody watches whose owner a verified rule counts as
+    present (`owner_tools`), with the policy on or off. It stays a write through every
+    check: an operator deny wins, an agent rule's deny wins, and an agent rule that asks
+    refuses, as nobody can answer. Only what is left runs."""
+    assert call.server_name is not None
+    if _listed(policy.denied, server_name=call.server_name, tool_name=call.tool_name):
+        return ToolVerdict(outcome="deny", effect="write", reason="denied_by_operator")
+    if agent_rule is not None and agent_rule.rule == "deny":
+        return ToolVerdict(outcome="deny", effect="write", reason="agent_rule_deny")
+    if agent_rule is not None and agent_rule.rule == "ask":
+        return ToolVerdict(outcome="deny", effect="write", reason="agent_rule_ask")
+    return ToolVerdict(outcome="allow", effect="write", reason="agent_chat_owner")
 
 
 def toolset_permission_policy(
@@ -1065,7 +1173,8 @@ def session_tools_for_policy(
     Otherwise each gated toolset gets `always_ask` as its default and on every
     per-tool config under it, since a per-tool `always_allow` would let that
     one tool skip the pause. Daimon's own trusted toolset stays `always_allow`
-    except for its `CONFIRMED_DAIMON_TOOLS`, which ask, and with
+    except for its `CONFIRMED_DAIMON_TOOLS`, which ask unless the turn's
+    `confirmed_tools` skips one (`approval_skipped_tools`), and with
     `asks_before_publishing` its `PUBLISH_TOOLS`; with the policy off only
     publish and explicitly selected confirmed-tool configs are written.
     With the policy and `agent_rules` on, `daimon_rule_tools` (the daimon tools
@@ -1089,7 +1198,12 @@ def session_tools_for_policy(
         else set[str]()
     )
     asked = (
-        *(sorted(_always_confirmed_tools()) if policy.enabled else ()),
+        # A turn's set may skip a card (`approval_skipped_tools`); no other set can.
+        *(
+            sorted(_session_confirmed_tools(policy, confirmed_tools, trusted_servers))
+            if policy.enabled
+            else ()
+        ),
         *sorted(confirmed_tools),
         *(sorted(PUBLISH_TOOLS) if asks_before_publishing else ()),
         *sorted(rule_asked),
@@ -1152,6 +1266,34 @@ def _ask_for(
             config["permission_policy"] = ask
             changed = True
     return out, changed
+
+
+def with_current_tool_names(tools: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]] | None:
+    """`tools` with daimon's per-tool configs moved off a renamed tool's old name, or `None`.
+
+    `None` means no config names a renamed tool. Only the reserved `daimon-mcp`
+    toolset is read: the same tool name on another connection is that server's own.
+    A config for the new name wins over one for the old, which is dropped.
+    """
+    changed = False
+    out: list[dict[str, Any]] = []
+    for tool in tools:
+        entry = dict(tool)
+        configs: Sequence[Mapping[str, Any]] = entry.get("configs") or ()
+        if (
+            entry.get("type") == "mcp_toolset"
+            and entry.get("mcp_server_name") == DAIMON_SERVER_NAME
+            and any(config.get("name") in RENAMED_DAIMON_TOOLS for config in configs)
+        ):
+            current = {config.get("name") for config in configs}
+            entry["configs"] = [
+                {**config, "name": RENAMED_DAIMON_TOOLS.get(config["name"], config["name"])}
+                for config in configs
+                if RENAMED_DAIMON_TOOLS.get(config.get("name", "")) not in current
+            ]
+            changed = True
+        out.append(entry)
+    return out if changed else None
 
 
 def has_confirmation_gate(tools: Sequence[Mapping[str, Any]], *, tool_name: str) -> bool:

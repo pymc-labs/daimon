@@ -19,6 +19,7 @@ typo is silent — check the spelling here.
 - [Compute](#compute)
 - [Long Jobs](#long-jobs)
 - [Monitoring](#monitoring)
+- [Ops Events](#ops-events)
 - [Database](#database)
 - [Anthropic](#anthropic)
 - [Privacy](#privacy)
@@ -157,25 +158,28 @@ Read from `daimon.core.config.ComputeSettings`. Prefix `DAIMON_COMPUTE__`.
 
 `bool` · optional · default `False`
 
-Allow attended owners to launch Fly sessions. Disabling launch does not disable cleanup.
+Allow attended owners to launch compute sessions. Disabling launch does not disable
+cleanup.
 
 ### `DAIMON_COMPUTE__DEPLOYMENT_ID`
 
 `str` · optional · default unset
 
-Stable unique deployment identifier fencing Fly resources. Required to use compute.
+Stable unique deployment identifier fencing session resources. Required to use compute.
 
-### `DAIMON_COMPUTE__API_TOKEN`
-
-`SecretStr | None` · optional · default unset · secret
-
-Fly API token, control plane and scheduler only. Never mounted in compute machines.
-
-### `DAIMON_COMPUTE__ORG_SLUG`
+### `DAIMON_COMPUTE__CLOUD_RUN_PROJECT`
 
 `str` · optional · default unset
 
-Fly organization for this deployment's disposable sessions.
+Google Cloud project id that holds the session services. Required to use compute. Daimon
+signs in with application default credentials.
+
+### `DAIMON_COMPUTE__CLOUD_RUN_SERVICE_ACCOUNT`
+
+`str` · optional · default unset
+
+Email of the service account session containers run as. Give it no roles. Required to
+use compute.
 
 ### `DAIMON_COMPUTE__SESSION_AUTH_KEY`
 
@@ -209,12 +213,18 @@ Maximum launch or extension lifetime in hours. No dollar cap or metering is prov
 Maximum background commands running at once on one session. A background command may run
 for at most max_ttl_hours.
 
+### `DAIMON_COMPUTE__WAKE_RUN_LIMIT`
+
+`int` · optional · default `20`
+
+How many wake turns in a row may act on one session. The count starts again when the
+owner runs a command or writes a file on it; a chat message alone does not.
+
 ### `DAIMON_COMPUTE__PROFILES`
 
 `dict[str, ComputeProfile]` · optional · default `{}`
 
-Operator-managed image profiles. Empty means no images can be launched. No environment
-or credentials are copied from template apps.
+Operator-managed image profiles. Empty means no images can be launched.
 
 ## Long Jobs
 
@@ -255,6 +265,17 @@ Read from `daimon.core.config.MonitoringSettings`. Prefix `DAIMON_MONITORING__`.
 
 Days a monitored question, answer or tool call is kept before the scheduler deletes it,
 default 90.
+
+## Ops Events
+
+Read from `daimon.core.config.OpsEventsSettings`. Prefix `DAIMON_OPS_EVENTS__`.
+
+### `DAIMON_OPS_EVENTS__RETENTION_DAYS`
+
+`int` · optional · default `30`
+
+Days a failure or warning shown on the admin Issues page is kept before the scheduler
+deletes it, default 30.
 
 ## Database
 
@@ -561,16 +582,20 @@ then sends the key from DAIMON_MCP_IDENTITY__BEARERS and no issuer or audience, 
 workspaces and agents (agent names that may use it) are required. Set requester_meta to
 true for a server that attributes writes to the requester: Daimon removes any requester
 fields the caller supplied and stamps each tool call with who it is for and where: the
-asker while their turn is live, or the person an unattended run acts for. An agent using
-a server stays in its channel with no long-term memory, a fresh session per channel turn
-and no handoffs, because the server answers with what the channel's readers can read.
-Set channel_scoped to false for a server that checks each call's asker and place itself:
-its agents then get their normal memory and sessions, so what they learn can surface in
-their other channels. A requester_meta server may list wake_tools: a person's call to
-one carries params._meta.wake_url, a private callback watch link for that conversation;
-each POST of the work's outcome to it wakes the conversation once. Each call gets its
-own link to one watch per conversation, which lasts a day after the latest call. Needs
-the watches feature and DAIMON_WATCHES__CALLBACK_BASE_URL. The MCP service requires
+asker while their turn is live, or the person an unattended run acts for. Set
+agent_chat_requester to true as well for a server that accepts requester_kind
+"agent_chat": a turn a person started through the MCP hub, signed in with their platform
+login, then names that person with no place. Turns started with an agent, coding or CLI
+key name nobody. An agent using a server stays in its channel with no long-term memory,
+a fresh session per channel turn and no handoffs, because the server answers with what
+the channel's readers can read. Set channel_scoped to false for a server that checks
+each call's asker and place itself: its agents then get their normal memory and
+sessions, so what they learn can surface in their other channels. A requester_meta
+server may list wake_tools: a person's call to one carries params._meta.wake_url, a
+private callback watch link for that conversation; each POST of the work's outcome to it
+wakes the conversation once. Each call gets its own link to one watch per conversation,
+which lasts a day after the latest call. Needs the watches feature and
+DAIMON_WATCHES__CALLBACK_BASE_URL. The MCP service requires
 DAIMON_MCP_IDENTITY__SIGNING_KEY when any server is signed; chat workers use the same
 server policy without the signing key. Default: [] (off).
 

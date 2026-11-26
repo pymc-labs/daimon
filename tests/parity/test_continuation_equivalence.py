@@ -148,8 +148,13 @@ async def test_dispatch_effects_match_recording(
             real = getattr(wakes, name)
 
             async def wrapped(*args, **kwargs):
-                # An omitted skip reason and the explicit default None have the same write.
-                call = {k: v for k, v in kwargs.items() if k != "skip_reason" or v is not None}
+                # An omitted skip reason and the explicit default None have the same write;
+                # the row and error class only label the ops issue a failed skip reports.
+                call = {
+                    k: v
+                    for k, v in kwargs.items()
+                    if (k != "skip_reason" or v is not None) and k not in ("row", "error_class")
+                }
                 events.append((name, call))
                 if scenario == "claim_lost" and name == "claim_wake":
                     return None

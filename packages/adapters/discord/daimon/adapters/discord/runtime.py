@@ -25,6 +25,7 @@ from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
 from daimon.core.mcp_oauth import McpTokenProbe, probe_bearer_token
 from daimon.core.notebooks._rate_limit import RateLimiter
+from daimon.core.ops_events import drain_ops_events
 from daimon.core.scope import DeploymentDefault
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.stores.discord_gateway_lease import GatewayLease, GatewayLeaseLost
@@ -310,6 +311,7 @@ async def build_runtime(
                 await turn_deps.context_providers.aclose()
                 await turn_deps.provider_clients.aclose()
                 await drain_outcomes()
+                await drain_ops_events()
                 await drain_budget_notices()
                 await owner_engine.dispose()
                 await engine.dispose()

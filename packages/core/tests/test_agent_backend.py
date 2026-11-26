@@ -1174,9 +1174,9 @@ async def test_an_admin_allowlist_save_is_a_choice_the_keyed_default_never_overr
     monkeypatch.setenv("DAIMON_CHANNEL_OPENAI_KEY", "set")
     monkeypatch.delenv("DAIMON_CHANNEL_GEMINI_KEY", raising=False)
     default = await service.tenant_policy(agent.tenant_id)
-    assert default.enabled_backends == ("anthropic",), "a key alone never opts a tenant in"
+    assert default.enabled_backends == ("anthropic", "openai"), "a key opts every tenant in"
 
-    chosen_list = ("anthropic", "openai")
+    chosen_list = ("anthropic",)
     await service.set_tenant_allowlist(agent.tenant_id, chosen_list, default.revision, actor)
 
     async with sessions() as session:
@@ -1190,4 +1190,4 @@ async def test_an_admin_allowlist_save_is_a_choice_the_keyed_default_never_overr
     async with sessions() as session:
         followed = await access_policy.load_access_policy(session, tenant_id=agent.tenant_id)
     assert followed.backends_explicit is False, "None goes back to the deployment default"
-    assert followed.enabled_backends == ("anthropic",)
+    assert followed.enabled_backends == ("anthropic", "openai")

@@ -3,6 +3,7 @@ import { useEffect, useState } from "react"
 
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { useDebounced } from "@/lib/hooks"
 import { cn } from "@/lib/utils"
 
 type Opt = { value: string; label: string; icon?: React.ReactNode; count?: number }
@@ -69,12 +70,11 @@ export function SearchInput({ value, onChange, placeholder = "Search", className
 }) {
   const [v, setV] = useState(value)
   useEffect(() => setV(value), [value])
+  const d = useDebounced(v, 250)
   useEffect(() => {
-    if (v === value) return
-    const t = setTimeout(() => onChange(v), 250)
-    return () => clearTimeout(t)
+    if (d !== value) onChange(d)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [v])
+  }, [d])
   return (
     <div className={cn("relative", className)}>
       <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-faint" />
@@ -84,7 +84,7 @@ export function SearchInput({ value, onChange, placeholder = "Search", className
         onKeyDown={(e) => { if (e.key === "Escape") { if (v) setV(""); else e.currentTarget.blur() } }}
         data-search
         placeholder={placeholder}
-        className="h-7 w-full rounded-md border bg-background pr-7 pl-7 text-xs outline-none placeholder:text-faint focus:border-border-strong"
+        className="h-7 w-full rounded-md border bg-background pr-7 pl-7 text-base outline-none md:text-xs placeholder:text-faint focus:border-border-strong"
       />
       {v && (
         <button onClick={() => setV("")} className="absolute top-1/2 right-1.5 -translate-y-1/2 text-faint hover:text-foreground" aria-label="Clear">

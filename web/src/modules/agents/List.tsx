@@ -1,4 +1,4 @@
-import { Globe, MessageCircle, Plus } from "lucide-react"
+import { Globe, Plus } from "lucide-react"
 import { Link, useNavigate } from "react-router"
 
 import { BrandIcon } from "@/components/brand"
@@ -21,7 +21,6 @@ const RUNS: Record<AgentSummary["runs_in"][number], { label: string; icon: React
   discord: { label: "Discord channels", icon: <BrandIcon brand="discord" className="size-3.5" /> },
   slack: { label: "Slack channels", icon: <BrandIcon brand="slack" className="size-3.5" /> },
   teams: { label: "Teams channels", icon: <BrandIcon brand="teams" className="size-3.5" /> },
-  dm: { label: "Direct messages", icon: <MessageCircle className="size-3.5 text-muted-foreground" /> },
   web: { label: "Web chat", icon: <Globe className="size-3.5 text-muted-foreground" /> },
 }
 const PROVIDER = { anthropic: "Anthropic", openai: "OpenAI", gemini: "Google", selfhosted: "Self-hosted" }
@@ -52,7 +51,7 @@ export function AgentList() {
           <ToggleGroupItem value="mine" className="px-3 text-xs">Mine</ToggleGroupItem>
         </ToggleGroup>
         <SearchInput value={q} onChange={(v) => setQ(v || null)} className="w-56" />
-        <Facet label="Channels" value={runs} onChange={setRuns} options={(["discord", "dm", "web"] as const).map((k) => ({ value: k, label: RUNS[k].label, icon: RUNS[k].icon }))} />
+        <Facet label="Channels" value={runs} onChange={setRuns} options={(["discord", "web"] as const).map((k) => ({ value: k, label: RUNS[k].label, icon: RUNS[k].icon }))} />
         <span className="ml-auto text-xs text-muted-foreground tabular">{plural(rows.length, "agent")}</span>
       </FilterBar>
       <QueryState query={query} className="px-6" isEmpty={() => !rows.length} empty="No agents">{() => (

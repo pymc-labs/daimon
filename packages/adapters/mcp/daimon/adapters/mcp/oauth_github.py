@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from anthropic import AsyncAnthropic
 from cryptography.fernet import MultiFernet
 from daimon.adapters.mcp.github_pages import github_page
+from daimon.adapters.mcp.oauth_github_follow import follow_offers_html, following_note_html
 from daimon.adapters.mcp.web_icons import icon, platform_mark
 from daimon.core.config import Settings
 from daimon.core.github_connect_admin import teams_admin_owner_ids
@@ -339,6 +340,7 @@ def _saved_agent_page(
     visible_ids: set[int] | None = None,
     back_url: str | None = "https://discord.com/app",
     installations: Sequence[ConnectInstallation] = (),
+    following: bool = False,
 ) -> Response:
     owner_installations = {item.owner_login.casefold(): item for item in installations}
     groups: dict[str, list[github_access.AgentRepo]] = {}
@@ -353,6 +355,7 @@ def _saved_agent_page(
         + icon("circle-check")
         + "</div>"
         + f'<p class="gh-status-line">{_agent_only_line(len(grants), name)}</p>'
+        + (following_note_html(agent_name=name) if following else "")
         + '<div class="gh-saved-groups">'
         + "".join(
             f'<section class="gh-owner-group"><h2 class="gh-owner-heading">'
@@ -463,6 +466,28 @@ _EDITOR_SCRIPT = """
     if (group) { group.querySelector(".gh-owner-rows").appendChild(row); group.hidden = false; }
     return row;
   }
+  const followOffers = [...form.querySelectorAll(".gh-follow-org")];
+  // The offer shows once the agent would hold every repo of that one org.
+  function renderFollow() {
+    const live = rows().filter(row => !removed.has(row.dataset.repoId));
+    const heldIds = new Set(live.map(row => row.dataset.repoId));
+    let on = false;
+    for (const offer of followOffers) {
+      const owner = offer.dataset.owner.toLowerCase();
+      const ready = live.length > 0 &&
+        live.every(row => (row.dataset.name || "").split("/")[0].toLowerCase() === owner) &&
+        offer.dataset.ids.split(",").every(id => heldIds.has(id));
+      const box = offer.querySelector("input");
+      offer.hidden = !ready;
+      box.disabled = !ready;
+      if (!ready) box.checked = false;
+      on = on || box.checked;
+    }
+    return on;
+  }
+  form.addEventListener("change", event => {
+    if (event.target.name === "follow_org") render();
+  });
   function render() {
     for (const row of rows()) {
       const id = row.dataset.repoId;
@@ -526,6 +551,7 @@ _EDITOR_SCRIPT = """
     if (added) parts.push("add " + added + " " + plural(added));
     if (removedCount) parts.push("remove " + removedCount + " " + plural(removedCount));
     if (workingChanged) parts.push("change working repo");
+    if (renderFollow()) parts.push("follow the org");
     document.getElementById("selection-status").textContent =
       parts.length ? "Not saved yet" : "No changes to save";
     document.querySelector(".gh-editor-footer").hidden = !parts.length;
@@ -856,6 +882,7 @@ _EDITOR_SCRIPT = """
   document.getElementById("discard-repos").addEventListener("click", () => {
     staged.clear(); removed.clear(); working = initialWorking; workingExplicit = false;
     pickerDraft.clear();
+    for (const box of form.querySelectorAll(".gh-follow-org input")) box.checked = false;
     for (const row of rows()) if (row.dataset.added === "true") row.remove();
     render();
   });
@@ -1076,6 +1103,9 @@ def _agent_editor_page(view: AgentEditorView) -> Response:
         '<button id="open-repo-picker" class="gh-add-button gh-js" type="button">'
         f"{icon('plus')}Add repos</button>"
     )
+    parts.append(follow_offers_html(view.follow_offers, agent_name=agent_name))
+    if view.following:
+        parts.append(following_note_html(agent_name=agent_name))
     owner_choice_rows: list[str] = []
     for item in installations:
         count = sum(
@@ -1254,6 +1284,11 @@ def _agent_editor_page(view: AgentEditorView) -> Response:
             + (" checked" if repo.id == requested_id else "")
             + ">"
             f"Add {esc(repo.full_name)}</label>"
+        )
+    for offer in view.follow_offers:
+        parts.append(
+            f'<label><input type="checkbox" name="follow_org" value="{offer.installation_id}">'
+            f"Also give {esc(agent_name)} new repos added to {esc(offer.owner)}</label>"
         )
     parts.append(
         '<label>Working repo <select name="working"><option value="keep">Keep current</option>'
@@ -1555,6 +1590,7 @@ def _render(view: ConnectView) -> Response:
                 if target is not None and target.platform == "discord"
                 else None,
                 installations=view.installations,
+                following=view.following,
             )
         case DoneView():
             return _done_page(

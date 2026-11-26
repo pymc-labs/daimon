@@ -48,6 +48,7 @@ SELECTION_FIELDS = frozenset(
         "remove",
         "access",
         "working",
+        "follow_org",
     }
 )
 _SCOPED_ACCESS = re.compile(r"access_(\d+)")
@@ -102,6 +103,16 @@ class ConnectInstallation:
 
 
 @pydantic_dataclass(frozen=True)
+class FollowOffer:
+    """An org the agent may follow: every new repo of it is given to the agent."""
+
+    installation_id: int
+    owner: str
+    repo_ids: frozenset[int]
+    """Every repo of the org the person can see and connect."""
+
+
+@pydantic_dataclass(frozen=True)
 class PendingInstallation:
     """Whether the signed-in person asked a GitHub owner to install the App."""
 
@@ -131,6 +142,7 @@ class ConnectSelection(BaseModel):
     remove: _Values = ()
     access: _Values = ()
     working: _Values = ()
+    follow_org: _Values = ()
     repo_access: Annotated[dict[str, _Values], Field(max_length=MAX_CONFIRM_FIELDS)] = Field(
         default_factory=dict[str, tuple[str, ...]]
     )
@@ -139,7 +151,12 @@ class ConnectSelection(BaseModel):
     def form_fields(self) -> dict[str, list[str]]:
         """The known fields as form name to values, for a retry that re-posts them."""
         fields = {name: [value] for name in _SCALARS if (value := getattr(self, name))}
-        lists = (("repo", self.repo), ("remove", self.remove), ("access", self.access))
+        lists = (
+            ("repo", self.repo),
+            ("remove", self.remove),
+            ("access", self.access),
+            ("follow_org", self.follow_org),
+        )
         fields.update({name: list(values) for name, values in lists if values})
         if self.working:
             fields["working"] = list(self.working)
@@ -156,6 +173,7 @@ def selection_from_fields(fields: Mapping[str, Sequence[str]]) -> ConnectSelecti
         remove=tuple(fields.get("remove", ())),
         access=tuple(fields.get("access", ())),
         working=tuple(fields.get("working", ())),
+        follow_org=tuple(fields.get("follow_org", ())),
         repo_access={
             match.group(1): tuple(values)
             for name, values in fields.items()
@@ -301,6 +319,9 @@ class AgentEditorView(_View):
     github_user_id: int | None
     pending_installation: PendingInstallation | None
     selection_error: str | None
+    # Orgs the person may tick to follow; shown once the agent would hold all of one.
+    follow_offers: list[FollowOffer] = Field(default_factory=list[FollowOffer])
+    following: bool = False
 
 
 class WorkspacePickerView(_View):
@@ -337,6 +358,7 @@ class SavedAgentView(_View):
     back_to_chat: ChatReturn | None
     installations: list[ConnectInstallation]
     back: BackLink | None = None
+    following: bool = False
 
 
 class DoneView(_View):
@@ -570,6 +592,8 @@ def agent_editor_view(
     selection_error: str | None = None,
     pending_installation: PendingInstallation | None = None,
     github_user_id: int | None = None,
+    follow: Sequence[FollowOffer] = (),
+    following: bool = False,
 ) -> AgentEditorView:
     """One agent's grants, what the person may add, and the signed form fields."""
     snapshot_digest = hashlib.sha256(snapshot.encode()).hexdigest()
@@ -648,6 +672,8 @@ def agent_editor_view(
         github_user_id=github_user_id,
         pending_installation=pending_installation,
         selection_error=selection_error,
+        follow_offers=list(follow),
+        following=following,
     )
 
 

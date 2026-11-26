@@ -1221,7 +1221,7 @@ async def test_long_job_cancel_survives_unavailable_source_proof(world, monkeypa
 async def test_stored_compute_and_job_output_is_refused_to_a_relay_hold_only(
     world: _World, monkeypatch, hold_kind, readable
 ):
-    """`fly_task_result` and `get_long_job` read a stored row through the source check.
+    """`compute_task_result` and `get_long_job` read a stored row through the source check.
 
     A relay hold reads none, though the row ran in its own channel; a plain hold
     and an unheld turn read exactly what they did before.
@@ -1232,7 +1232,7 @@ async def test_stored_compute_and_job_output_is_refused_to_a_relay_hold_only(
 
     from daimon.adapters.mcp.tools import _long_job_access as access_tools
     from daimon.adapters.mcp.tools._long_job_access import LongJobCaller, long_job_access
-    from daimon.adapters.mcp.tools.fly import _readable  # pyright: ignore[reportPrivateUsage]
+    from daimon.adapters.mcp.tools.compute import _readable  # pyright: ignore[reportPrivateUsage]
     from daimon.core.turn_hold import TurnHold
 
     stamps = dict(daimon_channel=_SEALED, daimon_thread="thread")
@@ -1245,7 +1245,7 @@ async def test_stored_compute_and_job_output_is_refused_to_a_relay_hold_only(
     runtime = world.runtime()
     monkeypatch.setattr(access_tools, "fresh_admin", AsyncMock(return_value=False))
     try:
-        # The stored compute row behind fly_task_result, status and the rest.
+        # The stored compute row behind compute_task_result, status and the rest.
         session = SimpleNamespace(source_metadata=stamps)
         if readable:
             await _readable(runtime, auth, "", session)  # pyright: ignore[reportArgumentType]
@@ -1258,5 +1258,35 @@ async def test_stored_compute_and_job_output_is_refused_to_a_relay_hold_only(
         access = await long_job_access(caller, job)
         assert access.act
         assert access.read is readable
+    finally:
+        await runtime.client.close()
+
+
+async def test_an_agent_chat_machines_source_reads_as_its_own_session_does(world: _World) -> None:
+    """What a launch from agent chat records (`compute._agent_chat_source`) reads for its own
+    session's credential, which names no origin. A session in a sealed channel stamps that
+    channel and seal, so only a credential inside the seal reads it."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from daimon.adapters.mcp.tools.compute import (  # pyright: ignore[reportPrivateUsage]
+        _agent_chat_source,
+        _readable,
+    )
+    from daimon.core.compute_sessions import ComputePlace
+
+    await world.seal(_SEALED)
+    auth = world.auth(is_chat_execution=True)
+    place = ComputePlace(world.platform, "agentchat:test-session", _AGENT, "acme-project", None)
+    in_seal = replace(auth, seal_ids=frozenset({_SEALED}))
+    sealed = replace(place, feature_channel_id=_SEALED)
+    runtime = world.runtime()
+    try:
+        own = SimpleNamespace(source_metadata=_agent_chat_source(auth, place))
+        await _readable(runtime, auth, None, own)  # pyright: ignore[reportArgumentType]
+        kept = SimpleNamespace(source_metadata=_agent_chat_source(in_seal, sealed))
+        await _readable(runtime, in_seal, None, kept)  # pyright: ignore[reportArgumentType]
+        with pytest.raises(ToolError, match="can no longer read the source conversation"):
+            await _readable(runtime, auth, None, kept)  # pyright: ignore[reportArgumentType]
     finally:
         await runtime.client.close()
