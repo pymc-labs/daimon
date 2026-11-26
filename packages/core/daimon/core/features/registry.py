@@ -1003,9 +1003,8 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         tiers=("workspace", "agent"),
         binds="turn",
         doc=(
-            "Agent chat may start cloud computers for the default time and use them; it lists "
-            "and stops all the person's. So may their keys driving it. Only a server admin sets "
-            "it."
+            "Agent chat may start cloud computers without a card and use them; it lists and "
+            "stops all the person's. So may their keys driving it. Only a server admin sets it."
         ),
         platforms=EVERY_PLATFORM,
         depends_on=("compute",),

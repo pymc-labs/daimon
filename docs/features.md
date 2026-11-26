@@ -1334,7 +1334,7 @@ After an unwatched command ends, the agent may run the next, up to a set number 
 
 ## Cloud computers from agent chat
 
-Agent chat may start cloud computers for the default time and use them; it lists and stops all the person's. So may their keys driving it. Only a server admin sets it.
+Agent chat may start cloud computers without a card and use them; it lists and stops all the person's. So may their keys driving it. Only a server admin sets it.
 
 | | |
 | --- | --- |

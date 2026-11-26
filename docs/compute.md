@@ -124,16 +124,18 @@ Code, can use cloud computers there too. A server admin turns on [Cloud computer
 from agent chat](features.md#cloud-computers-from-agent-chat) for a workspace or
 one agent. The `compute` feature must be on as well.
 
-No card can show in agent chat, so a machine starts and gets more time only for
-the default lifetime. The per-person limit applies. A launch retried after an
-uncertain answer starts a second machine, which ends at its idle time. Each
-agent-chat session uses only the machines it started; the person lists and stops
-all their machines from any conversation.
+No card can show in agent chat, so a machine starts with the default idle time
+and is given no more than that at a time. Each agent-chat session uses only the
+machines it started; the person lists and stops all their machines from any
+conversation.
+
+The per-person limit bounds how many machines a person has. A machine stops after
+its idle time, but commands and file writes renew it, so a machine in use has no
+total time or dollar limit. A launch retried after an uncertain answer starts a
+second machine.
 
 Agent chat gets no message when a command ends and no expiry warning. The agent
-checks a command again in a later turn. A running command keeps its machine
-alive up to `DAIMON_COMPUTE__MAX_TTL_HOURS` from its start; after the last
-command, the machine ends at its idle time.
+checks a command again in a later turn.
 
 Any key of the same person that drives the session can use these machines too,
 not only their own sign-in. Turn the feature on only where that is acceptable.

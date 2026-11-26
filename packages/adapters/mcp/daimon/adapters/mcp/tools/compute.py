@@ -250,9 +250,7 @@ def _agent_chat_key(caller: ComputeCaller) -> str:
 
 #: What launch and extend say in agent chat for more than the default time: no card can
 #: show there, so only what `compute_approval` skip allows runs.
-_DEFAULT_TIME_ONLY = (
-    "From agent chat, a cloud computer gets only the default time. Nothing was done."
-)
+_DEFAULT_TIME_ONLY = "From agent chat, only the default time can be asked for. Nothing was done."
 
 
 def _agent_chat_source(auth: AuthIdentity, place: ComputePlace) -> dict[str, str]:

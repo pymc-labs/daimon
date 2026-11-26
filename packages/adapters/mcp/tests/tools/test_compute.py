@@ -1521,7 +1521,7 @@ async def test_the_owners_agent_chat_session_uses_its_own_machine_with_no_origin
         await chat.call("compute_read_file")
 
 
-_DEFAULT_ONLY = "From agent chat, a cloud computer gets only the default time. Nothing was done."
+_DEFAULT_ONLY = "From agent chat, only the default time can be asked for. Nothing was done."
 
 
 async def test_agent_chat_starts_and_extends_a_machine_for_the_default_time_only(agent_chatting):
