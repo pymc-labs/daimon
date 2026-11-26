@@ -6,8 +6,7 @@ Walks the real web app's write routes (POST, PUT, PATCH, DELETE) and requires ea
 - `{"tool": name}`: an MCP tool; it serves every chat platform it is tagged for. It may also
   name the chat panels that do the same (`panel`), as a record.
 - `{"panel": {platform: module}}`: a chat panel per platform, all three.
-- `{"exempt": reason}`: configures the web app itself (web chat, web sign-in, page serving)
-  or a web-only feature (data sources).
+- `{"exempt": reason}`: configures the web app itself (web chat, web sign-in, page serving).
 - `{"gap": note}`: no chat path yet. A gap may also carry a partial `panel` or `tool`.
 
 `not_on` names a platform that deliberately has no such feature. Tool names are checked
