@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -24,9 +25,12 @@ from daimon.core.stores.held_timers import (
 )
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.turn.admission import Admission, AdmissionGrant
+from daimon.core.turn.errors import AdmissionDenied
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.turn_fakes import deps_for
+from mux.profiles.gemini import INLINE_REUSE_ID
+from mux.profiles.openai import PERSISTENT_WORKSPACE
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -177,6 +181,38 @@ async def test_a_channel_timer_runs_unattended_in_a_fresh_scope_of_its_channel(
     kwargs = run.await_args.kwargs
     assert kwargs["prompt"] == "seed text" and kwargs["parent_channel_id"] == CHANNEL
     assert kwargs["scope_id"] == scope and kwargs["origin"] == "routine"
+
+
+@pytest.mark.parametrize(
+    ("profile", "runs"),
+    [(INLINE_REUSE_ID, True), (PERSISTENT_WORKSPACE.profile_id, False)],
+    ids=["gemini", "openai"],
+)
+async def test_a_channel_timer_on_another_provider_runs_as_a_routine_with_no_opt_in(
+    db_session_factory: async_sessionmaker, monkeypatch, profile: str, runs: bool
+) -> None:
+    """No sandbox opt-in: Gemini runs it without built-ins, OpenAI's shell refuses it."""
+    tenant, account, row = await seed(db_session_factory)
+    revision = SimpleNamespace(profile=profile, backend=profile.split(".")[0])
+    admission = replace(
+        admission_for(tenant, account.id, "ag_target"),
+        backend_revision=revision,  # pyright: ignore[reportArgumentType]
+        backend_revision_origin="agent",
+    )
+    _admit, bind, run = patch_world(monkeypatch, admission)
+    bind.return_value = SimpleNamespace(admission=admission, backend=object())
+    run.return_value = SimpleNamespace(text="done", session_id="sesn_ch", outputs=None)
+    deps = deps_for(None, db_session_factory)
+
+    if not runs:
+        with pytest.raises(AdmissionDenied) as denied:
+            await run_channel_timer(deps, row, prompt="x", role=Role.USER)
+        assert denied.value.reason == "backend_unsupported", denied.value
+        bind.assert_not_awaited()
+        return
+    reply = await run_channel_timer(deps, row, prompt="x", role=Role.USER)
+    assert reply.text == "done" and not reply.on_managed_agents, reply
+    assert bind.await_args.args[1].routine_sandbox_tools is False, "no built-ins without opt-in"
 
 
 async def test_a_channel_timer_whose_agent_changed_does_not_run(

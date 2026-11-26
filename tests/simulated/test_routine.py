@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
 from daimon.adapters.mcp.server import create_mcp_app  # pyright: ignore[reportUnknownVariableType]
 from daimon.adapters.scheduler.main import _build_fire  # pyright: ignore[reportPrivateUsage]
+from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX
 from daimon.core.authz import Subject, build_subject
+from daimon.core.continuity.continuation import ContinuationRequest
+from daimon.core.continuity.wakes import enqueue_wake
+from daimon.core.direct_messages import run_channel_timer
 from daimon.core.routine_service import (
     NewRoutine,
     Placement,
@@ -21,10 +26,13 @@ from daimon.core.routine_service import (
 from daimon.core.scheduler import run_one_tick
 from daimon.core.stores import agent_tool_rules
 from daimon.core.stores.direct_messages import set_dm_enabled
-from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.domain import Role, RoutineRow
 from daimon.core.stores.routines import get_routine
+from daimon.core.stores.task_continuations import get_continuation
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolSafetyPolicy
 from daimon.testing.asgi import asgi_lifespan
+from daimon.testing.factories import make_account
 from daimon.testing.sim.discord import DiscordAPI
 from daimon.testing.sim.script import Tool, Turn
 from mux.drivers.gemini.core import BUILTIN_TOOLS
@@ -277,3 +285,39 @@ async def test_a_routine_into_a_thread_runs_on_the_provider_the_thread_kept(
         fired = await _fire(w, routine)
     assert fired.last_error is None, f"it ran, on the thread's Gemini: {fired.last_error}"
     assert len(w.gemini.reported) == ran + 1, "the fire ran on Gemini"
+
+
+async def test_a_channel_timer_runs_on_gemini_unattended_and_metered(
+    db_preflight: None, db_nullpool_engine: AsyncEngine
+) -> None:
+    """A Gemini agent's channel timer runs as a routine does there: unattended in a fresh
+    scope of its channel, with no built-in tools, metered, and no Anthropic request."""
+    async with _gemini_install(db_nullpool_engine) as (w, discord):
+        agent_id = (await _scheduled(w, discord)).agent_id
+        async with w.sessions.begin() as db:
+            account = await make_account(db, tenant=await get_tenant(db, discord.tenant_id))
+        request = ContinuationRequest(
+            tenant_id=discord.tenant_id,
+            platform="discord",
+            parent_channel_id=str(CHANNEL),
+            thread_id=f"{CHANNEL_SCOPE_PREFIX}{uuid.uuid4()}",
+            requester_account_id=account.id,
+            requester_external_user_id=str(PERSON),
+            target_ma_agent_id=agent_id,
+            target_name=w.deps.deployment_default.agent_name or "",
+            requested_work="stretch",
+            reason="timer",
+            idempotency_key=uuid.uuid4(),
+        )
+        await enqueue_wake(w.sessions, request, available_at=datetime.now(UTC))
+        async with w.sessions() as db:
+            row = await get_continuation(db, idempotency_key=request.idempotency_key)
+        assert row is not None
+        w.script.add(Turn("Time to stretch.", input_tokens=900, output_tokens=40))
+        reply = await run_channel_timer(w.deps, row, prompt="stretch", role=Role.ADMIN)
+        assert reply.text == "Time to stretch." and not reply.on_managed_agents, reply
+        sent = [t for i in w.gemini.interactions.values() for t in i.raw.get("tools") or []]
+        assert not [t for t in sent if t.get("type") in BUILTIN_TOOLS], sent
+        metered, billed = await metering(w, discord.tenant_id, "gemini")
+        assert metered == billed and w.gemini.reported, f"metered on Gemini: {metered} != {billed}"
+        assert not w.api.seen, f"no Anthropic request on a keyless install: {w.api.seen}"
