@@ -57,10 +57,16 @@ async def rechecked_sources(
 
 
 async def reader_subjects(
-    conn: AsyncConnection[DictRow], schemas: Schemas, source: Source, readers: Sequence[str]
+    conn: AsyncConnection[DictRow],
+    schemas: Schemas,
+    source: Source,
+    readers: Sequence[str],
+    *,
+    own_links: bool = False,
 ) -> list[tuple[str, ...]]:
     """For each reader, their subjects in this source's namespace: a person's linked
-    identities, or the subject itself. An empty tuple: the source cannot be asked about them."""
+    identities, or the subject itself. An empty tuple: the source cannot be asked about them.
+    `own_links`: only links the person made themselves, never one an admin made by hand."""
     workspace = CONNECTORS[source.kind].workspace_of(source)
     prefix = f"{source.provider}/{workspace}:user:"
     accounts = [r.removeprefix("account:") for r in readers if r.startswith("account:")]
@@ -69,7 +75,8 @@ async def reader_subjects(
         cur = await conn.execute(
             f"select account_id::text as account, subject from {schemas.data}.identities"
             " where tenant_id = %s and provider = %s and workspace = %s"
-            " and account_id::text = any(%s) and (active or proof = 'oauth')".encode(),
+            " and account_id::text = any(%s) and (active or proof = 'oauth')"
+            f"{' and linked_by is null' if own_links else ''}".encode(),
             (source.tenant_id, source.provider, workspace, accounts),
         )
         for row in await cur.fetchall():

@@ -255,7 +255,7 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         async with pool.connection(settings) as conn:
             offered = await personal.parts(conn, schemas, auth.tenant_id, auth.account_id, allowed)
             if part not in offered:
-                raise ToolError(f"This workspace doesn't offer reading your {part}.")
+                raise ToolError(f"Reading your {part} is not offered here.")
             await personal.set_part(conn, schemas, auth.tenant_id, auth.account_id, part, on)
             parts = await personal.parts(conn, schemas, auth.tenant_id, auth.account_id, allowed)
         return json.dumps(parts)

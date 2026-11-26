@@ -112,7 +112,11 @@ async def search(
     for r in rows:
         if CONNECTORS[r["kind"]].live_as_reader:
             people[r["id"]] = await reader_subjects(
-                conn, schemas, build_source(r, env, None), ctx.readers
+                conn,
+                schemas,
+                build_source(r, env, None),
+                ctx.readers,
+                own_links=CONNECTORS[r["kind"]].personal_part is not None,
             )
 
     gate = asyncio.Semaphore(READERS)

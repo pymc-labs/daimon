@@ -636,6 +636,30 @@ async def test_the_google_connection_is_the_first_active_source_that_can_act_as_
     assert second != first
 
 
+async def test_a_link_an_admin_made_by_hand_never_reads_the_persons_own_drive(
+    store: Store, google: FakeGoogle
+) -> None:
+    google.my("bobs", f"bob@{DOMAIN}", [to("bob")], mime=DOC, body=b"budget too")
+    src = await add_source(store)
+    await store.run(src)
+    admin = uuid.uuid4()
+    await identity.admin_link(
+        store.conn, store.schemas, tenant_id=store.tenant, by=admin,
+        key=IdentityKey("google", DOMAIN, "bob"), account_id=admin, admin=True,
+    )  # fmt: skip
+    reader = f"account:{admin}"
+    assert (
+        await personal.google_connection(
+            store.conn, store.schemas, store.env, [store.tenant], [reader]
+        )
+        is None
+    ), "no Google connection acts as bob for the admin"
+    hits = await my_drive.search(
+        store.conn, store.schemas, store.env, store.tenant, admin, "budget"
+    )
+    assert hits == [], "and bob's own Drive stays unread"
+
+
 async def test_calendar_and_drive_read_through_a_source_of_either_kind(
     store: Store, google: FakeGoogle
 ) -> None:

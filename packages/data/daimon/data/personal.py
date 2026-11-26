@@ -58,12 +58,15 @@ async def google_connection(
 ) -> tuple[DictRow, list[tuple[str, ...]]] | None:
     """The Google source a personal read of `readers` goes through, with the subjects it acts
     as: the first active, published Drive or Calendar source, by name then id, whose domain
-    every reader is linked to. None when no source can act as all of them."""
+    every reader is linked to by a link they made themselves, never one an admin made by hand.
+    None when no source can act as all of them."""
     cur = await conn.execute(
         _GOOGLE.format(d=schemas.data).encode(), (list(GOOGLE_KINDS), list(tenant_ids))
     )
     for row in await cur.fetchall():
-        who = await reader_subjects(conn, schemas, build_source(row, env, None), readers)
+        who = await reader_subjects(
+            conn, schemas, build_source(row, env, None), readers, own_links=True
+        )
         if who and all(who):
             return row, who
     return None
