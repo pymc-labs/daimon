@@ -9,10 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A long job asked through agent chat runs to its end with one tool: `await_turn`.**
   Call it after `start_turn`. It returns when the agent says something, when the turn
-  ends, or after about four minutes, and reports the tool call running now. The caller
-  polls nothing. `ask`, `await_turn` and Daimon's own handling of tool confirmations wait
-  on the session's event stream and read the session when it brings an event, and
-  otherwise every 20 seconds. A turn that paused because the service restarted, or because it
+  ends, or after about four minutes, and reports the tool call running now. Nothing is
+  polled: `ask`, `await_turn` and Daimon's own handling of tool confirmations wait on the
+  session's event stream. A turn that paused because the service restarted, or because it
   reached the unattended run time limit, is resumed by the call that waits for it, so the
   caller no longer needs `get_session` and `continue_turn`
   ([Agent chat sessions](docs/unattended.md#agent-chat-sessions)).
@@ -33,7 +32,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   limit what it returns to what that place may read
   ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).
 
-||||||| parent of de496c9a2 (feat(mcp): wait for a turn on its event stream, and add await_turn)
 - **Each request to a signed-identity MCP server carries a new token with its own `jti`.**
   A server can accept each token once, so a copied token cannot be replayed
   ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).
