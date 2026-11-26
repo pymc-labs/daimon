@@ -805,6 +805,10 @@ async def _build_fire(
                 owner=owner,
                 subject=subject,
                 sandbox=await routine_sandbox(sm, settings, row, platform=platform),
+                hold=hold,
+                origin_place=(
+                    routine_origin(policy, row, platform=platform) if policy is not None else None
+                ),
             )
         except AdmissionDenied as error:
             log.info(

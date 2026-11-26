@@ -19,7 +19,7 @@ from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX
 from daimon.core.authz import Subject, Surface
 from daimon.core.routine_provider import routine_thread_id
 from daimon.core.routine_sandbox import RoutineSandbox, builtins_allowed, provider_run_matches_pin
-from daimon.core.rule_views import routine_destination_channel
+from daimon.core.rule_views import RoutineOrigin, routine_destination_channel
 from daimon.core.stores.domain import Role, RoutineRow
 from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.ceiling import turn_deadline
@@ -30,7 +30,7 @@ from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.unattended import is_provider_turn
-from daimon.core.turn_hold import RequesterOrg
+from daimon.core.turn_hold import RequesterOrg, TurnHold
 from mux.profiles import get_profile
 
 SHELL_NEEDS_SANDBOX = (
@@ -78,13 +78,16 @@ async def admit_provider_routine(
     owner: str,
     subject: Subject,
     sandbox: RoutineSandbox | None,
+    hold: TurnHold | None = None,
+    origin_place: RoutineOrigin | None = None,
 ) -> Admission:
     """Admit the fire as its owner, for the routine's agent, on the place's provider:
     a thread destination's kept one, else its channel's or agent's.
 
     Refused unless it runs on another provider: a place that now answers on Claude
     takes its routine through Managed Agents on the next fire, never through here.
-    `sandbox` is read by `with_routine_sandbox`.
+    `sandbox` is read by `with_routine_sandbox`; `hold` and `origin_place` place it
+    as `headless_runner` places a Claude fire (`at_fire_place`).
     """
     admission = await admit(
         deps,
@@ -106,9 +109,32 @@ async def admit_provider_routine(
     )
     if not is_provider_turn(admission):
         raise AdmissionDenied(reason="backend_unsupported")
+    admission = at_fire_place(admission, hold=hold, origin_place=origin_place)
     return await with_routine_sandbox(
         deps, admission, sandbox, tenant_id=row.tenant_id, platform=platform
     )
+
+
+def at_fire_place(
+    admission: Admission, *, hold: TurnHold | None, origin_place: RoutineOrigin | None
+) -> Admission:
+    """The fire held and sealed where it posts, with read-only memory, as a Claude fire.
+
+    Admission placed it in its destination channel only: the thread it posts to and that
+    thread's own seal come from `origin_place`, and the scheduler's hold (`routine_hold`)
+    holds it even where admission read no shared channel.
+    """
+    if hold is not None and admission.hold is None and admission.grant is not None:
+        grant = admission.grant
+        subject = replace(grant.subject, is_admin=False, client=hold.client)
+        admission = replace(admission, hold=hold, grant=replace(grant, hold=hold, subject=subject))
+    if origin_place is not None:
+        admission = replace(
+            admission,
+            origin_thread_id=origin_place.thread_id,
+            origin_seal_ids=admission.origin_seal_ids | origin_place.seal_ids,
+        )
+    return replace(admission, memory_read_only=True)
 
 
 async def with_routine_sandbox(
