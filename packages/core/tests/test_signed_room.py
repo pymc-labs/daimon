@@ -56,12 +56,12 @@ def test_a_room_is_signed_only_with_a_channel() -> None:
     ("place", "room", "routine"),
     [
         (TurnPlace("3", None), None, "r-1"),
-        (TurnPlace("3", None), "dm", "r-1"),
+        (TurnPlace("3", "4"), "dm", "r-1"),
         (None, "team", "r-1"),
         (TurnPlace("3", None), "team", ""),
         (TurnPlace("3", None), "team", "r" * 81),
     ],
-    ids=["no-room", "dm", "no-channel", "blank", "too-long"],
+    ids=["no-room", "dm-message", "no-channel", "blank", "too-long"],
 )
 def test_a_routine_claim_is_never_signed_without_its_room(
     place: TurnPlace | None, room: SignedRoom | None, routine: str

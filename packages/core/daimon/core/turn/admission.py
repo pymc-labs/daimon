@@ -112,6 +112,7 @@ from daimon.core.ma_resolver import (
     retrieve_agent_cached,
     retrieve_environment_cached,
 )
+from daimon.core.mcp_identity import DmRoutineRelay
 from daimon.core.membership_subject import resolve_subject, resolve_subject_authority
 from daimon.core.permissions import (
     agent_permissions,
@@ -207,7 +208,7 @@ __all__ = [
 
 
 if TYPE_CHECKING:
-    from daimon.core.mcp_identity import DmRoutineRelay
+    pass
 
 _log = structlog.get_logger(__name__)
 

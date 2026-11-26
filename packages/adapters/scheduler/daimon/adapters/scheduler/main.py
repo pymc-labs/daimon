@@ -90,6 +90,7 @@ from daimon.core.github_issued_token_sweep import sweep_closed_github_issued_tok
 from daimon.core.headless_runner import run_turn
 from daimon.core.health import start_liveness_responder
 from daimon.core.hub_oauth_kv_sweep import sweep_expired_hub_oauth_kv
+from daimon.core.lead_intake_execution import current_intake_execution
 from daimon.core.logging_setup import configure_logging, mark_shutting_down
 from daimon.core.long_jobs import LongJobExecutor
 from daimon.core.long_jobs_ma import ManagedLongJobPort
@@ -100,7 +101,6 @@ from daimon.core.ma_resolver import (
     resolve_agent,
     resolve_environment,
 )
-from daimon.core.lead_intake_execution import current_intake_execution
 from daimon.core.mcp_identity import DmRoutineRelay, routine_destination_key
 from daimon.core.mcp_vault_janitor import archive_idle_relay_vaults
 from daimon.core.membership import MembershipResolver
