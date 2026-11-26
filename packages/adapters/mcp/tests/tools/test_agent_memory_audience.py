@@ -67,6 +67,7 @@ async def _open(
     thread: str,
     read_only: bool = False,
     switch: bool = False,
+    data_reading: bool = False,
 ) -> HostMemoryPlace:
     tenant, account = uuid.uuid4(), uuid.uuid4()
     auth: AuthIdentity = auth_identity(
@@ -88,6 +89,7 @@ async def _open(
     on: Callable[[str], bool] = lambda key: key != "dm_memory_read_only" or switch  # noqa: E731
     monkeypatch.setattr(host_memory, "audience_mode", read_mode)
     monkeypatch.setattr(tools, "anthropic_configured", lambda _client: True)
+    monkeypatch.setattr(tools, "reads_data", AsyncMock(return_value=data_reading))
     monkeypatch.setattr(
         tools,
         "require_turn_origin",
@@ -121,6 +123,11 @@ async def test_a_dm_turns_shared_memory_follows_the_mode(
 ) -> None:
     place = await _open(monkeypatch, mode=mode, thread=thread, read_only=read_only, switch=switch)
     assert place.read_only is expected
+
+
+async def test_a_data_reading_agent_writes_no_host_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    place = await _open(monkeypatch, mode="off", thread=ROOM, data_reading=True)
+    assert place.read_only is True
 
 
 async def test_shadow_logs_the_turn_on_would_change_and_never_text(

@@ -897,10 +897,12 @@ async def _prepare_session_for_turn_locked(
             return await from_fresh(fresh, carried or CONTINUED)
 
         fresh_start = row.fresh_start_requested_at is not None
-        # A relay agent's channel turn starts from nothing: an earlier turn's
-        # Grove results must not outlive the audience that was allowed to see them
-        # (`daimon.core.relay_scope`). Channel history still gives continuity.
-        relay_fresh = admission.relay_scoped and admission.hold is not None
+        # A relay or data-reading agent's held turn starts from nothing: earlier relay
+        # results or data reads must not outlive the audience that was allowed to see
+        # them (`daimon.core.relay_scope`). Channel history still gives continuity.
+        relay_fresh = admission.hold is not None and (
+            admission.relay_scoped or admission.data_reading
+        )
         fresh_start = fresh_start or relay_fresh
 
         await _heal_lineage(deps, db, row=row)
@@ -1215,7 +1217,9 @@ async def _prepare_session_for_turn_locked(
             # A fresh start may be a move here from another provider: carry that over.
             seed = (
                 await find_carry_over()
-                if fresh_start and not admission.relay_scoped and find_carry_over is not None
+                if fresh_start
+                and not (admission.relay_scoped or relay_fresh)
+                and find_carry_over is not None
                 else None
             )
             outcome = await _run_replacement(

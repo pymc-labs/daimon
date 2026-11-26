@@ -575,7 +575,8 @@ async def test_a_persons_own_drive_is_searched_as_them_and_never_stored(
     hits = await my_drive.search(
         store.conn, store.schemas, store.env, store.tenant, alice, "budget"
     )
-    assert [(h.ref, h.text) for h in hits] == [("file:plan", "budget plan")], "hers, as her"
+    assert [(h.ref, h.text) for _, h in hits] == [("file:plan", "budget plan")], "hers, as her"
+    assert {s for s, _ in hits} == {src}, "with the source it was read through"
     assert await store.bodies(src) == {}, "nothing of a My Drive is stored"
     await personal.set_part(store.conn, store.schemas, store.tenant, alice, "drive", False)
     mine = await my_drive.search(

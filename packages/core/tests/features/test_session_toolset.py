@@ -19,6 +19,7 @@ from daimon.core.config import (
     DiscordSettings,
     Settings,
 )
+from daimon.core.data_tools import DATA_SOURCE_TOOLS, DATA_TOOLS
 from daimon.core.errors import StaleChannelValue
 from daimon.core.features.model_input import (
     DEFAULT_TOOLSET,
@@ -45,6 +46,7 @@ from daimon.core.features.snapshot import (
 )
 from daimon.core.features.tool_gate import SESSION_KEPT_TOOLS, gated_tools
 from daimon.core.features.toolset import place_session, place_toolset
+from daimon.core.relay_scope import without_data_sources
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
 from daimon.core.session_snapshot import (
     desired_snapshot,
@@ -267,6 +269,11 @@ def test_a_capability_off_turns_exactly_its_tools_off(key: str) -> None:
     assert {c["name"] for c in daimon["configs"] if c.get("enabled") is False} == (
         CAPABILITY_TOOLS[key] - SESSION_KEPT_TOOLS
     ), "each tool is off in the session"
+
+
+def test_a_workspace_with_no_data_source_is_offered_no_data_tool() -> None:
+    toolset = agent_toolset(without_data_sources(_snapshot()), _agent())
+    assert toolset.hidden_daimon_tools == DATA_SOURCE_TOOLS | DATA_TOOLS
 
 
 def test_compute_off_keeps_the_stop_tools_and_long_jobs_off_hides_its_own() -> None:

@@ -187,8 +187,8 @@ def walk[T](value: T, fn: Callable[[str], str]) -> T:
 
 
 class Redactor:
-    """What a source applies to its records as it ingests them, or, for an `answer` set,
-    what every answer goes through (`answer_redactor`)."""
+    """What a source applies to its records as it ingests them, or what its answers go
+    through (`answer_redactors`)."""
 
     def __init__(self, rules: Rules, *, answer: bool = False) -> None:
         if rules.at == "answer" and not answer:
@@ -314,26 +314,29 @@ async def read_redactor(
     return Entities((e for r in rules if r.at != "storage" for e in r.entities), held)
 
 
-async def answer_redactor(
+async def answer_redactors(
     conn: AsyncConnection[DictRow], schemas: Schemas, tenant_id: uuid.UUID
-) -> Redactor | None:
-    """The regex, aliases and removals of the tenant's approved `answer` sets, which every
-    answer goes through; None when it has none."""
+) -> dict[uuid.UUID, Redactor]:
+    """Per source, the approved rules its answers go through: an `answer` set, or any set whose
+    rules changed since the source last synced completely, until that sync rewrites what is
+    stored. A source with neither is absent."""
+    d = schemas.data
     cur = await conn.execute(
-        f"select rules from {schemas.data}.redaction_sets where tenant_id = %s"
-        " and rules ->> 'at' = 'answer' order by name".encode(),
+        f"select s.id, r.name, r.rules from {d}.sources s join {d}.redaction_sets r"
+        " on r.tenant_id = s.tenant_id and r.name = s.redaction_set"
+        f" left join {d}.source_cursors c on c.source_id = s.id"
+        " where s.tenant_id = %s and r.rules is not null and (r.rules ->> 'at' = 'answer'"
+        " or c.last_sync_at is null or c.last_sync_at < r.rules_changed_at)".encode(),
         (tenant_id,),
     )
-    sets = [Rules.model_validate(r["rules"]) for r in await cur.fetchall()]
-    if not sets:
-        return None
-    merged = Rules(
-        at="answer",
-        aliases={k: v for r in sets for k, v in r.aliases.items()},
-        removals=[t for r in sets for t in r.removals],
-        regex=[p for r in sets for p in r.regex],
-    )
-    return Redactor(merged, answer=True)
+    built: dict[str, Redactor] = {}
+    out: dict[uuid.UUID, Redactor] = {}
+    for row in await cur.fetchall():
+        name = row["name"]
+        if name not in built:
+            built[name] = Redactor(Rules.model_validate(row["rules"]), answer=True)
+        out[row["id"]] = built[name]
+    return out
 
 
 async def redacted_among(
@@ -355,7 +358,12 @@ async def restart_sources(
     conn: AsyncConnection[DictRow], schemas: Schemas, tenant_id: uuid.UUID, name: str
 ) -> None:
     """Sync every source using set `name` again from the start, so changed rules reach what
-    is stored."""
+    is stored; answers apply them meanwhile (`answer_redactors`)."""
+    await conn.execute(
+        f"update {schemas.data}.redaction_sets set rules_changed_at = now()"
+        " where tenant_id = %s and name = %s".encode(),
+        (tenant_id, name),
+    )
     await conn.execute(
         f"update {schemas.data}.source_cursors set state = '{{}}', requested_at = now()"
         f" where source_id in (select id from {schemas.data}.sources"

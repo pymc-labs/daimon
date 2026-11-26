@@ -31,7 +31,9 @@ async def search(
     account_id: uuid.UUID,
     query: str,
     limit: int = 10,
-) -> list[LiveHit]:
+) -> list[tuple[uuid.UUID, LiveHit]]:
+    """What the person's own Drive finds for `query`, each with the source it was read through
+    (whose answer-time rules it goes through)."""
     if await personal.turned_off(conn, schemas, [tenant_id], [f"account:{account_id}"], "drive"):
         return []
     cur = await conn.execute(
@@ -42,7 +44,7 @@ async def search(
         (tenant_id,),
     )
     drive = cast("GDriveConnector", CONNECTORS["gdrive"])
-    hits: list[LiveHit] = []
+    hits: list[tuple[uuid.UUID, LiveHit]] = []
     for row in await cur.fetchall():
         try:
             rules = (
@@ -56,17 +58,15 @@ async def search(
         [subjects] = await reader_subjects(conn, schemas, source, [f"account:{account_id}"])
         for user_id in subjects:
             found = await drive.my_drive_search(source, user_id, query, limit)
-            hits += (
-                [
-                    replace(h, title=rules.text(h.title), text=rules.text(h.text))
-                    for h in found
-                    if not rules.excludes(h.ref)
-                ]
+            hits += [
+                (source.id, replace(h, title=rules.text(h.title), text=rules.text(h.text)))
                 if rules
-                else found
-            )
-    left, out = ANSWER_TEXT, list[LiveHit]()
-    for h in hits[:limit]:
-        out.append(replace(h, text=h.text[:left]))
+                else (source.id, h)
+                for h in found
+                if not (rules and rules.excludes(h.ref))
+            ]
+    left, out = ANSWER_TEXT, list[tuple[uuid.UUID, LiveHit]]()
+    for sid, h in hits[:limit]:
+        out.append((sid, replace(h, text=h.text[:left])))
         left = max(left - len(h.text), 0)
     return out

@@ -1,7 +1,7 @@
 """The `data_*` tools `data_reads` offers, and how their results stay out of other readers' hands.
 
 Every data tool result starts with `DATA_RESULT_MARK` (`mark_data_result`), so a transcript
-read outside the sealed session (a hub admin's, another session's) shows it redacted
+read outside its own session (a hub admin's, another session's) shows it redacted
 (`redact_data_results`) whichever page holds the call. Pure.
 """
 
@@ -21,6 +21,26 @@ PERSONAL_DRIVE_TOOLS: Final[frozenset[str]] = frozenset({"data_my_drive"})
 """Reading a person's own Drive as them, each read on their card (`daimon.data.my_drive`)."""
 PERSONAL_READS_TOOLS: Final[frozenset[str]] = frozenset({"data_personal_reads"})
 """A person turning their personal parts on or off (`daimon.data.personal`), behind `data_reads`."""
+DATA_SOURCES: Final = "data_sources"
+DATA_SOURCE_TOOLS: Final[frozenset[str]] = frozenset(
+    {
+        "list_data_sources",
+        "change_data_source",
+        "list_data_access",
+        "change_data_access",
+        "list_data_links",
+        "change_data_links",
+        "list_data_rule_sets",
+        "approve_data_rule_set",
+        "connect_my_data",
+        "check_my_data_connection",
+        "dismiss_data_notices",
+        "data_my_drive",
+        "data_personal_reads",
+    }
+)
+"""The data management, sign-in and personal read tools: hidden with `data_sources`, and until a
+workspace has a source (`daimon.core.ports.data_ready`)."""
 DATA_RESULT_MARK: Final = "[data source result]"
 REDACTED_DATA_RESULT: Final = f"{DATA_RESULT_MARK} hidden: only its own conversation sees it."
 
