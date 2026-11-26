@@ -815,6 +815,21 @@ async def test_gemini_gated_mcp_tool_loss_is_explicit_and_keeps_siblings(full):
     assert not posts
 
 
+@pytest.mark.parametrize("switched_request", [{**PARAMS, "keys": True}], indirect=True)
+async def test_gemini_carries_the_agents_keys_instead_of_declaring_them_lost(full):
+    from daimon.core.turn.runtime_manifest import classify_source_obligations
+
+    request, *_ = full
+    source = await capture_preparation_source(request, fresh=True)
+    keys = {r.credential_ref for r in source.resource_requirements if r.id.startswith("agent-env:")}
+    (represented,) = source.representations
+    assert keys and keys <= set(represented.credential_refs)
+    missing = classify_source_obligations(
+        source, represented.target, environment=represented.environment
+    )
+    assert not {"files", "credentials"} & set(missing), "the keys file goes to the sandbox"
+
+
 @pytest.mark.parametrize("switched_request", [GATED_PARAMS], indirect=True)
 @pytest.mark.parametrize("full", [True], indirect=True)
 async def test_gemini_gated_loss_does_not_waive_runtime_catalogue_verification(full):

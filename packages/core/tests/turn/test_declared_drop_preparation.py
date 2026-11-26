@@ -171,6 +171,18 @@ async def switched_request(owned, request):
             deadline=now + timedelta(seconds=30),
             now=lambda: now,
         )
+        if params.get("keys"):  # a saved agent key, so the source needs a keys file
+            from daimon.core.stores.agent_files import put_agent_file
+
+            async with sessions.begin() as db:
+                await put_agent_file(
+                    db,
+                    tenant_id=identity.tenant_id,
+                    agent_id=derive_agent_uuid(tenant_id=identity.tenant_id, ma_agent_id=native.id),
+                    key="API_KEY",
+                    content="s3cret",
+                    set_by_account_id=None,
+                )
         source = await capture_preparation_source(request, fresh=True)
         assert source.agent_id == derive_agent_uuid(
             tenant_id=identity.tenant_id, ma_agent_id=native.id
