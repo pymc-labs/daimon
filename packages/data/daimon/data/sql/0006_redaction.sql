@@ -22,6 +22,7 @@ create table {{data}}.redaction_sets (
   error text,                      -- why the last fetch failed
   approved_by uuid,
   approved_at timestamptz,
+  rules_changed_at timestamptz,    -- answers apply the rules too until its sources sync again
   primary key (tenant_id, name),
   check ((repo is null) = (path is null))
 );

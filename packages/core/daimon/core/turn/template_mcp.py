@@ -61,7 +61,9 @@ def unattended_turn() -> bool:
 
 
 def origin_read_only(admission: Admission) -> bool | None:
-    """The origin stamp a sealed or read-only turn's credential binds; None keeps it."""
+    """The origin stamp a sealed or read-only turn's credential binds; None keeps it. A
+    data-reading agent keeps repo memory, which records what it read; host memory checks
+    `data_reads` itself."""
     return True if admission.memory_read_only or admission.source_sealed else None
 
 

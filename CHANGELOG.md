@@ -18,19 +18,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first. Admins turn tools off for the workspace, or for one agent with its tool rules, and every
   call is audited ([MCP servers](docs/mcp-servers.md#share-a-server-with-the-workspace)).
 - **Data sources are on by default and inert until used.** `DAIMON_FEATURES__DATA_SOURCES=off`
-  turns them off. A data-reading agent no longer starts a fresh session each turn or loses
-  long-term memory: other agents still cannot ask it, writes out still ask first, and a
-  memory saved after a data read shows only to people who could read that data. Workspace
-  admins manage data access, and may grant themselves a scope (audited). Redaction sets
-  take `at: storage` or `at: answer`. Teams rooms get data answers for their members once
-  the app (0.6.3) is re-uploaded and a team owner or chat member grants
-  `ChannelMember.Read.Group` or `ChatMember.Read.Chat`
+  turns them off, and no data tool is offered until a workspace has a source. A data-reading
+  agent no longer starts a fresh session each turn, except when held, or loses long-term
+  memory: it and other agents ask each other only when both read data, writes out still ask
+  first, and a memory saved after a data read shows only to people who could read that data.
+  Workspace admins manage data access, and may grant themselves a scope (audited). Redaction
+  sets take `at: storage` or `at: answer` and apply to their own sources. Teams rooms with a
+  guest, another organisation's member or a shared channel get no data; others get data
+  answers for their members once the app (0.6.3) is re-uploaded and a team owner or chat
+  member grants `ChannelMember.Read.Group` or `ChatMember.Read.Chat`
   ([Data sources](docs/data-sources.md#who-sees-an-answer)).
 
 - **The web app gets pages for data sources, with the feature on.** A Data section searches
   and browses what the person may read and opens items with their files. Integrations lists
   sources with their runs, parity result and publish control. Admin gains Data access for
-  scopes, grants, identity links, data admins and redaction sets, and Profile lists a
+  scopes, grants, identity links and redaction sets, and Profile lists a
   person's linked and connected accounts ([Data sources](docs/data-sources.md)).
 
 - **Data sources can go stale, be read live, be declared in a file and be checked before

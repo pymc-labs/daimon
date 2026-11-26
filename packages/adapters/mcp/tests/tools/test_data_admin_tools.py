@@ -109,7 +109,7 @@ class Rig:
             yield object()
 
         mp.setattr(_data_admin, "data_is_on", on)
-        mp.setattr(_data_admin, "web_admin_of", actor)
+        mp.setattr(_data_admin, "web_actor_of", actor)
         mp.setattr(data_admin, "require_card", card)
         mp.setattr(data_admin, "names_of", names)
         mp.setattr(data_admin, "private_details", details)
@@ -156,7 +156,7 @@ async def test_a_member_is_refused_every_admin_tool(
     rig: Rig, tool: str, args: dict[str, Any]
 ) -> None:
     rig.role = "member"
-    with pytest.raises(ToolError, match="workspace admin or owner"):
+    with pytest.raises(ToolError, match="Only an admin or owner"):
         await rig.call(tool, **args)
     assert not rig.calls and not rig.cards, "a refused caller reaches neither card nor store"
 

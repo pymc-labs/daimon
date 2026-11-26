@@ -12,7 +12,7 @@ from typing import Any, Final
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._web_admin import web_actor_of, web_admin_of
+from daimon.adapters.mcp.tools._web_admin import web_actor_of
 from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.ports.gate import data_sources_on
 from daimon.core.stores import web_people
@@ -27,14 +27,15 @@ from psycopg.rows import DictRow
 from pydantic_core import to_jsonable_python
 
 NOT_ON: Final = "Data sources aren't turned on here."
-NOT_ADMIN: Final = "Only a workspace admin or owner manages data sources."
+NOT_ADMIN: Final = "Only an admin or owner manages data sources."
 ERROR_CHARS: Final = 300
 """A failed run's text is shown cut to this, as on the web."""
 
 
 async def data_is_on(runtime: McpRuntime, auth: AuthIdentity) -> None:
-    """Refuse unless the deployment and this workspace have data sources on."""
-    if not data_sources_on(runtime.settings):
+    """Refuse unless the deployment and this workspace have data sources on, and the store
+    exists."""
+    if not data_sources_on(runtime.settings) or not await pool.ready(runtime.settings):
         raise ToolError(NOT_ON)
     place = FeaturePlace(auth.tenant_id, auth.platform or "web")
     async with runtime.session_factory() as db:
@@ -43,9 +44,10 @@ async def data_is_on(runtime: McpRuntime, auth: AuthIdentity) -> None:
 
 
 async def manager(runtime: McpRuntime, auth: AuthIdentity) -> WebAdmin:
-    """The caller as a workspace admin or owner of the web app (`data.manage`), with data on."""
+    """The caller as a workspace admin or owner of the web app (`data.manage`), with data on;
+    the web role alone, as on the web."""
     await data_is_on(runtime, auth)
-    actor = await web_admin_of(runtime, auth)
+    actor = await web_actor_of(runtime, auth)
     if not is_admin(actor.role):
         raise ToolError(NOT_ADMIN)
     return actor

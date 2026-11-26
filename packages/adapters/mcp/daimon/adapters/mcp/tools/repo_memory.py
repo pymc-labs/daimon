@@ -7,18 +7,19 @@ from typing import Literal, TypedDict
 
 import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.adapters.mcp.data_access import readable_by_audience
+from daimon.adapters.mcp.data_access import ledgers, readable_by_audience
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import load_channel_policy
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
+from daimon.core.data_reading import reads_data
 from daimon.core.features.snapshot import FeaturePlace, may_turn_on, resolve_features
 from daimon.core.github_app_session import REQUESTER_CACHE, effective_app_grant_view
 from daimon.core.github_requester_access import linked_permissions
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.permissions import readers_limited_at
 from daimon.core.repo_memory import MemoryOrigin, new_entry
-from daimon.core.stores.data_memory import reads_of
+from daimon.core.stores.data_memory import UNKNOWN_READ, note_reads, reads_of
 from daimon.core.stores.github_access import AuthorizedRepo
 from daimon.core.stores.github_connect import requester_linked_github_user_id
 from daimon.core.stores.repo_memory import (
@@ -169,12 +170,7 @@ async def repo_memory_impl(
                     kind=kind,
                     scope=scope,
                 )
-                if auth.chat_session_id is not None:
-                    # What the session read so far bounds who may recall this.
-                    refs = await reads_of(
-                        session, tenant_id=auth.tenant_id, chat_session_id=auth.chat_session_id
-                    )
-                    entry = entry.model_copy(update={"data_refs": refs or None})
+                entry = entry.model_copy(update={"data_refs": await _refs(runtime, auth)})
                 previous = await save_entry(session, entry=entry)
             except ValueError as exc:
                 raise ToolError(str(exc)) from exc
@@ -187,14 +183,39 @@ async def repo_memory_impl(
     raise ToolError(f"Repo memory '{name}' not found for {target.repo_full_name}.")
 
 
+async def _refs(runtime: McpRuntime, auth: AuthIdentity) -> list[str] | None:
+    """What a save records: what the session read so far, which bounds who may recall it.
+    With no session to tell, a caller that may read data here records an unknown item, so
+    the memory shows nowhere (`daimon.data.reads.readable`)."""
+    if auth.chat_session_id is None:
+        place = FeaturePlace.of(auth.tenant_id, auth.platform or "mcp", auth.bound_channel_id)
+        reading = await reads_data(runtime.session_factory, runtime.settings, place)
+        return [UNKNOWN_READ] if reading else None
+    async with runtime.session_factory() as session:
+        refs = await reads_of(
+            session, tenant_id=auth.tenant_id, chat_session_id=auth.chat_session_id
+        )
+    return refs or None
+
+
 async def _shown(
     runtime: McpRuntime, auth: AuthIdentity, entries: list[MemoryEntry]
 ) -> list[MemoryEntry]:
     """The entries everyone this answer is for may recall: no data recorded, or every
-    recorded item readable by them all."""
+    recorded item readable by them all. What is recalled joins the session's reads, so a
+    memory saved from it records them too."""
     tagged = [e for e in entries if e.data_refs]
     ok = await readable_by_audience(runtime, auth, [e.data_refs or [] for e in tagged])
     hidden = {e.name for e, shown in zip(tagged, ok, strict=True) if not shown}
+    recalled = [ref for e in tagged if e.name not in hidden for ref in e.data_refs or []]
+    if recalled:
+        sessions = await ledgers(runtime, auth)
+        async with runtime.session_factory.begin() as session:
+            for chat_session_id in sessions:
+                await note_reads(
+                    session, tenant_id=auth.tenant_id, chat_session_id=chat_session_id,
+                    refs=recalled,
+                )  # fmt: skip
     return [e for e in entries if e.name not in hidden]
 
 

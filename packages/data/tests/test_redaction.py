@@ -135,10 +135,31 @@ def test_a_set_applies_every_rule_at_storage_or_at_answer_time() -> None:
     for rules in (unset, storage, answer):
         assert redaction.Redactor(rules).excludes("doc:2"), "an excluded id is never stored"
     ctx = ReadContext((uuid.uuid4(),))
-    shown = Reading(ctx, None, redaction.Redactor(answer, answer=True))
-    assert shown.show({"t": text}) == {"t": "client A wrote Globex"}, "every answer"
+    own, other = uuid.uuid4(), uuid.uuid4()
+    shown = Reading(ctx, None, {own: redaction.Redactor(answer, answer=True)})
+    hits = [{"source_id": str(own), "t": text}, {"source_id": str(other), "t": text}]
+    assert shown.show(hits) == [
+        {"source_id": str(own), "t": "client A wrote Globex"},
+        {"source_id": str(other), "t": text},
+    ], "only its own source"
+    assert shown.show(text, other) == text and shown.show({"t": text})["t"] != text
     assert shown.redacted and shown.names_hidden("Acme"), "sql, files and naming queries refused"
     assert not Reading(ctx, None).redacted, "no answer set: nothing refused"
+
+
+async def test_changed_rules_apply_to_answers_until_their_source_syncs_again(
+    store: Store, feed: None
+) -> None:
+    async def answered() -> bool:
+        return bool(await redaction.answer_redactors(store.conn, store.data.schemas, store.tenant))
+
+    await store.declare(1, redaction_sets=[{"id": "house", "rules": RULES}], sources=[SOURCE])
+    assert await answered(), "nothing stored under the rules yet"
+    assert await store.sync() == "ok" and not await answered(), "stored rewritten: ingest only"
+    changed = {**RULES, "at": "storage"}
+    await store.declare(2, redaction_sets=[{"id": "house", "rules": changed}], sources=[SOURCE])
+    assert await answered(), "rows stored under the old rules are rewritten at answer time"
+    assert await store.sync() == "ok" and not await answered()
 
 
 async def test_removed_text_is_never_stored_and_excluded_records_are_dropped(

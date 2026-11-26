@@ -200,7 +200,7 @@ def data_pages_router(runtime: WebRuntime) -> APIRouter:
             found = await reads.get(conn, schemas, r.ctx, uuid_of(record_id), env)
         if found is None:
             raise HTTPException(status_code=404, detail=NOT_FOUND)
-        body = r.show(found.body)
+        body = r.show(found.body, found.item.source_id)
         end = start + TEXT_CHARS
         out = RecordOut(
             item=ItemOut.model_validate(found.item, from_attributes=True),
@@ -208,7 +208,7 @@ def data_pages_router(runtime: WebRuntime) -> APIRouter:
             next_start=end if end < len(body) else None,
             files=[FileOut.model_validate(a, from_attributes=True) for a in found.attachments],
         )
-        return shown(r, out)
+        return shown(r, out, found.item.source_id)
 
     @router.get("/records/{record_id}/files/{index}")
     async def file(caller: Viewer, record_id: str, index: int) -> Response:  # pyright: ignore[reportUnusedFunction]

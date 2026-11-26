@@ -4,7 +4,8 @@ import uuid
 from typing import Any
 
 import pytest
-from daimon.core.config import DataSettings
+from daimon.core.config import DataSettings, Settings
+from daimon.data import pool
 from daimon.data.init import PsycopgSql, init_data
 from daimon.data.migrate import ROLES, STORE_FILES, apply
 from daimon.data.schema import Schemas, read_sql, render
@@ -204,3 +205,30 @@ def test_the_down_files_return_the_store_to_its_0003_shape(data_db: DataDb) -> N
         finally:
             for s in (full, base):
                 conn.execute(f"drop schema if exists {s.views}, {s.data} cascade")
+
+
+async def test_the_store_is_ready_only_where_every_file_is_applied(data_db: DataDb) -> None:
+    """A database without the store, or with it part way, reads as not set up, never an error."""
+
+    def settings(schema: str) -> Settings:
+        return Settings(
+            _env_file=None,  # pyright: ignore[reportCallIssue]
+            database={"url": data_db.url},  # pyright: ignore[reportArgumentType]
+            data={"schema_name": schema},  # pyright: ignore[reportArgumentType]
+        )
+
+    version = f"{data_db.schemas.data}.schema_version"
+    try:
+        assert await pool.ready(settings(data_db.settings.schema_name))
+        assert not await pool.ready(settings("no_store_here")), "no store: not ready"
+        with data_db.connect() as conn:
+            conn.execute(f"delete from {version} where file = %s".encode(), (STORE_FILES[-1],))
+        await pool.close_pools()
+        assert not await pool.ready(settings(data_db.settings.schema_name)), "part way"
+    finally:
+        with data_db.connect() as conn:
+            conn.execute(
+                f"insert into {version} (file) values (%s) on conflict do nothing".encode(),
+                (STORE_FILES[-1],),
+            )
+        await pool.close_pools()

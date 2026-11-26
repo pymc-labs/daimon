@@ -2,6 +2,7 @@
 
 import importlib.util
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from alembic.autogenerate import compare_metadata
@@ -12,22 +13,30 @@ from sqlalchemy import Connection, inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
-@pytest.mark.fresh_schema
-async def test_repository_memory_migration_matches_model(db_session: AsyncSession) -> None:
-    path = Path(__file__).parents[1] / "alembic/versions/0153_repo_memory.py"
-    spec = importlib.util.spec_from_file_location("repo_memory_migration", path)
+def _migration(name: str) -> ModuleType:
+    path = Path(__file__).parents[1] / f"alembic/versions/{name}.py"
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.fresh_schema
+async def test_repository_memory_migration_matches_model(db_session: AsyncSession) -> None:
+    module = _migration("0153_repo_memory")
+    later = _migration("0244_data_memory")  # adds repo_memory.data_refs
     assert len(module.revision) <= 32
     connection = await db_session.connection()
 
     def cycle(sync: Connection) -> None:
         schema = sync.scalar(text("SELECT current_schema()"))
         with Operations.context(MigrationContext.configure(sync)):
+            later.downgrade()
             module.downgrade()
             assert "repo_memory" not in inspect(sync).get_table_names(schema=schema)
             module.upgrade()
+            later.upgrade()
             differences = compare_metadata(MigrationContext.configure(sync), Base.metadata)
             assert not [
                 d for d in differences if "repo_memory" in str(d) or "memory_read_only" in str(d)

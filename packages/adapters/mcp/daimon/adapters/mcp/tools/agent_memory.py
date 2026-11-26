@@ -13,7 +13,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.anthropic_guard import anthropic_configured
-from daimon.core.data_tools import DATA_READS
+from daimon.core.data_reading import reads_data
 from daimon.core.features.snapshot import FeaturePlace, resolve_features
 from daimon.core.host_memory import (
     HOST_MEMORY_TAG,
@@ -59,20 +59,11 @@ async def open_host_memory(
         runtime.session_factory,
         runtime.settings,
         feature_place,
-        keys=(
-            "memory_shared",
-            "memory_personal",
-            "memory_channel",
-            "dm_memory_read_only",
-            DATA_READS,
-        ),
+        keys=("memory_shared", "memory_personal", "memory_channel", "dm_memory_read_only"),
     )
     is_dm = origin.thread_id.startswith("dm:")
-    # A data-reading agent writes no provider memory, as on Claude (`daimon.core.data_reading`).
-    read_only = (
-        origin.memory_read_only is not False
-        or features.on(DATA_READS)
-        or (is_dm and features.on("dm_memory_read_only"))
+    read_only = origin.memory_read_only is not False or (
+        is_dm and features.on("dm_memory_read_only")
     )
     if is_dm and origin.platform == "discord":
         # The audience mode adds to the switch above: `on` makes a DM turn read-only.
@@ -86,6 +77,10 @@ async def open_host_memory(
                 )
                 or read_only
             )
+    # A data-reading agent writes no provider memory, which cannot record what it read.
+    read_only = read_only or await reads_data(
+        runtime.session_factory, runtime.settings, feature_place
+    )
     place = HostMemoryPlace(
         tenant_id=auth.tenant_id,
         agent_id=derive_agent_uuid(

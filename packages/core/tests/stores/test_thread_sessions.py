@@ -10,7 +10,7 @@ Each test inlines its `create_thread_session(...)` call per guideline:testing.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest_asyncio
 from daimon.core._models import ThreadSession
@@ -23,7 +23,7 @@ from daimon.core.session_compat import (
     decide_session_compatibility,
 )
 from daimon.core.session_snapshot import SessionSnapshot, fingerprint_identity
-from daimon.core.stores.data_memory import note_reads, reads_of
+from daimon.core.stores.data_memory import note_reads, prune_reads, reads_of
 from daimon.core.stores.domain import ThreadSessionRow
 from daimon.core.stores.thread_session_lineage import (
     clear_fresh_start,
@@ -1367,3 +1367,21 @@ async def test_a_replacement_keeps_what_its_predecessor_read_from_data(
         "record:1",
         "sql",
     ]
+
+
+async def test_old_reads_of_ended_sessions_are_forgotten(
+    db_session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
+    await new_thread_session(
+        db_session,
+        tenant_id=tenant_id,
+        thread_id="t-1",
+        ma_session_id="ses_live",
+        effective_config=_snapshot().model_copy(update={"chat_session_id": "chat-live"}),
+    )
+    for chat in ("chat-live", "chat-gone"):
+        await note_reads(db_session, tenant_id=tenant_id, chat_session_id=chat, refs=["sql"])
+    later = datetime.now(UTC) + timedelta(days=1)
+    await prune_reads(db_session, cutoff=later)
+    assert await reads_of(db_session, tenant_id=tenant_id, chat_session_id="chat-live") == ["sql"]
+    assert not await reads_of(db_session, tenant_id=tenant_id, chat_session_id="chat-gone")

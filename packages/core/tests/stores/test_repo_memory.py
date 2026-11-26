@@ -344,3 +344,20 @@ async def test_render_hash_is_scoped_to_tenant_provider_and_session(
     assert (await turn_entries(db_session, **key, agent_id=agent_id, account_id=None))[
         -1
     ] == "updated-state"
+
+
+async def test_an_update_keeps_the_data_its_old_text_recorded(db_session: AsyncSession) -> None:
+    """A memory's readers only narrow: an update adds what it read to what the old text did."""
+    tenant = await make_tenant(db_session)
+    alice = await make_account(db_session, tenant=tenant)
+    now = datetime.now(UTC)
+    entry = MemoryEntry(
+        tenant_id=tenant.id, repo_id=17, name="n", title="N", body="a", kind="reference",
+        scope="repo", created_by_account_id=alice.id, created_at=now, updated_at=now,
+        data_refs=["record:a"],
+    )  # fmt: skip
+    await save_entry(db_session, entry=entry)
+    await save_entry(db_session, entry=entry.model_copy(update={"body": "b", "data_refs": None}))
+    await save_entry(db_session, entry=entry.model_copy(update={"data_refs": ["record:b"]}))
+    saved = await get_entry(db_session, tenant_id=tenant.id, repo_id=17, name="n")
+    assert saved is not None and saved.data_refs == ["record:a", "record:b"]

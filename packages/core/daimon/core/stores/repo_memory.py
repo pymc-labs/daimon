@@ -87,7 +87,9 @@ async def save_entry(session: AsyncSession, *, entry: MemoryEntry) -> str | None
         row.body = entry.body
         row.kind = entry.kind
         row.created_by_account_id = entry.created_by_account_id
-        row.data_refs = entry.data_refs
+        # An update keeps what the old text recorded: its readers only narrow.
+        refs = {*(row.data_refs or ()), *(entry.data_refs or ())}
+        row.data_refs = sorted(refs) or None
         row.updated_at = entry.updated_at
     else:
         session.add(RepoMemory(**entry.model_dump()))
