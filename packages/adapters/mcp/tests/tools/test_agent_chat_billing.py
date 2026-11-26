@@ -417,9 +417,17 @@ async def test_a_send_whose_turn_could_not_be_named_is_still_billed(
 
 @pytest.mark.parametrize(("status", "kept"), [(400, False), (503, True)])
 async def test_a_failed_send_withdraws_its_request_only_when_rejected(
-    world: _World, db_session: AsyncSession, status: int, kept: bool
+    db_session: AsyncSession,
+    pooled_sessionmaker: async_sessionmaker[AsyncSession],
+    status: int,
+    kept: bool,
 ) -> None:
-    """A 4xx was not accepted; a 5xx may hide an accepted send, so its request stays."""
+    """A 4xx was not accepted; a 5xx may hide an accepted send, so its request stays.
+
+    On independent connections, as in production: the send runs inside the session's
+    fence, whose own transaction must not take the committed request with it.
+    """
+    world = await _world(db_session, pooled_sessionmaker)
     world.agent.reject = status
 
     with pytest.raises(anthropic.APIStatusError):

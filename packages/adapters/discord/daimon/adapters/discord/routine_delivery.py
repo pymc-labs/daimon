@@ -62,7 +62,7 @@ from daimon.core.routine_delivery import (
     routine_agent_name,
     tenant_dm_still_open,
 )
-from daimon.core.routine_files import decode_payload, deliver_routine_files, payload_for
+from daimon.core.routine_files import deliver_routine_files, payload_for
 from daimon.core.routine_header import routine_header_shown
 from daimon.core.routine_hold import DeliveryGate, delivery_gate, result_is_held
 from daimon.core.rule_views import keeps_routine_inside
@@ -370,17 +370,16 @@ def make_discord_routine_poster(
         async def upload(file: DeliverableFile) -> None:
             await upload_output_file(destination, file)
 
-        if output_client is None and decode_payload(payload_for(row)).files:
-            raise RuntimeError("Generated file delivery is unavailable; it will not be retried.")
-        if output_client is not None:
-            await deliver_routine_files(
-                output_client,
-                payload_for(row),
-                max_bytes=upload_limit(destination),
-                post=upload,
-                notice=notice,
-                may_post=may_post,
-            )
+        await deliver_routine_files(
+            output_client,
+            payload_for(row),
+            max_bytes=upload_limit(destination),
+            post=upload,
+            notice=notice,
+            may_post=may_post,
+            sessions=sessionmaker,
+            tenant_id=row.tenant_id,
+        )
 
     async def _dm_fallback(
         row: RoutineRow,
@@ -427,10 +426,16 @@ def make_discord_routine_poster(
                 await dm.send(content=chunk, allowed_mentions=discord.AllowedMentions.none())
             await attach(row, dm, fallback_guard=may_post)
         except (discord.HTTPException, LookupError) as err:
-            log.info(
-                "routine.delivery_dm_failed", routine_id=str(row.id), error_type=type(err).__name__
+            log.warning(
+                "routine.delivery_fallback_failed",
+                routine_id=str(row.id),
+                error_type=type(err).__name__,
             )
-            return DeliveryOutcome(status="skipped", note=reason)
+            # Closed DMs or a gone member repeat on every run: a skip, not a failure that pages.
+            closed = isinstance(err, (discord.Forbidden, discord.NotFound))
+            return DeliveryOutcome(
+                status="skipped", note=reason, failed=None if closed else type(err).__name__
+            )
         return DeliveryOutcome(status="delivered", note=f"dm_fallback:{reason}")
 
     async def _post(row: RoutineRow) -> DeliveryOutcome:

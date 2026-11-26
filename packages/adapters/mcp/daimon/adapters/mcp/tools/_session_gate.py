@@ -21,7 +21,11 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
 from daimon.core.channel_backend import backend_refusal_causes, backend_selection_enabled
 from daimon.core.config import get_repo_memory_settings
-from daimon.core.confirmation import backend_switch_tools, watch_card_skipped
+from daimon.core.confirmation import (
+    backend_switch_tools,
+    compute_card_skipped,
+    watch_card_skipped,
+)
 from daimon.core.features.model_input import DEFAULT_TOOLSET, SessionToolset
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.features.toolset import place_toolset
@@ -37,6 +41,7 @@ from daimon.core.stores.lead_intake import confirmation_tools
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import (
     CARDED_TOOLS,
+    COMPUTE_APPROVAL_TOOLS,
     DAIMON_SERVER_NAME,
     PROVIDER_MOVE_TOOLS,
     REACH_APPROVAL_TOOLS,
@@ -106,6 +111,11 @@ async def session_card_gap(
         runtime.session_factory, auth.tenant_id, origin.responder_ma_agent_id, origin.platform
     ):
         # The deployment's admin set this agent to make watches without the card.
+        return None
+    if tool_name in COMPUTE_APPROVAL_TOOLS and await compute_card_skipped(
+        runtime.session_factory, auth.tenant_id, origin.responder_ma_agent_id, origin.platform
+    ):
+        # The admin set this agent to start and extend cloud computers without the card.
         return None
     async with runtime.session_factory() as session:
         live = await get_live_thread_session(
@@ -375,6 +385,10 @@ async def _recorded_as_gated_for(
             WATCH_CONFIRMED_TOOLS - {"update_watch"},
             # A session bound while `watch_approval` was skip: the rest still asked.
             WATCH_CONFIRMED_TOOLS - WATCH_APPROVAL_TOOLS,
+            # A session bound while `compute_approval` was skip, alone or with the
+            # watch skip: the rest still asked.
+            WATCH_CONFIRMED_TOOLS - COMPUTE_APPROVAL_TOOLS,
+            WATCH_CONFIRMED_TOOLS - WATCH_APPROVAL_TOOLS - COMPUTE_APPROVAL_TOOLS,
             frozenset[str](),
         )
         for reach_tools in (REACH_APPROVAL_TOOLS, frozenset[str]())

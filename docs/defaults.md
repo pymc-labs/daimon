@@ -50,7 +50,7 @@ off the agent at the provider and out of its fingerprint, so `apply` and
 `verify` read the agent as if the entry were absent. Each turn on a listed
 platform adds it to the session instead.
 
-- It fills only the room left under the 20-skill limit, and counts before a
+- It fills only the room left under the 50-skill limit, and counts before a
   channel's skills.
 - Only the Anthropic backend gets it.
 - A skill the provider refuses at session start is dropped for an hour, with a
@@ -109,7 +109,7 @@ Daimon.
 | `workspace-write` | `workspace-writer` | Google binding | Gmail send and draft, Drive create, copy and rename, Docs edits, Calendar create and update |
 | `slides-workflow` | `workspace-writer` | Google binding | Copy a named template or edit a named deck, then render changed slides to check them |
 | `toggl-edits` | `time-editor` | `TOGGL_API_TOKEN` | Edit stopped Toggl entries for a named member, up to 365 days old |
-| `image-workflow` | `image-maker` | `OPENAI_API_KEY` | Generate or edit one PNG into `/mnt/session/outputs` |
+| `image-workflow` | `image-maker` | `OPENAI_API_KEY` | Generate or edit one PNG into the reply's outputs directory |
 | `lead-intake` | none | none | Classify enquiries and draft replies for [lead intake](lead-intake.md) |
 
 To opt in, deliver the skills, create the agent, then bind its credential:

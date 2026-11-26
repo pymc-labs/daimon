@@ -584,8 +584,7 @@ def _is_dead_session(state: TurnState) -> bool:
     single terminal error bricked the thread PERMANENTLY: MA terminated the
     session, the mapping row still pointed at it, and every later message in
     that thread 400'd here forever with zero tokens billed and no path back.
-    Observed on staging thread 1535185295245582356 / session
-    sesn_01TBcsjhyD4KMEc6wasC3vyg (2026-08-07), where an oversized image ended
+    Observed on a staging thread (2026-08-07), where an oversized image ended
     the session and the next "hello" — and every message after it — failed.
 
     Note this deliberately does NOT fire on the terminating turn itself (whose
@@ -2054,11 +2053,13 @@ async def run_prepared_turn_impl(
                         # An unreadable unattended session cannot be constrained.
                         raise AdmissionDenied(reason="backend_unsupported")
                     if (
-                        job_row is None
+                        managed
+                        and job_row is None
                         and watch_row is None
                         and admission.grant is not None
                         and admission.grant.is_dm
                     ):
+                        # An OpenAI or Gemini DM routine takes the native gate below.
                         if not gateable:
                             raise AdmissionDenied(reason="backend_unsupported")
                         posture, dm_gate, dm_builtins = await dm_session_authority(
@@ -2165,7 +2166,11 @@ async def run_prepared_turn_impl(
                                 if watch_row is not None
                                 else unattended_entry_point(origin)
                             )
-                            host_builtins[0] = capability_policy(native_entry).allow_builtins
+                            native_policy = capability_policy(
+                                native_entry,
+                                routine_sandbox_tools=prepared.admission.routine_sandbox_tools,
+                            )
+                            host_builtins[0] = native_policy.allow_builtins
                             native_profile = revision.profile if revision is not None else "unknown"
                             native_gated = deps.settings is not None and deployment_on(
                                 deps.settings, "host_call_gate", platform
@@ -2176,7 +2181,7 @@ async def run_prepared_turn_impl(
                                     prepared._native_spec,  # pyright: ignore[reportPrivateUsage]
                                     profile_id=native_profile,
                                     gated=native_gated,
-                                    sandbox=capability_policy(native_entry).allow_builtins,
+                                    sandbox=native_policy.allow_builtins,
                                 )
 
                             native_check()

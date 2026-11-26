@@ -853,6 +853,204 @@ async def test_run_turn_attaches_vault_when_mcp_settings(
 
 
 @pytest.mark.parametrize(
+    ("origin", "signed", "daimon_mcp"),
+    [
+        pytest.param(
+            RoutineOrigin("c1", None, frozenset({"c1"}), "routine:r1", reads_inside=True),
+            ["c1"],
+            True,
+            id="channel-destination",
+        ),
+        pytest.param(
+            RoutineOrigin("c1", "t1", frozenset({"c1", "t1"}), "routine:r1", reads_inside=True),
+            ["c1", "t1"],
+            True,
+            id="thread-destination",
+        ),
+        pytest.param(
+            RoutineOrigin("c1", None, frozenset({"c1"}), "routine:r1"),
+            None,
+            True,
+            id="no-destination-dm-or-other-platform",
+        ),
+        pytest.param(
+            RoutineOrigin("c2", None, frozenset(), "routine:r1", reads_inside=True),
+            None,
+            True,
+            id="open-destination",
+        ),
+        pytest.param(
+            RoutineOrigin("c1", None, frozenset({"c1"}), "routine:r1", reads_inside=True),
+            None,
+            False,
+            id="agent-without-daimon-mcp",
+        ),
+    ],
+)
+async def test_a_routine_into_a_limited_room_signs_that_room_into_its_session_credential(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    run_turn: RunTurn,
+    headless_identity: HeadlessIdentity,
+    origin: RoutineOrigin,
+    signed: list[str] | None,
+    daimon_mcp: bool,
+) -> None:
+    """The unattended run names no turn origin, so the credential its `daimon-mcp` server
+    uses (the session-specific one) is what places it in its room: it signs the seals of a
+    channel or thread destination and no others. The ordinary vault, which holds personal
+    connections, stays the same vault and signs none, and both are mounted. An agent
+    without `daimon-mcp` has no Daimon read tools, so no credential is made for it."""
+    import jwt as pyjwt
+    from daimon.core.mcp_server_url import session_mcp_url
+
+    account_id, agent_uuid = headless_identity.account_id, uuid.uuid4()
+    public_url = "https://mcp.example.local/mcp"
+    vault_names: dict[str, str] = {}
+    credentials: list[tuple[str, dict[str, Any]]] = []
+    session_bodies: list[dict[str, Any]] = []
+    router = MARouter()
+
+    def create_vault(request: httpx.Request, match: Any) -> httpx.Response:
+        name = json.loads(request.content)["display_name"]
+        vault_id = f"vlt_{len(vault_names) + 1}"
+        vault_names[vault_id] = name
+        return httpx.Response(
+            200,
+            json={
+                "id": vault_id,
+                "type": "vault",
+                "display_name": name,
+                "metadata": None,
+                "archived_at": None,
+                "created_at": "2026-05-20T00:00:00Z",
+            },
+        )
+
+    def create_credential(request: httpx.Request, match: Any) -> httpx.Response:
+        body = json.loads(request.content)
+        credentials.append((match.group(1), body))
+        return httpx.Response(
+            200,
+            json={
+                "id": "vcrd_new",
+                "type": "vault_credential",
+                "vault_id": match.group(1),
+                "metadata": {},
+                "created_at": "2026-05-20T00:00:00Z",
+                "updated_at": "2026-05-20T00:00:00Z",
+                "auth": {"type": "static_bearer", "mcp_server_url": body["auth"]["mcp_server_url"]},
+            },
+        )
+
+    def create_session(request: httpx.Request, match: Any) -> httpx.Response:
+        session_bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=_fake_session_json())
+
+    router.add_agent(
+        ma_agent(
+            id="agent_x",
+            name="test-agent",
+            model=_MODEL_ID,
+            created_at=_NOW,
+            mcp_servers=[{"type": "url", "name": "daimon-mcp", "url": public_url}]
+            if daimon_mcp
+            else [],
+            tools=[
+                {
+                    "type": "mcp_toolset",
+                    "mcp_server_name": "daimon-mcp",
+                    "default_config": {
+                        "enabled": True,
+                        "permission_policy": {"type": "always_allow"},
+                    },
+                    "configs": [],
+                }
+            ]
+            if daimon_mcp
+            else [],
+        )
+    )
+    router.add(
+        "GET",
+        r"/v1/vaults",
+        lambda _r, _m: httpx.Response(200, json={"data": [], "has_more": False}),
+    )
+    router.add("POST", r"/v1/vaults$", create_vault)
+    router.add(
+        "GET",
+        r"/v1/vaults/[^/]+/credentials",
+        lambda _r, _m: httpx.Response(200, json={"data": [], "has_more": False}),
+    )
+    router.add("POST", r"/v1/vaults/([^/]+)/credentials", create_credential)
+    router.add("POST", r"/v1/sessions$", create_session)
+    router.add(
+        "GET", r"/v1/sessions/[^/]+$", lambda _r, _m: httpx.Response(200, json=_fake_session_json())
+    )
+    router.add(
+        "GET",
+        r"/v1/sessions/[^/]+/events/stream",
+        lambda _r, _m: sse_response([e.model_dump(mode="json") for e in _idle_events()]),
+    )
+    router.add(
+        "POST",
+        r"/v1/sessions/[^/]+/events",
+        lambda _r, _m: httpx.Response(200, json={"data": None}),
+    )
+    router.add(
+        "GET",
+        r"/v1/environments/([^/]+)",
+        lambda r, m: httpx.Response(
+            200,
+            json=ma_environment(
+                id=m.group(1), name="test-env", created_at=_NOW.isoformat()
+            ).model_dump(mode="json"),
+        ),
+    )
+
+    await run_turn(
+        anthropic=build_fake_anthropic(router.dispatch),
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="hi",
+        mcp_settings=McpSettings(jwt_secret=SecretStr("x" * 32), public_url=HttpUrl(public_url)),
+        account_id=account_id,
+        agent_uuid=agent_uuid,
+        session_factory=db_session_factory,
+        origin_place=origin,
+        tool_safety=OPEN_TOOL_SAFETY,
+    )
+
+    def claims(body: dict[str, Any]) -> dict[str, Any]:
+        return pyjwt.decode(
+            body["auth"]["token"], "x" * 32, algorithms=["HS256"], options={"verify_exp": False}
+        )
+
+    ordinary = [(v, b) for v, b in credentials if b["auth"]["mcp_server_url"] == public_url]
+    session_url = [
+        (v, b)
+        for v, b in credentials
+        if b["auth"]["mcp_server_url"].startswith(public_url + "?daimon_session=")
+    ]
+    assert len(ordinary) == 1, "the ordinary vault is the same one, with its own credential"
+    assert ":session:" not in vault_names[ordinary[0][0]]
+    assert "seal_ids" not in claims(ordinary[0][1]), "personal connections' vault signs no seals"
+    if not daimon_mcp:
+        assert session_url == [], "no session credential and so no seals for an agent without it"
+        assert session_bodies[0]["vault_ids"] == [ordinary[0][0]]
+        return
+    assert len(session_url) == 1
+    vault_id, body = session_url[0]
+    assert ":session:" in vault_names[vault_id]
+    assert body["auth"]["mcp_server_url"] == session_mcp_url(
+        public_url, vault_names[vault_id].rsplit(":session:", 1)[1]
+    ), "the URL the agent's daimon-mcp server is pointed at"
+    assert claims(body).get("seal_ids") == signed, "only a room destination signs its seals"
+    assert set(session_bodies[0]["vault_ids"]) == {ordinary[0][0], vault_id}, (
+        "both the ordinary and the session-specific vault are mounted"
+    )
+
+
+@pytest.mark.parametrize(
     "identity",
     ["no tenant", "no account", "neither"],
 )

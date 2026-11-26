@@ -63,6 +63,7 @@ SPEND_LEDGER_REASONS: tuple[str, ...] = (
     "media_debit",
     "classifier_debit",
     "thread_naming_debit",
+    "owner_notice_debit",
     "eval_draft_debit",
 )
 """Every debit reason this module writes: model spend, as opposed to clawbacks
@@ -558,6 +559,7 @@ _AUXILIARY_PURPOSES = {
     "thread_naming": ("thread_naming_debit", "thread-naming"),
     "classifier": ("classifier_debit", "classifier"),
     "eval_draft": ("eval_draft_debit", "eval-draft"),
+    "owner_notice": ("owner_notice_debit", "owner-notice"),
 }
 
 

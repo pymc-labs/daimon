@@ -398,7 +398,11 @@ class GeminiArtifacts(Base):
                 mounted = mounted_files(current.request.get("environment"), records.skills)
                 for path, (id_, data) in sorted(candidates.items(), reverse=order == "desc"):
                     sha = hashlib.sha256(data).hexdigest()
-                    if mounted.covers(path, sha) or "__pycache__" in path.split("/"):
+                    if (
+                        mounted.covers(path, sha)
+                        or "__pycache__" in path.split("/")
+                        or path in current.placed
+                    ):
                         continue
                     if id_ in records.delivered_artifacts:
                         continue

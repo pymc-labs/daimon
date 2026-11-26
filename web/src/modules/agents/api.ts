@@ -196,7 +196,9 @@ export function useDraftEditor(agent: Agent | undefined, draft: Draft | null | u
   const latest = useRef<AgentConfig | null>(null)
   const seq = useRef(0)
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
-  useEffect(() => () => clearTimeout(timer.current), [])
+  const pending = useRef<(() => void) | null>(null)
+  // An edit made just before leaving is sent, not dropped.
+  useEffect(() => () => { clearTimeout(timer.current); pending.current?.() }, [])
   const config = draft?.config ?? (agent ? configOf(agent) : null)
 
   const update = (fn: (c: AgentConfig) => void, delay = 250) => {
@@ -208,14 +210,17 @@ export function useDraftEditor(agent: Agent | undefined, draft: Draft | null | u
     qc.setQueryData<Draft | null>(key, (d) => ({ base_version: base, changes: d?.changes ?? [], stale: d?.stale ?? false, config: next }))
     const n = ++seq.current
     clearTimeout(timer.current)
-    timer.current = setTimeout(() => {
+    const send = () => {
+      pending.current = null
       api.patch<Draft | null>(`/api/agents/${agent.id}/draft`, { base_version: base, config: next }).then((d) => {
         if (n !== seq.current) return
         latest.current = null
         qc.setQueryData(key, d)
         qc.invalidateQueries({ queryKey: ["agents"], exact: true })
       }, (e) => toast.error(e.message))
-    }, delay)
+    }
+    pending.current = send
+    timer.current = setTimeout(send, delay)
   }
   return { config, update }
 }

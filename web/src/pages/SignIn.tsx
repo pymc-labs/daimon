@@ -4,7 +4,7 @@ import { useNavigate, useSearchParams } from "react-router"
 import { BrandIcon } from "@/components/brand"
 import { ErrorState, Rows } from "@/components/QueryState"
 import { Button } from "@/components/ui/button"
-import { api, ApiError } from "@/lib/api"
+import { api } from "@/lib/api"
 import { useProviders } from "@/lib/hooks"
 import type { Me, Provider } from "@/lib/types"
 import { safeNext } from "@/lib/safe-next"
@@ -33,7 +33,7 @@ export function SignIn() {
     if (p.kind === "dev" || MOCK) dev.mutate(p.id)
     else window.location.assign(`/auth/${p.id}/start?next=${encodeURIComponent(next)}`)
   }
-  const error = params.get("error") ?? (dev.error instanceof ApiError ? dev.error.message : null)
+  const error = params.get("error") ?? (dev.error instanceof Error ? dev.error.message : null)
   return (
     <Card>
       <h1 className="mt-5 text-lg font-semibold">Sign in to Daimon</h1>

@@ -14,7 +14,7 @@ server](https://daimon.decision.ai/) instead.
   Discord with Docker Compose.
 - **Run it for a team:** [Self-hosting](self-hosting.md) covers a production
   install, then [Model providers](providers.md),
-  [Operations](operations.md) and [Fly compute](compute.md).
+  [Operations](operations.md) and [Compute sessions](compute.md).
 - **Add a platform or tool:** [Slack](slack.md),
   [Microsoft Teams](teams.md), the [web app](web.md), [GitHub](github.md),
   [MCP servers](mcp-servers.md) and the
@@ -34,6 +34,8 @@ server](https://daimon.decision.ai/) instead.
   turn.
 - [Isolation](isolation.md), [Permissions](permissions.md) and
   [Admins](admins.md): who can see and do what.
+- [Rooms with outside people](outside-people.md): which Discord rooms are
+  contained or narrow, and what your own DM can read.
 - [Unattended turns](unattended.md): what runs with nobody watching.
 - [Billing](billing.md): how model calls are metered and gated.
 - [Allowances](allowances.md): per-person spend limits.

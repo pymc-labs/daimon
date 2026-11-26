@@ -23,6 +23,7 @@ import pytest
 import yaml
 from daimon.core.mcp_auth import token_jti
 from daimon.core.neutral_resources import NeutralResourceHost
+from daimon.core.sandbox_paths import WORKSPACE
 from daimon.core.stores import mux_state
 from daimon.core.stores.mcp_tokens import revoke_mcp_token
 from daimon.core.stores.mux_state import PostgresStateStore
@@ -69,6 +70,8 @@ DEFAULT = yaml.safe_load((ROOT / "defaults/agents/default.yaml").read_text())
 # A platform-limited custom skill (microsoft-365) is not on the seeded agent.
 CUSTOM = [s for s in DEFAULT["skills"] if s["type"] == "custom" and "platforms" not in s]
 BUILT_IN = [s for s in DEFAULT["skills"] if s["type"] == "anthropic"]
+#: A test tenant has no open copies seeded, so off Claude each built-in is a named loss.
+UNSEEDED_BUILT_INS = frozenset(f"skill:{s['skill_id']}" for s in BUILT_IN)
 PARAMS = {
     "backend": "gemini",
     "caller_mcp": True,
@@ -813,6 +816,26 @@ async def test_gemini_gated_mcp_tool_loss_is_explicit_and_keeps_siblings(full):
     )
     assert set(markers) <= set(missing)
     assert not posts
+
+
+@pytest.mark.parametrize(
+    "switched_request", [{**PARAMS, "keys": True, "guided": True}], indirect=True
+)
+async def test_gemini_carries_the_agents_keys_instead_of_declaring_them_lost(full):
+    from daimon.core.turn.runtime_manifest import classify_source_obligations
+
+    request, *_ = full
+    source = await capture_preparation_source(request, fresh=True)
+    keys = {r.credential_ref for r in source.resource_requirements if r.id.startswith("agent-env:")}
+    (represented,) = source.representations
+    assert keys and keys <= set(represented.credential_refs)
+    missing = classify_source_obligations(
+        source, represented.target, environment=represented.environment
+    )
+    assert not {"files", "credentials"} & set(missing), "the keys file goes to the sandbox"
+    # The turn's guidance names where this sandbox keeps keys and reply files.
+    assert WORKSPACE.keys in represented.target.system
+    assert WORKSPACE.outputs in represented.target.system
 
 
 @pytest.mark.parametrize("switched_request", [GATED_PARAMS], indirect=True)

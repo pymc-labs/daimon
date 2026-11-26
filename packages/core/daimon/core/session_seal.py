@@ -38,6 +38,7 @@ __all__ = [
     "is_private_conversation",
     "origin_stamp",
     "seal_ids",
+    "seal_ids_from_value",
     "session_facts",
 ]
 
@@ -70,6 +71,11 @@ def seal_ids(metadata: Mapping[str, str | None] | None) -> frozenset[str]:
         else:
             ids.add(part)
     return frozenset(ids) if ids else frozenset({_UNMATCHABLE})
+
+
+def seal_ids_from_value(value: str) -> frozenset[str]:
+    """The ids a `format_seal_ids` value names (credential metadata holds strings only)."""
+    return seal_ids({MA_METADATA_KEY_SEALED: value})
 
 
 def child_seal_ids(

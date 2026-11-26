@@ -5,17 +5,20 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from daimon.core._models import ComputeTaskRecord
+from daimon.core._models import ComputeTaskRecord, TaskContinuation
+from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX, DM_SCOPE_PREFIX
 from daimon.core.compute_models import (
     ACTIVE_TASK_STATES,
     ComputeSession,
     ComputeTask,
     ComputeTaskState,
 )
-from daimon.core.compute_tasks import wake_text
+from daimon.core.compute_tasks import wake_key, wake_text
 from daimon.core.errors import StoreError
-from daimon.core.stores.compute_sessions import scope
-from sqlalchemy import func, select, update
+from daimon.core.features.snapshot import feature_in_or_none
+from daimon.core.stores.compute_sessions import feature_place, notices_reach, scope
+from daimon.core.stores.domain import TurnOriginRow
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -29,15 +32,44 @@ async def get(db: AsyncSession, tenant_id: uuid.UUID, task_id: uuid.UUID) -> Com
     return None if row is None else ComputeTask.model_validate(row)
 
 
-async def list_active(db: AsyncSession, tenant_id: uuid.UUID) -> list[ComputeTask]:
+async def list_active(
+    db: AsyncSession, tenant_id: uuid.UUID, *, now: datetime
+) -> list[ComputeTask]:
+    """The active tasks the scheduler polls: not one whose caller still waits for it."""
     await scope(db, tenant_id)
     rows = await db.scalars(
         select(ComputeTaskRecord).where(
             ComputeTaskRecord.tenant_id == tenant_id,
             ComputeTaskRecord.state.in_(ACTIVE_TASK_STATES),
+            or_(ComputeTaskRecord.wait_until.is_(None), ComputeTaskRecord.wait_until <= now),
         )
     )
     return [ComputeTask.model_validate(row) for row in rows]
+
+
+async def list_for_session(
+    db: AsyncSession, tenant_id: uuid.UUID, session_id: uuid.UUID
+) -> list[ComputeTask]:
+    """Every task of one session, active or finished."""
+    await scope(db, tenant_id)
+    rows = await db.scalars(
+        select(ComputeTaskRecord).where(
+            ComputeTaskRecord.tenant_id == tenant_id, ComputeTaskRecord.session_id == session_id
+        )
+    )
+    return [ComputeTask.model_validate(row) for row in rows]
+
+
+async def withdraw_wake(db: AsyncSession, task: ComputeTask) -> bool:
+    """Withdraw a finished task's completion wake that no dispatcher has claimed yet, because
+    its conversation already has the end; False when there is none or it is claimed."""
+    from daimon.core.stores.task_continuations import cancel_wake_row
+
+    if task.state in ACTIVE_TASK_STATES:
+        raise ValueError("Only a finished task's wake can be withdrawn")
+    return await cancel_wake_row(
+        db, tenant_id=task.tenant_id, idempotency_key=wake_key(task.id), skip_reason="seen"
+    )
 
 
 async def register(db: AsyncSession, task: ComputeTask, *, cap: int) -> tuple[ComputeTask, bool]:
@@ -100,6 +132,7 @@ async def finish(
     state: ComputeTaskState,
     now: datetime,
     wake: bool,
+    run_limit: int,
     exit_code: int | None = None,
     output_bytes: int | None = None,
     output_tail: str | None = None,
@@ -108,7 +141,10 @@ async def finish(
 
     The wake goes to the session's own conversation, which is the only one a
     task can be started from. ``wake`` is false when the owner observed the end
-    themselves in that conversation, so they are not told twice.
+    themselves in that conversation, so they are not told twice. Its text offers the
+    next command only when the wake turn may run one: fewer than ``run_limit`` wake
+    turns acted since the owner last did (`ComputeSession.wake_turns`, `turn_may_act`).
+    No wake is queued where none can reach (`notices_reach`): the end is still saved.
     """
     if state in ACTIVE_TASK_STATES:
         raise ValueError("Finish requires a terminal state")
@@ -123,10 +159,14 @@ async def finish(
         output_bytes=task.output_bytes if output_bytes is None else output_bytes,
         output_tail=task.output_tail if output_tail is None else output_tail,
     )
-    if done is None or not wake:
+    if done is None or not wake or not notices_reach(session):
         return done
     from daimon.core.stores.task_continuations import record_continuation
 
+    reads = wake_reads_in(session)
+    on = reads and await wake_runs_on(db, session)
+    # A new wake turn is not on the list yet: it may run while the list has room.
+    full = len(session.wake_turns) >= run_limit
     await record_continuation(
         db,
         tenant_id=session.tenant_id,
@@ -138,9 +178,86 @@ async def finish(
         target_ma_agent_id=session.agent_id,
         target_name=session.agent_name,
         reason="timer",
-        idempotency_key=uuid.uuid5(task.id, "finished"),
+        idempotency_key=wake_key(task.id),
         available_at=now,
         attended=False,
-        requested_work=wake_text(done),
+        requested_work=wake_text(
+            done, reads=reads, runs=on and not full, limit=run_limit if on and full else None
+        ),
     )
     return done
+
+
+def wake_reads_in(session: ComputeSession) -> bool:
+    """Whether a finished command's wake can read this session: in a thread, yes.
+
+    A session launched in a Discord DM or under a plain channel's scope gets its wake
+    through the scope timer runners (`direct_messages.run_dm_timer`,
+    `run_channel_timer`), which start the turn in a fresh scope. That is not the
+    session's conversation, so every read is refused there
+    (`packages/core/tests/test_compute_wake_scope_gap.py`). An agent-chat session's
+    machine gets no wake at all (`notices_reach`).
+    """
+    return notices_reach(session) and not session.thread_id.startswith(
+        (DM_SCOPE_PREFIX, CHANNEL_SCOPE_PREFIX)
+    )
+
+
+async def wake_turn_of(
+    db: AsyncSession, origin: TurnOriginRow, session: ComputeSession, *, now: datetime
+) -> bool:
+    """Whether ``origin`` is the turn a wake of one of this session's finished commands started.
+
+    A dispatcher claims a wake row under a fresh ``lease_owner``, and the turn it
+    then starts takes that owner as its origin id (`daimon.core.turn_origin.wake_turn`).
+    So the row names its exact turn, for as long as it is claimed, started and inside
+    its lease, and it names its command by ``wake_key``. Any other turn, whatever
+    started it and whenever, has another origin id and reads nothing. An agent-chat
+    session's machine has no wake (`notices_reach`), so its scope is never looked up.
+    """
+    if not notices_reach(session):
+        return False
+    await scope(db, session.tenant_id)
+    wake = await db.scalar(
+        select(TaskContinuation).where(
+            TaskContinuation.tenant_id == session.tenant_id,
+            TaskContinuation.platform == session.platform,
+            TaskContinuation.thread_id == session.thread_id,
+            TaskContinuation.lease_owner == origin.id.hex,
+            TaskContinuation.status == "claimed",
+            TaskContinuation.started_at.is_not(None),
+            TaskContinuation.lease_expires_at > now,
+        )
+    )
+    place = (session.tenant_id, session.platform, session.thread_id, session.parent_channel_id)
+    if (
+        wake is None
+        or origin.attended
+        or origin.helper_of is not None
+        or (origin.tenant_id, origin.platform, origin.thread_id, origin.parent_channel_id) != place
+        or wake.parent_channel_id != session.parent_channel_id
+        or not origin.account_id == wake.requester_account_id == session.owner_account_id
+        or not origin.responder_ma_agent_id == wake.target_ma_agent_id == session.agent_id
+    ):
+        return False
+    finished = await db.scalars(
+        select(ComputeTaskRecord.id).where(
+            ComputeTaskRecord.tenant_id == session.tenant_id,
+            ComputeTaskRecord.session_id == session.id,
+            ComputeTaskRecord.state.not_in(ACTIVE_TASK_STATES),
+        )
+    )
+    return wake.idempotency_key in {wake_key(task_id) for task_id in finished}
+
+
+async def wake_runs_on(db: AsyncSession, session: ComputeSession) -> bool:
+    """Whether `compute_wake_runs` is on at the session's place; off when it cannot be read.
+
+    `feature_in_or_none` does not check `depends_on`, and this needs `compute` on too.
+    It is: the session exists, and `ComputeSessions._allowed` checked it at launch.
+    """
+    place = await feature_place(db, session)
+    if place is None:
+        return False
+    found = await feature_in_or_none(db, None, place, "compute_wake_runs")
+    return found is not None and found.on

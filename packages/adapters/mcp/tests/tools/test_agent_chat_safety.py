@@ -9,6 +9,7 @@ or after a restart. The deciders, reducer and gate are the real ones.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import re
 import uuid
@@ -39,6 +40,7 @@ from daimon.core.config import McpSettings
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_CHANNEL,
+    MA_METADATA_KEY_CHAT_SESSION,
     MA_METADATA_KEY_PRIVATE_DM,
 )
 from daimon.core.ma_identity import derive_agent_uuid
@@ -46,7 +48,14 @@ from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import agent_tool_rules, session_settle_state
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.tool_safety import ToolAnnotations, ToolCall, ToolSafetyPolicy
+from daimon.core.stores.domain import FeatureTarget
+from daimon.core.stores.feature_values import set_feature_value
+from daimon.core.tool_safety import (
+    CONFIRMED_DAIMON_TOOLS,
+    ToolAnnotations,
+    ToolCall,
+    ToolSafetyPolicy,
+)
 from daimon.testing import ma_agent, ma_environment, with_coordinator, with_hidden_capability
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter
@@ -376,7 +385,11 @@ async def _record(
     """What an agent-chat send left behind before the restart."""
     async with factory.begin() as db:
         await session_settle_state.record_unattended_turn(
-            db, managed_session_id=_SESSION, turn_event_id=boundary, rules_channel_id=channel
+            db,
+            managed_session_id=_SESSION,
+            turn_event_id=boundary,
+            rules_channel_id=channel,
+            send=None,
         )
 
 
@@ -1302,7 +1315,11 @@ async def test_a_throttled_confirmation_is_decided_again_on_resume(
     await _deny_in_channel(factory, "C1")
     async with factory.begin() as db:
         await session_settle_state.record_unattended_turn(
-            db, managed_session_id=_SESSION, turn_event_id=boundary, rules_channel_id="C1"
+            db,
+            managed_session_id=_SESSION,
+            turn_event_id=boundary,
+            rules_channel_id="C1",
+            send=None,
         )
     await _continue_turn_impl(runtime, _auth(), _SESSION, None)
     await _settle(runtime)
@@ -1375,7 +1392,11 @@ async def test_another_sessions_record_does_not_authorize_this_one(
     boundary = fake.pause()
     async with factory.begin() as db:
         await session_settle_state.record_unattended_turn(
-            db, managed_session_id="ses_elsewhere", turn_event_id=boundary, rules_channel_id=None
+            db,
+            managed_session_id="ses_elsewhere",
+            turn_event_id=boundary,
+            rules_channel_id=None,
+            send=None,
         )
     runtime = _runtime(fake, factory, _DISABLED)
     with pytest.raises(ToolError, match="approval in the chat"):
@@ -1527,3 +1548,90 @@ async def test_the_worker_runs_to_the_unattended_run_limit_at_its_place(
     )
     assert await asyncio.wait_for(worker, timeout=5) is False, "the worker stops at its limit"
     assert read == [30 * 60.0], "the worker reads the tenant's unattended run limit"
+
+
+async def _cloud_computers(factory: async_sessionmaker[AsyncSession], agent_chat: str) -> None:
+    """Cloud computers on for the workspace, and cloud computers from agent chat `agent_chat`."""
+    async with factory.begin() as db:
+        await make_tenant(db, id=_TENANT_ID)
+        for key, value in (("compute", "on"), ("compute_agent_chat", agent_chat)):
+            await set_feature_value(
+                db, tenant_id=_TENANT_ID, target=FeatureTarget("workspace"), key=key,
+                value=value, set_by=None, surface="cli",
+            )  # fmt: skip
+
+
+@pytest.mark.parametrize("policy", [_ENABLED, _DISABLED], ids=["enabled", "disabled"])
+@pytest.mark.parametrize(
+    ("caller", "switch", "expected"),
+    [
+        ("owner", "on", "allow"),
+        ("owner", "off", "deny"),
+        ("no_grant", "on", "deny"),
+        ("no_platform_user", "on", "deny"),
+    ],
+)
+async def test_an_agent_chat_owner_starts_a_cloud_computer_with_nobody_watching(
+    policy: ToolSafetyPolicy,
+    factory: async_sessionmaker[AsyncSession],
+    caller: str,
+    switch: str,
+    expected: str,
+) -> None:
+    """Only for a person's account, on a session stamped with its credential's grant, with
+    the switch on. Off, the worker answers exactly as before: nobody is here to press its
+    card. A session of another account is not driven at all (`require_session_driver`)."""
+    calls: list[Call] = [
+        ("daimon-mcp", "compute_launch_session", {"template": "mmm"}),
+        ("daimon-mcp", "compute_extend_session", {"session_id": "s", "hours": 1}),
+        ("daimon-mcp", "create_watch", {CONFIRMED_DAIMON_TOOLS["create_watch"] or "": "x"}),
+    ]
+    fake = FakeSession(script=[calls]).with_daimon()
+    fake.metadata[MA_METADATA_KEY_CHAT_SESSION] = "grant-safety"
+    await _record(factory, fake.pause())
+    await _cloud_computers(factory, switch)
+    runtime = _runtime(fake, factory, policy, public_url=_PUBLIC)
+    auth = dataclasses.replace(_auth(platform="discord"), platform_user_id="u1")
+    if caller == "no_grant":
+        del fake.metadata[MA_METADATA_KEY_CHAT_SESSION]
+    if caller == "no_platform_user":
+        auth = _auth(platform="discord")
+    _restart()
+    await _continue_turn_impl(runtime, auth, _SESSION, None)
+    await _settle(runtime)
+    answers = {c["tool_use_id"]: c["result"] for c in fake.confirmations}
+    assert list(answers.values()) == [expected, expected, "deny"], "a watch still needs its card"
+
+
+async def test_a_signed_in_resume_records_where_an_older_session_came_from(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A session made before provenance was kept has no record of it. A person's resume,
+    with no message, copies it from the session's stamp and changes nothing else the
+    driver record holds."""
+    fake = FakeSession().with_daimon()
+    fake.metadata[MA_METADATA_KEY_CHAT_SESSION] = "grant-older"
+    await _record(factory, fake.pause())
+
+    async def stored() -> tuple[object, bool, object]:
+        async with factory() as db:
+            return (
+                await session_settle_state.count_agent_chat_sends(db, managed_session_id=_SESSION),
+                await session_settle_state.is_agent_chat_signed_in(db, managed_session_id=_SESSION),
+                await session_settle_state.find_agent_chat_session(
+                    db, grant="grant-older", account_id=_OWNER
+                ),
+            )
+
+    sends, signed_in, found = await stored()
+    assert found is None, "no send of this release recorded it"
+    runtime = _runtime(fake, factory, _ENABLED, public_url=_PUBLIC)
+    _restart()
+    person = dataclasses.replace(_auth(), signed_in_person=True)
+    await _continue_turn_impl(runtime, person, _SESSION, None)
+    await _settle(runtime)
+    assert await stored() == (
+        sends,
+        signed_in,
+        session_settle_state.AgentChatSession(managed_session_id=_SESSION, channel_id=None),
+    )

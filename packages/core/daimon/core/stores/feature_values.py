@@ -248,6 +248,20 @@ async def list_feature_values(
     return [FeatureValueRow.model_validate(row) for row in rows]
 
 
+async def list_agent_rows_with_value(
+    session: AsyncSession, *, key: str, value: str, tenant_ids: Collection[uuid.UUID] | None = None
+) -> list[FeatureValueRow]:
+    """Every agent-tier row of `key` that holds `value`, across workspaces (a background
+    worker's question: which agents have this on). `tenant_ids` narrows it."""
+    stmt = select(FeatureValue).where(
+        FeatureValue.key == key, FeatureValue.tier == "agent", FeatureValue.value == value
+    )
+    if tenant_ids is not None:
+        stmt = stmt.where(FeatureValue.tenant_id.in_(tenant_ids))
+    rows = (await session.scalars(stmt.order_by(FeatureValue.id))).all()
+    return [FeatureValueRow.model_validate(row) for row in rows]
+
+
 async def replace_agent_values(
     session: AsyncSession,
     *,

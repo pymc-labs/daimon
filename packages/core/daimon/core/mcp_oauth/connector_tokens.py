@@ -1,8 +1,10 @@
-"""OAuth connector tokens Daimon holds and refreshes, for agents not on Managed Agents.
+"""OAuth connector tokens Daimon holds and refreshes, on every backend.
 
-Each grant has one refresh owner. On a Managed Agents agent the MA vault holds
-and refreshes the token (`vault`); on every other backend Daimon does, in the
-`connector_tokens` table. A backend switch therefore means a reconnect.
+Daimon is each grant's one refresh owner, in the `connector_tokens` table. A
+Managed Agents turn gets a copy of the fresh access token in the caller's vault
+(`agent_mcp_credentials.mirror_stored_credentials`), with no refresh token, so
+Anthropic never spends it; every other backend calls the connector through
+Daimon's relay. A backend switch therefore keeps the grant working.
 
 A refresh claims the row first (a compare-and-set, no lock held over HTTP), so
 concurrent turns spend a rotating refresh token once; the others wait for the
@@ -20,8 +22,8 @@ from collections.abc import Awaitable, Callable
 from urllib.parse import urlsplit
 
 import httpx
+import structlog
 from cryptography.fernet import MultiFernet
-from daimon.core.channel_backend import current_agent_backend, resolve_agent_backend
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.mcp_oauth.flow import (
     McpOAuthFlowError,
@@ -29,16 +31,21 @@ from daimon.core.mcp_oauth.flow import (
     refresh_access_token,
 )
 from daimon.core.mcp_oauth.models import ClientRegistration, TokenResponse
+from daimon.core.mcp_server_url import same_mcp_url
+from daimon.core.stores import agent_mcp_credentials as agent_tokens_store
 from daimon.core.stores import connector_tokens as store
-from daimon.core.stores.domain import ConnectorRefreshOwner, ConnectorTokenRow, McpOAuthFlowRow
-from mux.contracts.config import ResolvedBackend
-from mux.profiles import MANAGED_AGENTS
+from daimon.core.stores.domain import ConnectorTokenRow, McpOAuthFlowRow
+from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+_log = structlog.get_logger(__name__)
 
 REFRESH_LEASE = dt.timedelta(seconds=60)
 """A claim older than this belongs to a refresher that died; another may take it."""
 REFRESH_EARLY = dt.timedelta(seconds=60)
 """Refresh a token this close to expiry before handing it to a turn."""
+VAULT_REFRESH_EARLY = dt.timedelta(seconds=LONGEST_TURN_CEILING_S) + dt.timedelta(minutes=5)
+"""A vault copy is not refreshed mid-turn, so it must outlive the longest turn, with margin."""
 _WAIT_STEP_S = 0.2
 
 Clock = Callable[[], dt.datetime]
@@ -56,25 +63,6 @@ class ConnectorScopeWidenedError(McpOAuthFlowError):
 
 class ConnectorResourceRefusedError(McpOAuthFlowError):
     """The grant's `resource` is not on the MCP server's own origin."""
-
-
-def refresh_owner_for(selection: ResolvedBackend) -> ConnectorRefreshOwner:
-    """Who refreshes a grant made for an agent running on `selection`."""
-    return "ma" if selection.profile == MANAGED_AGENTS.profile_id else "daimon"
-
-
-async def agent_refresh_owner(
-    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: uuid.UUID, selection_enabled: bool
-) -> ConnectorRefreshOwner:
-    """The refresh owner for the agent's current backend (MA when selection is off).
-
-    A Daimon-held agent record has no MA vault, so Daimon refreshes its grants."""
-    from daimon.core.stores.selfhosted_resources import record_agent_row  # import cycle
-
-    revision = await current_agent_backend(session, tenant_id, agent_id)
-    if revision is None and await record_agent_row(session, tenant_id=tenant_id, agent_id=agent_id):
-        return "daimon"
-    return refresh_owner_for(resolve_agent_backend(None, revision, enabled=selection_enabled))
 
 
 def _origin(url: str) -> tuple[str, str, int | None]:
@@ -168,7 +156,12 @@ async def connector_access_token(
     http_factory: HttpFactory | None = None,
     sleep: Sleep = asyncio.sleep,
 ) -> str | None:
-    """The bearer token for this turn, refreshed first when near expiry; None to reconnect."""
+    """The bearer token for this turn, refreshed first when near expiry; None to reconnect.
+
+    With no OAuth grant, the agent's stored bearer for the server
+    (`agent_mcp_credentials`, the token form) serves it: it is agent-wide, as in
+    every caller's Managed Agents vault, so a shared thread gets it too.
+    """
     row = await connector_token_for_turn(
         session_factory,
         tenant_id=tenant_id,
@@ -178,7 +171,12 @@ async def connector_access_token(
         hide_personal=hide_personal,
     )
     if row is None:
-        return None
+        async with session_factory() as session:
+            stored = await agent_tokens_store.list_credentials(
+                session, tenant_id=tenant_id, agent_id=agent_id
+            )
+        bearer = next((c for c in stored if same_mcp_url(c.mcp_server_url, server_url)), None)
+        return None if bearer is None else decrypt_token(fernet, bearer.encrypted_token)
     if row.expires_at is not None and row.expires_at - clock() <= REFRESH_EARLY:
         try:
             row = await refresh_connector_token(
@@ -197,6 +195,46 @@ async def connector_access_token(
             if row.expires_at <= clock():
                 raise
     return decrypt_token(fernet, row.access_token_encrypted)
+
+
+async def refresh_due_grants(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    account_id: uuid.UUID,
+    fernet: MultiFernet,
+    clock: Clock = lambda: dt.datetime.now(dt.UTC),
+    http_factory: HttpFactory | None = None,
+) -> None:
+    """Refresh this person's grants on the agent that expire within `VAULT_REFRESH_EARLY`.
+
+    Run before a vault mirror. A refused grant is deleted (the next turn shows
+    Reconnect); a transient failure leaves the current token, logged, so one
+    slow token endpoint never fails the whole turn.
+    """
+    async with session_factory() as session:
+        rows = await store.list_connector_tokens(
+            session, tenant_id=tenant_id, agent_id=agent_id, account_id=account_id
+        )
+    for row in rows:
+        if row.expires_at is None or row.expires_at - clock() > VAULT_REFRESH_EARLY:
+            continue
+        try:
+            await refresh_connector_token(
+                session_factory,
+                tenant_id=tenant_id,
+                token_id=row.id,
+                fernet=fernet,
+                clock=clock,
+                http_factory=http_factory,
+            )
+        except (McpOAuthFlowError, httpx.HTTPError) as err:
+            _log.warning(
+                "connector_token.refresh_failed",
+                token_id=str(row.id),
+                error_type=type(err).__name__,
+            )
 
 
 async def refresh_connector_token(
@@ -348,13 +386,13 @@ async def _await_other_refresh(
 __all__ = [
     "REFRESH_EARLY",
     "REFRESH_LEASE",
+    "VAULT_REFRESH_EARLY",
     "ConnectorReconnectRequiredError",
     "ConnectorResourceRefusedError",
     "ConnectorScopeWidenedError",
-    "agent_refresh_owner",
     "connector_access_token",
     "connector_token_for_turn",
     "refresh_connector_token",
-    "refresh_owner_for",
+    "refresh_due_grants",
     "store_connector_grant",
 ]

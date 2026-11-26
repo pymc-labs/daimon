@@ -157,6 +157,44 @@ async def test_a_thread_under_a_contained_room_is_held_to_the_room(
     assert admission.hold == TurnHold("discord", ROOM, client=False)
 
 
+@pytest.mark.parametrize(
+    ("parent", "public", "read_only", "seals"),
+    [
+        (OPEN, True, False, set[str]()),
+        (NARROW, True, True, {ROOM, THREAD}),
+        (OPEN, False, True, {THREAD}),  # private, or a kind the adapter did not know
+        (None, True, True, {ROOM, THREAD}),  # the parent has no fact: unknown, narrow
+    ],
+)
+async def test_a_new_thread_with_no_row_is_judged_by_its_parent_only_when_public(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    parent: RoomFacts | None,
+    public: bool,
+    read_only: bool,
+    seals: set[str],
+) -> None:
+    """The row of a thread made seconds ago is not there yet: no seal, no read-only memory."""
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    await _mode(db_session, tenant, "on")
+    await _facts(db_session, tenant, {} if parent is None else {ROOM: parent, "7099": OPEN})
+
+    admission = await _admit(
+        db_session_factory, tmp_path, tenant, thread_id=THREAD, public_thread=public
+    )
+
+    assert admission.memory_read_only is read_only
+    assert admission.origin_seal_ids == seals
+
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+    again = await reauthorize(deps, admission)
+    assert again.memory_read_only is read_only
+    assert again.origin_seal_ids == seals
+
+
 @pytest.mark.parametrize("mode", ["off", "shadow"])
 async def test_modes_off_and_shadow_hold_nothing_and_shadow_logs(
     db_session: AsyncSession,

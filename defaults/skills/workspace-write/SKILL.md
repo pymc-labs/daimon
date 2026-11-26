@@ -34,7 +34,8 @@ DAIMON_GOOGLE_ACCESS_TOKEN
 ```
 
 This passes the token to the script's stdin, not its argv. Python standard
-library only. Never put request files or credentials in `/mnt/session/outputs`.
+library only. Never put request files or credentials in the outputs directory
+(`output_dir()` in `scripts/workflow_io.py`).
 Read [references/requests.md](references/requests.md) for schemas. There is no
 generic command, raw URL or HTTP passthrough.
 

@@ -126,6 +126,9 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
         "mux",
         "harness",
         "harness-conformance",
+        # Core's compute caller and task scripts against the session server. The image
+        # build itself is a docker-build step, which a deploy does not wait for.
+        "compute-session",
     }
     # No status override: GitHub's default needs gate skips after failure/skip.
     assert not any(status in deploy["if"] for status in ("always()", "failure()", "cancelled()"))
@@ -690,73 +693,9 @@ def test_mcp_cutover_shell_drains_every_minter_before_strict_admission(
         assert len((tmp_path / "updates").read_text().splitlines()) == 1
 
 
-@pytest.mark.parametrize("environment", ["production", "staging"])
-def test_only_production_mcp_deploys_pin_the_old_turn_behaviour(
-    tmp_path: Path, environment: str
-) -> None:
-    """Prod keeps today's stops until a promote is approved; staging runs code defaults."""
-    import json
-
-    steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
-    step = next(step for step in steps if step.get("id") == "mcp_minters")
-    assert step["env"]["DEPLOY_ENVIRONMENT"] == "${{ inputs.environment }}"
-    receipt = {"spec": {"template": {"spec": {"timeoutSeconds": 300, "containers": [{}]}}}}
-    (tmp_path / "service.json").write_text(json.dumps(receipt))
-    gcloud = tmp_path / "gcloud"
-    gcloud.write_text(
-        '#!/bin/sh\nif [ "$3" = describe ]; then cat "$RUNNER_TEMP/service.json"; '
-        'else echo "$*" >> "$RUNNER_TEMP/updates"; fi\n'
-    )
-    gcloud.chmod(0o700)
-    script = (
-        step["run"]
-        .replace("${{ vars.GCP_AR_REPO }}", "offline")
-        .replace("${{ steps.images.outputs.daimon }}", "offline/image")
-    )
-    result = subprocess.run(
-        ["bash", "-euo", "pipefail", "-c", script],
-        env={
-            **os.environ,
-            "PATH": f"{tmp_path}:{os.environ['PATH']}",
-            "RUNNER_TEMP": str(tmp_path),
-            "GITHUB_OUTPUT": str(tmp_path / "outputs"),
-            "REGION": "offline",
-            "DEPLOY_ENVIRONMENT": environment,
-        },
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    assert result.returncode == 0, result.stderr
-    updates = (tmp_path / "updates").read_text()
-    pins = (
-        "DAIMON_TURN__CHANNEL_BACKENDS=false",
-        "DAIMON_TURN__AGENT_BACKENDS=false",
-    )
-    if environment == "production":
-        assert all(pin in updates for pin in pins), updates
-    else:
-        assert "TURN__" not in updates and "FLEET__" not in updates, updates
-
-
-def test_production_worker_refresh_pins_backends_off() -> None:
-    """The prod worker env gets both backend switches off after every refresh."""
-    steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
-    script = next(
-        step["run"]
-        for step in steps
-        if step.get("name") == "Refresh worker VM containers (recreate in place)"
-    )
-    refresh = script.index("sudo /usr/local/bin/daimon-refresh-env")
-    pin = script.index('if [ "${{ inputs.environment }}" = production ]; then', refresh)
-    assert pin < script.index("docker compose -f compose.worker.yml pull"), "before recreate"
-    block = script[pin : script.index("fi", pin)]
-    for line in (
-        "DAIMON_TURN__CHANNEL_BACKENDS=false",
-        "DAIMON_TURN__AGENT_BACKENDS=false",
-    ):
-        assert line in block
-    assert "tee -a /etc/daimon/daimon.env" in block
+def test_deploys_leave_turn_switches_to_the_environment_config() -> None:
+    """Deploys never pin turn switches; each environment's own config sets them."""
+    assert "DAIMON_TURN__" not in (_WORKFLOWS / "deploy.yml").read_text()
 
 
 def test_staging_configuration_matrix_blocks_deploy_and_runs_real_paths() -> None:
@@ -790,8 +729,8 @@ def test_staging_configuration_matrix_blocks_deploy_and_runs_real_paths() -> Non
             assert (_WORKFLOWS.parents[1] / path.split("::")[0]).is_file(), f"{path} must exist"
 
 
-def test_journeys_run_on_the_default_and_production_backend_pins() -> None:
-    """mux runs the code defaults (backends on); stop pins both off, as deploy.yml does for production."""
+def test_journeys_run_with_backends_on_and_off() -> None:
+    """mux runs the code defaults (backends on); stop pins both off, the emergency stop."""
     job = _workflow("ci.yml")["jobs"]["journeys-offline"]
     assert job["strategy"]["matrix"]["include"] == [
         {"leg": "mux", "backends": "true"},

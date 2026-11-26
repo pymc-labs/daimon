@@ -42,7 +42,6 @@ from daimon.core.confirmation import (
 )
 from daimon.core.defaults.metadata import is_private_routine_stamp
 from daimon.core.stores import agent_tool_rules, server_skills
-from daimon.core.stores.agent_tool_rules import DaimonRuleSet
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
     WILDCARD_TOOL,
@@ -174,13 +173,13 @@ def agent_rule_lookup(
     return _lookup
 
 
-async def daimon_rule_set_for(
+async def daimon_rule_tools_for(
     factory: async_sessionmaker[AsyncSession],
     policy: ToolSafetyPolicy,
     *,
     tenant_id: uuid.UUID | None,
     agent_id: str,
-) -> DaimonRuleSet:
+) -> frozenset[str]:
     """The daimon tools this agent has an ask or deny rule on, for a session's tools.
 
     Empty, with no read, while rules are not applied (`tool_safety.enabled` and
@@ -192,24 +191,11 @@ async def daimon_rule_set_for(
         or not getattr(policy, "enabled", False)
         or not getattr(policy, "agent_rules", False)
     ):
-        return DaimonRuleSet(frozenset(), False)
+        return frozenset()
     async with factory() as session:
-        return await agent_tool_rules.daimon_rule_set(
+        return await agent_tool_rules.daimon_rule_tools(
             session, tenant_id=tenant_id, agent_id=agent_id
         )
-
-
-async def daimon_rule_tools_for(
-    factory: async_sessionmaker[AsyncSession],
-    policy: ToolSafetyPolicy,
-    *,
-    tenant_id: uuid.UUID | None,
-    agent_id: str,
-) -> frozenset[str]:
-    """`daimon_rule_set_for(...).tools`."""
-    return (
-        await daimon_rule_set_for(factory, policy, tenant_id=tenant_id, agent_id=agent_id)
-    ).tools
 
 
 async def rule_for(
@@ -218,12 +204,14 @@ async def rule_for(
     rules_for: RuleLookup | None,
     *,
     skip: bool = False,
+    always: bool = False,
 ) -> tuple[ResolvedAgentToolRule | None, bool]:
-    """`skip` leaves the lookup out: daimon's own server for an agent with no rule on it."""
+    """`skip` leaves the lookup out: daimon's own server for an agent with no rule on it.
+    `always` reads the rule even with the policy or its agent rules off, for a call that a
+    rule may only refuse there (`owner_tools`)."""
     if (
         skip
-        or not policy.enabled
-        or not policy.agent_rules
+        or (not always and not (policy.enabled and policy.agent_rules))
         or rules_for is None
         or call.server_name is None
     ):
@@ -504,6 +492,7 @@ async def tool_call_verdict(
     confirmed_tools: frozenset[str],
     agent_rule: ResolvedAgentToolRule | None,
     annotations_for: AnnotationLookup | None = None,
+    owner_tools: frozenset[str] = frozenset(),
 ) -> ToolVerdict:
     """Decide one attended or unattended call; both deciders come through here.
 
@@ -520,6 +509,7 @@ async def tool_call_verdict(
         confirmed_tools=confirmed_tools,
         agent_rule=agent_rule,
         annotations=hints,
+        owner_tools=owner_tools,
     )
     _log_annotation_allow(policy, call, verdict, hints, attended=attended)
     return verdict
@@ -533,9 +523,11 @@ def unattended_decider(
     rules_for: RuleLookup | None = None,
     daimon_rules: bool = False,
     annotations_for: AnnotationLookup | None = None,
+    owner_tools: frozenset[str] = frozenset(),
 ) -> ToolCallDecider:
     """Decider for runs nobody is watching: reads run, writes are refused
-    unless the operator allowed them there."""
+    unless the operator allowed them there. `owner_tools` run as their owner's
+    (`tool_safety._decide_tool_call`)."""
 
     async def _decide(call: ToolCall) -> ToolConfirmationResult:
         if _is_unseen(call):
@@ -545,7 +537,11 @@ def unattended_decider(
         if (refusal := _proxied_approval_refusal(call, sent_as, attended=False)) is not None:
             return refusal
         rule, read_error = await rule_for(
-            policy, call, rules_for, skip=_skips_daimon_rules(call, trusted_servers, daimon_rules)
+            policy,
+            call,
+            rules_for,
+            skip=_skips_daimon_rules(call, trusted_servers, daimon_rules),
+            always=call.tool_name in owner_tools and call.server_name in trusted_servers,
         )
         verdict = await tool_call_verdict(
             policy,
@@ -555,6 +551,7 @@ def unattended_decider(
             confirmed_tools=confirmed_tools,
             agent_rule=rule,
             annotations_for=annotations_for,
+            owner_tools=owner_tools,
         )
         if read_error:
             verdict = read_error_verdict(verdict, attended=False)

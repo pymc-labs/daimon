@@ -447,9 +447,9 @@ def test_a_channel_block_names_the_channel_and_the_denying_role() -> None:
     state = _state(agents=(answering,), answering=answering, is_admin=True)
     state.webhook_blocks = (
         WebhookBlock(
-            channel_name="insighta-client",
+            channel_name="acme-client",
             denied_by="roles",
-            roles=(DenyingRole(id=1, name="insighta client"),),
+            roles=(DenyingRole(id=1, name="acme client"),),
         ),
         WebhookBlock(channel_name="general", denied_by="@everyone"),
         WebhookBlock(channel_name="ops", denied_by="member"),
@@ -466,7 +466,7 @@ def test_a_channel_block_names_the_channel_and_the_denying_role() -> None:
     text = _text(RosterView(state, runtime=MagicMock(), allowed_user_id=42))
 
     assert (
-        "In #insighta-client Daimon can't manage webhooks because the 'insighta client' role "
+        "In #acme-client Daimon can't manage webhooks because the 'acme client' role "
         "is denied Manage Webhooks there, so new agent posts there may show as Daimon. "
         "Allow it for Daimon in that channel's permissions."
     ) in text
