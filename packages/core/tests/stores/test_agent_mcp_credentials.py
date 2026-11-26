@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -768,6 +769,7 @@ async def test_a_token_deleted_before_the_mirror_takes_the_lock_is_not_written_b
 
     from daimon.core import agent_mcp_credentials as module
     from daimon.core.agent_mcp_credentials import ResolvedMcpCredential
+    from daimon.core.mcp_oauth import connector_tokens
 
     stored = [
         ResolvedMcpCredential(mcp_server_url="https://crm.example/mcp", token="t", version="1")
@@ -797,6 +799,12 @@ async def test_a_token_deleted_before_the_mirror_takes_the_lock_is_not_written_b
     monkeypatch.setattr(module, "hold_agent_vault_lock", lock)
     monkeypatch.setattr(module, "_read_agent_mcp_credentials", read_under_lock)
     monkeypatch.setattr(module, "mirror_credentials_into_vault", mirror)
+    # The caller's OAuth grants (none here) are refreshed and mirrored alongside.
+    monkeypatch.setattr(connector_tokens, "refresh_due_grants", AsyncMock())
+    monkeypatch.setattr(
+        module.connector_tokens_store, "list_connector_tokens", AsyncMock(return_value=())
+    )
+    monkeypatch.setattr(module, "mirror_grants_into_vault", AsyncMock())
 
     await sync_agent_mcp_credentials(
         object(),  # type: ignore[arg-type]
