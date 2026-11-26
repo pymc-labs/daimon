@@ -1145,67 +1145,33 @@ async def test_origin_approval_has_separate_claim_and_native_response(composed):
 @pytest.mark.parametrize(
     ("policy", "value"),
     [
-        ("daimon_rules_need_driver", True),
-    ],
-)
-async def test_unimplemented_restricted_policy_refuses_before_transport(composed, policy, value):
-    from daimon.core.turn.errors import AdmissionDenied
-    from mux.errors import UnsupportedCapability
-
-    request, wire, _, _, _ = composed
-    request = replace(request, admission=replace(request.admission, **{policy: value}))
-    with pytest.raises(AdmissionDenied) as refused:
-        await prepare_openai(request)
-    assert refused.value.reason == "backend_unsupported"
-    if policy == "daimon_rules_need_driver":
-        assert isinstance(refused.value.__cause__, UnsupportedCapability)
-        assert refused.value.__cause__.missing == ("daimon_tool_rules",)
-    assert wire.requests == []
-
-
-@pytest.mark.parametrize("composed", ["postgres"], indirect=True)
-@pytest.mark.parametrize(
-    ("policy", "value"),
-    [
         ("memory_read_only", True),
         ("hold", TurnHold(platform="slack", channel_id="C-SYN-1", client=True)),
         ("source_sealed", True),
         ("origin_seal_ids", frozenset({"C-SYN-1"})),
         ("slack_turn_context_id", UUID("00000000-0000-4000-8000-000000000001")),
+        ("daimon_rule_tools", frozenset({"get_session"})),
     ],
 )
 async def test_held_and_read_only_turns_prepare(composed, policy, value):
-    """Held, sealed and Slack-context turns run on a per-turn credential carrying them."""
+    """Held, sealed, Slack-context and tool-rule turns run on a per-turn credential;
+    the MCP server's host call gate applies the rules (`needs_host_gate`)."""
     request, *_ = composed
     request = replace(request, admission=replace(request.admission, **{policy: value}))
     prepared = await prepare_openai(request)
     assert prepared.session_ref is not None, f"a {policy} turn prepares its session"
 
 
-@pytest.mark.parametrize("missing_runtime", [True, False])
-async def test_configured_channel_refuses_unavailable_runtime_before_io(composed, missing_runtime):
+async def test_configured_channel_refuses_unavailable_runtime_before_io(composed):
     from daimon.core.turn.errors import AdmissionDenied
     from daimon.core.turn.prepare import bind_session_impl
 
-    request, wire, _, _, runtime = composed
-
-    def forbidden_transport(revision, scope):
-        raise AssertionError("a refused channel must not access a key or transport")
-
-    async def forbidden_plan(request):
-        raise AssertionError("a refused channel must not resolve native resources")
-
-    runtime = replace(runtime, transport_factory=forbidden_transport, session_plan=forbidden_plan)
-    deps = replace(request.deps, turn_runtimes={} if missing_runtime else {PROFILE: runtime})
-    admission = (
-        request.admission
-        if missing_runtime
-        else replace(request.admission, daimon_rules_need_driver=True)
-    )
+    request, wire, *_ = composed
+    deps = replace(request.deps, turn_runtimes={})
     with pytest.raises(AdmissionDenied) as refused:
         await bind_session_impl(
             deps,
-            admission,
+            request.admission,
             tenant_id=TENANT,
             platform="slack",
             external_user_id="caller",

@@ -424,12 +424,6 @@ async def _prepare_with_runtime(
     current = await reauthorize(request.deps, request.admission)
     # A read-only or sealed turn's origin is stamped read-only (`turn.run`); its
     # seals and Slack context ride its turn credential (`template_mcp`).
-    if current.daimon_rules_need_driver:
-        # Daimon tool rules need an approval pause this backend does not have.
-        # Refused before any plan, key or transport is touched.
-        raise AdmissionDenied(reason="backend_unsupported") from UnsupportedCapability(
-            ("daimon_tool_rules",), revision.profile
-        )
     request = replace(request, admission=current)
     await _check_daily_model_cap(request, runtime, revision)
     if request.gate is not None:

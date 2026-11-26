@@ -826,7 +826,6 @@ async def test_admission_reads_agent_rules_only_when_tool_safety_and_rules_are_o
             )
         fresh = await reauthorize(scoped, admission)
         assert fresh.daimon_rule_tools == frozenset({"hubspot_update_objects"})
-        assert fresh.daimon_rules_need_driver, "a channel deny is the driver's to apply"
         assert admission.daimon_rule_tools == frozenset(), "the old admission is not mutated"
     finally:
         event.remove(engine, "before_cursor_execute", count)

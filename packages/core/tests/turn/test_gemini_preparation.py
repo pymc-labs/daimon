@@ -198,17 +198,6 @@ async def test_fresh_preparation_creates_empty_slot_then_replaces_binding(host: 
     assert "summar" not in second.continuity.user_prefix
 
 
-def _causes(error: BaseException) -> list[tuple[str, ...]]:
-    """`missing` of every UnsupportedCapability in the cause chain."""
-    found: list[tuple[str, ...]] = []
-    while error is not None:
-        missing = getattr(error, "missing", None)
-        if isinstance(missing, tuple):
-            found.append(missing)
-        error = error.__cause__ or error.__context__  # type: ignore[assignment]
-    return found
-
-
 @pytest.mark.parametrize("failure", ["runtime", "deployment", "tenant", "revision"])
 async def test_missing_or_foreign_dependencies_refuse_before_provider_factory(
     host: Host,
@@ -383,7 +372,7 @@ async def test_a_shared_thread_binds_once_and_a_second_caller_continues_it(host:
         await as_caller(other, agent_origin)
 
 
-@pytest.mark.parametrize("failure", ["runtime", "model", "daimon_rules"])
+@pytest.mark.parametrize("failure", ["runtime", "model"])
 async def test_unsupported_host_configuration_is_visible_refusal_before_factory(
     host: Host, failure: str
 ) -> None:
@@ -411,18 +400,9 @@ async def test_unsupported_host_configuration_is_visible_refusal_before_factory(
         # Independently prove the preparation boundary also refuses a stale or
         # manually supplied admission, rather than relying on the first gate.
         admission = replace(admission, backend_revision=revision)
-    else:
-        # A rule that makes daimon's own tools ask is a gate this backend cannot hold.
-        admission = replace(
-            admission,
-            daimon_rule_tools=frozenset({"get_session"}),
-            daimon_rules_need_driver=True,
-        )
     with pytest.raises(AdmissionDenied) as refusal:
         await prepare(host, admission)
     assert refusal.value.reason == "backend_unsupported"
-    if failure == "daimon_rules":
-        assert ("daimon_tool_rules",) in _causes(refusal.value), "the log names the rule gap"
     assert not opened and not host.transport.requests and not host.ancillary.requests
 
 

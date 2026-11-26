@@ -635,7 +635,6 @@ _RAISED_CAPABILITIES: frozenset[str] = frozenset(
         "credential_mcp_requires_https",
         "credentialed_mcp_requires_scoped_tools_resolver",
         "custom_tools_or_tool_permissions",
-        "daimon_tool_rules",
         "duplicate_mcp_server",
         "environment_archive",
         "environment_conditional_update",

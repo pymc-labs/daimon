@@ -89,10 +89,6 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         or request.session_account_id != (shared if shared is not None else admission.account_id)
     ):
         raise ScopeViolation(request.thread_id, "Gemini preparation differs from admission")
-    if admission.daimon_rules_need_driver:
-        # Daimon tool rules need an approval pause this backend does not have.
-        # Refused before any key, transport or journal is touched.
-        raise UnsupportedCapability(("daimon_tool_rules",), PROFILE)
     target = request.target_spec
     from daimon.core.turn.runtime_manifest import host_memory_represented
 

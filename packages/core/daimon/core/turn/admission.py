@@ -156,7 +156,7 @@ from daimon.core.stores.shared_channels import mark_channel_shared
 from daimon.core.stores.thread_sessions import get_thread_session_at
 from daimon.core.thread_models import apply_thread_model, conversation_key, thread_backend
 from daimon.core.thread_release import apply_thread_release, release_due, release_now
-from daimon.core.turn.approvals import daimon_rule_set_for
+from daimon.core.turn.approvals import daimon_rule_tools_for
 from daimon.core.turn.ceiling import limit_ceiling_s
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import (
@@ -437,10 +437,6 @@ class Admission:
     # admitted (empty while rules are off): their session tools wait for the
     # driver's decision, so the set is part of the tools the session is bound to.
     daimon_rule_tools: frozenset[str] = frozenset()
-    # Some of those rules only the turn driver applies (any `ask`, a channel
-    # `deny`); an agent-wide `deny` is also enforced by the MCP server, which
-    # backends without an approval pause rely on.
-    daimon_rules_need_driver: bool = False
     # The channel or thread itself is sealed (DM memory policy aside). Callers
     # that copy content out of the channel, such as /dm-me, must refuse.
     source_sealed: bool = False
@@ -1680,7 +1676,7 @@ async def _admit_gates(
 
     # The agent's rules on daimon's own tools, read once per turn (no query
     # unless tool safety and agent rules are both on).
-    daimon_rules = await daimon_rule_set_for(
+    daimon_rule_tools = await daimon_rule_tools_for(
         deps.sessionmaker, deps.tool_safety, tenant_id=tenant_id, agent_id=agent.id
     )
     mark("daimon_rule_tools")
@@ -1742,8 +1738,7 @@ async def _admit_gates(
             memory_read_only=memory_read_only,
             asks_before_publishing=_asks_before_publishing(policy, grant),
             approval_gate=_approval_gate_for(deps, policy, grant, agent.id),
-            daimon_rule_tools=daimon_rules.tools,
-            daimon_rules_need_driver=daimon_rules.needs_driver,
+            daimon_rule_tools=daimon_rule_tools,
             source_sealed=source_sealed,
             hold=hold,
             shared_channel=shared,
@@ -2111,8 +2106,7 @@ async def _admit_gates(
         memory_read_only=memory_read_only,
         asks_before_publishing=_asks_before_publishing(policy, grant),
         approval_gate=_approval_gate_for(deps, policy, grant, agent.id),
-        daimon_rule_tools=daimon_rules.tools,
-        daimon_rules_need_driver=daimon_rules.needs_driver,
+        daimon_rule_tools=daimon_rule_tools,
         source_sealed=source_sealed,
         source_shared=source_shared,
         hold=hold,
@@ -2588,7 +2582,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
     )
     asks_before_publishing = _asks_before_publishing(policy, grant)
     approval_gate = _approval_gate_for(deps, policy, grant, admission.agent.id)
-    rules = await daimon_rule_set_for(
+    rule_tools = await daimon_rule_tools_for(
         deps.sessionmaker, deps.tool_safety, tenant_id=grant.tenant_id, agent_id=admission.agent.id
     )
     # A room that became contained since admission answers with no signed-identity
@@ -2604,8 +2598,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         and memory_read_only == admission.memory_read_only
         and asks_before_publishing == admission.asks_before_publishing
         and approval_gate == admission.approval_gate
-        and rules.tools == admission.daimon_rule_tools
-        and rules.needs_driver == admission.daimon_rules_need_driver
+        and rule_tools == admission.daimon_rule_tools
     ):
         return admission
     return replace(
@@ -2619,8 +2612,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         memory_read_only=memory_read_only,
         asks_before_publishing=asks_before_publishing,
         approval_gate=approval_gate,
-        daimon_rule_tools=rules.tools,
-        daimon_rules_need_driver=rules.needs_driver,
+        daimon_rule_tools=rule_tools,
     )
 
 
@@ -3023,7 +3015,7 @@ async def _capture_backend_source(
                 if context.channel_id is not None
                 else ()
             )
-            rule_set = await daimon_rule_set_for(
+            rule_tools = await daimon_rule_tools_for(
                 deps.sessionmaker,
                 deps.tool_safety,
                 tenant_id=context.tenant_id,
@@ -3040,8 +3032,7 @@ async def _capture_backend_source(
                 ),
                 asks_before_publishing=_asks_before_publishing(policy, grant),
                 approval_gate=_approval_gate_for(deps, policy, grant, actual.id),
-                daimon_rule_tools=rule_set.tools,
-                daimon_rules_need_driver=rule_set.needs_driver,
+                daimon_rule_tools=rule_tools,
                 source_sealed=bool(seals),
                 origin_channel_id=context.channel_id,
                 origin_thread_id=context.thread_id,

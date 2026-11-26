@@ -103,7 +103,7 @@ _ADMISSION_FACTS = {
 }
 
 #: Admission facts a root retained before they existed read as their default.
-_LEGACY_ADMISSION_FACTS = frozenset({"daimon_rule_tools", "daimon_rules_need_driver"})
+_LEGACY_ADMISSION_FACTS = frozenset({"daimon_rule_tools"})
 
 log = structlog.get_logger(__name__)
 
