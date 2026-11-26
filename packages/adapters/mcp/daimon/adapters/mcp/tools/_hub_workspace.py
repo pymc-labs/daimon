@@ -26,9 +26,9 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
 
-_NOT_FOUND = "workspace not found"
+_NOT_FOUND = "chat space not found"
 _DOC = (
-    "\n\n`workspace`: the workspace to use, by name or id as `list_daimons` shows them; "
+    "\n\n`workspace`: the chat space to use, by name or id as `list_daimons` shows them; "
     "leave it out when you reach only one."
 )
 
@@ -39,7 +39,7 @@ def pick_workspace(hub: HubIdentity, wanted: str | None) -> HubTenant:
         if len(hub.tenants) == 1:
             return hub.tenants[0]
         names = ", ".join(sorted(t.workspace_name for t in hub.tenants))
-        raise ToolError(f"Name the workspace: {names}." if names else _NOT_FOUND)
+        raise ToolError(f"Name the chat space: {names}." if names else _NOT_FOUND)
     key = wanted.strip().casefold()
     found = [
         t

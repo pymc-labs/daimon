@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 def test_serving_is_off_by_default_and_never_offered_to_chat_turns() -> None:
     assert FEATURES[LIBRARY_SKILLS].default == "off"
-    assert CAPABILITY_TOOLS[LIBRARY_SKILLS] == SERVING_TOOLS
+    assert LIBRARY_SKILLS not in CAPABILITY_TOOLS, "chat sessions never get these tools"
     assert {server_gate_key(t) for t in SERVING_TOOLS} == {LIBRARY_SKILLS}
     source = inspect.getsource(mcp_identity.IdentityMiddleware)
     assert "if identity.is_chat_execution:" in source

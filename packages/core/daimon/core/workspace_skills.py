@@ -14,7 +14,7 @@ from collections.abc import Collection, Mapping
 import structlog
 from daimon.core.capability_tools import LIBRARY_SKILLS
 from daimon.core.features.snapshot import FeaturePlace, resolve_features
-from daimon.core.server_skills.gate import manifest_digest
+from daimon.core.server_skills import gate  # a module: `gate` imports back through `defaults`
 from daimon.core.skills.ingest import retained_archive_files
 from daimon.core.stores import workspace_skills as store
 from daimon.core.stores.domain import WorkspaceSkillRow
@@ -33,7 +33,7 @@ log = structlog.get_logger(__name__)
 
 def files_digest(files: Mapping[str, bytes]) -> str:
     """Names a version's files: sha256 over the sorted (path, sha256) pairs."""
-    return manifest_digest({path: hashlib.sha256(body).hexdigest() for path, body in files.items()})
+    return gate.manifest_digest({p: hashlib.sha256(body).hexdigest() for p, body in files.items()})
 
 
 async def _served_here(

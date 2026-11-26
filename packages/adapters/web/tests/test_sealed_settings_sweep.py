@@ -209,6 +209,9 @@ EXEMPT: dict[str, str] = {
         "workspace level: no channel and no agent (the skill library)"
     ),
     "POST /api/agents/skills": ("workspace level: no channel and no agent (the skill library)"),
+    "PUT /api/agents/skills/{skill_id}/scope": (
+        "workspace level: no channel and no agent (the skill library)"
+    ),
     "PUT /api/agents/skills/{skill_id}/files": (
         "workspace level: no channel and no agent (the skill library)"
     ),

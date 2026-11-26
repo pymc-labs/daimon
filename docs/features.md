@@ -44,6 +44,7 @@ Where each feature can be set, and its default.
 | Platform skills | `platform_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
 | Agent skills | `agent_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Always On on Gemini, OpenAI |
 | Channel skills | `channel_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Library skills | `library_skills` | Model input | Off |  | ✓ |  |  |  |  |  |
 | Thread participation | `participation` | Chat | Off | ✓ | ✓ |  | ✓ | ✓ |  | Only Discord, Teams |
 | Progress plans | `progress_plans` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Cost footer | `cost_footer` | Chat | Shown |  | ✓ |  | ✓ | ✓ |  |  |
@@ -98,7 +99,6 @@ Where each feature can be set, and its default.
 | GitHub access | `github` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Lead intake | `lead_intake` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Data source reads | `data_reads` | Capability | Off |  | ✓ | ✓ | ✓ |  |  |  |
-| Library skills | `library_skills` | Capability | Off |  | ✓ |  |  |  |  |  |
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Long job dollar cap | `long_jobs_max_usd` | Limit | $5 | ✓ | ✓ | ✓ |  |  |  |  |
 | Long job time limit | `long_jobs_max_deadline` | Limit | 70 minutes | ✓ | ✓ | ✓ |  |  |  |  |

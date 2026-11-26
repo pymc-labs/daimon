@@ -58,7 +58,7 @@ def build_hub_app(
         instructions=(
             "Every daimon reachable here belongs to a chat space. "
             "Call list_daimons first; every other tool takes a daimon_id from that list, "
-            "except the data and skill tools, which take a workspace."
+            "except the data and skill tools, which take a `workspace`."
         ),
     )
     mcp.add_middleware(HubIdentityMiddleware(platform))

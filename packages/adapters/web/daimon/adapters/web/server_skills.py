@@ -331,12 +331,13 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
             lambda asker: ask_node(exchange, runtime.http_client, skills, asker, call),
         )
 
-    async def _mirror(caller_tenant: uuid.UUID, skill_id: str) -> ServerSkillRow:
+    async def _mirror(caller: WebCaller, skill_id: str) -> ServerSkillRow:
         async with runtime.sessionmaker() as session:
             mirror = await store.mirror_of_skill(
-                session, tenant_id=caller_tenant, skill_id=skill_id
+                session, tenant_id=caller.person.tenant_id, skill_id=skill_id
             )
         if mirror is None:
+            await node_or_404(caller)  # an unserved workspace sees no node route
             raise HTTPException(status_code=404, detail="No such server skill.")
         return mirror
 
@@ -400,7 +401,7 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
 
     @router.post("/skills/{skill_id}/check")
     async def check(caller: Editor, skill_id: str) -> MirrorCheck:  # pyright: ignore[reportUnusedFunction]
-        mirror = await _mirror(caller.person.tenant_id, skill_id)
+        mirror = await _mirror(caller, skill_id)
         deps = await _sync_for(caller, mirror)
         try:
             require_admin(actor_of(caller), "The skill library")
@@ -410,7 +411,7 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
 
     @router.post("/skills/{skill_id}/approve")
     async def approve(caller: Editor, skill_id: str, body: ApproveBody) -> MirrorCheck:  # pyright: ignore[reportUnusedFunction]
-        mirror = await _mirror(caller.person.tenant_id, skill_id)
+        mirror = await _mirror(caller, skill_id)
         deps = await _sync_for(caller, mirror)
         try:
             require_admin(actor_of(caller), "The skill library")

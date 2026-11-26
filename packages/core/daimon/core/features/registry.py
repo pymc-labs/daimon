@@ -1334,7 +1334,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     FeatureSpec(
         key="library_skills",
         name="Library skills",
-        category="capabilities",
+        category="model_input",
         effect="capability",
         values=_ON_OFF,
         default="off",

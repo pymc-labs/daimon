@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import get_args
 
 import pytest
-from daimon.core.capability_tools import CAPABILITY_KEYS
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -36,7 +35,7 @@ from daimon.core.features.registry import (
 from daimon.core.features.resolver import ResolvedFeature, TierValue, resolve_feature
 from daimon.core.features.session_identity import IDENTITY_KEYS
 from daimon.core.features.snapshot import FeaturePlace, FeatureSnapshot, may_turn_on
-from daimon.core.features.tool_gate import WEB_APP_TOOLS, server_gate_key
+from daimon.core.features.tool_gate import GATED_KEYS, WEB_APP_TOOLS, server_gate_key
 from daimon.core.long_job_models import LongJobPolicy
 from pydantic import PostgresDsn, SecretStr
 
@@ -118,6 +117,7 @@ _NARROWED: dict[str, str] = {
     "long_jobs_max_deadline": "checked when a job starts, from its workspace and agent",
     "callback_watch_lifetime": "a server admin's limit, read when a callback watch is made",
     "daily_model_cap": "counts the team's spend, so a workspace or agent limit",
+    "library_skills": "served to coding keys, the hub and outside clients, which have no agent or thread",
     "thread_providers": "an agent owner's consent, checked when a conversation's model is picked",
     "monitor_direct_messages": "kept per agent: a DM or web chat has no channel to set",
     "monitor_mcp": "kept per agent: an MCP call has no channel or thread",
@@ -542,7 +542,7 @@ def test_every_feature_key_read_is_registered_and_every_registered_key_is_read()
     named: set[str] = (
         set(TOOL_KEYS)
         | set(IDENTITY_KEYS)
-        | set(CAPABILITY_KEYS)
+        | set(GATED_KEYS)
         | {f"web.{module}" for module in WEB_MODULES}
         | {"daily_model_cap"}  # request.admission.resolved("daily_model_cap")
         | {"display_name"}  # Admission.display_name resolves it
