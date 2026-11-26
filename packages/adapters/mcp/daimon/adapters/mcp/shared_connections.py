@@ -20,8 +20,8 @@ from daimon.adapters.mcp.data_access import data_audience_for
 from daimon.adapters.mcp.middleware.capability_gate import caller_places
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core import shared_connections as shared
-from daimon.core.config import Settings
 from daimon.core.data_audience import DataAudience
+from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.security_audit import record_denial, record_policy_decision
 from daimon.data.shared_scopes import holds_scope
 from fastmcp.exceptions import ToolError
@@ -41,14 +41,20 @@ _SEEN = "shared_connections.visible"
 """Request state: what this request's caller sees (`SharedConnectionProvider._visible`)."""
 
 
-def register_scopes(settings: Settings) -> None:
-    """At startup: scoped shared tools follow the data store's grants."""
+def register_scopes(runtime: McpRuntime) -> None:
+    """At startup: scoped shared tools follow the data store's grants, while the workspace
+    has data sources on."""
+    settings = runtime.settings
 
     async def check(caller: shared.SharedCaller, scope: str) -> bool:
         audience = None if caller.audience is None else await caller.audience()
-        return audience is not None and await holds_scope(
-            settings, caller.tenant_id, audience, scope
-        )
+        if audience is None:
+            return False
+        place = FeaturePlace(caller.tenant_id, caller.platform or "web")
+        async with runtime.session_factory() as db:
+            if not (await feature_in(db, settings, place, "data_sources")).on:
+                return False
+        return await holds_scope(settings, caller.tenant_id, audience, scope)
 
     shared.register_scope_check(check)
 

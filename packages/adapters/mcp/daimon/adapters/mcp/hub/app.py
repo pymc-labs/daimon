@@ -63,7 +63,7 @@ def build_hub_app(
     mcp.add_middleware(MaErrorMiddleware())
     register_hub_tools(mcp, runtime, billing_config=billing_config)
     register_hub_shared_tools(mcp, runtime)
-    register_scopes(runtime.settings)
+    register_scopes(runtime)
     return mcp
 
 

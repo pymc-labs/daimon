@@ -569,7 +569,7 @@ def create_mcp_app(
         HostCallGate(runtime, public_url=str(effective_settings.mcp.public_url or ""))
     )
     mcp.add_provider(SharedConnectionProvider(runtime))  # `<connection>_<tool>`, per caller
-    register_scopes(effective_settings)  # scoped ones follow the data store's grants
+    register_scopes(runtime)  # scoped ones follow the data store's grants
     mcp.add_middleware(CallOriginMiddleware(runtime))  # where the call's turn started
     mcp.add_middleware(CapabilityGateMiddleware(runtime))  # innermost: reads the identity
     agents.register_agent_tools(mcp, runtime)
