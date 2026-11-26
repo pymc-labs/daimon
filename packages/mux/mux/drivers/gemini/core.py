@@ -2,7 +2,9 @@
 
 import asyncio
 import copy
+import hashlib
 import logging
+import posixpath
 import random
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
@@ -56,8 +58,10 @@ from mux.contracts.resources import (
 )
 from mux.drivers.gemini.bundles import (
     UPLOAD_ROOT,
+    file_archive,
     inline_files,
     owned_skill,
+    relative_path,
     skill_archive,
     skill_sources,
     target_path,
@@ -1190,6 +1194,66 @@ class GeminiSessions(Base):
             if delay is not None:
                 await asyncio.sleep(random.uniform(delay / 2, delay))
         return False
+
+    async def place_file(
+        self, scope: Scope, ref: ResourceRef, path: str, content: bytes | None
+    ) -> bool:
+        """Put a private file at this workspace path before the next send; False: not there.
+
+        Never in the environment config, which interactions echo and the record keeps;
+        only its hash is recorded, so an unchanged file is not sent again. A first
+        turn's environment is made here, as `_prepare` makes one, where its sources
+        allow. `None` empties a file placed before. Snapshots never offer it as an output.
+        """
+        environments = (
+            self._transport if isinstance(self._transport, EnvironmentTransport) else None
+        )
+        if environments is None or self._max_output_tokens is not None:
+            return False
+        directory, name = posixpath.split(relative_path(path))
+        async with self._storage.read(session_keys(ref.id)) as records:
+            record = self._record(records, scope, ref)
+            environment_id, placed = record.environment_id, record.placed.get(path)
+            config, fresh = self._environment_config(record), record.current is None
+        if content is None and (placed is None or environment_id is None):
+            return False
+        mark = f"{environment_id}:{hashlib.sha256(content or b'').hexdigest()}"
+        if placed == mark:
+            return content is not None
+        if environment_id is None:
+            if not fresh or not (self._plain_sources(config) and self._valid_network(config)):
+                return False
+            try:
+                made = await environments.create_environment(config)
+            except ProviderError as error:
+                if error.retryable:
+                    raise
+                log.warning("gemini_environment_create_refused category=%s", error.category)
+                return False
+            async with self._storage.transaction(session_keys(ref.id, lock=True)) as records:
+                record = self._record(records, scope, ref)
+                saved = (
+                    record.environment_id is None
+                    and record.current is None
+                    and self._environment_config(record) == config
+                )
+                if saved:
+                    record.environment_id = made
+                    record.workspace_expires_at = now() + timedelta(days=7)
+                environment_id = record.environment_id
+            if not saved:
+                await self._discard(environments, made)
+            if environment_id is None:
+                return False
+            return await self.place_file(scope, ref, path, content)
+        archive = file_archive({name: content or b""}, mode=0o600)
+        await environments.upload_archive(environment_id, directory, archive, overwrite=True)
+        async with self._storage.transaction(session_keys(ref.id, lock=True)) as records:
+            record = self._record(records, scope, ref)
+            if record.environment_id != environment_id:
+                return False
+            record.placed[path] = mark
+        return content is not None
 
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Session:
         return await self.retrying(lambda: self._retrieve(scope, ref))
