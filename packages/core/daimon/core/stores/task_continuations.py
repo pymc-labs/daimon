@@ -415,11 +415,13 @@ async def cancel_wake_row(
     *,
     tenant_id: _uuid.UUID,
     idempotency_key: _uuid.UUID,
+    skip_reason: str = "cancelled",
 ) -> bool:
     """Withdraw a wake nobody has claimed yet; False once it is claimed or settled.
 
     A status flip, never a delete: a claim is a conditional UPDATE on
     `status = 'pending'`, so a cancelled row can never be claimed afterwards.
+    `skip_reason` says why, for the record.
     """
     cancelled = (
         await session.execute(
@@ -430,7 +432,7 @@ async def cancel_wake_row(
                 TaskContinuation.idempotency_key == idempotency_key,
                 TaskContinuation.status == "pending",
             )
-            .values(status="cancelled", skip_reason="cancelled")
+            .values(status="cancelled", skip_reason=skip_reason)
             .returning(TaskContinuation.id)
         )
     ).scalar_one_or_none()

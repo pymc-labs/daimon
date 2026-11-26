@@ -8,7 +8,7 @@ import functools
 import io
 import uuid
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -23,7 +23,8 @@ import structlog.contextvars
 from daimon.adapters.discord import theme
 from daimon.adapters.discord.agent_setup.stale_picture import StalePictureChangeButton
 from daimon.adapters.discord.attachments import prepare_attachments
-from daimon.adapters.discord.audience_sync import AudienceSync
+from daimon.adapters.discord.audience_rest import reader_from_settings
+from daimon.adapters.discord.audience_sync import AudienceSync, watch_gateway
 from daimon.adapters.discord.budget_notice import discord_budget_alerter, with_budget_notifier
 from daimon.adapters.discord.button_message import ButtonMessage
 from daimon.adapters.discord.channel_agent import channel_agent_id
@@ -66,6 +67,7 @@ from daimon.adapters.discord.names import (
 )
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.output_delivery import Conversation, deliver_session_outputs
+from daimon.adapters.discord.outsiders import is_public_thread
 from daimon.adapters.discord.permissions import check_missing_permissions
 from daimon.adapters.discord.post_transport import (
     DiscordPostTransport,
@@ -154,6 +156,7 @@ from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.model_reactions import model_marks
 from daimon.core.ops_alerts import alert_ops
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.output_delivery import NoticedFiles
 from daimon.core.output_runtime import OutputRuntime
@@ -249,6 +252,7 @@ from daimon.core.turn.protection import (
     protection_state,
 )
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
+from daimon.core.turn.shown_model import shown_model
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT, holding, release_turn_slot, wait_for_slot
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn.thread_queue import (
@@ -261,7 +265,7 @@ from daimon.core.turn.thread_queue import (
     release_thread,
 )
 from daimon.core.turn_hold import RequesterOrg
-from daimon.core.turn_keys import list_mounted_key_names
+from daimon.core.turn_keys import answering_env_sha256, list_mounted_key_names
 from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
 from daimon.core.turn_queue import TurnQueue
 from mux.contracts.config import DEFAULT_BACKEND
@@ -391,6 +395,18 @@ def _capture_turn_error(
         scope.set_tag("tenant_id", str(tenant_id))
         scope.set_tag("guild_id", guild_id)
         sentry_sdk.capture_exception(exc)
+
+
+def turn_model(admission: Admission) -> tuple[str | None, object]:
+    """The model and effort a turn runs on: a non-default backend's own, else the agent's.
+
+    An agent copied onto another backend keeps its original agent's model id, so labelling
+    the card from the agent showed a Gemini turn as the Claude model it was copied from.
+    """
+    backend = admission.backend_revision
+    if backend is not None and backend.backend not in (None, DEFAULT_BACKEND):
+        return backend.model, backend.effort
+    return admission.agent.model.id, (admission.agent.model.model_extra or {}).get("effort")
 
 
 class _ThreadOpenFailed(Exception):
@@ -860,7 +876,12 @@ class DaimonBot(commands.Bot):
         # cleanup DB await while the completed turn still owns its thread.
         self._committed_message_ids: set[str] = set()
         self._orphans_retired: bool = False
-        self._audience_sync = AudienceSync(self.runtime.sessionmaker)
+        self._audience_sync = AudienceSync(
+            self.runtime.sessionmaker, reader=reader_from_settings(self.runtime.settings)
+        )
+        # Room-fact withdrawals come from the raw gateway events, before discord.py's
+        # cache and before any handler (see `watch_gateway`).
+        watch_gateway(self._connection.parsers, self._audience_event)  # pyright: ignore[reportPrivateUsage]
         self._audience_renewal: asyncio.Task[None] | None = None
         self._member_sync = MemberSync(self.runtime.sessionmaker, audience=self._audience_sync)
         self._member_reload: asyncio.Task[None] | None = None
@@ -889,6 +910,21 @@ class DaimonBot(commands.Bot):
         task.add_done_callback(self._bg_tasks.discard)
         task.add_done_callback(_log_bg_task_exception)
         return task
+
+    def _report_shed(self, tenant_id: uuid.UUID, thread_id: int, reason: str) -> None:
+        """Record a turn turned away at the process-wide cap; the caller logs its own line."""
+        report_ops_event(
+            self.runtime.sessionmaker,
+            OpsEvent(
+                "turn.shed",
+                tenant_id,
+                reason=reason,
+                platform="discord",
+                channel_id=str(thread_id),
+                thread_id=str(thread_id),
+            ),
+            logged=False,
+        )
 
     def _track_processing_task(self, thread_id: int) -> None:
         task = asyncio.current_task()
@@ -946,6 +982,7 @@ class DaimonBot(commands.Bot):
                 requester_id=attributed.requester_id if attributed is not None else None,
                 requester_label=requester_label,
                 reply_to=attributed.files_reply_to(thread.id) if attributed is not None else None,
+                sessions=self.runtime.sessionmaker,
             )
         except Exception as exc:  # detached sweep must not fail the completed turn
             log.warning(
@@ -953,6 +990,21 @@ class DaimonBot(commands.Bot):
                 session_id=session_id,
                 thread_id=thread.id,
                 error=str(exc)[:300],
+            )
+            guild = thread.guild
+            report_ops_event(
+                self.runtime.sessionmaker,
+                OpsEvent(
+                    "delivery.output_failed",
+                    derive_tenant_uuid(platform="discord", workspace_id=str(guild.id))
+                    if guild is not None
+                    else None,
+                    reason=type(exc).__name__,
+                    platform="discord",
+                    thread_id=str(thread.id),
+                    session_id=session_id,
+                ),
+                logged=False,
             )
 
     def _confirmed_call_prefix(
@@ -2289,6 +2341,9 @@ class DaimonBot(commands.Bot):
                 remember_guild_channels(
                     self.runtime.sessionmaker, guild_id=guild.id, channels=guild.channels
                 )
+        # First, so no slower step of the ready holds up the room facts.
+        self._audience_sync.connected()
+        self._start_audience_renewal()
         await self._retire_orphaned_turns()
         # Every ready: events missed while disconnected are not replayed. Without the
         # members intent there is no list to load.
@@ -2296,7 +2351,6 @@ class DaimonBot(commands.Bot):
             self._member_reload = self._spawn(
                 self._member_sync.reload_all([g for g in self.guilds if self._allows_guild(g.id)])
             )
-        self._start_audience_renewal()
         if not self._startup_replay_started:
             self._startup_replay_started = True
             self._spawn(self._replay_missed_messages())
@@ -2861,13 +2915,14 @@ class DaimonBot(commands.Bot):
                     reason="unprompted_at_cap",
                 )
             else:
-                log.info(
-                    "turn.skipped.global_concurrency_shed",
+                log.warning(
+                    "turn.shed",
                     tenant_id=str(tenant_id),
                     guild_id=guild_id,
                     channel_id=str(thread_id),
                     reason="unprompted_at_cap",
                 )
+                self._report_shed(tenant_id, thread_id, "unprompted_at_cap")
             return
         self._processing.add(thread_id)
         self._thread_stops.claim(thread_id)
@@ -3444,13 +3499,14 @@ class DaimonBot(commands.Bot):
                     )
                     await message.channel.send(embed=build_notice_embed(TENANT_CAP_NOTICE))
                     return
-                log.info(
-                    "turn.skipped.global_concurrency_shed",
+                log.warning(
+                    "turn.shed",
                     tenant_id=str(tenant_id),
                     guild_id=guild_id,
                     channel_id=str(thread_id),
                     reason="queue_full",
                 )
+                self._report_shed(tenant_id, thread_id, "queue_full")
                 await message.channel.send(embed=build_notice_embed(GLOBAL_CAP_NOTICE))
                 return
 
@@ -4104,12 +4160,7 @@ class DaimonBot(commands.Bot):
         is on and they differ from the pair last shown in this thread."""
         if not admission.shown("model_reactions", "discord"):
             return ()
-        backend = admission.backend_revision
-        if backend is not None and backend.backend not in (None, DEFAULT_BACKEND):
-            model_id, effort = backend.model, backend.effort
-        else:
-            model_id = admission.agent.model.id
-            effort = (admission.agent.model.model_extra or {}).get("effort")
+        model_id, effort = turn_model(admission)
         marks = model_marks(model_id, effort if isinstance(effort, str) else None)
         if not marks:
             return ()
@@ -4332,6 +4383,7 @@ class DaimonBot(commands.Bot):
                         status="skipped",
                         now=datetime.now(UTC),
                         skip_reason="thread_unavailable",
+                        row=row,
                     )
                 continue
             self._spawn(
@@ -4734,6 +4786,7 @@ class DaimonBot(commands.Bot):
             now=datetime.now(UTC),
             category_id=category_id,
             category_unresolved=category_unresolved,
+            public_thread=is_public_thread(thread),
         )
         if (
             row.reason in ("watch_fired", "watch_report", "job_finished")
@@ -4859,7 +4912,7 @@ class DaimonBot(commands.Bot):
                 agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
-                model_id=agent.model.id,
+                model_id=shown_model(admission).id,
                 turn_id=turn_id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
@@ -5042,7 +5095,7 @@ class DaimonBot(commands.Bot):
                 agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
-                model_id=agent.model.id,
+                model_id=shown_model(admission).id,
                 turn_id=turn_card_intent.id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
@@ -5198,10 +5251,6 @@ class DaimonBot(commands.Bot):
         if archive_after:
             await self._archive_after_outputs(outcome, thread)
 
-    async def on_guild_role_create(self, role: discord.Role) -> None:
-        if self._allows_guild(role.guild.id):
-            self._audience_sync.schedule(role.guild)
-
     async def on_guild_role_update(self, before: discord.Role, after: discord.Role) -> None:
         self.membership_resolver.invalidate_guild(str(after.guild.id))
         if not self._allows_guild(after.guild.id):
@@ -5209,32 +5258,36 @@ class DaimonBot(commands.Bot):
         if before.permissions != after.permissions:
             clear_webhook_backoff(after.guild)
             await self._member_sync.admins_changed(after.guild, after.members)
-            self._audience_sync.schedule(after.guild)
 
     async def on_guild_role_delete(self, role: discord.Role) -> None:
         # A new role has no members, so only a delete and an update move admin flags.
         if self._allows_guild(role.guild.id):
             await self._member_sync.admins_changed(role.guild, role.guild.members)
-            self._audience_sync.schedule(role.guild)
 
     async def on_disconnect(self) -> None:
-        # Events are lost until the gateway resumes: no room fact can be trusted.
-        if self._audience_renewal is not None:
-            self._audience_renewal.cancel()  # on_ready starts it again
+        # Events are lost until the gateway resumes: no room fact can be trusted. The
+        # renewal loop is not cancelled: it lives for the process, so no disconnect and
+        # resume order can leave zero loops, and a tick while disconnected only retries
+        # unknown marks (nothing is published or read until `connected`).
         await self._audience_sync.disconnected([g for g in self.guilds if self._allows_guild(g.id)])
 
     async def on_resumed(self) -> None:
-        # The gateway replayed what it missed, so the cache is current again. A resume
-        # fires no on_ready, so the renewal that on_disconnect stopped starts here too.
+        # A resume fires no on_ready, so the renewal starts here too if it is not running,
+        # first; each server's reconcile runs in its own task.
+        self._audience_sync.connected()
+        self._start_audience_renewal()
         if self.intents.members:
             await self._audience_sync.resumed([g for g in self.guilds if self._allows_guild(g.id)])
-        self._start_audience_renewal()
 
     async def on_guild_available(self, guild: discord.Guild) -> None:
         # After an outage the server's members must load again before its facts are
         # published. At startup on_ready's full reload covers every server.
         if self.is_ready() and self.intents.members and self._allows_guild(guild.id):
             self._spawn(self._member_sync.reload_all([guild]))
+
+    def _audience_event(self, event: str, guild_id: int, data: Mapping[str, Any]) -> None:
+        if self._allows_guild(guild_id):
+            self._audience_sync.gateway_event(event, guild_id, data, self.get_guild(guild_id))
 
     def _start_audience_renewal(self) -> None:
         if self._audience_renewal is not None and not self._audience_renewal.done():
@@ -5255,7 +5308,6 @@ class DaimonBot(commands.Bot):
     async def on_member_join(self, member: discord.Member) -> None:
         if self._allows_guild(member.guild.id):
             await self._member_sync.joined(member)
-            self._audience_sync.schedule(member.guild)
 
     async def on_raw_member_remove(self, payload: discord.RawMemberRemoveEvent) -> None:
         guild_id = str(payload.guild_id)
@@ -5264,8 +5316,6 @@ class DaimonBot(commands.Bot):
         # Raw, so a member missing from the cache still leaves the list.
         if self._allows_guild(payload.guild_id):
             await self._member_sync.left(payload.guild_id, payload.user.id)
-            if (guild := self.get_guild(payload.guild_id)) is not None:
-                self._audience_sync.schedule(guild)
 
     async def on_member_remove(self, member: discord.Member) -> None:
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(member.guild.id))
@@ -5288,7 +5338,6 @@ class DaimonBot(commands.Bot):
             clear_webhook_backoff(after.guild)
         if before.roles != after.roles:
             await self._member_sync.joined(after)
-            self._audience_sync.schedule(after.guild)
 
     async def on_guild_channel_update(
         self, before: discord.abc.GuildChannel, after: discord.abc.GuildChannel
@@ -5300,31 +5349,16 @@ class DaimonBot(commands.Bot):
         )
         if before.overwrites != after.overwrites:
             clear_webhook_backoff(after.guild)
-        if (
-            before.overwrites != after.overwrites
-            or before.name != after.name
-            or before.type != after.type
-            or getattr(before, "category_id", None) != getattr(after, "category_id", None)
-        ):
-            self._audience_sync.schedule(after.guild)
-
-    async def on_guild_channel_create(self, channel: discord.abc.GuildChannel) -> None:
-        if self._allows_guild(channel.guild.id):
-            self._audience_sync.schedule(channel.guild)
-
-    async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
-        if self._allows_guild(channel.guild.id):
-            self._audience_sync.schedule(channel.guild)
 
     async def on_thread_create(self, thread: discord.Thread) -> None:
         if self._allows_guild(thread.guild.id):
-            self._audience_sync.schedule(thread.guild)
+            self._audience_sync.refresh(thread.guild)
 
     async def on_raw_thread_update(self, payload: discord.RawThreadUpdateEvent) -> None:
         if not self._allows_guild(payload.guild_id):
             return
         if (guild := self.get_guild(payload.guild_id)) is not None:
-            self._audience_sync.schedule(guild)
+            self._audience_sync.refresh(guild)
         metadata = payload.data["thread_metadata"]
         tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(payload.guild_id))
         async with self.runtime.sessionmaker() as session:
@@ -5671,6 +5705,7 @@ class DaimonBot(commands.Bot):
                 now=self._ingress_clock() if self._ingress_clock is not None else datetime.now(UTC),
                 category_id=category_id,
                 category_unresolved=category_unresolved,
+                public_thread=is_public_thread(thread),
             )
         except MissingTurnConfigError as err:
             log.info(
@@ -6026,7 +6061,7 @@ class DaimonBot(commands.Bot):
                 agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
-                model_id=agent.model.id,
+                model_id=shown_model(admission).id,
                 turn_id=turn_id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
@@ -6361,15 +6396,11 @@ class DaimonBot(commands.Bot):
                 thread_id=str(thread.id),
                 account_id=session_account_id,
             )
-            _live_config = (
-                None if _live_row_for_keys is None else _live_row_for_keys.effective_config
-            )
-            _env_sha256 = None if _live_config is None else _live_config.env_sha256
             key_names = await list_mounted_key_names(
                 _keys_session,
                 tenant_id=tenant_id,
                 agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)),
-                env_sha256=_env_sha256,
+                env_sha256=answering_env_sha256(prepared, _live_row_for_keys),
             )
 
         # Split trigger-message attachments: API-consumable images → vision
@@ -6501,8 +6532,8 @@ class DaimonBot(commands.Bot):
             the agent curls the URL, ``read``s it at full size, and MA
             terminates the session. Reseeding that same URL into the fresh
             session just repeats it, so the thread recovers, dies, recovers,
-            dies -- each cycle billing a full agentic run. Observed on staging
-            thread 1535185295245582356: two consecutive recoveries burned 243k
+            dies -- each cycle billing a full agentic run. Observed on a staging
+            thread: two consecutive recoveries burned 243k
             then 62k input tokens and both ended terminated. Withholding the
             URL (rather than only warning about it, which the model may ignore)
             is what actually breaks the loop.
@@ -6575,7 +6606,7 @@ class DaimonBot(commands.Bot):
                 agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
-                model_id=agent.model.id,
+                model_id=shown_model(admission).id,
                 turn_id=turn_card_intent.id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(

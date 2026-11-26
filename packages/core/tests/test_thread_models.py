@@ -341,6 +341,37 @@ async def test_a_model_that_takes_no_effort_drops_the_agents_and_refuses_a_chose
         await choose_thread_model(db_session_factory, choice="haiku", effort="low", **pick)
 
 
+async def test_an_effort_is_kept_for_an_openai_conversation_and_gemini_takes_none(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """OpenAI takes low, medium and high; the stored pick or the agent's provider decides."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    pick = {"tenant_id": tenant.id, "platform": "discord", "thread_id": "T1"}
+    async with db_session_factory.begin() as session:
+        await set_thread_model(session, **pick, model="gpt-6-luna", provider="openai")
+
+    change = await choose_thread_model(db_session_factory, effort="high", **pick)
+    assert (change.model_id, change.effort) == ("gpt-6-luna", "high")
+    assert change.note == "This conversation runs on GPT-6 Luna at high effort from the next reply."
+    with pytest.raises(ThreadModelRefused, match="OpenAI models take low, medium, high only"):
+        await choose_thread_model(db_session_factory, effort="max", **pick)
+
+    alone = {**pick, "thread_id": "T2"}
+    kept = await choose_thread_model(
+        db_session_factory, effort="low", agent_provider="openai", **alone
+    )
+    assert (kept.model_id, kept.effort) == (None, "low"), "the agent's own OpenAI model"
+    with pytest.raises(ThreadModelRefused, match="Gemini models don't take an effort"):
+        await choose_thread_model(
+            db_session_factory, effort="low", agent_provider="gemini", **{**pick, "thread_id": "T3"}
+        )
+    assert await describe_thread_model(db_session_factory, **pick) == (
+        "This conversation runs on GPT-6 Luna at high effort."
+    )
+
+
 def test_each_model_takes_only_the_efforts_confirmed_for_it() -> None:
     for model_id in THREAD_MODEL_CHOICES.values():
         assert model_efforts(model_id) == ("low", "medium", "high", "xhigh", "max")

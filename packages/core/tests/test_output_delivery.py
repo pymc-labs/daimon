@@ -8,14 +8,19 @@ settle floor produces.
 
 from __future__ import annotations
 
+import ast
 import re
+import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import Any
+from pathlib import Path
+from typing import Any, cast
 
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
+from daimon.core import output_delivery
+from daimon.core.ops_events import OpsEvent
 from daimon.core.output_delivery import (
     DeliverableFile,
     NoticedFiles,
@@ -37,6 +42,7 @@ from mux.testing.drivers.anthropic.ma import (
     combine_handlers,
     list_response,
 )
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 NOW = datetime(2026, 8, 25, 12, 0, 0, tzinfo=UTC)
 
@@ -793,9 +799,16 @@ async def test_sweep_deletes_zero_byte_entry_without_download_or_notice() -> Non
     assert deletes == ["file_empty"], "the 0-byte entry must be deleted"
 
 
-async def test_sweep_continues_when_post_fails_for_one_file() -> None:
+async def test_sweep_continues_when_post_fails_for_one_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A post failure isolates to that file: it stays listed, the next file is
-    posted and deleted, and the return value counts only the success."""
+    posted and deleted, the return value counts only the success, and the
+    failed file is an ops issue."""
+    reported: list[OpsEvent] = []
+    monkeypatch.setattr(
+        output_delivery, "report_ops_event", lambda sm, event, *, logged: reported.append(event)
+    )
 
     async def sleep(delay: float) -> None:
         pass
@@ -832,12 +845,24 @@ async def test_sweep_continues_when_post_fails_for_one_file() -> None:
         if file.file_id == "file_bad":
             raise RuntimeError("upload exploded")
 
-    count = await _sweep(client, session_id="sesn_1", post=post, sleep=sleep)
+    tenant_id = uuid.uuid4()
+    count = await _sweep(
+        client,
+        session_id="sesn_1",
+        post=post,
+        sleep=sleep,
+        tenant_id=tenant_id,
+        platform="slack",
+        sessions=cast("async_sessionmaker[AsyncSession]", object()),
+    )
 
     assert count == 1, "only the successfully posted file counts"
     assert deletes == ["file_good"], (
         "the failed file must stay listed; only the posted file is deleted"
     )
+    assert [(e.code, e.tenant_id, e.reason, e.platform) for e in reported] == [
+        ("delivery.output_failed", tenant_id, "file_failed", "slack")
+    ]
 
 
 async def test_sweep_leaves_deferred_file_listed_without_counting_it() -> None:
@@ -1134,3 +1159,20 @@ async def test_sweep_posts_in_the_order_the_caller_gives() -> None:
 
     assert seen == [names], "order sees the listed names"
     assert posted == ["second.png", "first.pdf"], "posted in the order given"
+
+
+def test_every_adapter_sweep_passes_sessions_so_a_failed_file_is_an_ops_issue() -> None:
+    """Every chat and web path records its failed files; found by AST over the adapters."""
+    adapters = Path(__file__).resolve().parents[2] / "adapters"
+    calls: dict[str, bool] = {}
+    for path in adapters.glob("*/daimon/**/*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "sweep_outputs"
+            ):
+                where = f"{path.relative_to(adapters)}:{node.lineno}"
+                calls[where] = any(k.arg == "sessions" for k in node.keywords)
+    assert len(calls) >= 6, calls
+    assert [where for where, ok in calls.items() if not ok] == []

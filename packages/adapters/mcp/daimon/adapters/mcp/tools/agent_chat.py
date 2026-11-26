@@ -80,6 +80,7 @@ from daimon.adapters.mcp.resource_ports import (
 )
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._agent_chat_safety import (
+    earlier_turn_open,
     gate,
     record_turn,
     require_session_driver,
@@ -107,6 +108,7 @@ from daimon.adapters.mcp.tools._session_access import (
 from daimon.adapters.mcp.tools._turn_observation import observed_agent_turn
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core import bundle_handle
+from daimon.core.agent_chat_requester import UNREAD, record_driver, session_provenance
 from daimon.core.agent_mcp_credentials import sync_agent_mcp_credentials
 from daimon.core.agent_pins import agent_pin_names as core_agent_pin_names
 from daimon.core.billing import BillingConfig
@@ -127,7 +129,11 @@ from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
 from daimon.core.mcp_identity import identity_relay_urls
-from daimon.core.mcp_vault import archive_relay_vaults, refresh_mounted_mcp_vaults
+from daimon.core.mcp_vault import (
+    archive_relay_vaults,
+    refresh_mounted_mcp_vaults,
+    refresh_relay_vault,
+)
 from daimon.core.monitoring import KeptQuestion, capture_question, monitored_notice
 from daimon.core.mux_compat import retrieve_agent, retrieve_agent_version
 from daimon.core.permissions import agent_permissions, channel_permissions, memory_writable
@@ -794,6 +800,47 @@ async def _mirror_shared_mcp_tokens(
     )
 
 
+def _agent_chat_binding(runtime: McpRuntime, handle: str) -> str | None:
+    """The agent-chat session a relay vault is bound to, only while a server may be
+    sent its driver: off, the relay credential stays exactly as it was."""
+    return handle if runtime.settings.mcp_identity.names_agent_chat_requester else None
+
+
+async def _bind_relay_vault(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    session: BetaManagedAgentsSession,
+    *,
+    now: Callable[[], dt.datetime],
+) -> None:
+    """Bind a new session's relay vault to it (`refresh_relay_vault`), before its
+    first send. A continue binds it with its own refresh, older sessions included."""
+    mcp = runtime.settings.mcp
+    agent_chat = _agent_chat_binding(runtime, session.id)
+    if agent_chat is None or mcp.public_url is None or mcp.jwt_secret is None:
+        return
+    assert auth.agent_id is not None  # _resolve_ma_agent requires it
+    public_url = str(mcp.public_url)
+    relay_urls = identity_relay_urls(
+        (server.url for server in session.agent.mcp_servers), public_url=public_url
+    )
+    if not relay_urls:
+        return
+    for vault_id in dict.fromkeys(session.vault_ids):
+        await refresh_relay_vault(
+            runtime.client,
+            vault_id=vault_id,
+            account_id=auth.account_id,
+            agent_id=auth.agent_id,
+            jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
+            relay_urls=relay_urls,
+            now=now(),
+            session_factory=runtime.session_factory,
+            scope=mcp_scope(auth),
+            agent_chat=agent_chat,
+        )
+
+
 @observed_agent_turn
 async def _start_turn_impl(
     runtime: McpRuntime,
@@ -1000,16 +1047,31 @@ async def _start_turn_impl(
     if (observation := current_outcome.get()) is not None:
         observation.session_id = session.id
         observation.agent_id = str(ma_agent.id)
-    if recheck is not None:
-        await recheck()
-    await gate(runtime, auth, session)
-    turn_started_at = now()
-    turn_event_id = await _send_billed(runtime, session, message, scope=mcp_scope(auth))
-    kept = await _keep_question(
-        runtime, auth, session, turn_event_id=turn_event_id, message=message
-    )
-    channel = rules_channel(auth, session)
-    await record_turn(runtime, session.id, turn_event_id=turn_event_id, rules_channel_id=channel)
+    # Fenced as a continue is: a send on this session by another caller, once its
+    # handle is listed, cannot fall between this driver record and this send.
+    async with session_mutation_fence(runtime.session_factory, session.id):
+        if recheck is not None:
+            await recheck()
+        await gate(runtime, auth, session)
+        await _bind_relay_vault(runtime, auth, session, now=now)
+        send = await record_driver(
+            runtime.session_factory,
+            managed_session_id=session.id,
+            signed_in_person=auth.signed_in_person,
+            session_status=None,
+            earlier=await earlier_turn_open(runtime, auth, session.id, new_session=True),
+            provenance=session_provenance(session.metadata),
+            new_session=True,
+        )
+        turn_started_at = now()
+        turn_event_id = await _send_billed(runtime, session, message, scope=mcp_scope(auth))
+        kept = await _keep_question(
+            runtime, auth, session, turn_event_id=turn_event_id, message=message
+        )
+        channel = rules_channel(auth, session)
+        await record_turn(
+            runtime, session.id, turn_event_id=turn_event_id, rules_channel_id=channel, send=send
+        )
     watch_turn(runtime, auth, session.id, turn_event_id=turn_event_id, rules_channel_id=channel)
 
     return _turn_handle(session.id, turn_event_id, turn_started_at, kept)
@@ -1114,6 +1176,7 @@ async def _continue_turn_impl(
                 relay_urls=identity_relay_urls(
                     (server.url for server in current.agent.mcp_servers), public_url=public_url
                 ),
+                agent_chat=_agent_chat_binding(runtime, handle),
             )
         await gate(runtime, auth, current)
         return current
@@ -1121,6 +1184,15 @@ async def _continue_turn_impl(
     async with session_mutation_fence(runtime.session_factory, handle):
         # The fence may have waited behind a transfer or another send.
         current = await ready()
+        await record_driver(
+            runtime.session_factory,
+            managed_session_id=handle,
+            signed_in_person=auth.signed_in_person,
+            session_status=current.status,
+            earlier=UNREAD,
+            provenance=session_provenance(current.metadata),
+            resuming=True,
+        )
         resumed = await resume_paused(runtime, auth, current)
         if resumed is not None:
             if message is None:
@@ -1140,6 +1212,14 @@ async def _continue_turn_impl(
             current = await ready()
         elif message is None:
             raise ToolError(_MESSAGE_REQUIRED_MSG)
+        send = await record_driver(
+            runtime.session_factory,
+            managed_session_id=handle,
+            signed_in_person=auth.signed_in_person,
+            session_status=current.status,
+            earlier=await earlier_turn_open(runtime, auth, handle, new_session=False),
+            provenance=session_provenance(current.metadata),
+        )
         turn_started_at = now()
         # Inside the fence, so settle requests follow the order of the sends.
         turn_event_id = await _send_billed(runtime, current, message, scope=mcp_scope(auth))
@@ -1147,7 +1227,9 @@ async def _continue_turn_impl(
             runtime, auth, current, turn_event_id=turn_event_id, message=message
         )
         channel = rules_channel(auth, current)
-        await record_turn(runtime, handle, turn_event_id=turn_event_id, rules_channel_id=channel)
+        await record_turn(
+            runtime, handle, turn_event_id=turn_event_id, rules_channel_id=channel, send=send
+        )
         watch_turn(runtime, auth, handle, turn_event_id=turn_event_id, rules_channel_id=channel)
     return _turn_handle(handle, turn_event_id, turn_started_at, kept)
 

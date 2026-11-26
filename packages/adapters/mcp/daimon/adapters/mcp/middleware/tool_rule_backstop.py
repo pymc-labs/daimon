@@ -13,8 +13,9 @@ and `call_tool` included. A deny on one tool never refuses the two proxies by
 name; the inner call it carries is refused instead.
 
 Only an agent-wide `deny` is enforced here. `allow` has no server-side effect,
-and `ask` and channel rules need the driver (the server has no card and does not
-know the channel). The chat credential is shared by chat turns and routines, and
+and `ask` and channel rules need the driver. A provider turn has none, so its call
+to a tool with one goes to the host call gate (`needs_host_gate`), which decides it
+as the driver does. The chat credential is shared by chat turns and routines, and
 the driver denies in both (a deny ignores `scope` and `attended`), so this does too.
 """
 
@@ -124,6 +125,41 @@ async def tool_rule_refusal(
     if wildcard:
         return _denied(identity, key, chat_agent_id, wildcard=True)
     return None
+
+
+async def needs_host_gate(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    identity: AuthIdentity,
+    tool_name: str,
+    policy: ToolSafetyPolicy | None,
+    public_url: str | None,
+) -> bool:
+    """Whether this agent's `ask` or channel `deny` rule on `tool_name` sends a provider
+    turn's call to the host call gate. A failed read sends it there too, where a failed
+    rule read cards or refuses it as the driver does."""
+    if (
+        policy is None
+        or not policy.enabled
+        or not policy.agent_rules
+        or not public_url
+        or not _enforced_for(identity)
+        or tool_name in SEARCH_PROXY_TOOLS
+    ):
+        return False
+    try:
+        async with sessionmaker() as session:
+            rows = await agent_tool_rules.gate_rules_for_trusted_tool(
+                session, tenant_id=identity.tenant_id, tool_key=f"{DAIMON_SERVER_NAME}/{tool_name}"
+            )
+    except Exception:  # fail closed: the gate re-reads and decides
+        return True
+    return any(
+        same_mcp_url(row.server_url, public_url)
+        and derive_agent_uuid(tenant_id=identity.tenant_id, ma_agent_id=row.agent_id)
+        == identity.chat_agent_id
+        for row in rows
+    )
 
 
 def _denied(identity: AuthIdentity, key: str, agent: uuid.UUID, *, wildcard: bool) -> str:

@@ -2,6 +2,7 @@ import { ChevronRight, RotateCcw } from "lucide-react"
 import { useState } from "react"
 
 import { Ago, Avatar } from "@/components/common"
+import { ErrorState } from "@/components/QueryState"
 import { useConfirm } from "@/lib/confirm"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -11,11 +12,12 @@ import { ChangeList } from "./Draft"
 import type { Agent, Change } from "./types"
 
 export function History({ agent }: { agent: Agent }) {
-  const { data } = useVersions(agent.id)
+  const versions = useVersions(agent.id)
+  const { data } = versions
   const revert = useRevert(agent.id)
   const confirm = useConfirm()
   const [open, setOpen] = useState<number | null>(null)
-  if (!data) return <div className="space-y-2 p-5">{Array.from({ length: 5 }, (_, i) => <Skeleton key={i} className="h-12" />)}</div>
+  if (!data) return versions.isError ? <ErrorState error={versions.error} onRetry={() => void versions.refetch()} /> : <div className="space-y-2 p-5">{Array.from({ length: 5 }, (_, i) => <Skeleton key={i} className="h-12" />)}</div>
   return (
     <div className="py-2">
       {data.map((v) => {

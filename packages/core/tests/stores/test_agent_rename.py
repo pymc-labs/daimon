@@ -280,6 +280,8 @@ _KEPT_NAME_COLUMNS = {
     ("session_preparations", "target_fingerprint"): "a hash, not a name",
     ("selfhosted_agent_versions", "name"): "a revision keeps the name it was saved under",
     ("turn_origins", "helper_key"): "a helper turn's session key, not a name",
+    ("usage_reconcile_progress", "agent_chat_grant"): "an agent-chat session's grant, not a name",
+    ("usage_reconcile_progress", "agent_chat_channel"): "a channel id, not a name",
 }
 # Moved outside the column lists: by `rename_selfhosted_agent` and by hand.
 _OTHER_RENAMED = {("selfhosted_agents", "name"), ("user_config", "agent_name")}

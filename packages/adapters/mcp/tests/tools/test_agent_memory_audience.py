@@ -19,8 +19,10 @@ from daimon.adapters.mcp.tools import agent_memory as tools
 from daimon.core import host_memory
 from daimon.core.host_memory import HostMemoryPlace, choose_store
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.provider_routine import routine_scope_thread
 from daimon.core.stores.domain import Role, TurnOriginRow
 from daimon.core.turn_hold import TurnHold
+from fastmcp.exceptions import ToolError
 
 from ..harness import auth_identity
 
@@ -67,6 +69,7 @@ async def _open(
     thread: str,
     read_only: bool = False,
     switch: bool = False,
+    personal: bool = False,
 ) -> HostMemoryPlace:
     tenant, account = uuid.uuid4(), uuid.uuid4()
     auth: AuthIdentity = auth_identity(
@@ -94,7 +97,9 @@ async def _open(
         AsyncMock(return_value=_origin(tenant, account, thread, read_only=read_only)),
     )
     monkeypatch.setattr(tools, "resolve_features", AsyncMock(return_value=SimpleNamespace(on=on)))
-    memory = await tools.open_host_memory(runtime, auth, origin_context_id="origin", personal=False)
+    memory = await tools.open_host_memory(
+        runtime, auth, origin_context_id="origin", personal=personal
+    )
     return cast("Any", memory)._place  # pyright: ignore[reportPrivateUsage]
 
 
@@ -157,3 +162,22 @@ def test_a_contained_room_uses_the_channel_store_only() -> None:
     assert kind == "channel"
     with pytest.raises(host_memory.HostMemoryError):
         choose_store(place, personal=True, shared_on=True, personal_on=True, channel_on=True)
+
+
+@pytest.mark.parametrize(
+    ("channel_id", "allowed"), [("channel", False), (None, True)], ids=["posts", "owner-only"]
+)
+async def test_a_provider_routine_fire_reads_personal_memory_only_where_claude_mounts_it(
+    monkeypatch: pytest.MonkeyPatch, channel_id: str | None, allowed: bool
+) -> None:
+    """A fire whose result others see gets no personal store, as `headless_runner` mounts none."""
+    routine_id = uuid.uuid4()
+    row = SimpleNamespace(destination_kind=None, destination_id=None, channel_id=channel_id)
+    monkeypatch.setattr(tools, "get_routine", AsyncMock(return_value=row), raising=False)
+    thread = routine_scope_thread(routine_id)
+    if allowed:
+        place = await _open(monkeypatch, mode="off", thread=thread, personal=True)
+        assert not place.routine_posts, "an owner-only routine keeps its personal memory"
+        return
+    with pytest.raises(ToolError, match="no personal memory"):
+        await _open(monkeypatch, mode="off", thread=thread, personal=True)

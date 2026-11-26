@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import type { Me } from "@/lib/types"
 import { events, json } from "@/test/render"
 import type { Msg, SessionDetail } from "./types"
-import { hydrate, loadEarlier, send, useThread } from "./turns"
+import { answer, hydrate, loadEarlier, send, useThread } from "./turns"
 
 const reply = (content: string, extra: Partial<Msg> = {}): Msg => ({ id: "m2", role: "assistant", content, created_at: "2030-01-01T00:00:00Z", ...extra })
 const detail = (messages: Msg[], resume_from?: string) => ({ session: { id: "s" }, messages, resume_from }) as unknown as SessionDetail
@@ -98,6 +98,47 @@ describe("a refused turn", () => {
     const { result } = renderHook(() => useThread(sid))
     await send(qc, sid, "hi")
     expect(result.current.messages.at(-1)?.card).toMatchObject({ kind: "refusal", body: "This agent isn't available to you. Ask an admin." })
+  })
+
+  it("keeps a message that never reached the server and says the connection was lost", async () => {
+    const qc = new QueryClient()
+    const sid = "s-unsent"
+    hydrate(sid, { messages: [] })
+    server({
+      "POST /api/chat/uploads": [() => { throw new TypeError("Failed to fetch") }],
+      [`GET /api/chat/sessions/${sid}`]: [() => json(detail([]))],
+    })
+    const { result } = renderHook(() => useThread(sid))
+    await send(qc, sid, "hi", [new File(["a"], "notes.txt")])
+    expect(result.current.messages[0]).toMatchObject({ content: "hi", attachments: [{ name: "notes.txt" }] })
+    expect(result.current.messages.at(-1)?.card).toMatchObject({ kind: "refusal", body: "Connection lost." })
+  })
+})
+
+describe("a card answer whose response is lost", () => {
+  const card = (state: "pending" | "approved"): Msg => ({ ...user, id: "m0", role: "assistant", content: "", card: { id: "c1", kind: "approval", state, title: "Send it?", details: [], always_allowed: false } })
+  const lost = (sid: string, after: Msg[]) => server({
+    [`POST /api/chat/sessions/${sid}/cards/c1`]: [() => { throw new TypeError("Failed to fetch") }],
+    [`GET /api/chat/sessions/${sid}`]: [() => json(detail(after))],
+  })
+
+  it("shows the reply when the server took the answer", async () => {
+    const sid = "s-card-took"
+    hydrate(sid, { messages: [card("pending")] })
+    lost(sid, [card("approved"), reply("Sent.")])
+    const { result } = renderHook(() => useThread(sid))
+    await answer(new QueryClient(), sid, "c1", { answer: "approve" })
+    expect(result.current.messages.at(-1)).toMatchObject({ content: "Sent." })
+    expect(result.current.messages.at(-1)?.card).toBeUndefined()
+  })
+
+  it("says not sent when the server never got it", async () => {
+    const sid = "s-card-lost"
+    hydrate(sid, { messages: [card("pending")] })
+    lost(sid, [card("pending")])
+    const { result } = renderHook(() => useThread(sid))
+    await answer(new QueryClient(), sid, "c1", { answer: "approve" })
+    expect(result.current.messages.at(-1)?.card).toMatchObject({ kind: "refusal", body: "Connection lost." })
   })
 })
 

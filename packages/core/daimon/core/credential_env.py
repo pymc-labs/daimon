@@ -112,6 +112,10 @@ async def upload_github_repo_helpers_and_mount(
     )
 
 
+#: A session's requirement for one key of its `.env` (`sessions.project_session_resources`).
+ENV_REQUIREMENT_PREFIX = "agent-env:"
+
+
 def session_env_key(key: str, *, exclude_github: bool) -> bool:
     """The session owner's app-mode exclusion, before value decoding/upload."""
     return not exclude_github or key not in ("GH_TOKEN", "GITHUB_TOKEN")

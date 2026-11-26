@@ -576,3 +576,27 @@ async def test_a_new_session_names_the_skills_it_went_without(
     )
     await session_skills.tell_left_out(request, files, None)
     assert len(told) == 1, "nothing left out, nothing told"
+
+
+async def test_builtin_skills_are_carried_as_their_open_copies(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A provider without Anthropic's docx and pdf gets the tenant's open copies instead;
+    a built-in with no copy seeded, or no open equivalent, adds nothing."""
+    from daimon.core.stores.seeded_skills import record_seeded_skill
+
+    root = Path(__file__).resolve().parents[4] / "defaults/skills"
+    for builtin, name in session_skills.OPEN_SKILLS.items():
+        text = (root / name / "SKILL.md").read_text()
+        assert f"name: {name}\n" in text, f"{builtin}: the open skill ships under its own name"
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session)
+        await record_seeded_skill(
+            session, tenant_id=tenant.id, name="open-docx", content_hash="h", anthropic_id="sk_d"
+        )
+    got, missing = await session_skills.open_skills(
+        db_session_factory, tenant.id, ("docx", "pdf", "brainstorm")
+    )
+
+    assert got == (SkillRef(id="sk_d", version="latest", source="custom"),), "only a seeded copy"
+    assert missing == ("skill:pdf", "skill:brainstorm"), "the rest are named losses"

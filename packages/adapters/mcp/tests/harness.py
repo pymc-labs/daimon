@@ -196,13 +196,17 @@ async def registered_account_token(
 async def stop_confirmation_workers() -> None:
     """Cancel the confirmation workers agent-chat sends started and wait them out.
 
-    A worker reads through the test's database connection, so a test that holds
-    one must call this before its database fixture tears down.
+    A worker reads through the test's database connection, so the database
+    fixtures call this before they tear down (``add_background_drain``). A worker
+    the test already cancelled is only waited for: a second cancel can land while
+    SQLAlchemy closes the connection the first one invalidated, and its pool then
+    keeps that closed connection for the next test.
     """
     from daimon.adapters.mcp.tools import _agent_chat_safety
 
     workers = [w.task for w in _agent_chat_safety._workers.values()]  # pyright: ignore[reportPrivateUsage]
     _agent_chat_safety._workers.clear()  # pyright: ignore[reportPrivateUsage]
     for worker in workers:
-        worker.cancel()
+        if not worker.cancelling():
+            worker.cancel()
     await asyncio.gather(*workers, return_exceptions=True)

@@ -168,6 +168,10 @@ class RelayBinding:
     #: turn holding it (`bind_origin_session`) is the one making the call, so the relay
     #: names that turn even beside a queued one or after the session row was replaced.
     grant: str | None = None
+    #: The agent-chat session (its Managed Agents id) this credential is mounted in; set
+    #: alone. The relay names a person only while that session's driver is one signed in
+    #: to the hub (`daimon.core.agent_chat_requester`).
+    agent_chat: str | None = None
 
     def claim(self) -> dict[str, str]:
         value = {"agent_name": self.agent_name}
@@ -181,6 +185,8 @@ class RelayBinding:
             value["watch"] = str(self.watch_id)
         if self.owner is not None:
             value["owner"] = self.owner
+        if self.agent_chat is not None:
+            value["agent_chat"] = self.agent_chat
         return value
 
 
@@ -191,9 +197,11 @@ def parse_relay_claim(raw: object) -> RelayBinding:
     claim = cast("Mapping[str, object]", raw)
     name, key, routine = claim.get("agent_name"), claim.get("session"), claim.get("routine")
     owner, watch, grant = claim.get("owner"), claim.get("watch"), claim.get("grant")
+    agent_chat = claim.get("agent_chat")
     unattended = routine is not None or watch is not None
     if (
-        not set(claim) <= {"agent_name", "session", "routine", "watch", "owner", "grant"}
+        not set(claim)
+        <= {"agent_name", "session", "routine", "watch", "owner", "grant", "agent_chat"}
         or not (owner is None or (isinstance(owner, str) and owner and unattended))
         or not (grant is None or (isinstance(grant, str) and grant and key is not None))
         or not isinstance(name, str)
@@ -202,6 +210,14 @@ def parse_relay_claim(raw: object) -> RelayBinding:
         or not (routine is None or isinstance(routine, str))
         or not (watch is None or isinstance(watch, str))
         or sum(value is not None for value in (key, routine, watch)) > 1
+        or not (
+            agent_chat is None
+            or (
+                isinstance(agent_chat, str)
+                and agent_chat
+                and set(claim) == {"agent_name", "agent_chat"}
+            )
+        )
     ):
         raise ValueError("relay claim has the wrong shape")
     return RelayBinding(
@@ -211,6 +227,7 @@ def parse_relay_claim(raw: object) -> RelayBinding:
         owner=owner,
         watch_id=None if watch is None else uuid.UUID(watch),
         grant=grant,
+        agent_chat=agent_chat,
     )
 
 
@@ -370,8 +387,9 @@ CONVERSATION_META_KEY: Final = "requester_conversation"
 KIND_META_KEY: Final = "requester_kind"
 #: A one-time callback watch link for a `wake_tools` call; only the relay writes it.
 WAKE_META_KEY: Final = "wake_url"
-#: Who a stamped call is for: a person's live turn, or a routine run on its owner's behalf.
-RequesterKind = Literal["person", "routine"]
+#: Who a stamped call is for: a person's live turn, a routine run on its owner's behalf,
+#: or an agent-chat turn a person signed in to the hub started (it has no place).
+RequesterKind = Literal["person", "routine", "agent_chat"]
 #: Platforms whose user and channel ids the requester fields may carry.
 REQUESTER_PLATFORMS: Final = frozenset({"discord"})
 
@@ -509,15 +527,16 @@ def _stamp_message(
     meta.pop(KIND_META_KEY, None)
     meta.pop(WAKE_META_KEY, None)
     # Only a tool call is stamped; any other method just loses what a caller put there.
-    # A live turn is named only with its place; a routine's place may be unrecorded.
+    # A live turn is named only with its place; a routine's place may be unrecorded; an
+    # agent-chat turn never has one, so none is sent that could pass it off as a DM.
     if (
         is_call
         and person is not None
-        and (kind == "routine" or (kind == "person" and conversation))
+        and (kind in ("routine", "agent_chat") or (kind == "person" and conversation))
     ):
         meta[REQUESTER_META_KEY] = person
         meta[KIND_META_KEY] = kind
-        if conversation:
+        if conversation and kind != "agent_chat":
             meta[CONVERSATION_META_KEY] = dict(conversation)
     if is_call and wake_url is not None:
         meta[WAKE_META_KEY] = wake_url
@@ -568,7 +587,8 @@ def stamp_parsed(
     Whatever the caller put under `params._meta` for any requester key is
     removed first, so a value present was set here. `kind` is `person` for a live
     turn and `routine` for a routine run, whose `person` is the routine's owner and
-    whose `conversation` is its delivery place (left out when it has none). With no
+    whose `conversation` is its delivery place (left out when it has none). `agent_chat`
+    names the hub-signed-in person driving an agent-chat session, never with a place. With no
     `person` or `kind` (a foreign sender, two live turns) the keys are only removed.
     Requester keys are removed under `params._meta` of every method, not only tool calls.
     `wake_url` is set on each tool call when given; a caller's own one is always removed.

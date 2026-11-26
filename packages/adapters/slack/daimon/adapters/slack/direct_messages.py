@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from functools import partial
@@ -50,6 +51,7 @@ from daimon.core.dm_access import (
     lookup_dm_groups,
 )
 from daimon.core.dm_debounce import PICK_EXPIRED, PICK_SECONDS, DmBurst, debounce_seconds
+from daimon.core.dm_failures import report_dm_issue
 from daimon.core.dm_routing import DmChoose, DmDecision, DmRefused, DmStart, DmUnchecked, Route
 from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.handoff_context import TranscriptTurn
@@ -67,6 +69,7 @@ from daimon.core.workspace_settings import set_dms
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 _SEEN_REACTION = "eyes"
@@ -318,7 +321,13 @@ _COLD_DM_NOTICES = ColdDmNotices()
 
 
 async def _explain_no_private_chat(
-    client: AsyncWebClient, *, team_id: str, user_id: str, channel_id: str, dms_on: bool
+    client: AsyncWebClient,
+    sessions: async_sessionmaker[AsyncSession],
+    *,
+    team_id: str,
+    user_id: str,
+    channel_id: str,
+    dms_on: bool,
 ) -> None:
     """Answer a DM that has no conversation to continue, once per person per process."""
     person = f"{team_id}:{user_id}"
@@ -330,7 +339,32 @@ async def _explain_no_private_chat(
         )
     except (SlackApiError, aiohttp.ClientError, TimeoutError) as exc:
         _COLD_DM_NOTICES.forget(person)
-        log.warning("slack.dm.cold_notice_failed", error_type=type(exc).__name__)
+        tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+        log.warning(
+            "slack.dm.cold_notice_failed", tenant_id=str(tenant_id), error_type=type(exc).__name__
+        )
+        await _report_dm_failed(
+            sessions, tenant_id, team_id=team_id, channel_id=channel_id, user_id=user_id
+        )
+
+
+async def _report_dm_failed(
+    sessions: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    *,
+    team_id: str,
+    channel_id: str,
+    user_id: str,
+) -> None:
+    """Record a DM not sent as an issue, with its person and agent; the caller logs."""
+    await report_dm_issue(
+        sessions,
+        tenant_id,
+        "not_sent",
+        platform="slack",
+        route_key=f"{team_id}:{channel_id}",
+        user_id=user_id,
+    )
 
 
 async def _react(client: AsyncWebClient, channel_id: str, event: dict[str, Any], add: bool) -> None:
@@ -381,7 +415,20 @@ async def handle_direct_message(
     finally:
         # An error no turn handled, or a cancellation: nothing left goes unheard.
         if left := await bursts.end(key, burst):
-            log.warning("slack.dm.not_sent", messages=len(left), client=client is not None)
+            tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+            log.warning(
+                "slack.dm.not_sent",
+                tenant_id=str(tenant_id),
+                messages=len(left),
+                client=client is not None,
+            )
+            await _report_dm_failed(
+                runtime.sessionmaker,
+                tenant_id,
+                team_id=team_id,
+                channel_id=channel_id,
+                user_id=user_id,
+            )
             if client is not None:
                 with contextlib.suppress(SlackApiError, aiohttp.ClientError, TimeoutError):
                     await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
@@ -415,7 +462,12 @@ async def _answer_burst(
     if not dms_on:
         await runtime.dm_bursts.end(key, burst)  # one notice speaks for the whole burst
         await _explain_no_private_chat(
-            client, team_id=team_id, user_id=user_id, channel_id=channel_id, dms_on=dms_on
+            client,
+            runtime.sessionmaker,
+            team_id=team_id,
+            user_id=user_id,
+            channel_id=channel_id,
+            dms_on=dms_on,
         )
         return
     seconds = await debounce_seconds(runtime.sessionmaker, runtime.settings, tenant_id, "slack")
@@ -442,7 +494,12 @@ async def _answer_burst(
         else:
             await runtime.dm_bursts.end(key, burst)  # one refusal speaks for the whole burst
             await _refuse_cold(
-                client, route, team_id=team_id, user_id=user_id, channel_id=channel_id
+                client,
+                route,
+                runtime.sessionmaker,
+                team_id=team_id,
+                user_id=user_id,
+                channel_id=channel_id,
             )
             return
         if conversation is None:
@@ -695,6 +752,7 @@ async def _start_cold(
 async def _refuse_cold(
     client: AsyncWebClient,
     route: Route,
+    sessions: async_sessionmaker[AsyncSession],
     *,
     team_id: str,
     user_id: str,
@@ -705,7 +763,7 @@ async def _refuse_cold(
     An unrouted workspace with no default gets the guidance Slack gave before DM routing."""
     if isinstance(route, DmRefused) and route.reason in {"no_agent", "unrouted"}:
         await _explain_no_private_chat(
-            client, team_id=team_id, user_id=user_id, channel_id=channel_id, dms_on=True
+            client, sessions, team_id=team_id, user_id=user_id, channel_id=channel_id, dms_on=True
         )
         return
     text = _UNCHECKED if isinstance(route, DmUnchecked) else DM_AGENT_REFUSED

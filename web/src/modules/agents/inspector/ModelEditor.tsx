@@ -1,6 +1,7 @@
 import { Switch } from "@/components/ui/switch"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { byProvider } from "@/lib/providers"
 import { cn } from "@/lib/utils"
 import { EFFORT_LABEL, PROVIDER } from "../lib"
 import { ModelPreviewPanel } from "../ModelPreviewPanel"
@@ -37,28 +38,32 @@ export function ModelEditor({ agent, config, catalog, ro, update }: Props) {
   return (
     <>
       <Section title="Model">
-        <div className="space-y-2">
-          {catalog?.models.map((x) => {
-            const on = m.id === x.id && m.backend === x.backend
-            return (
-              <button
-                key={`${x.backend}:${x.id}`}
-                disabled={ro}
-                onClick={() => update((c) => {
-                  const effort = carriedEffort(c.model.effort, effortsOf(x, x.backend), x.backend)
-                  c.model = { ...c.model, id: x.id, backend: x.backend, speed: x.fast ? c.model.speed : "standard", effort }
-                }, 0)}
-                className={cn("flex min-h-12 w-full items-center gap-3 rounded-lg border px-3 py-2 text-left text-sm enabled:hover:bg-accent", on && "border-primary bg-accent")}
-              >
-                <span className={cn("flex size-4 shrink-0 items-center justify-center rounded-full border", on && "border-primary")}>
-                  {on && <span className="size-2 rounded-full bg-primary" />}
-                </span>
-                <span className="font-medium">{x.label}</span>
-                <span className="inline-flex h-5 items-center rounded bg-muted px-1.5 text-[11px] font-medium text-muted-foreground">{PROVIDER[x.backend]}</span>
-                <span className="ml-auto text-xs text-muted-foreground tabular">${x.in_usd} / ${x.out_usd} per M</span>
-              </button>
-            )
-          })}
+        <div className="space-y-4">
+          {byProvider(catalog?.models ?? [], (x) => x.backend).map((g) => (
+            <div key={g.provider} role="group" aria-labelledby={`model-${g.provider}`} className="space-y-2">
+              <h4 id={`model-${g.provider}`} className="text-xs text-faint">{g.name}</h4>
+              {g.models.map((x) => {
+                const on = m.id === x.id && m.backend === x.backend
+                return (
+                  <button
+                    key={`${x.backend}:${x.id}`}
+                    disabled={ro}
+                    onClick={() => update((c) => {
+                      const effort = carriedEffort(c.model.effort, effortsOf(x, x.backend), x.backend)
+                      c.model = { ...c.model, id: x.id, backend: x.backend, speed: x.fast ? c.model.speed : "standard", effort }
+                    }, 0)}
+                    className={cn("flex min-h-12 w-full items-center gap-3 rounded-lg border px-3 py-2 text-left text-sm enabled:hover:bg-accent", on && "border-primary bg-accent")}
+                  >
+                    <span className={cn("flex size-4 shrink-0 items-center justify-center rounded-full border", on && "border-primary")}>
+                      {on && <span className="size-2 rounded-full bg-primary" />}
+                    </span>
+                    <span className="font-medium">{x.label}</span>
+                    <span className="ml-auto text-xs text-muted-foreground tabular">${x.in_usd} / ${x.out_usd} per M</span>
+                  </button>
+                )
+              })}
+            </div>
+          ))}
         </div>
         {preview && <ModelPreviewPanel preview={preview} className="mt-3" />}
       </Section>

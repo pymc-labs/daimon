@@ -4,14 +4,15 @@ import { useState } from "react"
 import { toast } from "sonner"
 
 import { Button } from "@/components/ui/button"
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
+import { DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { api } from "@/lib/api"
+import { byProvider } from "@/lib/providers"
 import type { ThreadModels } from "./types"
 
 const DEFAULT = "default"
 
 /** The chat's model: a pick applies to this chat at once; its note says what is off on the new provider. */
-export function ThreadModel({ sid, model, onChanged }: { sid: string; model: string; onChanged: () => void }) {
+export function ThreadModel({ sid, model }: { sid: string; model: string }) {
   const qc = useQueryClient()
   const [open, setOpen] = useState(false)
   const models = useQuery({
@@ -24,8 +25,9 @@ export function ThreadModel({ sid, model, onChanged }: { sid: string; model: str
   const pick = async (value: string) => {
     try {
       const done = await api.put<{ note: string }>(`/api/chat/sessions/${sid}/model`, { value })
+      // The header reads the model from the thread list first, so both refetch.
       void qc.invalidateQueries({ queryKey: ["chat", "session", sid] })
-      onChanged()
+      void qc.invalidateQueries({ queryKey: ["chat", "sessions"] })
       toast.success(done.note)
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Couldn't change the model.")
@@ -35,8 +37,8 @@ export function ThreadModel({ sid, model, onChanged }: { sid: string; model: str
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="xs" className="text-faint" aria-label="Chat model">
-          {model || "Model"}<ChevronDown />
+        <Button variant="ghost" size="xs" className="max-w-28 shrink-0 text-faint" aria-label="Chat model">
+          <span className="truncate">{model || "Model"}</span><ChevronDown />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="max-h-80 overflow-y-auto">
@@ -45,12 +47,17 @@ export function ThreadModel({ sid, model, onChanged }: { sid: string; model: str
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         {models.isPending && <div className="px-2 py-1.5 text-sm text-muted-foreground">Loading…</div>}
-        {models.data?.choices.map((c) => (
-          <DropdownMenuItem key={c.value} onSelect={() => void pick(c.value)}>
-            <span>{c.label}</span>
-            <span className="ml-2 text-xs text-muted-foreground">{c.price}</span>
-            {models.data.current === c.value && <Check className="ml-auto" />}
-          </DropdownMenuItem>
+        {byProvider(models.data?.choices ?? [], (c) => c.provider).map((g) => (
+          <DropdownMenuGroup key={g.provider}>
+            <DropdownMenuLabel>{g.name}</DropdownMenuLabel>
+            {g.models.map((c) => (
+              <DropdownMenuItem key={c.value} onSelect={() => void pick(c.value)}>
+                <span>{c.label}</span>
+                <span className="ml-2 text-xs text-muted-foreground">{c.price}</span>
+                {models.data?.current === c.value && <Check className="ml-auto" />}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuGroup>
         ))}
       </DropdownMenuContent>
     </DropdownMenu>

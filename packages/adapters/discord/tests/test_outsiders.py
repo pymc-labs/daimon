@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import discord
-from daimon.adapters.discord.outsiders import channel_outsiders, guild_rooms
+from daimon.adapters.discord.outsiders import channel_outsiders, guild_rooms, is_public_thread
 from daimon.core.outsiders import INTERNAL_ROLES_HINT
 
 from . import audience_fakes as fake
@@ -74,3 +74,15 @@ def test_an_archived_thread_the_cache_lacks_is_checked_from_the_channel_itself()
     archived.guild = fake.guild(channels=[guest])
 
     assert channel_outsiders(archived, INTERNAL, TEAM).outsiders_can_view is True
+
+
+def test_only_a_thread_discord_calls_public_is_public() -> None:
+    def thread(kind: discord.ChannelType) -> discord.Thread:
+        made = object.__new__(discord.Thread)
+        made._type = kind  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]
+        return made
+
+    assert is_public_thread(thread(discord.ChannelType.public_thread))
+    assert is_public_thread(thread(discord.ChannelType.news_thread))
+    assert not is_public_thread(thread(discord.ChannelType.private_thread))
+    assert not is_public_thread(_open()) and not is_public_thread(None)

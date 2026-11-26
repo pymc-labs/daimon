@@ -7,7 +7,9 @@ For each room:
 - **contained**: a person who is not internal can view it, or "client" is in its name,
   or the facts are unknown.
 - **narrow**: three or more team members cannot read it (view it and read its history),
-  or it is a private thread, or the facts are unknown.
+  or an internal person is shut out of it by name (a member overwrite that denies View
+  Channel or Read Message History, and the person cannot read it), or it is a private
+  thread, or the facts are unknown.
 
 A private thread takes "contained" from its parent room and is always narrow. A public
 thread and a forum post take both facts from their parent. A voice or stage room, and
@@ -111,6 +113,7 @@ def compute_room_facts(
         if not m.is_bot
     ]
     outsiders = [p for p in people if not p.role_ids & internal]
+    insiders = [p for p in people if p.role_ids & internal]
     team_members = [p for p in people if p.role_ids & team]
     own: dict[str, RoomFacts] = {}
 
@@ -122,7 +125,8 @@ def compute_room_facts(
         )
         return RoomFacts(
             contained=outside > 0 or is_client_name(channel.name),
-            narrow=shut_out >= NARROW_TEAM_THRESHOLD,
+            narrow=shut_out >= NARROW_TEAM_THRESHOLD
+            or _sealed_by_name(guild_id, role_permissions, insiders, overwrites),
             outsiders_count=outside,
             team_shut_out_count=shut_out,
         )
@@ -157,6 +161,26 @@ def compute_room_facts(
 _VIEW = DISCORD_VIEW_CHANNEL
 _READ = DISCORD_VIEW_CHANNEL | DISCORD_READ_HISTORY
 """Permission bits a person must hold: to view a room, and to read it."""
+
+
+def _sealed_by_name(
+    guild_id: str,
+    role_permissions: Mapping[str, int],
+    insiders: Sequence[DiscordMember],
+    overwrites: Sequence[DiscordOverwrite],
+) -> bool:
+    """Whether a member overwrite shuts an internal person out of the room by name.
+
+    The overwrite denies View Channel or Read Message History, and the person cannot read
+    the room. An owner or administrator always can, so one never counts. A person who is
+    not internal has no open internal room where a leak would show, so one never counts.
+    """
+    denied = {o.id for o in overwrites if o.type == 1 and o.deny & _READ}
+    return any(
+        not _holds(person, guild_id, role_permissions, overwrites, _READ)
+        for person in insiders
+        if person.user_id in denied
+    )
 
 
 def _count(
