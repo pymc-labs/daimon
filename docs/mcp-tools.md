@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 258 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 259 tools Daimon's MCP server registers, plus the 9 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -58,6 +58,7 @@ Agent-chat primitives plus bounded ``ask`` and completed-chart delivery.
 | --- | --- | --- |
 | `archive_my_session` | agent tokens only | Archive a session when its conversation is finished. |
 | `ask` | agent tokens only | Ask one question and wait for the final answer and any chart images. |
+| `await_turn` | agent tokens only | Wait for news from the turn running on ``handle``, without polling. |
 | `cancel_turn` | agent tokens only | Stop a running turn immediately. |
 | `continue_turn` | agent tokens only | Send a follow-up message on an existing session, or resume a paused one. |
 | `deliver_turn_charts` | agent tokens only | Return the newest completed reply with its chart images and optional links. |
@@ -829,9 +830,10 @@ visibility tags, so a logged-in caller sees all of them; each takes a `daimon_id
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `ask` | all callers | Ask a Daimon one question and wait up to about two minutes for its answer. |
+| `await_turn` | all callers | Wait for news from the turn running on ``handle``, without polling. |
 | `continue_turn` | all callers | Send a follow-up on an existing session without waiting. |
 | `describe_daimon` | all callers | Describe one Daimon: role, skills, repo, environment, platform and workspace. |
-| `get_session` | all callers | Status of one session. |
+| `get_session` | all callers | Status of one session, read once. |
 | `list_daimons` | all callers | List every Daimon you can reach on this platform, across all your workspaces. |
 | `list_events` | all callers | A session's transcript. |
 | `list_my_sessions` | all callers | Sessions you started with this Daimon, for resuming with ``handle``. |

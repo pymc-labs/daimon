@@ -208,7 +208,7 @@ async def _routine_claims(
         ),
         ({"destination_kind": "channel", "destination_id": "chan-9"}, "chan-9", "contained"),
     ],
-    ids=["team", "narrow", "thread-without-a-fact", "unknown"],
+    ids=["team", "narrow", "thread-without-a-fact-is-narrow", "unknown"],
 )
 async def test_a_routine_run_names_its_routine_the_room_it_posts_to_and_its_kind(
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -297,3 +297,45 @@ async def test_a_run_whose_routine_now_posts_elsewhere_signs_no_routine_claim(
     assert not {"routine", "channel", "room"} & set(claims), (
         "the run signs only the room it started for, and only with a credential that names it"
     )
+
+
+async def test_a_thread_opened_for_the_answer_signs_the_message_channel_and_the_threads_kind(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A mention in chan-1 answered in a new public thread-1: `channel` stays chan-1, where
+    the server fetches the message, and `room` judges thread-1, which reads as chan-1."""
+    person = await _person(db_session_factory)
+    token, _ = await _chat_session(db_session_factory, person, "thread-1", message="m-1")
+    async with db_session_factory() as db, db.begin():
+        await db.execute(
+            text(
+                "UPDATE turn_origins SET platform_channel_id = 'chan-1', public_thread = true"
+                " WHERE thread_id = 'thread-1'"
+            )
+        )
+    for facts, room in ((TEAM, "team"), (NARROW, "narrow")):
+        await _facts(db_session_factory, person, {"chan-1": facts})
+        claims = await _claims_of(db_session_factory, token, SERVER)
+        assert (claims["channel"], claims["msg"], claims["room"]) == ("chan-1", "m-1", room), (
+            "the message's channel, with the kind of the thread the answer goes to"
+        )
+
+
+async def test_a_routine_reads_a_public_thread_with_no_fact_as_narrow_where_a_turn_reads_its_parent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A deliberate difference: a turn knows its thread is public from Discord, a routine
+    does not record it, so with no fact of the thread's own the routine reads narrow. It
+    only ever reads less (`daimon.core.signed_room.routine_room`)."""
+    person = await _person(db_session_factory)
+    await _facts(db_session_factory, person, {"chan-1": TEAM})
+    token, _ = await _chat_session(db_session_factory, person, "thr-1")
+    async with db_session_factory() as db, db.begin():
+        await db.execute(text("UPDATE turn_origins SET public_thread = true"))
+    assert await _room(db_session_factory, token) == ["team"], "a turn takes its parent's"
+    _, claims = await _routine_claims(
+        db_session_factory,
+        person,
+        {"destination_kind": "thread", "destination_id": "thr-1", "channel_id": "chan-1"},
+    )
+    assert (claims["channel"], claims["room"]) == ("thr-1", "narrow"), "a routine reads narrow"
