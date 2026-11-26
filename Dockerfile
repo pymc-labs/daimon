@@ -98,6 +98,15 @@ RUN --mount=type=bind,from=builder,source=/app/uv.lock,target=/app/uv.lock \
     && python -c "import google.genai" \
     && python -m compileall -q -j 0 packages
 
+# The self_knowledge tools serve the generated reference pages too, which are
+# never committed: build them, and the llms.txt index that describes them.
+RUN --mount=type=bind,source=scripts,target=/app/scripts \
+    --mount=type=bind,source=apps,target=/app/apps \
+    python scripts/generate_config_reference.py \
+    && python scripts/generate_feature_reference.py \
+    && python scripts/generate_mcp_tool_catalogue.py \
+    && python scripts/generate_llms_txt.py
+
 # The commit this image was built from; daimon logs it as `release`. Last, so a
 # new commit does not invalidate the layers above.
 ARG DAIMON_RELEASE=""

@@ -620,8 +620,11 @@ jobs:
           from daimon.core.self_knowledge import Library;
           s = S();
           lib = Library(s.docs_root, s.source_root, s.docs_url, s.repo_url, "smoke", True);
-          assert "how-daimon-works.md" in lib.read_docs(), "docs missing from the image";
+          index = lib.read_docs();
+          assert "how-daimon-works.md" in index, "docs missing from the image";
+          assert "features.md" in index, "generated pages missing from the image";
           lib.read_docs("how-daimon-works.md");
+          lib.read_docs("features.md");
           lib.read_source("packages/core/daimon/core/self_knowledge.py")'
       - name: create the test database with the image's alembic
         env:
