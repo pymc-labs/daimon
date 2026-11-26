@@ -2,8 +2,7 @@
 
 A person reading in the web app reads for themselves: the rule in `daimon.core.data_audience`
 with a private origin, the person as asker and as the agent owner (a list row they hold shows).
-Writes are the workspace admins', who manage data access as data admins do. The store's own
-refusals carry messages safe to show.
+Writes are the workspace admins'. The store's own refusals carry messages safe to show.
 """
 
 from __future__ import annotations
@@ -55,7 +54,7 @@ async def store(runtime: WebRuntime) -> AsyncIterator[AsyncConnection[DictRow]]:
 
 
 def workspace_admin(caller: WebCaller) -> bool:
-    """A workspace owner or admin, who manages data access as a data admin does."""
+    """A workspace owner or admin, who manages data access."""
     return caller.role in ("owner", "admin")
 
 

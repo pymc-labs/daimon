@@ -213,12 +213,9 @@ async def test_names_hide_from_a_guest_and_a_marked_person_only(store: Store) ->
             account_id=account,
             proof=Proof(IdentityKey("chat", "w", subject), "oauth"),
         )
-    await store.sql(
-        f"insert into {store.d}.data_admins (tenant_id, account_id) values (%s, %s)",
-        store.tenant,
-        admin,
+    await redaction.set_redacted(
+        store.conn, schemas, store.tenant, marked, True, by=admin, admin=True
     )
-    await redaction.set_redacted(store.conn, schemas, store.tenant, marked, True, by=admin)
     assert await redaction.redacted_among(store.conn, schemas, store.tenant, [marked, other]) == {
         marked
     }, "only the marked person"
@@ -282,13 +279,12 @@ async def test_a_changed_pinned_file_stops_its_source_until_approved(
     assert "await approval" in cursor["last_error"]
 
     admin = uuid.uuid4()
-    await store.sql(
-        f"insert into {store.d}.data_admins (tenant_id, account_id) values (%s, %s)",
-        store.tenant,
-        admin,
+    detail = await redaction.show_set(
+        store.conn, schemas, store.tenant, "house", by=admin, admin=True
     )
-    detail = await redaction.show_set(store.conn, schemas, store.tenant, "house", by=admin)
     assert detail.info.pending and detail.pending_rules is not None
-    await redaction.approve(store.conn, schemas, store.tenant, "house", served["file"][0], by=admin)
+    await redaction.approve(
+        store.conn, schemas, store.tenant, "house", served["file"][0], by=admin, admin=True
+    )
     assert await store.sync() == "ok", "approved: the source syncs with the new rules"
     assert "client B" in await store.texts()

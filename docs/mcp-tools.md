@@ -302,7 +302,7 @@ Chat tools for the data pages: sources, access, links and redaction rule sets.
 | `change_data_access` | admin only | Change who may read what in the data sources. |
 | `change_data_links` | admin only | Link an account the data sources know to a person (link: provider, workspace, subject as listed, person), turn down a suggestion (reject: the same), unlink an account (unlink: provider, workspace, subject), or hide or show a person's name in what agents read (hide_names, show_names: person). |
 | `change_data_source` | admin only | Add a data source (create: kind, name, settings by the kind's fields) or pause, resume, retire, publish, unpublish or sync one (source_id). |
-| `list_data_access` | admin only | List who may read what in the data sources: each scope with its holders, the data admins and the workspace's people (names and account ids). |
+| `list_data_access` | admin only | List who may read what in the data sources: each scope with its holders, and the workspace's people (names and account ids). |
 | `list_data_links` | admin only | List the accounts the data sources know, each linked to a person or not, and the open suggestions (an account whose verified email matches a person). |
 | `list_data_rule_sets` | admin only | List the redaction rule sets, or show one (name) with its approved and waiting rules. |
 | `list_data_sources` | admin only | List the workspace's data sources with their state, or one source's latest sync runs (source_id). |

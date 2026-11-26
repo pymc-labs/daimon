@@ -78,7 +78,6 @@ def erasure(schemas: Schemas) -> tuple[ErasureStatement, ...]:
             account(f"{table}.{col}", f"delete from {d}.{table} where {col} = :account_id")
             for table, col in (
                 ("link_decisions", "account_id"),
-                ("data_admins", "account_id"),
                 ("identity_notices", "account_id"),
                 ("person_connections", "account_id"),
                 ("connect_pending", "account_id"),
@@ -87,10 +86,6 @@ def erasure(schemas: Schemas) -> tuple[ErasureStatement, ...]:
         account(
             "decided_by",
             f"update {d}.link_decisions set decided_by = null where decided_by = :account_id",
-        ),
-        account(
-            "admin_granted_by",
-            f"update {d}.data_admins set granted_by = null where granted_by = :account_id",
         ),
         account(
             "audit_detail",
@@ -105,7 +100,6 @@ def erasure(schemas: Schemas) -> tuple[ErasureStatement, ...]:
             for table in (
                 "identities",
                 "link_decisions",
-                "data_admins",
                 "identity_notices",
                 "redaction_sets",
             )

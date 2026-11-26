@@ -45,15 +45,6 @@ create table {{data}}.link_decisions (
 );
 create index on {{data}}.link_decisions (account_id);
 
--- Who may link others: granted by the tenant's owner or another data admin.
-create table {{data}}.data_admins (
-  tenant_id uuid not null,
-  account_id uuid not null,
-  granted_by uuid,
-  created_at timestamptz not null default now(),
-  primary key (tenant_id, account_id)
-);
-
 -- What a person is told about links others made or ended for them; read by the app.
 create table {{data}}.identity_notices (
   id uuid primary key default gen_random_uuid(),
@@ -145,8 +136,6 @@ end $$;
 create trigger refuse_erased before insert or update on {{data}}.identities
   for each row execute function {{data}}.refuse_erased('account_id');
 create trigger refuse_erased before insert or update on {{data}}.link_decisions
-  for each row execute function {{data}}.refuse_erased('account_id');
-create trigger refuse_erased before insert or update on {{data}}.data_admins
   for each row execute function {{data}}.refuse_erased('account_id');
 create trigger refuse_erased before insert or update on {{data}}.identity_notices
   for each row execute function {{data}}.refuse_erased('account_id');

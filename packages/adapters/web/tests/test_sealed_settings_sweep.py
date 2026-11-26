@@ -185,8 +185,6 @@ EXEMPT: dict[str, str] = {
     "POST /api/admin/data/links/reject": "workspace level: the data store's access, links and admins, no channel and no agent",
     "POST /api/admin/data/links/unlink": "workspace level: the data store's access, links and admins, no channel and no agent",
     "PUT /api/admin/data/people/{account_id}/redacted": "workspace level: the data store's access, links and admins, no channel and no agent",
-    "POST /api/admin/data/admins": "workspace level: the data store's access, links and admins, no channel and no agent",
-    "DELETE /api/admin/data/admins/{account_id}": "workspace level: the data store's access, links and admins, no channel and no agent",
     "POST /api/admin/data/redaction/{name}/approve": "workspace level: the data store's access, links and admins, no channel and no agent",
     "POST /api/profile/data/connect": "a person's own data, not a channel or an agent's settings",
     "POST /api/profile/data/connect/{pending_id}/poll": "a person's own data, not a channel or an agent's settings",
