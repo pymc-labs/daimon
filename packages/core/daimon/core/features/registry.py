@@ -402,8 +402,8 @@ _SESSION_IDENTITY: Final[tuple[FeatureSpec, ...]] = (
         binds="session_identity",
         doc=(
             "The skills listed on the agent. Off leaves them out of new conversations; "
-            "the agent keeps its list. Skills need the read tool, so they are off wherever it "
-            f"is. {_KEPT} Always on for Gemini and OpenAI agents."
+            "the agent keeps its list. Off wherever the read tool is off. "
+            f"{_KEPT}"
         ),
         backend_fixed=_FIXED_ON,
         platforms=EVERY_PLATFORM,
@@ -1340,9 +1340,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         tiers=("workspace",),
         binds="turn",
         doc=(
-            "Coding keys, the hub and outside clients can read the skill library, by scope. "
-            "Chat agents see a scoped skill only where everyone who can read the room holds "
-            "its scope."
+            "Chat agents see a scoped skill only where everyone in the room holds its scope."
         ),
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,

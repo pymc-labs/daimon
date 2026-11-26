@@ -469,7 +469,7 @@ The skills Daimon adds for the chat app, such as its formatting. They need the r
 
 ## Agent skills
 
-The skills listed on the agent. Off leaves them out of new conversations; the agent keeps its list. Skills need the read tool, so they are off wherever it is. A conversation keeps what it started with until /new. Always on for Gemini and OpenAI agents.
+The skills listed on the agent. Off leaves them out of new conversations; the agent keeps its list. Off wherever the read tool is off. A conversation keeps what it started with until /new.
 
 | | |
 | --- | --- |
@@ -1112,7 +1112,7 @@ The agent can search the team's data sources, showing only what everyone who wil
 
 ## Library skills
 
-Coding keys, the hub and outside clients can read the skill library, by scope. Chat agents see a scoped skill only where everyone who can read the room holds its scope.
+Chat agents see a scoped skill only where everyone in the room holds its scope.
 
 | | |
 | --- | --- |
