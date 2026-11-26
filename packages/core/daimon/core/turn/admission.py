@@ -142,6 +142,7 @@ from daimon.core.spend_gate import (
 from daimon.core.stores import agent_backends, mux_state
 from daimon.core.stores.access_policy import PolicyBusyError, load_access_policy
 from daimon.core.stores.accounts import set_role
+from daimon.core.stores.audience_facts import FACTS_WAIT_S, wait_for_usable_facts
 from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, Role
 from daimon.core.stores.identity import (
@@ -422,6 +423,13 @@ class AdmitRequest:
     relay_scoped: bool = False
 
 
+@dataclass
+class FactsWaitBudget:
+    """Seconds one turn has waited for room facts, all waits together."""
+
+    waited_s: float = 0.0
+
+
 @dataclass(frozen=True)
 class Admission:
     """Everything `run_prepared_turn` needs to start a turn, resolved once."""
@@ -466,6 +474,9 @@ class Admission:
     origin_channel_id: str | None = None
     origin_thread_id: str | None = None
     origin_seal_ids: frozenset[str] = frozenset()
+    # The turn's one wait budget for room facts, shared by reference with every copy
+    # (`replace`): admission and every `reauthorize` spend it in place.
+    facts_wait: FactsWaitBudget = field(default_factory=FactsWaitBudget, compare=False, repr=False)
     # Parent channel the turn's spend is attributed to; in a DM, the channel it
     # was moved from, or None. Apart from `origin_channel_id`, which drives the
     # seal: a DM is budgeted to its source channel but never runs there.
@@ -742,8 +753,11 @@ async def admit(
     principal_platform: str | None = None,
     helper: HelperCall | None = None,
     public_thread: bool = False,
+    on_facts_wait: Callable[[], Awaitable[None]] | None = None,
 ) -> Admission:
     """Admit a turn, or raise the typed reason it is refused.
+
+    `on_facts_wait` is awaited once, only when admission starts to wait for room facts.
 
     `requester_org` is the platform's word on which organisation the requester
     belongs to; every caller states it. `requester_home_id` names the home
@@ -796,6 +810,7 @@ async def admit(
                 principal_platform=principal_platform,
                 helper=helper,
                 public_thread=public_thread,
+                on_facts_wait=on_facts_wait,
             )
     except BaseException as exc:
         observation.finish(error=exc)
@@ -935,6 +950,7 @@ async def admit_impl(
     principal_platform: str | None = None,
     helper: HelperCall | None = None,
     public_thread: bool = False,
+    on_facts_wait: Callable[[], Awaitable[None]] | None = None,
 ) -> Admission:
     """Run the full pre-turn gate sequence; raise instead of returning bool.
 
@@ -976,6 +992,7 @@ async def admit_impl(
         principal_platform=principal_platform,
         helper=helper,
         public_thread=public_thread,
+        on_facts_wait=on_facts_wait,
     )
     followed: list[Slot] = []
     try:
@@ -1019,6 +1036,7 @@ async def _admit_gates(
     principal_platform: str | None = None,
     helper: HelperCall | None = None,
     public_thread: bool = False,
+    on_facts_wait: Callable[[], Awaitable[None]] | None = None,
     followed: list[Slot] | None = None,
     follow_switch: bool = True,
 ) -> Admission:
@@ -1077,6 +1095,18 @@ async def _admit_gates(
         # A DM has no channel of its own to share; /dm-me asks about the channel
         # it copies history from.
         shared_place = dm_source_channel_id if is_dm else channel_id
+        facts_waited = 0.0
+        facts_budget = FactsWaitBudget()
+        if mode == "on" and platform == "discord" and shared_place is not None:
+            # Facts retired moments ago come back soon: wait (no transaction held) before judging.
+            mark("identity")
+            facts_waited = (
+                await wait_for_usable_facts(session, tenant_id=tenant_id, on_wait=on_facts_wait)
+                or 0.0
+            )
+            facts_budget.waited_s = facts_waited
+            if facts_waited:
+                mark("facts_wait")
         if shared_place is not None:
             audience = await _record_shared_channel(
                 session,
@@ -1780,6 +1810,7 @@ async def _admit_gates(
             source_sealed=source_sealed,
             hold=hold,
             shared_channel=shared,
+            facts_wait=facts_budget,
             origin_channel_id=channel_id,
             origin_thread_id=thread_id,
             origin_seal_ids=seal_ids,
@@ -2149,6 +2180,7 @@ async def _admit_gates(
         source_shared=source_shared,
         hold=hold,
         shared_channel=shared,
+        facts_wait=facts_budget,
         relay_scoped=relay_agent,
         origin_channel_id=channel_id,
         origin_thread_id=thread_id,
@@ -2535,6 +2567,23 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
     if grant is None:
         return admission
     async with deps.sessionmaker() as session:
+        if (
+            grant.platform == "discord"
+            # Held and narrow already: both only tighten, so no fact can change this turn.
+            and not (grant.hold is not None and grant.narrow_room)
+            and (not grant.is_dm or grant.dm_source is not None)
+            and await audience_mode(
+                session, FeaturePlace(grant.tenant_id, "discord", grant.channel_id)
+            )
+            == "on"
+        ):
+            budget = admission.facts_wait
+            budget.waited_s += (
+                await wait_for_usable_facts(
+                    session, tenant_id=grant.tenant_id, budget_s=FACTS_WAIT_S - budget.waited_s
+                )
+                or 0.0
+            )
         policy = await load_access_policy(session, tenant_id=grant.tenant_id)
         if grant.public_thread:
             policy = with_public_thread_room(
