@@ -1,4 +1,4 @@
-"""Signed MCP caller identity: keys, claims per platform, signing and re-signing."""
+"""Signed MCP caller identity: keys, claims per platform, signing with a jti per request."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from daimon.core.config import McpIdentitySettings
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_identity import (
     IdentityClaims,
-    IdentityTokenCache,
+    IdentitySigner,
     RelayBinding,
     RequesterBodyError,
     SigningKey,
@@ -137,17 +137,16 @@ def _decode_with(claims: IdentityClaims) -> dict[str, Any]:
     return _decode(sign_identity(claims, key=key, now=NOW), key)
 
 
-def test_cache_reuses_token_until_thirty_seconds_before_expiry() -> None:
-    cache = IdentityTokenCache(generate_signing_key())
+def test_every_token_has_its_own_jti_so_a_server_can_refuse_a_replay() -> None:
+    key = generate_signing_key()
+    signer = IdentitySigner(key)
     claims = _claims("discord", "1", "2", TurnPlace("3", "4"))
-    first = cache.token(claims, now=NOW)
-    assert cache.token(claims, now=NOW + dt.timedelta(seconds=89)) == first, (
-        "a token with more than 30 s left is reused"
-    )
-    resigned = cache.token(claims, now=NOW + dt.timedelta(seconds=91))
-    assert resigned != first, "a token within 30 s of expiry is re-signed"
-    other = cache.token(_claims("discord", "1", "2", TurnPlace("3", "5")), now=NOW)
-    assert other != first, "another turn's message gets its own token"
+    first, second = signer.token(claims, now=NOW), signer.token(claims, now=NOW)
+    assert first != second, "the same claims at the same moment still get a new token"
+    ids = {_decode(first, key)["jti"], _decode(second, key)["jti"]}
+    assert len(ids) == 2 and all(len(i) == 32 for i in ids), "each token names its own jti"
+    fixed = _decode(sign_identity(claims, key=key, now=NOW, jti="given"), key)
+    assert fixed["jti"] == "given", "a caller may set the jti"
 
 
 def test_relay_urls_are_only_this_deployments_relay() -> None:
