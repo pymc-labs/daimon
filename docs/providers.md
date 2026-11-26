@@ -46,7 +46,8 @@ pypdf) instead.
   Switching off one of bash, read, edit, write, grep or glob removes all six,
   since the provider has one execution tool. A connector that
   OpenAI's size limit cannot hold, or whose tool names clash with Gemini's own,
-  is off there, and so is a web search that must ask first.
+  is off there, and so is a web search that must ask first. GitHub repository
+  access and the agent's keys stay on Claude.
 - **Without an Anthropic key:** memory.
 
 ## Route channels to a backend
@@ -135,7 +136,9 @@ Memory settings show as needing setup.
   agents get it too.
 - **Connectors.** The agent's own connectors run through Daimon with a
   credential for that reply only, and the provider never sees a sign-in. Each tool keeps the
-  agent's permission. Personal connectors need one Reconnect after a switch.
+  agent's permission. Sign-ins and pasted tokens keep working after a switch,
+  except one made before this release for an agent on Claude, which needs one
+  last Reconnect.
   Self-hosted agents get it too, and their harness asks before an `ask` tool.
   The provider receives what the connectors return; turn the
   `mcp_connector_relay` feature off to keep them out of OpenAI and Gemini.

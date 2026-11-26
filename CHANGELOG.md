@@ -33,6 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sandbox tools. A routine that sends a direct message still runs only on Anthropic
   ([Routines](docs/routines.md)).
 
+- **An agent's connectors keep working after it switches to OpenAI or Gemini.** Daimon now
+  keeps and refreshes every connector sign-in itself, and gives an agent on Claude a fresh
+  short-lived copy for each reply, so a switch no longer needs a Reconnect. A connector added
+  with a pasted token now works on OpenAI and Gemini too. A sign-in made before this release
+  for an agent on Claude needs one last Reconnect before it works off Claude. GitHub
+  repository access and the agent's keys still stay on Claude
+  ([Providers](docs/providers.md#what-daimon-adds-on-openai-and-gemini)).
+
 - **A finished command no longer sends a second message when the conversation already has its
   result, or when its machine was stopped from the conversation.** Reading the result there,
   or stopping the machine from the conversation it started in, withdraws a message nobody has
