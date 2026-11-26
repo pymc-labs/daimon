@@ -102,13 +102,14 @@ def test_retired_imagen_refused_without_key_or_request(workflow):
 def test_output_is_unique_and_rejects_symlink_directory(load_workflow, monkeypatch, tmp_path):
     runtime = load_workflow("image-workflow", "workflow_io")
     output = tmp_path / "outputs"
-    monkeypatch.setattr(runtime, "OUTPUT_DIR", output)
+    # Collected from the workspace when Claude's outputs mount is absent.
+    monkeypatch.setattr(runtime, "OUTPUT_DIRS", (tmp_path / "absent" / "outputs", output))
     first, second = runtime.save_png(png()), runtime.save_png(png())
     assert first != second
     assert output.joinpath(first.split("/")[-1]).read_bytes() == png()
     link = tmp_path / "link"
     link.symlink_to(output, target_is_directory=True)
-    monkeypatch.setattr(runtime, "OUTPUT_DIR", link)
+    monkeypatch.setattr(runtime, "OUTPUT_DIRS", (link,))
     with pytest.raises(runtime.Failure, match="symlink"):
         runtime.save_png(png())
 
@@ -116,7 +117,7 @@ def test_output_is_unique_and_rejects_symlink_directory(load_workflow, monkeypat
 def test_corrupt_image_never_creates_output(load_workflow, monkeypatch, tmp_path):
     runtime = load_workflow("image-workflow", "workflow_io")
     output = tmp_path / "outputs"
-    monkeypatch.setattr(runtime, "OUTPUT_DIR", output)
+    monkeypatch.setattr(runtime, "OUTPUT_DIRS", (output,))
     with pytest.raises(runtime.Failure, match="invalid"):
         runtime.save_png(b"corrupt image")
     assert not output.exists()

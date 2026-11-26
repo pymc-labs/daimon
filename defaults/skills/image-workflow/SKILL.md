@@ -26,8 +26,8 @@ local path. Download a user-provided attachment with existing authorized file
 access before invoking this script; it accepts no remote reference URLs. Reference
 files must be regular, non-hidden, non-symlink images under 10 MB and 25 megapixels.
 
-Output is validated and saved under `/mnt/session/outputs` with a unique filename,
-which attaches to the reply. Inspect the image using file-handling, report its
+Output is validated and saved in the outputs directory (`output_dir()` in
+`scripts/workflow_io.py`) with a unique filename, which attaches to the reply. Inspect the image using file-handling, report its
 filename and any limitations, and do not post it again through messaging tools.
 The script never overwrites existing outputs or accepts custom output paths.
 
