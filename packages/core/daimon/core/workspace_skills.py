@@ -135,6 +135,6 @@ def scoped_skill_note(scopes: Collection[str]) -> str:
     """Said where a skill limited to a data scope is attached."""
     named = ", ".join(sorted(set(scopes)))
     return (
-        f"A skill scoped to {named} loads only in DMs, the web chat and Discord rooms "
-        "where everyone present holds that scope."
+        f"A skill scoped to {named} loads only in direct messages, the web chat and rooms "
+        "whose members Daimon can list, where everyone present holds that scope."
     )

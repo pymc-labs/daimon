@@ -114,9 +114,9 @@
       'data_file': dict({
         'description': '''
           Read a file attached to a record (`index` from `data_get`'s files), fetched now from
-          its source with the source's permissions and never stored. Text files return their
-          text, through the source's redaction rules best effort; other files only their type
-          and size. Refused when names are hidden from someone the answer is for.
+          its source with the source's permissions and never stored. Text and Office files
+          return their text, through the source's redaction rules best effort; other files only
+          their type and size. Refused when names are hidden from someone the answer is for.
           <blank line>
           `workspace`: the chat space to use, by name or id as `list_daimons` shows them; leave it out when you reach only one.
         ''',
