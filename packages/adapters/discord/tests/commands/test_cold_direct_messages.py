@@ -890,6 +890,7 @@ async def test_dm_turn_card_rechecks_delivery_access_before_every_write(
     row_reply = private_reply(await conversation(db_session_factory))
     admission = SimpleNamespace(
         grant=row_reply.grant,
+        backend_revision=None,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         backend_revision=None,
         shown=lambda *_args, **_kwargs: False,
@@ -940,6 +941,7 @@ async def test_dm_answer_pings_only_where_dm_completion_pings_and_completion_pin
     shown = {"dm_completion_pings": dm_pings, "completion_pings": pings}
     admission = SimpleNamespace(
         grant=private_reply(await conversation(db_session_factory)).grant,
+        backend_revision=None,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         backend_revision=None,
         shown=lambda key, *_args: shown.get(key, False),
@@ -1026,6 +1028,7 @@ async def test_unknown_membership_does_not_close_the_dm_turn_card(db_session_fac
     await cog.on_message(message())
     admission = SimpleNamespace(
         grant=private_reply(await conversation(db_session_factory)).grant,
+        backend_revision=None,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         backend_revision=None,
         shown=lambda *_args, **_kwargs: False,
@@ -1070,6 +1073,7 @@ async def test_unknown_membership_still_closes_the_card_on_a_proved_denial(
     await cog.on_message(message())
     admission = SimpleNamespace(
         grant=private_reply(await conversation(db_session_factory)).grant,
+        backend_revision=None,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         backend_revision=None,
         shown=lambda *_args, **_kwargs: False,
@@ -1097,6 +1101,7 @@ async def test_unknown_membership_refuses_a_write_once_the_source_is_sealed(
     await cog.on_message(message())
     admission = SimpleNamespace(
         grant=private_reply(await conversation(db_session_factory)).grant,
+        backend_revision=None,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         backend_revision=None,
         shown=lambda *_args, **_kwargs: False,
@@ -1121,6 +1126,7 @@ async def test_recipient_policy_closes_the_dm_turn_card(db_session_factory, monk
     grant = private_reply(await conversation(db_session_factory)).grant
     admission = SimpleNamespace(
         grant=grant,
+        backend_revision=None,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         backend_revision=None,
         shown=lambda *_args, **_kwargs: False,
@@ -1169,6 +1175,7 @@ async def test_answer_is_sent_as_text_only_when_the_card_shows_no_outcome(
         kwargs["card_for"](await conversation(db_session_factory))(
             SimpleNamespace(
                 grant=None,
+                backend_revision=None,
                 agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
                 backend_revision=None,
                 shown=lambda *_args, **_kwargs: False,
@@ -1203,6 +1210,7 @@ async def test_failed_turn_adds_no_second_error_under_an_ended_card(
         kwargs["card_for"](await conversation(db_session_factory))(
             SimpleNamespace(
                 grant=None,
+                backend_revision=None,
                 agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
                 backend_revision=None,
                 shown=lambda *_args, **_kwargs: False,
@@ -1279,6 +1287,7 @@ async def test_dm_card_edit_drops_the_transport_only_replacement_flag(
         kwargs["card_for"](await conversation(db_session_factory))(
             SimpleNamespace(
                 grant=None,
+                backend_revision=None,
                 agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
                 backend_revision=None,
                 shown=lambda *_args, **_kwargs: False,
