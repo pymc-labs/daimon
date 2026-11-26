@@ -44,6 +44,7 @@ Where each feature can be set, and its default.
 | Platform skills | `platform_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
 | Agent skills | `agent_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Always On on Gemini, OpenAI |
 | Channel skills | `channel_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Data source reads | `data_reads` | Model input | Off |  | ✓ | ✓ | ✓ |  |  |  |
 | Library skills | `library_skills` | Model input | On |  | ✓ |  |  |  |  |  |
 | Thread participation | `participation` | Chat | Off | ✓ | ✓ |  | ✓ | ✓ |  | Only Discord, Teams |
 | Progress plans | `progress_plans` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
@@ -98,7 +99,6 @@ Where each feature can be set, and its default.
 | Own support channel | `support_own_channel` | Capability | On | ✓ |  |  |  |  |  |  |
 | GitHub access | `github` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Lead intake | `lead_intake` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
-| Data source reads | `data_reads` | Capability | Off |  | ✓ | ✓ | ✓ |  |  |  |
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Long job dollar cap | `long_jobs_max_usd` | Limit | $5 | ✓ | ✓ | ✓ |  |  |  |  |
 | Long job time limit | `long_jobs_max_deadline` | Limit | 70 minutes | ✓ | ✓ | ✓ |  |  |  |  |
@@ -192,7 +192,7 @@ Each message starts with the notes in the agent's repository memory, and the age
 
 ## Data sources
 
-The data store, with its connected sources and search. Nothing runs until an admin adds a source and turns data reads on for an agent. The operator or a team can turn it off.
+The data store, with its sources and search, idle until an admin adds a source. The operator or a team can turn it off.
 
 | | |
 | --- | --- |
@@ -1100,7 +1100,7 @@ The agent can take in sales leads and look them up. Off removes the lead tools h
 
 ## Data source reads
 
-The agent can search the team's data sources, showing only what everyone who will see the answer may read. Other agents cannot ask it, writes out ask first, and a memory it saves shows only to people who could read that data. Not in rooms people outside the team can read.
+The agent can search the team's data sources, showing only what everyone who will see the answer may read. Other agents cannot ask it, writes out ask first, and its memories show only to people who could read that data.
 
 | | |
 | --- | --- |

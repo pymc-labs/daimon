@@ -168,14 +168,14 @@ use **Apps** > **Manage your apps** > **Upload an app** instead.
 - **1:1 chat.** Select **Apps** > **Built for your org** > your app > **Add**.
   Send `help` or `setup`.
 - **A team.** On the app's page, open the menu beside **Add**, select **Add to a
-  team** and pick a team and channel. A team owner must accept the permission to
-  read channel messages. Then @mention the bot, choosing its name from the
+  team** and pick a team and channel. A team owner must accept the permissions to
+  read channel messages and members. Then @mention the bot, choosing its name from the
   autocomplete list: typed text alone does not count. Add the app to the admin
   team too, or nobody is an admin.
 - **A private or shared channel.** The channel's owner adds the app from the
   channel's own apps settings. Adding it to the team does not add it there.
 - **A group chat.** Add the app from the chat's apps and allow
-  `ChatMessage.Read.Chat` when asked.
+  `ChatMessage.Read.Chat` and `ChatMember.Read.Chat` when asked.
 
 ### Work with people from another organisation (optional)
 
@@ -380,6 +380,3 @@ started is never rerun. A message sent to a 1:1 chat during the gap is lost.
 Channel history needs the consents `ChannelMessage.Read.Group` and
 `TeamMember.Read.Group`, which a team owner grants when adding the app. Without
 them the bot answers without history.
-Data answers in a channel or group chat need `ChannelMember.Read.Group` or
-`ChatMember.Read.Chat` (app version 0.6.3), granted the same way when the app is
-added or updated. Without them they hold only what everyone may read.

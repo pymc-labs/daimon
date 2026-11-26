@@ -144,12 +144,9 @@ even where the rule does not name the channel.
 
 ## Data reads
 
-[`data_reads`](features.md#data-source-reads) gives `data_sources`, `data_context`,
-`data_search`, `data_get`, `data_file` and `data_sql`. After such a read, a write that
-would not ask first, including sandbox `bash` and `web_fetch`, shows a card in chat
-and is refused in a routine. Other agents cannot ask it, and its provider memory is
-read-only; a memory it saves shows only to people who could read that data
-([Data sources](data-sources.md#who-sees-an-answer)).
+[`data_reads`](features.md#data-source-reads) gives an agent the data tools. After a
+read, a write that would not ask first, sandbox `bash` and `web_fetch` included, shows
+a card in chat and is refused in routines. Other agents cannot ask it.
 
 ## Approval overrides
 

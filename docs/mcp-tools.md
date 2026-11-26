@@ -317,7 +317,7 @@ lists them; `remove_my_data` disconnects one).
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `check_my_data_connection` | all callers | Whether the sign-in started by connect_my_data (pending_id) is finished. |
-| `connect_my_data` | all callers | Start your own sign-in to a data source (source_id from list_my_data's can_connect). |
+| `connect_my_data` | all callers | Start your own sign-in at a data source; source_id is one list_my_data offers. |
 | `dismiss_data_notices` | all callers | Mark your notices about data-source links an admin changed as read. |
 
 ## `environments`
