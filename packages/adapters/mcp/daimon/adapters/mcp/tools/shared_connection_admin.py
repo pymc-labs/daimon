@@ -84,8 +84,8 @@ def register_shared_connection_admin_tools(mcp: FastMCP, runtime: McpRuntime) ->
     ) -> Connection | dict[str, bool]:
         """Add a shared connection (add: name, url, optional scope; its tools start off), or
         refresh, pause, resume, rescope (scope; empty clears it) or remove one (connection:
-        its id or name). Runs on the asker's Approve card. A token is added or replaced in
-        the web app, never here. Admin-only."""
+        its id or name). Runs on the asker's Approve card. A token is added or replaced
+        under Integrations, Shared connections, never here. Admin-only."""
         auth = await _auth(ctx)
         actor, _ = await manager(auth)
         await require_card(

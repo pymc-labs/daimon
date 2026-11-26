@@ -46,7 +46,7 @@
       'call_shared_tool': dict({
         'description': '''
           Call one shared tool of a workspace's connected MCP servers, as listed by
-          list_shared_tools. Only tools that don't change anything run from here.
+          list_shared_tools. Before a tool with ``writes`` true, ask your user first.
         ''',
         'parameters': dict({
           'additionalProperties': False,
@@ -268,8 +268,8 @@
           List the tools a workspace has shared from its connected MCP servers.
           <blank line>
           ``workspace_id`` is the ``workspace_id`` of a Daimon from list_daimons. Pass a
-          tool's ``name`` to call_shared_tool. A tool with ``writes`` true changes things
-          and can't be called from here.
+          tool's ``name`` to call_shared_tool. A tool with ``writes`` true changes things:
+          ask your user and get their yes before you call it.
         ''',
         'parameters': dict({
           'additionalProperties': False,
@@ -1275,6 +1275,102 @@
           'key',
           'tier',
           'value',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'change_shared_connection': dict({
+      'description': '''
+        Add a shared connection (add: name, url, optional scope; its tools start off), or
+        refresh, pause, resume, rescope (scope; empty clears it) or remove one (connection:
+        its id or name). Runs on the asker's Approve card. A token is added or replaced
+        under Integrations, Shared connections, never here. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'action': dict({
+            'enum': list([
+              'add',
+              'refresh',
+              'pause',
+              'resume',
+              'rescope',
+              'remove',
+            ]),
+            'type': 'string',
+          }),
+          'connection': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'name': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'scope': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'url': dict({
+            'default': '',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'action',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'change_shared_connection_tool': dict({
+      'description': '''
+        Turn one tool of a shared connection on (turn_on: the ``seen`` fingerprint from
+        list_shared_connections, so it serves exactly what was shown) or off for the whole
+        workspace, mark it as changing things or only reading, or rescope it (scope; empty
+        clears it). To keep a tool from one agent, set that agent's tool rule instead.
+        Runs on the asker's Approve card. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'action': dict({
+            'enum': list([
+              'turn_on',
+              'turn_off',
+              'mark_writes',
+              'mark_reads',
+              'rescope',
+            ]),
+            'type': 'string',
+          }),
+          'connection': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'scope': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'seen': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'tool': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'action',
+          'connection',
+          'tool',
+          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -6895,6 +6991,19 @@
             ]),
             'default': None,
           }),
+        }),
+        'type': 'object',
+      }),
+    }),
+    'list_shared_connections': dict({
+      'description': '''
+        List the workspace's shared connections: each server's state and its tools, with
+        what each does, whether it is on and the ``seen`` fingerprint to turn it on as
+        shown. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
         }),
         'type': 'object',
       }),

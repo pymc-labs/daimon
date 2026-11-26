@@ -55,13 +55,13 @@ class Rig:
 
         return call
 
-    async def call(self, tool: str, **args: Any) -> Any:
+    async def call(self, name: str, /, **args: Any) -> Any:
         mcp = FastMCP("t")
         runtime = fake_runtime()
         runtime.fernet = object()  # pyright: ignore[reportAttributeAccessIssue]
         tools.register_shared_connection_admin_tools(mcp, runtime)
         found: dict[str, Any] = {t.name: t for t in await mcp.local_provider.list_tools()}
-        return await found[tool].fn(ctx=_Ctx(), **args)
+        return await found[name].fn(ctx=_Ctx(), **args)
 
 
 _TURN_OFF = {"action": "turn_off", "connection": _ID, "tool": "send", "origin_context_id": "o"}
