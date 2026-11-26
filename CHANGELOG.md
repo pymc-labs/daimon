@@ -13,6 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   release reads its agent and channel from its next message on. If Daimon can't find the
   agent, the call is refused ([Features](docs/features.md)).
 
+- **A long Gemini reply no longer fails when Gemini refuses to reconnect to it.** After two
+  minutes with no news, Daimon reconnects to the reply. Gemini can refuse that while the reply
+  is still running; Daimon now keeps checking the reply until it ends and answers from it,
+  within the usual time limit. A refusal on a reply's first connection still ends it, also
+  after Daimon restarts mid-reply, and the logs now say why Gemini refused.
+
 - **A finished command no longer sends a second message when the conversation already has its
   result, or when its machine was stopped from the conversation.** Reading the result there,
   or stopping the machine from the conversation it started in, withdraws a message nobody has
