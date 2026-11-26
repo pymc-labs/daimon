@@ -557,7 +557,7 @@ async def _readable_session(
             raise
         cause = error.native_code
     log.warning(
-        "gemini.prior_interaction_unreadable",
+        "turn.gemini_prior_interaction_unreadable",
         binding_id=binding_id,
         session_id=ref.id,
         cause=cause,
