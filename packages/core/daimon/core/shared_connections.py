@@ -9,9 +9,10 @@ allows it. A name Daimon's own tools use (`DAIMON_TOOL_NAMES`) is never served. 
 is the connection's, not the person's. Whether a tool writes is Daimon's name rule or an admin's
 switch, never the upstream's hints.
 
-Scopes live in the data schema and belong to the data package: `register_scope_check` is the
-port it fills. Until it does, a scoped connection or tool is refused to everyone (fail
-closed). Calls go through `mcp_tool_session`, the bounded public-address-only client.
+Scopes live in the data schema and belong to the data package: the MCP server fills the
+`register_scope_check` port at startup with `daimon.data.shared_scopes.holds_scope`. Without
+it a scoped connection or tool is refused to everyone (fail closed). Calls go through
+`mcp_tool_session`, the bounded public-address-only client.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from urllib.parse import urlsplit
 from cryptography.fernet import MultiFernet
 from daimon.core.config import Settings
 from daimon.core.confirmation import SharedConnectionCard
+from daimon.core.data_audience import DataAudience
 from daimon.core.features.snapshot import FeaturePlace, Sessions, place_feature_or_none
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_https_url
@@ -135,12 +137,15 @@ class SharedConnectionError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class SharedCaller:
-    """Who asks: what the data package's scope check needs, and nothing else."""
+    """Who asks: what the data package's scope check needs, and nothing else. `audience`
+    resolves, once, who the answer is for, as for data reads; None, or a None answer, holds
+    no scope."""
 
     tenant_id: uuid.UUID
     account_id: uuid.UUID | None
     platform: str | None = None
     chat_session_id: str | None = None
+    audience: Callable[[], Awaitable[DataAudience | None]] | None = None
 
 
 class ScopeCheck(Protocol):

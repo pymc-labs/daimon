@@ -28,30 +28,29 @@ Ask it to disconnect the server or connect again.
 
 ## Share a server with the workspace
 
-A server admin can share one MCP server with the whole workspace, so agents and
-outside MCP clients use it without a sign-in of their own. Open Integrations,
-Shared connections, and add the server's name, URL and token. The token is stored
-encrypted. The [`shared_connections`](features.md) feature is on by default and
-turns them all off.
+A server admin can share an MCP server with the workspace, so agents and
+outside clients use it without their own sign-in. Open Integrations, Shared
+connections, and add the server's name, URL and token. The token is stored
+encrypted. Turning off [`shared_connections`](features.md), on by default, turns
+them all off.
 
-Daimon lists the server's tools and shows each one's description and full input
-schema. Turn on the tools you want. A tool whose text changes
-upstream stays off until you approve it again, and one named like a Daimon tool is
-left out. Each tool appears as `<name>_<tool>` on Daimon's MCP server, for
-members, not web guests.
+Daimon lists each tool's description and full input schema; turn on the ones you
+want. A tool whose text changes upstream stays off until you approve it again,
+and one named like a Daimon tool is left out. Each tool appears as
+`<name>_<tool>` on Daimon's MCP server, for members, not web guests. A scoped
+connection or tool is served only when everyone the answer reaches holds its data
+scope: in chat the asker and the room, for a key or the hub its person.
 
-Daimon marks a tool that changes data by its name, and you can change the mark.
+Daimon marks a tool that changes data by its name; you can change the mark.
 In chat a change waits for the asker's card, unless
 [`shared_write_approval`](features.md) is Skip for the workspace or agent. An
 outside MCP client, agent key or coding key may call it; its description tells
-the client to ask its user first. A chat call with no conversation behind it is
-refused. Turn a tool off for the workspace here, or for one agent with its tool
+the client to ask its user first. A chat call with no conversation is refused. Turn a tool off for the workspace here, or for one agent with its tool
 rules, which agent keys follow too. Every call is audited.
 
-Admins can do all of this from chat too, except adding or replacing a token.
-Each change waits for the admin's card, which names the tool, its server and
-the words callers get. In a room, addresses and errors go to the admin by
-direct message.
+Admins can do this from chat too, except setting a token. Each change waits for
+the admin's card, naming the tool, its server and the words callers get. In a
+room, addresses and errors go to the admin by direct message.
 
 ## Register a client for servers without dynamic registration
 

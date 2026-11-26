@@ -10,15 +10,20 @@ What a caller sees is read once per request; a Daimon tool's name is never looke
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Sequence
 from typing import Any, cast
 
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.data_access import data_audience_for
 from daimon.adapters.mcp.middleware.capability_gate import caller_places
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core import shared_connections as shared
+from daimon.core.config import Settings
+from daimon.core.data_audience import DataAudience
 from daimon.core.security_audit import record_denial, record_policy_decision
+from daimon.data.shared_scopes import holds_scope
 from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_context
 from fastmcp.server.providers import Provider
@@ -36,12 +41,52 @@ _SEEN = "shared_connections.visible"
 """Request state: what this request's caller sees (`SharedConnectionProvider._visible`)."""
 
 
-def caller_of(auth: AuthIdentity) -> shared.SharedCaller:
+def register_scopes(settings: Settings) -> None:
+    """At startup: scoped shared tools follow the data store's grants."""
+
+    async def check(caller: shared.SharedCaller, scope: str) -> bool:
+        audience = None if caller.audience is None else await caller.audience()
+        return audience is not None and await holds_scope(
+            settings, caller.tenant_id, audience, scope
+        )
+
+    shared.register_scope_check(check)
+
+
+def person_audience(account_id: uuid.UUID) -> DataAudience:
+    """A key's or the hub's answer goes to its person alone."""
+    return DataAudience(
+        people=frozenset({account_id}),
+        guests=frozenset(),
+        public_only=False,
+        list_rows=False,
+        redact=False,
+    )
+
+
+def caller_of(runtime: McpRuntime, auth: AuthIdentity) -> shared.SharedCaller:
+    """`auth` as a shared caller: in chat its audience is the data reads' (the asker and the
+    room's viewers), for a key its person."""
+    account = auth.requester_account_id or auth.account_id
+    found: list[DataAudience | None] = []
+
+    async def audience() -> DataAudience | None:
+        if not found:
+            if auth.chat_agent_id is None:
+                found.append(person_audience(account))
+            else:
+                try:
+                    found.append(await data_audience_for(runtime, auth))
+                except ToolError:  # no audience here: no scope is held
+                    found.append(None)
+        return found[0]
+
     return shared.SharedCaller(
         tenant_id=auth.tenant_id,
-        account_id=auth.requester_account_id or auth.account_id,
+        account_id=account,
         platform=auth.platform,
         chat_session_id=auth.chat_session_id,
+        audience=audience,
     )
 
 
@@ -109,7 +154,7 @@ class SharedConnectionProvider(Provider):
             return []
         runtime = self._runtime
         async with runtime.session_factory() as session:
-            found = await shared.served_tools(session, caller_of(auth))
+            found = await shared.served_tools(session, caller_of(runtime, auth))
         # Nothing stored, nothing more read: the feature is on by default.
         if found and not await shared.shared_connections_on(
             runtime.session_factory, runtime.settings, await caller_places(runtime, auth, None)

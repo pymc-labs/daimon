@@ -25,6 +25,7 @@ from daimon.adapters.mcp.hub.slack_provider import SlackHubProvider
 from daimon.adapters.mcp.hub.storage import asyncpg_dsn, build_hub_kv_base, hub_kv_for
 from daimon.adapters.mcp.middleware.ma_errors import MaErrorMiddleware
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.shared_connections import register_scopes
 from daimon.adapters.mcp.tools.hub import register_hub_tools
 from daimon.adapters.mcp.tools.hub_shared import register_hub_shared_tools
 from daimon.core.billing import BillingConfig
@@ -62,6 +63,7 @@ def build_hub_app(
     mcp.add_middleware(MaErrorMiddleware())
     register_hub_tools(mcp, runtime, billing_config=billing_config)
     register_hub_shared_tools(mcp, runtime)
+    register_scopes(runtime.settings)
     return mcp
 
 

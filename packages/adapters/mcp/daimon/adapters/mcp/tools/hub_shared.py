@@ -18,10 +18,11 @@ from daimon.adapters.mcp.hub.identity import (
 )
 from daimon.adapters.mcp.middleware.host_call_gate import schema_problem
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.shared_connections import OPERATION
+from daimon.adapters.mcp.shared_connections import OPERATION, person_audience
 from daimon.adapters.mcp.tools._ctx import _admit  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.hub import _auth_for  # pyright: ignore[reportPrivateUsage]
 from daimon.core import shared_connections as shared
+from daimon.core.data_audience import DataAudience
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.hub_identity import HubTenant
 from daimon.core.stores.security_audit import SecurityAuditEntry, append_event
@@ -70,7 +71,13 @@ def register_hub_shared_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             runtime.session_factory, runtime.settings, [place]
         ):
             raise ToolError(_OFF)
-        caller = shared.SharedCaller(tenant.tenant_id, tenant.account_id, hub.platform)
+
+        async def audience() -> DataAudience:  # the hub answers its person alone
+            return person_audience(tenant.account_id)
+
+        caller = shared.SharedCaller(
+            tenant.tenant_id, tenant.account_id, hub.platform, audience=audience
+        )
         async with runtime.session_factory() as session:
             return await shared.served_tools(session, caller)
 
