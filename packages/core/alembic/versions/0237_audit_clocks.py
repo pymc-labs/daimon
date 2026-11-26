@@ -11,6 +11,7 @@ Revision ID: 0237_audit_clocks
 Revises: 0236_retention_runs
 
 downgrade: destructive
+schema: contract
 """
 
 import uuid

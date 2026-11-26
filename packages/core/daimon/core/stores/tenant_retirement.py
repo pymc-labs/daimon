@@ -93,7 +93,13 @@ PERSON_COLUMNS: dict[str, tuple[str, ...]] = {
     "accounting_outbox": ("row", "platform_user_id"),
     "usage_observation": ("applied",),
     # Anonymized by their own helpers when retirement begins, before accounts go.
-    "support_escalations": ("account_id", "platform_user_id", "ma_session_id"),
+    "support_escalations": (
+        "account_id",
+        "platform_user_id",
+        "ma_session_id",
+        "settled_by",
+        "settled_by_account_id",
+    ),
     "support_limits": ("platform_user_id", "set_by_account_id"),
 }
 _SCRUBBED_ON_BEGIN = {"support_escalations", "support_limits"}

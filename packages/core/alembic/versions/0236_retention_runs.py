@@ -10,6 +10,7 @@ Revision ID: 0236_retention_runs
 Revises: 0235_tenant_retirement
 
 downgrade: safe
+schema: contract
 """
 
 from collections.abc import Sequence

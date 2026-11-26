@@ -8,6 +8,7 @@ Revision ID: 0235_tenant_retirement
 Revises: 0234_retention_activity
 
 downgrade: safe
+schema: expand
 """
 
 from collections.abc import Sequence

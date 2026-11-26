@@ -9,6 +9,7 @@ Revision ID: 0238_dm_activity
 Revises: 0237_audit_clocks
 
 downgrade: destructive
+schema: contract
 """
 
 from collections.abc import Sequence

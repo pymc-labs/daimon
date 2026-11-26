@@ -6,6 +6,7 @@ import runpy
 from pathlib import Path
 from typing import cast
 
+from daimon.testing.migrations import load_migration
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -208,10 +209,8 @@ async def install_firing_trigger(session: AsyncSession) -> None:
     if not isinstance(schema, str) or not schema.startswith("test_"):
         raise ValueError("Watch fixtures require an owned test schema")
     quoted = '"' + schema + '"'
-    migration = runpy.run_path(
-        str(Path(__file__).resolve().parents[3] / "core/alembic/versions/0237_audit_clocks.py")
-    )
-    await session.execute(text(cast(str, migration["FUNCTION"]).format(schema=quoted)))
+    function = cast(str, load_migration("audit_clocks").FUNCTION)
+    await session.execute(text(function.format(schema=quoted)))
     await session.execute(
         text(
             f"REVOKE ALL ON FUNCTION {quoted}.note_watch_firing() "

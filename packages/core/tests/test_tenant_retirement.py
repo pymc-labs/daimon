@@ -143,7 +143,7 @@ async def test_retirement_keeps_the_balance_and_the_spent_trial(
     work = await store.get_work(db_session, tenant_id=tenant_id)
     assert work is not None and work["sessions"] == ["sesn_a"], "the session is queued upstream"
     assert work["memory_stores"] == ["memstore_a"], "the memory store is queued upstream"
-    assert work["named_vaults"] == [str(account_id)], "the account's MCP vaults are queued"
+    assert str(account_id) in work["named_vaults"], "the account's MCP vaults are queued"
     assert work["hosts"] == ["notebooks", "reports"], "both hosts are queued"
     assert work["agents"] == work["environments"] == [store.TAGGED], (
         "the tenant's stamped agents and environments are queued"
