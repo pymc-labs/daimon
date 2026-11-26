@@ -92,10 +92,11 @@ daimon routines sandbox-tools --tenant TENANT_UUID ROUTINE_ID --inherit
 `--off` keeps built-ins off for the routine even when its agent is opted in.
 `--inherit` clears the routine's own setting, so its agent's applies.
 
-The opt-in records the agent version and environment the routine runs with.
-A run gets built-ins only while both still match. After anyone edits the agent
-or its environment, the next run goes without them and the opt-in is cleared
-until the operator runs the command again.
+The opt-in records the provider, agent version and environment the routine
+runs with. A run gets built-ins only while all three still match. After anyone
+edits the agent or its environment, or moves it to another provider, the next
+run goes without them and the opt-in is cleared until the operator runs the
+command again.
 
 Editing the routine's agent, trigger message, destination or budget channel
 also clears it. Changing the schedule, pausing or resuming does not. DM

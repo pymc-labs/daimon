@@ -23,7 +23,7 @@ in one conversation.
 | Output files | Yes | Yes | Yes | Yes, from harness 0.2.0 |
 | Reasoning effort | Yes | Low, medium, high | None | Not supported |
 | Spend limit for one reply | Yes | Daimon stops the reply | Daimon stops the reply | Not supported |
-| Routines | Yes | Not supported, its hosted shell cannot be turned off | Yes, for agents without automatic code execution | Not supported |
+| Routines | Yes | With sandbox tools turned on | Yes | Not supported |
 | Workspace export and import | Yes | Not supported | Not supported | Not supported |
 | Skills | Full | Custom and agent skills, up to 28 MiB each | Custom and channel skills, up to 28 MiB each; small text skills share 2 MiB | Seeded defaults only |
 
@@ -39,12 +39,12 @@ pypdf) instead.
 - **Self-hosted:** memory, routines, effort and a
   spend limit, workspace export and import. An agent can pick it only with
   its own runtime file row (`daimon selfhosted init --agent`).
-- **OpenAI and Gemini:** a routine that sends a direct message, and a routine
-  whose agent runs code on its own (OpenAI's hosted shell always does). A
-  channel's own deployment where a channel or thread switches a built-in tool
-  off. Workspace export and import. Switching off one of bash, read, edit,
-  write, grep or glob removes all six, since the provider has one execution
-  tool. A connector that
+- **OpenAI and Gemini:** a routine that sends a direct message. An OpenAI
+  routine needs [sandbox tools](unattended.md#opt-a-routine-into-sandbox-tools),
+  since its hosted shell cannot be left out. A channel's own deployment where a
+  channel or thread switches a built-in tool off. Workspace export and import.
+  Switching off one of bash, read, edit, write, grep or glob removes all six,
+  since the provider has one execution tool. A connector that
   OpenAI's size limit cannot hold, or whose tool names clash with Gemini's own,
   is off there, and so is a web search that must ask first.
 - **Without an Anthropic key:** memory.
