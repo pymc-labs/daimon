@@ -384,7 +384,7 @@ def register_server_skill_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def add_server_skill(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, skill: _Uri | None = None, origin_context_id: _OriginId | None = None
     ) -> ServerSkills:
-        """Only for the connected data server: list what it serves, or take one of its offers
+        """Only for the connected data server: list the skills it offers, or take one
         by name or URI into the library, kept current with that server. A person confirms on
         a card, and you pass your ``origin_context_id``. Not for any other source, nor for giving
         an agent what the library already holds."""

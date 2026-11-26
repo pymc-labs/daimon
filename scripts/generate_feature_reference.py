@@ -140,6 +140,8 @@ def summary() -> str:
 
 def _section(spec: FeatureSpec) -> str:
     values = ", ".join(f"`{key}` ({label})" for key, label in spec.values.items())
+    if spec.max_length:
+        values += f", or any name up to {spec.max_length} characters"
     rows = [
         ("Key", f"`{spec.key}`"),
         ("Values", values),

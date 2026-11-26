@@ -97,7 +97,7 @@ export type AgentSummary = Pick<Agent, "id" | "name" | "purpose" | "avatar" | "v
   draft_changes: number
   model_label: string
   backend: Backend
-  runs_in: ("discord" | "slack" | "teams" | "dm" | "web")[]
+  runs_in: ("discord" | "slack" | "teams" | "web")[]
 }
 
 export type Change = {

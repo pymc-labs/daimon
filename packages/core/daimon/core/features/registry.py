@@ -68,11 +68,6 @@ _OFF_ON: Final[Mapping[str, str]] = {"off": "Off", "on": "On"}
 """A guardrail's on/off: On is the stricter value, so it comes last."""
 EVERY_PLATFORM: Final[frozenset[str]] = frozenset({"*"})
 """`platforms` for a feature that applies wherever a turn runs, chat or not (web, CLI, MCP)."""
-_PROVIDER_ONLY: Final[Mapping[str, tuple[Tier, ...]]] = {
-    _GEMINI: ("deployment", "workspace", "agent"),
-    _OPENAI: ("deployment", "workspace", "agent"),
-}
-"""Gemini and OpenAI compile one revision per agent, so a model feature stops at the agent."""
 _MANAGED_AGENTS_ONLY: Final[Mapping[str, tuple[Tier, ...]]] = {_GEMINI: (), _OPENAI: ()}
 """Runs only on Claude agent turns; Gemini and OpenAI agents never get it."""
 BACKEND_NAMES: Final[Mapping[str, str]] = {
@@ -97,6 +92,25 @@ class Authority:
     thread_anyone: bool = False
     native: bool = False
     agent_owner: bool = True
+
+
+_MARKUP = frozenset("<>@#*_~|`[]\\:")
+"""Mention and markdown marks on any platform, and the `:` the tier text and choice use."""
+_PLATFORM_RESERVED = ("discord", "clyde")
+"""Words Discord refuses in a webhook name."""
+
+
+def is_feature_text(value: str, max_length: int) -> bool:
+    """A free-text value: one trimmed printable line of plain words, never `default`."""
+    folded = value.casefold()
+    return (
+        0 < len(value) <= max_length
+        and value == value.strip()
+        and value.isprintable()
+        and not _MARKUP.intersection(value)
+        and not any(word in folded for word in _PLATFORM_RESERVED)
+        and value != DEFAULT
+    )
 
 
 @dataclass(frozen=True)
@@ -140,6 +154,13 @@ class FeatureSpec:
     pinned: bool = False
     """An On at the agent or routine tier holds only for the agent and environment in the
     `pin` kept with it; a write without one is refused, and no other tier takes On."""
+    max_length: int = 0
+    """Above 0, the feature also takes any one-line text up to this many characters (a name),
+    besides its listed values."""
+    connect_only: bool = False
+    """An On needs proof only a sign-in flow has (the GitHub connect page): chat, tools, the web
+    app, the settings panel and an agent's spec refuse it, and only the operator CLI may set it.
+    Off and clearing stay open to anyone who may change it."""
     zero_unlimited: bool = False
     """A limit whose deployment 0 means no limit, as its legacy variable did: when settings
     combine, 0 is the loosest value, never the smallest."""
@@ -165,6 +186,8 @@ class FeatureSpec:
         choose from the listed steps."""
         if value in self.values:
             return True
+        if self.max_length:
+            return is_feature_text(value, self.max_length)
         if self.effect == "limit" and tier == "deployment":
             try:
                 number = float(value)
@@ -226,11 +249,10 @@ def _builtin(tool: str) -> FeatureSpec:
         binds="session_mutable",
         doc=(
             f"The agent can {does}. Off removes it here; On never gives more than the "
-            "agent's own tool settings allow. Applies from the next message in a conversation."
+            "agent's own tool settings allow. Applies from the next message."
             + (_SEARCH_BILLING if tool == "web_search" else "")
         ),
         page="features.md#" + name.lower().replace(" ", "-"),
-        backend_tiers=_PROVIDER_ONLY,
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     )
@@ -268,7 +290,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         doc=(
             "The agent knows about the web app: messages, routine runs and tool results carry "
             "its address and the pages it may link to, its invite and access tools are offered, "
-            "and Daimon's cards show buttons into it. Off leaves all of that out here."
+            "and Daimon's cards show buttons into it. Off leaves it out."
         ),
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
@@ -334,11 +356,9 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         tiers=TIERS,
         binds="session_mutable",
         doc=(
-            "The agent's saved keys as a .env file in its working files. Off leaves the file "
-            "out; the keys stay saved. Applies from the next message in a conversation. "
-            "Claude agents only."
+            "The agent's saved keys as a .env file in its sandbox; Off leaves it out. "
+            "Applies from the next message."
         ),
-        backend_tiers=_MANAGED_AGENTS_ONLY,
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
         page="isolation.md#keys-and-credentials",
@@ -497,6 +517,8 @@ _TIME_LIMITS: Final[Mapping[str, str]] = {
 }
 """Choices of both time limits, loosest first: the one set keeps them in step."""
 _CHANNELS: Final[tuple[Tier, ...]] = ("deployment", "workspace", "channel")
+_AGENT_CHANNELS: Final[tuple[Tier, ...]] = ("deployment", "workspace", "agent", "channel")
+"""A Discord display choice an agent may differ in from the others in its server."""
 _ADMIN: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS)
 # Monitoring keeps what people say: workspace admins switch it on, an agent's owner may not.
 _ADMIN_NOT_OWNER: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS, agent_owner=False)
@@ -551,6 +573,85 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         legacy_env=("DAIMON_THREAD_NAMING__ENABLED",),
         page="features.md#thread-titles",
     ),
+    FeatureSpec(
+        key="display_name",
+        name="Display name",
+        category="chat",
+        effect="display",
+        values={"id": "The agent's id"},
+        default="id",
+        tiers=("agent",),
+        binds="turn",
+        doc="The name people see for an agent: up to 40 plain characters, never another agent's.",
+        max_length=40,
+    ),
+    FeatureSpec(
+        key="thread_title_style",
+        name="Thread title style",
+        category="chat",
+        effect="display",
+        values={"sentence": "Sentence case", "title": "Title Case"},
+        default="sentence",
+        tiers=_AGENT_CHANNELS,
+        binds="turn",
+        doc="Sentence case up to 50 characters, or Title Case up to 100, for a thread opened "
+        "to answer a mention.",
+        platforms=_DISCORD,
+        authority=_ADMIN,
+    ),
+    FeatureSpec(
+        key="thread_auto_archive",
+        name="Thread archive time",
+        category="chat",
+        effect="display",
+        values={"10080": "1 week", "1440": "1 day"},
+        default="10080",
+        tiers=_AGENT_CHANNELS,
+        binds="turn",
+        doc="How long an idle thread opened to answer a mention stays open.",
+        platforms=_DISCORD,
+        authority=_ADMIN,
+    ),
+    _shown(
+        "status_reactions",
+        "Status reactions",
+        "⏳ while the agent works, then ✅ first however it ended, and 📨 instead of a notice on a "
+        "queued message. Off shows 👀, and ✅ only with Completion pings.",
+        tiers=_AGENT_CHANNELS,
+        platforms=_DISCORD,
+        authority=_ADMIN,
+    ),
+    _shown(
+        "protected_notice_reaction",
+        "Lock reaction",
+        "A 🔒 on a mention the agent may not answer, besides the direct message saying why.",
+        tiers=_AGENT_CHANNELS,
+        default="on",
+        platforms=_DISCORD,
+        authority=_ADMIN,
+    ),
+    _shown(
+        "pre_tool_messages",
+        "Text before tool calls",
+        "Text written before a tool call is posted as its own message. Off keeps it on the "
+        "working card.",
+        default="on",
+        platforms=_DISCORD,
+    ),
+    _shown(
+        "card_timer",
+        "Working card timer",
+        "The card shows Working or Thinking with the time, and the model in its footer.",
+        platforms=_DISCORD,
+    ),
+    _shown(
+        "answer_bots",
+        "Answer bots",
+        "Answer a bot that mentions the agent, under people's access rules; never itself.",
+        tiers=("deployment", "workspace", "agent"),
+        platforms=_DISCORD,
+        authority=_ADMIN,
+    ),
     _shown(
         "plain_text_mentions",
         "Typed mentions",
@@ -585,6 +686,13 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         tiers=("workspace", "agent"),
         platforms=frozenset({"discord"}),
         page="features.md#model-reactions",
+    ),
+    _shown(
+        "routine_result_header",
+        "Routine result header",
+        'Off drops the "Result from" line above a routine\'s result.',
+        tiers=("deployment", "workspace", "agent", "channel", "routine"),
+        default="on",
     ),
     _shown(
         "tool_server_names",
@@ -802,7 +910,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         category="guardrails",
         effect="guardrail",
         values=_OFF_ON,
-        default="off",
+        default="on",
         tiers=("deployment",),
         binds="turn",
         doc=(
@@ -812,6 +920,19 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         platforms=_CALL_GATE_PLATFORMS,
         authority=_ADMIN,
         page="providers.md#what-daimon-adds-on-openai-and-gemini",
+    ),
+    FeatureSpec(
+        key="provider_keys_file",
+        name="Keys on OpenAI and Gemini",
+        category="guardrails",
+        effect="guardrail",
+        values=_ON_OFF,
+        default="on",
+        tiers=("deployment",),
+        binds="turn",
+        doc="Sends the keys file to OpenAI and Gemini.",
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN,
     ),
     FeatureSpec(
         key="reach_budget",
@@ -881,10 +1002,10 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         tiers=("workspace", "agent"),
         binds="turn",
         doc=(
-            "Ask shows a card with the destination and duration before the agent makes "
-            "or resumes a watch. Skip makes it without the card, reporting in the same "
-            "thread for the default duration. Editing a watch, long jobs, key "
-            "rotation and Fly launches keep asking. Only a server admin can change it."
+            "Ask shows a card with the destination and duration before a watch is made "
+            "or resumed. Skip makes it without the card, in the same thread for the "
+            "default duration. Editing a watch, long jobs and key rotation keep asking. "
+            "Only a server admin can change it."
         ),
         platforms=EVERY_PLATFORM,
         authority=_SERVER_ADMIN,
@@ -892,6 +1013,64 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         # be loosened. Only a server admin sets either tier; the nearer one decides.
         combine_override="most_specific",
         page="watches.md#manage-watches",
+    ),
+    FeatureSpec(
+        key="compute_approval",
+        name="Approval for cloud computers",
+        category="guardrails",
+        effect="guardrail",
+        values={"skip": "Skip the card", "ask": "Ask"},
+        default="ask",
+        tiers=("workspace", "agent"),
+        binds="turn",
+        doc=(
+            "Ask shows a card to start or extend a cloud computer. Skip: no card, default time "
+            "only; OpenAI and Gemini still ask. Only a server admin sets it."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_SERVER_ADMIN,
+        # As `watch_approval`: Ask is the strict default, so the nearer tier decides.
+        combine_override="most_specific",
+    ),
+    FeatureSpec(
+        key="compute_wake_runs",
+        name="Cloud computers continue after a job",
+        category="guardrails",
+        effect="guardrail",
+        values=_ON_OFF,
+        default="off",
+        tiers=("workspace", "agent"),
+        binds="turn",
+        doc=(
+            "After an unwatched command ends, the agent may run the next, up to a set number "
+            "in a row; then it waits for the owner to run a command or write a file (not a "
+            "message). Off: it only reports. Only a server admin sets it."
+        ),
+        platforms=EVERY_PLATFORM,
+        depends_on=("compute",),
+        authority=_SERVER_ADMIN,
+        # Off is the default and the strict value, so a stricter-wins rule could never
+        # turn it on. Only a server admin sets either tier; the nearer one decides.
+        combine_override="most_specific",
+    ),
+    FeatureSpec(
+        key="compute_agent_chat",
+        name="Cloud computers from agent chat",
+        category="guardrails",
+        effect="guardrail",
+        values=_ON_OFF,
+        default="off",
+        tiers=("workspace", "agent"),
+        binds="turn",
+        doc=(
+            "Agent chat may start cloud computers without a card and use them; it lists and "
+            "stops all the person's. So may their keys driving it. Only a server admin sets it."
+        ),
+        platforms=EVERY_PLATFORM,
+        depends_on=("compute",),
+        authority=_SERVER_ADMIN,
+        # As `compute_wake_runs`: Off is the strict default, so the nearer tier decides.
+        combine_override="most_specific",
     ),
     FeatureSpec(
         key="require_routine_destination",
@@ -940,11 +1119,26 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
                 "monitor_mcp",
                 "Monitor coding tools",
                 "Keeps what people ask this agent from their coding tools and what it answers, "
-                "and the name, time and outcome of each other tool call, never what it sent or "
-                "returned. People are told in the conversation or their first "
+                "plus the name, time and outcome of their other tool calls, never what they "
+                "sent or returned. People are told in the conversation or their first "
                 "tool result. Kept from when it is turned on, for the retention period.",
             ),
         )
+    ),
+    FeatureSpec(
+        key="github_follow_org",
+        name="Follow the GitHub org",
+        category="guardrails",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("agent",),
+        # Read when GitHub's repo list for the org is refreshed, at most an hour apart.
+        binds="provision",
+        doc=("Follows the whole org."),
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN_NOT_OWNER,
+        connect_only=True,
     ),
 )
 
@@ -1054,13 +1248,49 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         authority=_SERVER_ADMIN,
         page="long-jobs.md#administration",
     ),
+    FeatureSpec(
+        key="secret_sharing",
+        name="Secret sharing",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("deployment", "workspace", "agent"),
+        binds="session_mutable",
+        doc=(
+            "/share-secret sends a secret to one person's DMs; the agent sends its keys to an "
+            "admin, its owner or its setter. They reveal it once, within a day. A server admin "
+            "turns it on."
+        ),
+        platforms=_DISCORD,
+        authority=_SERVER_ADMIN,
+    ),
+    FeatureSpec(
+        key="bot_access_wait",
+        name="Wait for bot access",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("workspace",),
+        binds="turn",
+        doc=(
+            "Work for a channel Daimon cannot reach waits, without failing, and runs once it can."
+        ),
+        platforms=_DISCORD,
+        authority=_SERVER_ADMIN,
+    ),
     _capability(
         "compute",
         "Cloud computers",
-        "The agent can start a short-lived cloud computer to run code and keep files. Off "
-        "removes the computer tools here.",
+        (
+            "A short-lived cloud computer to run code. Only a server admin turns it "
+            "on; Off removes its tools."
+        ),
         requires=("compute_setup",),
         page="compute.md#turn-it-on",
+        default="off",
+        authority=_SERVER_ADMIN,
     ),
     _capability(
         "notebooks",
@@ -1098,7 +1328,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         category="chat",
         effect="capability",
         values=_ON_OFF,
-        default="off",
+        default="on",
         tiers=("deployment", "workspace", "agent"),
         binds="turn",
         doc=(
@@ -1119,9 +1349,9 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent", "channel"),
         binds="turn",
         doc=(
-            "Answers offer a way to ask a person for help, which posts the request in the "
-            "support channel. Off removes the button and the form. Whoever runs Daimon sets the "
-            "default channel and credits; an admin can set limits, a menu and their own channel."
+            "Answers offer a way to ask a person for help, posted in the "
+            "support channel. Off removes the button and the form. The operator sets the "
+            "default channel and credits; an admin sets limits, a menu and their own channel."
         ),
         requires=("support_channel", "support_credits"),
         authority=_SETTINGS,
@@ -1137,7 +1367,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent", "channel"),
         binds="turn",
         doc=(
-            "A submitted thumbs-down form (the reasons, the text, the person, the agent and a "
+            "A submitted thumbs-down form (reasons, text, person, agent and a "
             "link to the answer) is also posted where Ask a person requests go, and the form "
             "says so first. It spends no credits. Off keeps the form in the database only."
         ),
@@ -1218,7 +1448,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "turn_time_limit",
         "Answer time limit",
         (
-            "The longest one answer may take before it is stopped when someone is talking to "
+            "The longest an answer may take before it is stopped when someone is talking to "
             "the agent: the standard 45 minutes, or shorter. The smallest setting wins. "
             "Routines and watches use the unattended run limit."
         ),

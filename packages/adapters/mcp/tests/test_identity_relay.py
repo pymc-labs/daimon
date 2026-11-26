@@ -16,6 +16,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.x509.oid import NameOID
+from daimon.adapters.mcp import identity_relay
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
 from daimon.adapters.mcp.identity_relay import (
     MAX_BODY_BYTES,
@@ -25,6 +26,7 @@ from daimon.adapters.mcp.identity_relay import (
     build_relay_clients,
 )
 from daimon.adapters.mcp.tools import _session_gate
+from daimon.core.agent_chat_requester import EarlierTurn, record_driver
 from daimon.core.config import SignedIdentityServer
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.ma_identity import derive_agent_uuid
@@ -35,9 +37,12 @@ from daimon.core.mcp_identity import (
     SigningKey,
     generate_signing_key,
 )
+from daimon.core.ops_events import OpsEvent
 from daimon.core.stores import watches
 from daimon.core.stores.domain import Role
 from daimon.core.stores.routines import create_routine
+from daimon.core.stores.session_settle_state import SessionProvenance
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import create_thread_session, mark_dead
 from daimon.core.stores.turn_origins import bind_origin_session, create_origin
 from daimon.core.turn_hold import TurnHold
@@ -48,6 +53,9 @@ from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
+
+#: A send whose session carries no provenance stamp.
+NO_PROVENANCE = SessionProvenance(grant=None, channel_id=None, account_id=None)
 
 SECRET = b"r" * 32
 SERVER = SignedIdentityServer(
@@ -79,10 +87,11 @@ def _public_ca() -> tuple[str, bytes]:
 
 
 class _Upstream:
-    def __init__(self, *, down: bool = False, busy: bool = False) -> None:
+    def __init__(self, *, down: bool = False, busy: bool = False, status: int = 200) -> None:
         self.requests: list[httpx.Request] = []
         self.down = down
         self.busy = busy
+        self.status = status
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         if self.down:
@@ -91,7 +100,7 @@ class _Upstream:
             raise httpx.PoolTimeout("no free connection", request=request)
         self.requests.append(request)
         return httpx.Response(
-            200,
+            self.status,
             content=b'{"jsonrpc":"2.0","id":1,"result":{}}',
             headers={"content-type": "application/json", "mcp-session-id": "up-1"},
         )
@@ -113,6 +122,16 @@ async def _person(factory: async_sessionmaker[AsyncSession]) -> _Person:
         )
     agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_a")
     return _Person(tenant.id, principal.account_id, agent_id)
+
+
+async def _colleague(factory: async_sessionmaker[AsyncSession], person: _Person) -> _Person:
+    """user-2, in the same guild and talking to the same agent as `person`."""
+    async with factory() as db, db.begin():
+        tenant = await get_tenant(db, person.tenant_id)
+        principal = await make_platform_principal(
+            db, platform="discord", external_id="user-2", tenant=tenant
+        )
+    return _Person(person.tenant_id, principal.account_id, person.agent_id)
 
 
 async def _token(
@@ -139,9 +158,12 @@ async def _chat_session(
     human: bool | None = True,
     dm: bool = False,
     channel: str | None = None,
+    grant: str | None = None,
+    message: str | None = None,
 ) -> tuple[str, uuid.UUID]:
     """A person's chat session in `thread`, optionally running their turn there.
 
+    With a `grant` the session has an execution grant, which its turn holds.
     Returns the session's relay credential and its mapping row id.
     """
     now = dt.datetime.now(dt.UTC)
@@ -149,7 +171,8 @@ async def _chat_session(
     async with factory() as db, db.begin():
         await create_thread_session(
             db, id=mapping_id, tenant_id=person.tenant_id, platform="discord",
-            thread_id=thread, account_id=person.account_id, ma_session_id=f"sess_{thread}",
+            thread_id=thread, account_id=person.account_id,
+            ma_session_id=f"sess_{grant or thread}",
             ma_agent_id="agent_a", channel_id=channel,
         )  # fmt: skip
         if turn:
@@ -161,12 +184,12 @@ async def _chat_session(
                 role=Role.USER, expires_at=now + dt.timedelta(hours=1), now=now,
                 sender_foreign=foreign, shared_channel=False,
                 platform_channel_id=None if dm else thread,
-                platform_message_id=f"msg-{thread}",
+                platform_message_id=message or f"msg-{thread}",
             )  # fmt: skip
             await bind_origin_session(
-                db, origin_id=origin.id, chat_session_id=None, human_invocation=human
+                db, origin_id=origin.id, chat_session_id=grant, human_invocation=human
             )
-    token = await _token(factory, person, RelayBinding("Agent A", mapping_id))
+    token = await _token(factory, person, RelayBinding("Agent A", mapping_id, grant=grant))
     return token, mapping_id
 
 
@@ -377,6 +400,33 @@ async def test_unreachable_server_is_a_bad_gateway_and_a_full_pool_a_retry(
     assert busy.headers["retry-after"] == "5", "the caller is told when to retry"
 
 
+async def test_each_relay_failure_is_an_issue_with_its_own_reason(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Busy, unconfigured and an upstream 503 differ; a valid credential to an unknown
+    server is still its tenant's issue."""
+    reported: list[OpsEvent] = []
+    monkeypatch.setattr(
+        identity_relay, "report_ops_event", lambda sm, event, *, logged: reported.append(event)
+    )
+    person = await _person(db_session_factory)
+    token, _ = await _chat_session(db_session_factory, person, "thread-1")
+    key = generate_signing_key()
+    async with _relay(db_session_factory, _Upstream(busy=True), key) as client:
+        await _call(client, token)
+        await client.post("/mcp-identity/other", headers={"authorization": f"Bearer {token}"})
+    async with _relay(db_session_factory, _Upstream(), None, BEARER_SERVER) as client:
+        await _post(client, token, _tool_call())
+    async with _relay(db_session_factory, _Upstream(status=503), key) as client:
+        await _call(client, token)
+    assert [(e.code, e.tenant_id, e.reason, e.subject_key) for e in reported] == [
+        ("bridge.relay_failed", person.tenant_id, "relay_busy", "tools"),
+        ("bridge.relay_refused", person.tenant_id, "404", None),
+        ("bridge.relay_failed", person.tenant_id, "relay_unconfigured", "tools"),
+        ("bridge.relay_failed", person.tenant_id, "503", "tools"),
+    ]
+
+
 BEARER_KEY = "bearer-key-1"
 BEARER_SERVER = SignedIdentityServer(
     name="tools",
@@ -512,15 +562,28 @@ async def test_a_wake_watch_follows_the_conversation_to_its_newest_session(
     assert bound == ["sess_next"], "the wake watch moved to the thread's newest session"
 
 
-@pytest.mark.parametrize("case", ["dm", "unattended", "owner limit", "helper"])
+async def test_a_wake_link_made_in_a_dm_wakes_that_dm(
+    db_session_factory: async_sessionmaker[AsyncSession], callbacks_on: None
+) -> None:
+    """A DM's jobs get links too: each post runs a fresh private turn in the owner's DM,
+    so the watch holds no session, and a later job's link shares its one watch."""
+    person = await _person(db_session_factory)
+    token, _ = await _chat_session(db_session_factory, person, "dm:scope-1", channel="chan-1")
+    first, second = await _wake_urls(db_session_factory, token, _tool_call(), _tool_call())
+    assert isinstance(first, str) and isinstance(second, str), "a DM's job gets a wake link"
+    assert first.rsplit("/", 2)[1] == second.rsplit("/", 2)[1], "both jobs share one watch"
+    async with db_session_factory() as db:
+        rows = (await db.execute(text("SELECT delivery, session_id FROM watches"))).all()
+    assert [tuple(row) for row in rows] == [("dm", None)], "it reports in the owner's DM"
+
+
+@pytest.mark.parametrize("case", ["unattended", "owner limit", "helper"])
 async def test_a_wake_tool_call_that_cannot_have_a_link_still_runs_without_one(
     db_session_factory: async_sessionmaker[AsyncSession], callbacks_on: None, case: str
 ) -> None:
     person = await _person(db_session_factory)
-    thread = "dm:scope-1" if case == "dm" else "thread-1"
-    channel = thread if case == "dm" else "chan-1"
     token, _ = await _chat_session(
-        db_session_factory, person, thread, channel=channel, human=case != "unattended"
+        db_session_factory, person, "thread-1", channel="chan-1", human=case != "unattended"
     )
     if case == "owner limit":
         await _fill_owner_watches(db_session_factory, person)
@@ -784,6 +847,66 @@ async def test_two_live_turns_and_a_replaced_session_stamp_no_requester(
     assert [_sent_meta(r) for r in upstream.requests] == [{}, {}], (
         "ambiguous or stale turns name nobody"
     )
+
+
+async def test_concurrent_turns_by_two_people_in_one_thread_each_name_their_asker(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Each call is stamped from the turn that holds its session's grant: a queued
+    turn of the same person beside it does not make the call anonymous."""
+    first = await _person(db_session_factory)
+    second = await _colleague(db_session_factory, first)
+    token_1, _ = await _chat_session(
+        db_session_factory, first, "thread-1", grant="grant-1", message="msg-1"
+    )
+    token_2, _ = await _chat_session(
+        db_session_factory, second, "thread-1", grant="grant-2", message="msg-2"
+    )
+    await _chat_session(db_session_factory, first, "thread-1", message="msg-queued")
+    upstream = _Upstream()
+    async with _relay(
+        db_session_factory, upstream, None, BEARER_SERVER, bearers=_BEARERS
+    ) as client:
+        await _post(client, token_2, _tool_call(requester_platform_user_id="user-1"))
+        await _post(client, token_1, _tool_call(requester_platform_user_id="user-2"))
+    stamped = [_sent_meta(r).get("requester_platform_user_id") for r in upstream.requests]
+    assert stamped == ["user-2", "user-1"], "each call names the person whose turn made it"
+    signer, key = _Upstream(), generate_signing_key()
+    async with _relay(db_session_factory, signer, key) as client:
+        await _call(client, token_1)
+    assert _identity(signer.requests[0], key)["msg"] == "msg-1", "the running turn, not the queued"
+
+
+async def test_the_turn_holding_the_grant_is_named_until_it_lets_go(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A session row replaced under a running turn still names that turn; once the
+    turn releases the grant, nobody is named, and a grant never names another account."""
+    person = await _person(db_session_factory)
+    token, mapping_id = await _chat_session(db_session_factory, person, "thread-1", grant="g-1")
+    other = await _colleague(db_session_factory, person)
+    # A credential of another account naming the first person's grant.
+    borrowed = await _token(
+        db_session_factory, other, RelayBinding("Agent A", mapping_id, grant="g-1")
+    )
+    upstream = _Upstream()
+    async with _relay(
+        db_session_factory, upstream, None, BEARER_SERVER, bearers=_BEARERS
+    ) as client:
+        async with db_session_factory() as db, db.begin():
+            await mark_dead(db, id=mapping_id)
+        await _post(client, token, _tool_call())
+        await _post(client, borrowed, _tool_call())
+        async with db_session_factory() as db, db.begin():
+            origin_id = (
+                await db.execute(text("SELECT id FROM turn_origins WHERE chat_session_id = 'g-1'"))
+            ).scalar_one()
+            await bind_origin_session(db, origin_id=origin_id, chat_session_id=None)
+        await _post(client, token, _tool_call(requester_platform_user_id="user-1"))
+    held, borrowed_meta, released = (_sent_meta(r) for r in upstream.requests)
+    assert held["requester_platform_user_id"] == "user-1", "the turn holding the grant is named"
+    assert borrowed_meta == {}, "a grant names only its own account's turn"
+    assert released == {}, "a released grant names nobody, and a forged field is dropped"
 
 
 async def test_a_platform_the_server_does_not_understand_is_never_stamped(
@@ -1067,3 +1190,87 @@ async def test_a_held_token_with_an_unreadable_room_is_refused_in_mode_on(
     upstream, key = _Upstream(), generate_signing_key()
     async with _relay(db_session_factory, upstream, key) as client:
         assert (await _call(client, token)).status_code == 403
+
+
+AGENT_CHAT_SERVER = WAKE_SERVER.model_copy(update={"agent_chat_requester": True})
+_FORGED = _tool_call(
+    requester_platform_user_id="666",
+    requester_conversation={"place_type": "dm", "channel_id": "evil"},
+    requester_kind="person",
+    wake_url="https://evil.example.com",
+)
+
+
+async def _agent_chat(
+    factory: async_sessionmaker[AsyncSession],
+    person: _Person,
+    *,
+    signed_in: bool | None,
+    session_id: str = "sesn_chat",
+) -> str:
+    """An agent-chat session's relay credential; `signed_in` is its recorded driver."""
+    if signed_in is not None:
+        await record_driver(
+            factory,
+            managed_session_id=session_id,
+            provenance=NO_PROVENANCE,
+            signed_in_person=signed_in,
+            session_status=None,
+            earlier=EarlierTurn(open=False),
+            new_session=True,
+        )
+    return await _token(factory, person, RelayBinding("Agent A", agent_chat=session_id))
+
+
+async def _agent_chat_meta(
+    factory: async_sessionmaker[AsyncSession], token: str, server: SignedIdentityServer
+) -> dict[str, object]:
+    upstream = _Upstream()
+    async with _relay(factory, upstream, None, server, bearers=_BEARERS) as client:
+        response = await _post(client, token, _FORGED)
+    assert response.status_code == 200, "the call runs whoever drives it"
+    return _sent_meta(upstream.requests[0])
+
+
+async def test_an_agent_chat_turn_a_signed_in_person_drives_names_them_with_no_place(
+    db_session_factory: async_sessionmaker[AsyncSession], callbacks_on: None
+) -> None:
+    person = await _person(db_session_factory)
+    token = await _agent_chat(db_session_factory, person, signed_in=True)
+    assert await _agent_chat_meta(db_session_factory, token, AGENT_CHAT_SERVER) == {
+        "requester_platform_user_id": "user-1",
+        "requester_kind": "agent_chat",
+    }, "the signed-in person is named from their account, never from the request"
+    assert await _wake_watches(db_session_factory) == [], "and no wake link is made"
+
+
+@pytest.mark.parametrize(
+    ("signed_in", "server", "case"),
+    [
+        (True, WAKE_SERVER, "a server that has not opted in"),
+        (False, AGENT_CHAT_SERVER, "a turn an agent, coding or CLI key drives"),
+        (None, AGENT_CHAT_SERVER, "a session with no recorded driver"),
+    ],
+)
+async def test_an_agent_chat_turn_otherwise_names_nobody(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    signed_in: bool | None,
+    server: SignedIdentityServer,
+    case: str,
+) -> None:
+    person = await _person(db_session_factory)
+    token = await _agent_chat(db_session_factory, person, signed_in=signed_in)
+    assert await _agent_chat_meta(db_session_factory, token, server) == {}, (
+        f"{case}: forged requester fields are only removed"
+    )
+
+
+async def test_a_credential_minted_before_the_agent_chat_binding_names_nobody(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Such a session gains the binding on its next continue (`refresh_relay_vault`); until
+    then the relay cannot tell which session calls, so it names nobody."""
+    person = await _person(db_session_factory)
+    await _agent_chat(db_session_factory, person, signed_in=True)
+    token = await _token(db_session_factory, person, RelayBinding("Agent A"))
+    assert await _agent_chat_meta(db_session_factory, token, AGENT_CHAT_SERVER) == {}

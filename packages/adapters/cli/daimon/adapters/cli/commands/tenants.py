@@ -90,7 +90,7 @@ def tenants_backend_policy_command(
             "--backends",
             help=(
                 "Comma-separated providers, or 'default' for the deployment default "
-                "(Anthropic, or the keyed providers with no Anthropic key)."
+                "(Anthropic and the keyed providers)."
             ),
         ),
     ] = None,

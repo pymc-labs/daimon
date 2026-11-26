@@ -92,10 +92,11 @@ daimon routines sandbox-tools --tenant TENANT_UUID ROUTINE_ID --inherit
 `--off` keeps built-ins off for the routine even when its agent is opted in.
 `--inherit` clears the routine's own setting, so its agent's applies.
 
-The opt-in records the agent version and environment the routine runs with.
-A run gets built-ins only while both still match. After anyone edits the agent
-or its environment, the next run goes without them and the opt-in is cleared
-until the operator runs the command again.
+The opt-in records the provider, agent version and environment the routine
+runs with. A run gets built-ins only while all three still match. After anyone
+edits the agent or its environment, or moves it to another provider, the next
+run goes without them and the opt-in is cleared until the operator runs the
+command again.
 
 Editing the routine's agent, trigger message, destination or budget channel
 also clears it. Changing the schedule, pausing or resuming does not. DM
@@ -162,11 +163,15 @@ provider's own status, so a paused turn lists as `idle`.
 A turn on a backend other than Managed Agents has no session to check, so it
 refuses every tool call that pauses. With the `host_call_gate` deployment
 feature on, an OpenAI or Gemini turn nobody watches keeps its Daimon tools:
-each call gets the unattended verdict above. Automatic custom tools are always
+each call gets the unattended verdict above. DM routines and DM timers run
+there too, as their owner's private turn, and channel timers as unattended
+replies. Before each send Daimon rechecks the source's seal and the owner's
+roles. Watch reports run only on Anthropic. Automatic custom tools are always
 refused before the first message.
 
 OpenAI's persistent workspace always has a shell, so its unattended turns run
-only where sandbox tools are allowed, such as a long job. With the feature off,
+only where sandbox tools are allowed, such as a long job. A timer has no
+sandbox opt-in, so an OpenAI timer is refused. With the feature off,
 native turns that need MCP, sandbox, bash or custom tools are refused before
 the first message. A self-hosted harness inspects every tool at the host, so
 allowed reads continue while sandbox calls and unapproved writes are refused.

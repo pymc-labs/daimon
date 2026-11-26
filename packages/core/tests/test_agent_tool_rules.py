@@ -20,6 +20,7 @@ from daimon.core.stores.agent_tool_rules import valid_tool_name
 from daimon.core.tool_safety import (
     CONFIRMED_DAIMON_TOOLS,
     PUBLISH_TOOLS,
+    RENAMED_DAIMON_TOOLS,
     ResolvedAgentToolRule,
     ToolCall,
     ToolSafetyPolicy,
@@ -1166,26 +1167,9 @@ async def test_a_stored_row_with_a_bad_name_is_skipped_and_logged_not_sent_to_ma
         )
     await db_session.flush()
     with capture_logs() as logs:
-        ruled = await store.daimon_rule_set(db_session, tenant_id=tenant_id, agent_id="ma-1")
-    assert ruled.tools == {"get_session"} and not ruled.needs_driver
+        ruled = await store.daimon_rule_tools(db_session, tenant_id=tenant_id, agent_id="ma-1")
+    assert ruled == {"get_session"}
     assert len([row for row in logs if row["event"] == "tool_safety.rule_name_skipped"]) == 3
-
-
-async def test_which_daimon_rules_only_the_driver_can_apply(db_session: AsyncSession) -> None:
-    tenant_id = await _tenant(db_session)
-
-    async def needs(agent_id: str) -> bool:
-        ruled = await store.daimon_rule_set(db_session, tenant_id=tenant_id, agent_id=agent_id)
-        assert ruled.tools
-        return ruled.needs_driver
-
-    await _set(db_session, tenant_id, "get_session", "deny", agent_id="wide")
-    await _set(db_session, tenant_id, "*", "deny", agent_id="wide")
-    assert not await needs("wide"), "the server enforces an agent-wide deny, specific or *"
-    await _set(db_session, tenant_id, "get_session", "ask", agent_id="asks")
-    assert await needs("asks")
-    await _set(db_session, tenant_id, "get_session", "deny", agent_id="chan", channel_id="home")
-    assert await needs("chan"), "the server does not know the channel"
 
 
 async def test_a_channel_rule_on_a_publish_tool_cards_everywhere_and_denies_in_its_channel(
@@ -1223,3 +1207,103 @@ async def test_a_channel_rule_on_a_publish_tool_cards_everywhere_and_denies_in_i
         daimon_rules=True,
     )
     assert not (await routine(publish)).allow, "and a routine is refused, as for any publish"
+
+
+_OLD_TOOL, _NEW_TOOL = "fly_run_bash", "compute_run_bash"
+_ABSENT = "absent"
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "in_force"),
+    [
+        # Old key only: the schema before the copy, or a rule the older release wrote.
+        ("deny", _ABSENT, "deny"),
+        ("ask", _ABSENT, "ask"),
+        ("allow", _ABSENT, "allow"),
+        # New key only: a rule set after the old keys are gone.
+        (_ABSENT, "deny", "deny"),
+        # Both: the new name is the one an admin edits now, stricter or not.
+        ("allow", "deny", "deny"),
+        ("deny", "allow", "allow"),
+        ("deny", "ask", "ask"),
+        # A rule cleared under the new name is cleared, whatever the old row says.
+        ("deny", None, None),
+    ],
+)
+@pytest.mark.parametrize("channel", [None, "home"])
+async def test_a_renamed_tools_old_rule_stands_until_its_place_has_a_rule_under_the_new_name(
+    db_session: AsyncSession, old: str, new: str | None, in_force: str | None, channel: str | None
+) -> None:
+    """A deny must hold at every moment of a deploy, on either side of the rule copy."""
+    assert RENAMED_DAIMON_TOOLS[_OLD_TOOL] == _NEW_TOOL
+    tenant_id = await _tenant(db_session)
+    if old != _ABSENT:
+        await _set(db_session, tenant_id, _OLD_TOOL, cast(store.Rule, old), channel_id=channel)
+    if new != _ABSENT:
+        await _set(
+            db_session, tenant_id, _NEW_TOOL, cast(store.Rule | None, new), channel_id=channel
+        )
+    # A relayed server's tool of the old name is never Daimon's.
+    await _set(db_session, tenant_id, "", "deny", key=f"internal/{_OLD_TOOL}")
+    key = f"{_DAIMON}/{_NEW_TOOL}"
+
+    resolved = await store.get_for_call(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id="ma-1",
+        tool_key=key,
+        server_url=_DAIMON_URL,
+        channel_id="home",
+    )
+    assert (resolved.rule if resolved else None) == in_force
+    elsewhere = await store.get_for_call(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id="ma-1",
+        tool_key=key,
+        server_url=_DAIMON_URL,
+        channel_id="other",
+    )
+    assert (elsewhere.rule if elsewhere else None) == (None if channel else in_force)
+
+    # The session holds the tool by its new name whichever key the rule is under.
+    held = await store.daimon_rule_tools(db_session, tenant_id=tenant_id, agent_id="ma-1")
+    assert held == ({_NEW_TOOL} if in_force in ("ask", "deny") else set())
+
+    # The MCP server's own refusal reads agent-wide denies only.
+    denies = await store.deny_rules_for_trusted_tool(
+        db_session, tenant_id=tenant_id, tool_keys=[key, f"{_DAIMON}/*"]
+    )
+    assert bool(denies) == (in_force == "deny" and channel is None)
+
+    # An admin sees one row for the tool: the one in force.
+    listed = [
+        row.tool_key
+        for row in await store.list_rules(db_session, tenant_id=tenant_id, agent_id="ma-1")
+        if row.tool_key.startswith(_DAIMON)
+    ]
+    assert listed == [key if new != _ABSENT else f"{_DAIMON}/{_OLD_TOOL}"]
+
+
+async def test_old_and_new_rules_in_different_places_are_each_judged_in_their_own(
+    db_session: AsyncSession,
+) -> None:
+    tenant_id = await _tenant(db_session)
+    await _set(db_session, tenant_id, _OLD_TOOL, "deny", channel_id="home")
+    await _set(db_session, tenant_id, _NEW_TOOL, "allow")
+
+    async def rule(channel_id: str | None) -> str | None:
+        resolved = await store.get_for_call(
+            db_session,
+            tenant_id=tenant_id,
+            agent_id="ma-1",
+            tool_key=f"{_DAIMON}/{_NEW_TOOL}",
+            server_url=_DAIMON_URL,
+            channel_id=channel_id,
+        )
+        return resolved.rule if resolved else None
+
+    # The channel has no row under the new name, so its old deny still stands there.
+    assert await rule("home") == "deny"
+    assert await rule("other") == "allow"
+    assert await rule(None) == "allow"

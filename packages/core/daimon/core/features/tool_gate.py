@@ -36,12 +36,20 @@ SELF_KNOWLEDGE_TOOLS: Final[frozenset[str]] = frozenset(
 through `call_tool` and its catalogue does not change."""
 
 STOP_TOOLS: Final[frozenset[str]] = frozenset(
-    {"fly_stop_session", "fly_list_sessions", "list_long_jobs", "get_long_job", "cancel_long_job"}
+    {
+        "compute_stop_session",
+        "compute_list_sessions",
+        "list_long_jobs",
+        "get_long_job",
+        "cancel_long_job",
+    }
 )
 """The server keeps these callable while their feature is Off: Off leaves running work running,
 so it must stay findable and stoppable."""
 
-SESSION_KEPT_TOOLS: Final[frozenset[str]] = frozenset({"fly_stop_session", "fly_list_sessions"})
+SESSION_KEPT_TOOLS: Final[frozenset[str]] = frozenset(
+    {"compute_stop_session", "compute_list_sessions"}
+)
 """Compute Off hides the rest of its tools from a session but not these two: a running sandbox
 session must stay stoppable from chat. Long jobs have no such exception; their tools all go."""
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -9,14 +10,16 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 from daimon.adapters.slack import routine_delivery as poster_mod
-from daimon.adapters.slack.routine_delivery import make_slack_routine_poster
+from daimon.adapters.slack.routine_delivery import make_slack_owner_dm, make_slack_routine_poster
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_identity import AgentIdentity
 from daimon.core.native_admins import GroupMembersCache
+from daimon.core.owner_notices import OwnerNotice
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.domain import FeatureTarget, RoutineRow
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.platform_names import KnownName, upsert_user_names
 from daimon.core.stores.routines import create_routine
@@ -54,6 +57,7 @@ def _poster(
     monkeypatch: pytest.MonkeyPatch,
     *,
     dm_policies: dict | None = None,
+    build: Callable[[SlackRuntime], Any] = make_slack_routine_poster,
 ) -> tuple[Any, MagicMock]:
     client = MagicMock()
     client.token = "xoxb-test"
@@ -81,7 +85,8 @@ def _poster(
             sessionmaker=sm,
             anthropic=MagicMock(),
             settings=SimpleNamespace(
-                direct_message_policies=dm_policies if dm_policies is not None else {}
+                direct_message_policies=dm_policies if dm_policies is not None else {},
+                features={},
             ),
             deployment_default=DeploymentDefault(),
             group_members=GroupMembersCache(),
@@ -92,7 +97,44 @@ def _poster(
             ),
         ),
     )
-    return make_slack_routine_poster(runtime), client
+    return build(runtime), client
+
+
+@pytest.mark.parametrize(
+    ("text", "policy", "sent"),
+    [
+        ("Your readout failed.", "members", "text"),
+        (None, "members", "card"),
+        ("x", "disabled", None),
+    ],
+)
+async def test_the_owner_gets_its_failure_notice_by_dm_where_dms_are_allowed(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    text: str | None,
+    policy: str,
+    sent: str | None,
+) -> None:
+    """The agent's words, else the error card; a DM policy that excludes the owner, nothing."""
+    from daimon.core.config import DirectMessagePolicy
+
+    row = await _routine(db_session, kind="channel", destination_id="C1")
+    send, client = _poster(
+        db_session_factory,
+        monkeypatch,
+        dm_policies={row.tenant_id: DirectMessagePolicy(mode=policy)},  # type: ignore[arg-type]
+        build=make_slack_owner_dm,
+    )
+
+    closed = await send(row, OwnerNotice('Your routine "x" failed', "It stopped.", text))
+
+    posts = [call.kwargs for call in client.chat_postMessage.await_args_list]
+    if sent is None:
+        assert (closed, posts) == ("dm_policy_denies", []), "no DM the policy excludes"
+    else:
+        assert closed is None and [p["channel"] for p in posts] == ["D_CREATOR"], "a DM"
+        assert ("blocks" in posts[0]) == (sent == "card"), "the card only without the agent's"
 
 
 async def test_posts_into_a_thread_without_broadcasting(
@@ -111,6 +153,25 @@ async def test_posts_into_a_thread_without_broadcasting(
     client.conversations_replies.assert_awaited_once_with(channel="C1", ts="1717.5", limit=1)
     assert "<!channel>" not in kwargs["text"], "a routine never broadcasts"
     assert "<@U7>" in kwargs["text"], "mentions of people survive"
+
+
+async def test_with_the_header_off_the_result_posts_without_it(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row = await _routine(db_session, kind="channel", destination_id="C1")
+    async with db_session_factory.begin() as session:
+        await set_feature_value(
+            session, tenant_id=row.tenant_id, target=FeatureTarget("workspace"),
+            key="routine_result_header", value="off", set_by=None, surface="cli",
+        )  # fmt: skip
+    post, client = _poster(db_session_factory, monkeypatch)
+
+    assert (await post(row)).status == "delivered"
+
+    text = client.chat_postMessage.await_args.kwargs["text"]
+    assert text.startswith("Done") and "Result from" not in text, text
 
 
 def _with_identity(monkeypatch: pytest.MonkeyPatch, identity: AgentIdentity) -> None:

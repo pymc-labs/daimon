@@ -42,7 +42,7 @@ export function ServerEditor({ agent, ro, update, select, server: s, changed, un
               <Field label="URL" changed={changed.has(`mcp:${s.key}/url`)}>
                 <Input value={url} disabled={ro} onChange={(e) => setUrl(e.target.value)} className="h-8 font-mono text-[12.5px]" />
               </Field>
-              {saved && (
+              {saved && s.credential && (
                 <Field label="Credential">
                   <span className="flex items-center gap-3">
                     {s.credential === "connected" ? <StatusDot status="healthy" label="Connected" />
@@ -58,7 +58,7 @@ export function ServerEditor({ agent, ro, update, select, server: s, changed, un
               {saved && !ro && (
                 <Field label="Token">
                   <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (secret.trim()) token.save.mutate(secret.trim(), { onSuccess: () => setSecret("") }) }}>
-                    <Input type="password" autoComplete="off" value={secret} onChange={(e) => setSecret(e.target.value)} className="h-8 font-mono text-[12.5px]" />
+                    <Input type="password" autoComplete="off" value={secret} placeholder={s.auth === "token" ? "*****" : "Not set"} onChange={(e) => setSecret(e.target.value)} className="h-8 font-mono text-[12.5px]" />
                     <Button type="submit" variant="outline" size="sm" disabled={!secret.trim() || token.save.isPending}>Save</Button>
                   </form>
                 </Field>

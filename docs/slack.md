@@ -166,8 +166,9 @@ Before enabling, finish the DM setup in the manifest: the two scopes, the
 > before any rollback.
 
 Private turns start a fresh session each time. Recent private history is
-replayed, but workspace files and OAuth grants held only in a shared vault are
-not copied.
+replayed, and the sign-ins Daimon holds for the agent and for you are copied
+into the session's own vault, but workspace files and OAuth grants held only
+in a shared vault are not copied.
 
 ### Ask a person
 

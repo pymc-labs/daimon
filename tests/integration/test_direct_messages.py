@@ -795,6 +795,8 @@ async def test_discord_move_command_seeds_and_runs_a_real_private_turn(
                 session, tenant_id=tenant.id, policy=TenantAccessPolicy(invoker_user_ids=("other",))
             )
     bot = MagicMock()
+    bot.working_mark = AsyncMock(return_value="👀")
+    bot.turn_model_marks = AsyncMock(return_value=())
     bot.draining = False
     bot.user.id = 999
     bot.runtime.sessionmaker = db_session_factory

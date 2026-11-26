@@ -720,37 +720,35 @@ async def routine_execution(
     routine_id: UUID,
     *,
     lifetime_s: float,
-    register: bool = True,
 ) -> AsyncIterator[None]:
     """A live grant ends with the scheduler fire, including cancellation.
 
-    `lifetime_s` is the fire's own outer bound, so a grant a dead process left
-    behind expires no later than its fire would have been stopped.
+    Every fire holds one: lead intake tools and `report_routine_problem` check it
+    (`execution_is_active`). `lifetime_s` is the fire's own outer bound, so a grant
+    a dead process left behind expires no later than its fire would have been stopped.
     """
     identity = uuid4()
-    if register:
-        async with sessions() as session, session.begin():
-            session.add(
-                LeadIntakeExecution(
-                    tenant_id=tenant_id,
-                    id=identity,
-                    routine_id=routine_id,
-                    expires_at=datetime.now(UTC) + timedelta(seconds=lifetime_s),
-                )
+    async with sessions() as session, session.begin():
+        session.add(
+            LeadIntakeExecution(
+                tenant_id=tenant_id,
+                id=identity,
+                routine_id=routine_id,
+                expires_at=datetime.now(UTC) + timedelta(seconds=lifetime_s),
             )
+        )
     token = current_intake_execution.set((routine_id, identity))
     try:
         yield
     finally:
         current_intake_execution.reset(token)
-        if register:
-            async with sessions() as session, session.begin():
-                await session.execute(
-                    delete(LeadIntakeExecution).where(
-                        LeadIntakeExecution.tenant_id == tenant_id,
-                        LeadIntakeExecution.id == identity,
-                    )
+        async with sessions() as session, session.begin():
+            await session.execute(
+                delete(LeadIntakeExecution).where(
+                    LeadIntakeExecution.tenant_id == tenant_id,
+                    LeadIntakeExecution.id == identity,
                 )
+            )
 
 
 async def execution_is_active(

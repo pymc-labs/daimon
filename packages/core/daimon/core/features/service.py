@@ -58,6 +58,7 @@ from daimon.core.features.snapshot import (
 from daimon.core.permissions import SEALED_REFUSAL, any_own_readers, sealed_outside
 from daimon.core.platform_words import NEUTRAL_ADMIN, space_for, words_for
 from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.agent_avatars import avatar_names, normalize_agent_name
 from daimon.core.stores.channel_changes import WORKSPACE_ID, WriteHook, record_change
 from daimon.core.stores.domain import (
     CHAT_PLATFORMS,
@@ -382,8 +383,14 @@ def feature_refusal(
         reason = None
     for failed, message, code in (
         (
-            value != DEFAULT and value not in spec.values,
+            value != DEFAULT and value not in spec.values and not spec.max_length,
             f"{spec.name} can be {_joined([*(spec.label(v) for v in spec.values), 'Default'])}.",
+            "bad_value",
+        ),
+        (
+            value != DEFAULT and not spec.accepts(value, "agent"),
+            f"{spec.name} can be {spec.label(spec.default)}, Default, or one line of up to "
+            f"{spec.max_length} characters of plain words, with no marks like @ # : or *.",
             "bad_value",
         ),
         (
@@ -720,6 +727,10 @@ async def change_feature(
     if refusal is not None:
         raise refusal
     spec = FEATURES[key]
+    if spec.connect_only and value == "on" and not actor.operator:
+        raise _refused(CONNECT_ONLY, "connect_only", "forbidden")
+    if key == "display_name" and value != DEFAULT and value not in spec.values:
+        await _refuse_taken_name(sessions, actor, place, value)
     await _require_inside(sessions, actor, spec, tier, place)
     after = TierSetting(tier, value, locked)
     if key == "approvals":  # the one native feature kept in the approval gate, not feature storage
@@ -744,6 +755,42 @@ async def change_feature(
     )
     (view,) = await read_features(sessions, settings, place, keys=(key,), agent_builtins=builtins)
     return FeatureChange(key, tier, before, after, view)
+
+
+CONNECT_ONLY = (
+    "This can only be turned on from the agent's GitHub connect page, by an admin of the "
+    "org. Open that page and tick the box to follow the org."
+)
+
+NAME_TAKEN = "That name belongs to Daimon or another agent. Pick another one."
+
+
+async def _refuse_taken_name(
+    sessions: Sessions, actor: FeatureActor, place: FeaturePlace, value: str
+) -> None:
+    """A display name may not pass for another agent (its slug or display name), nor for
+    Daimon itself unless the operator gives it, so one agent can show as the bot."""
+    wanted = normalize_agent_name(value)
+    if wanted == "daimon":
+        if actor.operator:
+            return
+        raise _refused(NAME_TAKEN, "name_taken")
+    own = (
+        await actor.agent_names(place.agent_id)
+        if place.agent_id and actor.agent_names is not None
+        else ()
+    )
+    mine = {normalize_agent_name(name) for name in own if name}
+    async with sessions() as session:
+        slugs = await avatar_names(session, tenant_id=place.tenant_id)
+        rows = await list_feature_values(
+            session, tenant_id=place.tenant_id, keys=("display_name",), tier="agent"
+        )
+    names = {slug for slug in slugs if slug not in mine} | {
+        normalize_agent_name(row.value) for row in rows if row.agent_id != place.agent_id
+    }
+    if wanted in names:
+        raise _refused(NAME_TAKEN, "name_taken")
 
 
 async def _require_inside(
@@ -918,6 +965,46 @@ async def set_workspace_feature(
         actor,
         FEATURES[key],
         TierSetting("workspace", value),
+        place,
+        None,
+        check_own_lock=False,
+    )
+
+
+async def set_agent_feature(
+    session: AsyncSession,
+    settings: Settings | None,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    ma_agent_id: str,
+    key: str,
+    value: str,
+    account_id: uuid.UUID | None,
+    surface: ChangeSurface,
+) -> TierSetting:
+    """Set `key` at the agent tier of one agent inside the caller's transaction, for a
+    surface that has already checked its admin (the GitHub connect page, the operator CLI).
+    Same refusals and records as `change_feature`; returns what it was."""
+    place = FeaturePlace(tenant_id, platform, agent_id=ma_agent_id)
+    specs = (FEATURES[key],) if key in FEATURES else ()
+    support = await support_setup(session, settings, place, specs)
+    refusal = feature_refusal(
+        key, "agent", value, locked=False, place=place, settings=settings, support=support
+    )
+    if refusal is not None:
+        raise refusal
+
+    async def _nobody(_: DelegatedAction | None) -> bool:
+        return False
+
+    actor = FeatureActor(tenant_id, account_id, surface, None, _nobody)
+    return await _write_in(
+        session,
+        settings,
+        actor,
+        FEATURES[key],
+        TierSetting("agent", value),
         place,
         None,
         check_own_lock=False,

@@ -1842,3 +1842,57 @@ async def test_personal_memory_erasure_survives_agent_archive_and_missing_princi
     await sweep_privacy_session_deletes(client, db_session_factory)
 
     assert store_id not in state.stores, "the personal store and its memories are deleted"
+
+
+async def test_purge_clears_where_the_accounts_agent_chat_sessions_came_from(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """The account's id leaves each agent-chat session record, with the session's grant and
+    channel, so the session is no longer found. Its driver record names no one and stays;
+    another account's session is untouched."""
+    from daimon.core.agent_chat_requester import UNREAD, record_driver
+    from daimon.core.privacy import collect_purge_preview
+    from daimon.core.stores import session_settle_state as settle
+    from sqlalchemy import text
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    other = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    for session_id, owner in (("sesn-mine", account.id), ("sesn-other", other.id)):
+        await record_driver(
+            db_session_factory,
+            managed_session_id=session_id,
+            signed_in_person=False,
+            session_status="idle",
+            earlier=UNREAD,
+            provenance=settle.SessionProvenance(
+                grant=f"grant-{session_id}", channel_id="chan-k", account_id=owner
+            ),
+        )
+    async with db_session_factory() as db:
+        sends = await settle.count_agent_chat_sends(db, managed_session_id="sesn-mine")
+    preview = await collect_purge_preview(sm=db_session_factory, account_id=account.id)
+    assert preview.agent_chat_session_links.count == 1
+
+    report = await purge_account(sm=db_session_factory, account_id=account.id)
+
+    assert report.db.agent_chat_session_links == 1
+    async with db_session_factory() as db:
+        kept = (
+            await db.execute(
+                text(
+                    "SELECT agent_chat_grant, agent_chat_channel, agent_chat_account_id "
+                    "FROM usage_reconcile_progress WHERE managed_session_id = 'sesn-mine'"
+                )
+            )
+        ).one()
+        assert tuple(kept) == (None, None, None), "the grant, channel and account are cleared"
+        assert (
+            await settle.find_agent_chat_session(db, grant="grant-sesn-mine", account_id=account.id)
+            is None
+        )
+        assert await settle.count_agent_chat_sends(db, managed_session_id="sesn-mine") == sends
+        assert await settle.find_agent_chat_session(
+            db, grant="grant-sesn-other", account_id=other.id
+        ) == settle.AgentChatSession(managed_session_id="sesn-other", channel_id="chan-k")

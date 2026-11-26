@@ -86,6 +86,7 @@ class PurgePreview(BaseModel):
     dm_rules: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     dm_grant_users: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     credential_requests: PurgePreviewRow
+    secret_shares: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     wizard_sessions: PurgePreviewRow
     message_feedback: PurgePreviewRow
     support_escalations: PurgePreviewRow
@@ -94,6 +95,7 @@ class PurgePreview(BaseModel):
     support_settlers_cleared: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     daimon_admins: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     agent_post_requesters: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    agent_chat_session_links: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     platform_user_names: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     teams_messages: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     microsoft_user_tokens: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
@@ -101,6 +103,7 @@ class PurgePreview(BaseModel):
     web_people: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     web_admin_grants: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     monitored_events: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    ops_events: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     # Provider-neutral conversation state erased with the account (stores.mux_erasure),
     # one row per PurgeReport mux field.
     mux_slots: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
@@ -155,6 +158,7 @@ def held_lines(preview: PurgePreview) -> list[str]:
         (preview.mux_journal_events, "saved conversation message"),
         (preview.host_call_cards, "approval request"),
         (preview.monitored_events, "record admins can read"),
+        (preview.ops_events, "failure record"),
     )
     parts = [
         "saved settings"

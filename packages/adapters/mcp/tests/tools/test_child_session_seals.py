@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.adapters.mcp.tools import fly
+from daimon.adapters.mcp.tools import compute
 from daimon.adapters.mcp.tools.agent_chat import _bound_posture
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.permissions import session_readable_from
@@ -59,7 +59,9 @@ def test_child_seal_is_the_parents_and_the_turns(parent, turn, expected) -> None
 
 
 @pytest.mark.parametrize("sealed", [True, False], ids=["provider-sealed", "ma-unchanged"])
-async def test_fly_child_stamp_is_sealed_by_the_provider_credential(monkeypatch, sealed) -> None:
+async def test_compute_child_stamp_is_sealed_by_the_provider_credential(
+    monkeypatch, sealed
+) -> None:
     """The parent has no seal metadata; the stamped source seals the child to the turn's seals."""
 
     @asynccontextmanager
@@ -73,14 +75,14 @@ async def test_fly_child_stamp_is_sealed_by_the_provider_credential(monkeypatch,
         responder_ma_agent_id="agent",
         parent_channel_id="parent",
     )
-    monkeypatch.setattr(fly._session_gate, "session_card_gap", AsyncMock(return_value=None))
+    monkeypatch.setattr(compute._session_gate, "session_card_gap", AsyncMock(return_value=None))
     monkeypatch.setattr(
-        fly,
+        compute,
         "get_live_thread_session",
         AsyncMock(return_value=SimpleNamespace(ma_session_id="parent-session")),
     )
     monkeypatch.setattr(
-        fly,
+        compute,
         "retrieve_session",
         AsyncMock(
             return_value=SimpleNamespace(
@@ -91,24 +93,29 @@ async def test_fly_child_stamp_is_sealed_by_the_provider_credential(monkeypatch,
     events = [
         SimpleNamespace(
             type="agent.mcp_tool_use",
-            name="fly_launch_session",
-            mcp_server_name=fly.DAIMON_SERVER_NAME,
-            input={"template": "mmm", "origin_context_id": "origin"},
+            name="compute_launch_session",
+            mcp_server_name=compute.DAIMON_SERVER_NAME,
+            input={"template": "mmm", "origin_context_id": "origin", "region": "us-central1"},
             id="tool-call",
         ),
         SimpleNamespace(type="user.tool_confirmation", result="allow", tool_use_id="tool-call"),
     ]
     monkeypatch.setattr(
-        fly, "turn_io", lambda *a, **k: SimpleNamespace(replay=AsyncMock(return_value=events))
+        compute, "turn_io", lambda *a, **k: SimpleNamespace(replay=AsyncMock(return_value=events))
     )
 
-    _, metadata = await fly._approved(
+    _, metadata = await compute._approved(
         SimpleNamespace(session_factory=db, client=None),
         auth,
         origin,
-        "fly_launch_session",
-        {"template": "mmm", "origin_context_id": "origin", "region": "iad", "ttl_hours": None},
-        {"region": "iad", "ttl_hours": None},
+        "compute_launch_session",
+        {
+            "template": "mmm",
+            "origin_context_id": "origin",
+            "region": "us-central1",
+            "ttl_hours": None,
+        },
+        {"ttl_hours": None},
     )
 
     if sealed:

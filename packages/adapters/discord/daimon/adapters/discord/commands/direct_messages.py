@@ -34,9 +34,11 @@ from daimon.adapters.discord.context import (
     forwarded_names,
     input_context,
 )
+from daimon.adapters.discord.feedback_seed import seed_feedback_reactions
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.private_answer import PrivateOffers
+from daimon.adapters.discord.reactions import remove_own_reaction
 from daimon.adapters.discord.tool_confirmation import discord_confirmation_hook
 from daimon.adapters.discord.views import CancelView
 from daimon.core.admin_actions import DelegatedAction
@@ -68,13 +70,20 @@ from daimon.core.direct_messages import (
     start_dm,
     tenant_ready,
 )
-from daimon.core.dm_access import decide_dm, list_dm_agents, list_routable_dm_agents
+from daimon.core.dm_access import (
+    decide_dm,
+    dm_agent_display_name,
+    list_dm_agents,
+    list_routable_dm_agents,
+)
 from daimon.core.dm_debounce import DmBursts, debounce_seconds
+from daimon.core.dm_failures import DmStage, report_dm_issue
 from daimon.core.dm_routing import DmChoose, DmRefused, DmUnchecked
 from daimon.core.dm_settings import DmActor, set_default
 from daimon.core.errors import DaimonError
 from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.handoff_context import TranscriptTurn
+from daimon.core.logging_setup import is_shutting_down
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
 from daimon.core.membership_subject import resolve_subject
@@ -91,10 +100,11 @@ from daimon.core.stores.domain import Role, TenantRow
 from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
 from daimon.core.stores.tenants import get_tenant, list_tenants_by_platform
 from daimon.core.stores.thread_session_lineage import request_fresh_start
-from daimon.core.stores.thread_sessions import get_live_thread_session
+from daimon.core.stores.thread_sessions import get_live_thread_session, record_model_marks
 from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.errors import AdmissionDenialReason, AdmissionDenied
 from daimon.core.turn.output import OutputAuthorization
+from daimon.core.turn.shown_model import shown_model
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT
 from daimon.core.workspace_settings import set_dms
 from sqlalchemy.exc import SQLAlchemyError
@@ -149,12 +159,8 @@ class _DmRequest:
 
 
 def _attachments(message: discord.Message | _DmRequest) -> list[discord.Attachment]:
-    """The files a message carries that an agent can use; a voice message is not one."""
-    return [
-        a
-        for a in getattr(message, "attachments", None) or ()
-        if not (isinstance(a, discord.Attachment) and a.is_voice_message())
-    ]
+    """The files a message carries; a voice message is one, as in a thread."""
+    return list(getattr(message, "attachments", None) or ())
 
 
 @dataclass
@@ -408,12 +414,17 @@ class DirectMessageCog(commands.Cog):
             # disclose which candidate failed, or include exception/resource text.
             log.warning(
                 "discord.dm.discovery_failed",
+                tenant_id=str(tenant.id),
                 causes=backend_refusal_causes(exc),
                 error_type=type(exc).__name__,
             )
-            await message.channel.send(
-                _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
-            )
+            try:
+                await message.channel.send(
+                    _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
+                )
+            finally:
+                # After the notice: a failing database must not delay it.
+                await self._report(tenant.id, "discovery", message)
             return _Eligibility(failed=True)
         return _Eligibility(admission=admission)
 
@@ -422,7 +433,9 @@ class DirectMessageCog(commands.Cog):
         message: discord.Message | _DmRequest,
         *,
         expected_scope_id: str | None = None,
+        tried: list[uuid.UUID] | None = None,
     ) -> DirectMessageRow | None:
+        """`tried` collects each server looked at, so a failure can name the last one."""
         if self._unloaded or not self._claim_discovery(message.author.id):
             return None
         tenants = await list_tenants_by_platform(self.bot.runtime.sessionmaker, platform="discord")
@@ -430,6 +443,8 @@ class DirectMessageCog(commands.Cog):
         denied: set[uuid.UUID] = set()
         unknown = False
         for tenant in tenants:
+            if tried is not None:
+                tried.append(tenant.id)
             found = await self._eligible(tenant, message, denied=denied)
             if found.failed:
                 return None
@@ -452,6 +467,8 @@ class DirectMessageCog(commands.Cog):
         if len(candidates) == 1 and expected_scope_id is None:
             only = candidates[0]
             if only.admission is not None:
+                if tried is not None:
+                    tried.append(only.tenant.id)
                 return await self._start(
                     message, only.tenant, only.admission, expected_scope_id=None
                 )
@@ -597,10 +614,11 @@ class DirectMessageCog(commands.Cog):
             return None
         guild = self.bot.get_guild(int(tenant.external_id))
         server_name = guild.name if guild else tenant.external_id
+        name = admission.display_name(admission.config.agent_name or admission.agent.name)
 
         # The only message that carries the controls; /dm-settings shows them again.
         await message.channel.send(
-            f"Private conversation with {admission.config.agent_name} in {server_name}.\n"
+            f"Private conversation with {name} in {server_name}.\n"
             "Run `/dm-settings` to switch server or start a new conversation.",
             view=self._switch_control(
                 user_id=message.author.id,
@@ -840,11 +858,12 @@ class DirectMessageCog(commands.Cog):
                     return "failed"
                 guild = self.bot.get_guild(int(tenant.external_id))
                 server_name = guild.name if guild else tenant.external_id
+                shown = admission.display_name(admission.config.agent_name or admission.agent.name)
                 try:
                     # First, so a closed DM makes no conversation.
                     await channel.send(
                         embed=build_notice_embed(
-                            f"Private answer from {admission.config.agent_name} in "
+                            f"Private answer from {shown} in "
                             f"{server_name}.\n\nReply here to follow up.",
                             neutral=True,
                         ),
@@ -948,6 +967,14 @@ class DirectMessageCog(commands.Cog):
                 if current is not None
                 else None
             )
+            if agent and current is not None:
+                agent = await dm_agent_display_name(
+                    session,
+                    tenant_id=current.tenant_id,
+                    anthropic=self.bot.runtime.turn_deps.anthropic,
+                    records=self.bot.runtime.sessionmaker,
+                    name=agent,
+                )
         if current is None:
             await interaction.response.send_message(
                 "There is no conversation yet. Send a message to start one.", ephemeral=True
@@ -1186,6 +1213,7 @@ class DirectMessageCog(commands.Cog):
         # reply -- is in progress for the shutdown drain, not only the turn.
         with self.bot.runtime.turn_deps.running_turns.track():
             burst = self._bursts.open(key, message)
+            found: DirectMessageRow | None = None
             try:
                 async with self._lock(key):
                     found = await self._conversation(message)
@@ -1205,6 +1233,7 @@ class DirectMessageCog(commands.Cog):
                     # The refusal, the failed pick or the expired selector speaks for the burst.
                     await self._bursts.end(key, burst)
                     return
+                tenant_id = found.tenant_id
                 async with self._lock(key):
                     seconds = 0.0
                     if not fresh:
@@ -1218,21 +1247,28 @@ class DirectMessageCog(commands.Cog):
 
                     async def answer(group: list[discord.Message]) -> None:
                         nonlocal scope_id
-                        scope_id = await self._answer(group, scope_id)
+                        scope_id = await self._answer(group, scope_id, tenant_id)
 
                     await burst.answer(seconds, self._react, answer)
             finally:
                 # An error no turn handled, or a cancellation: nothing left goes unheard.
                 if await self._bursts.end(key, burst):
-                    await self._tell_dropped(message.channel)
+                    await self._tell_dropped(
+                        message,
+                        reason="burst_interrupted",
+                        tenant_id=found.tenant_id if found is not None else None,
+                    )
 
     async def _open(self, message: discord.Message) -> DirectMessageRow | None:
         """The conversation a first message starts; None once it offered a pick or said why not."""
+        tried: list[uuid.UUID] = []
         try:
-            return await self._discover(message)
+            return await self._discover(message, tried=tried)
         except _DM_FAILURES as exc:
+            tenant_id = tried[-1] if tried else None
             log.warning(
                 "discord.dm.discovery_failed",
+                tenant_id=str(tenant_id) if tenant_id is not None else None,
                 causes=backend_refusal_causes(exc),
                 error_type=type(exc).__name__,
                 user_id=str(message.author.id),
@@ -1242,6 +1278,7 @@ class DirectMessageCog(commands.Cog):
                 await message.channel.send(
                     _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
                 )
+            await self._report(tenant_id, "discovery", message)
             return None
 
     def _open_pick(self, key: tuple[int, int]) -> _PendingSelection | None:
@@ -1273,7 +1310,9 @@ class DirectMessageCog(commands.Cog):
             elif self.bot.user is not None:
                 await message.remove_reaction(_SEEN_REACTION, self.bot.user)
 
-    async def _answer(self, group: list[discord.Message], scope_id: str | None) -> str | None:
+    async def _answer(
+        self, group: list[discord.Message], scope_id: str | None, tenant_id: uuid.UUID
+    ) -> str | None:
         """One turn for `group`, sent into `scope_id`; the conversation the next one goes to."""
         first = group[0]
         try:
@@ -1281,6 +1320,7 @@ class DirectMessageCog(commands.Cog):
         except _DM_FAILURES as exc:
             log.warning(
                 "discord.dm.reply_failed",
+                tenant_id=str(tenant_id),
                 causes=backend_refusal_causes(exc),
                 error_type=type(exc).__name__,
                 user_id=str(first.author.id),
@@ -1289,16 +1329,49 @@ class DirectMessageCog(commands.Cog):
                 await first.channel.send(
                     _DISCOVERY_FAILURE_NOTICE, allowed_mentions=discord.AllowedMentions.none()
                 )
+            await self._report(tenant_id, "reply", first)
             return scope_id
 
-    async def _tell_dropped(self, channel: discord.abc.Messageable) -> None:
-        """Tell the person messages taken in for a turn that will not run were not sent."""
-        log.info("discord.dm.dropped")
+    async def _report(
+        self,
+        tenant_id: uuid.UUID | None,
+        reason: DmStage | Literal["queue_full"],
+        message: discord.Message | _DmRequest,
+    ) -> None:
+        """Record a DM failure as an issue, with its person and agent; the caller logs."""
+        await report_dm_issue(
+            self.bot.runtime.sessionmaker,
+            tenant_id,
+            reason,
+            platform="discord",
+            route_key=str(message.channel.id),
+            user_id=str(message.author.id),
+        )
+
+    async def _tell_dropped(
+        self,
+        message: discord.Message | _DmRequest,
+        *,
+        reason: str,
+        tenant_id: uuid.UUID | None,
+    ) -> None:
+        """Tell the person messages taken in for a turn that will not run were not sent.
+
+        A deploy stopping the process is not an issue, and an interrupted burst only
+        warns: the error that interrupted it is reported where it happened."""
+        stopping = is_shutting_down()
+        (log.info if stopping else log.warning)(
+            "discord.dm.dropped_on_stop" if stopping else "discord.dm.dropped",
+            tenant_id=str(tenant_id) if tenant_id is not None else None,
+            reason="process_stopping" if stopping else reason,
+        )
         with contextlib.suppress(discord.HTTPException):
-            await channel.send(
+            await message.channel.send(
                 embed=build_notice_embed(_DROPPED_NOTICE),
                 allowed_mentions=discord.AllowedMentions.none(),
             )
+        if not stopping and reason != "burst_interrupted":
+            await self._report(tenant_id, "dropped", message)
 
     async def _explain_no_private_chat(
         self,
@@ -1329,6 +1402,7 @@ class DirectMessageCog(commands.Cog):
         message: discord.Message | _DmRequest,
         conversation: DirectMessageRow,
         cards: list[DiscordTurnLifecycle],
+        feedback: list[DiscordTurnLifecycle],
     ) -> DmTurnCard:
         """Build the same progress card a thread gets, gated like a DM answer.
 
@@ -1388,20 +1462,35 @@ class DirectMessageCog(commands.Cog):
                 await sent.delete()
 
             pings = admission.shown("dm_completion_pings") and admission.shown("completion_pings")
+            trigger = message if isinstance(message, discord.Message) else None
             card = DiscordTurnLifecycle(
                 send=channel.send,
                 edit=edit,
                 # With no delete a late replacement edits the card, as before the toggle.
                 delete=delete if pings else None,
-                agent_name=admission.agent.name,
-                model_id=admission.agent.model.id,
+                agent_name=admission.display_name(admission.agent.name),
+                model_id=shown_model(admission).id,
                 markup=runtime.turn_deps.markup,
                 cancel_view=CancelView(allowed_user_id=message.author.id, cancel=cancel),
                 requester_id=message.author.id,
                 requester_is_admin=admission.is_admin,
                 in_dm=True,
+                # The same reactions as a thread turn: this turn's own working mark, ✅ and
+                # the model and effort emoji on the message it answers.
+                trigger_message=trigger,
+                acknowledgment_managed=True,
+                model_marks_for=partial(
+                    self.bot.turn_model_marks,
+                    admission,
+                    tenant_id=conversation.tenant_id,
+                    thread_id=conversation.scope_id,
+                ),
+                conversation_id=conversation.scope_id,
                 notify_on_completion=pings,
                 render_tables=admission.shown("table_rendering"),
+                status_reactions=admission.shown("status_reactions"),
+                post_pre_tool_text=admission.shown("pre_tool_messages"),
+                card_timer=admission.shown("card_timer"),
                 answer_message_cap=admission.answer_message_cap,
                 sessionmaker=runtime.sessionmaker,
                 tenant_id=conversation.tenant_id,
@@ -1410,6 +1499,8 @@ class DirectMessageCog(commands.Cog):
             )
             card.set_output_authorization(OutputAuthorization(still_allowed))
             cards.append(card)
+            if admission.shown("message_feedback"):
+                feedback.append(card)
             return card
 
         return build
@@ -1461,7 +1552,11 @@ class DirectMessageCog(commands.Cog):
         if conversation is None or conversation.scope_id != expected_scope_id:
             # Messages sent before /dm-me moved the conversation.
             self._suppress(message, "conversation_moved")
-            await self._tell_dropped(message.channel)
+            await self._tell_dropped(
+                message,
+                reason="conversation_moved",
+                tenant_id=conversation.tenant_id if conversation is not None else None,
+            )
             return None if conversation is None else conversation.scope_id
         await self._turn(message, conversation, batch)
         return conversation.scope_id
@@ -1475,6 +1570,7 @@ class DirectMessageCog(commands.Cog):
         assert isinstance(message.channel, discord.DMChannel), "a DM turn runs in a DM"
         runtime = self.bot.runtime
         cards: list[DiscordTurnLifecycle] = []
+        feedback: list[DiscordTurnLifecycle] = []
         try:
             subject = await self._subject(conversation.tenant_id, message.author.id)
             async with runtime.sessionmaker() as session:
@@ -1516,17 +1612,29 @@ class DirectMessageCog(commands.Cog):
                 channel_id=str(message.channel.id),
             )
             if ticket is None:
-                log.info(
-                    "turn.skipped.global_concurrency_shed",
+                log.warning(
+                    "turn.shed",
                     tenant_id=str(conversation.tenant_id),
                     path="dm",
                     reason="queue_full",
                 )
-                await message.channel.send(
-                    embed=build_notice_embed(GLOBAL_CAP_NOTICE),
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+                try:
+                    await message.channel.send(
+                        embed=build_notice_embed(GLOBAL_CAP_NOTICE),
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    )
+                finally:
+                    await self._report(conversation.tenant_id, "queue_full", message)
                 return
+            working: str | None = None
+            if isinstance(message, discord.Message):
+                working = await self.bot.working_mark(message, conversation.tenant_id)
+                if working == _SEEN_REACTION:
+                    # A held message already shows 👀 while it is answered (DmBurst).
+                    working = None
+                else:
+                    with contextlib.suppress(discord.HTTPException):
+                        await message.add_reaction(working)
             try:
                 async with message.channel.typing():
                     if await ticket.wait(asyncio.Event()) != "started":
@@ -1600,11 +1708,28 @@ class DirectMessageCog(commands.Cog):
                             account_id=admission.account_id,
                             admission=admission,
                         ),
-                        card_for=lambda claimed: self._turn_card(message, claimed, cards),
+                        card_for=lambda claimed: self._turn_card(message, claimed, cards, feedback),
                         platform_channel_id=str(message.channel.id),
                     )
             finally:
                 ticket.release()
+                if working is not None and isinstance(message, discord.Message):
+                    # With status reactions the card has put ✅ in its place.
+                    await remove_own_reaction(message, working)
+            if cards and cards[-1].model_marked:
+                async with runtime.sessionmaker.begin() as session:
+                    await record_model_marks(
+                        session,
+                        tenant_id=conversation.tenant_id,
+                        platform="discord",
+                        thread_id=conversation.scope_id,
+                        marks=cards[-1].model_marks,
+                    )
+            last = cards[-1] if cards else None
+            if last in feedback and last.was_answered and last.feedback_message_id is not None:
+                await seed_feedback_reactions(
+                    message.channel, message_id=last.feedback_message_id, escalate=False
+                )
             if reply is not None and not (cards and (cards[-1].was_answered or cards[-1].ended)):
                 # The card shows the outcome unless a recovery replaced it; then the text goes here.
                 answer = reply.text
@@ -1633,6 +1758,7 @@ class DirectMessageCog(commands.Cog):
             )
             log.warning(
                 "discord.dm.turn_failed",
+                tenant_id=str(conversation.tenant_id),
                 causes=backend_refusal_causes(exc),
                 error_type=type(exc).__name__,
             )
@@ -1654,3 +1780,4 @@ class DirectMessageCog(commands.Cog):
                     embed=build_notice_embed(error),
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
+            await self._report(conversation.tenant_id, "reply", message)

@@ -141,8 +141,9 @@ def _template(table: MarkdownTable) -> Image.Image | None:
 
     It never calls table_png or render_discord_tables and never uses the image
     under test to generate its reference. Every expected cell must contain
-    visible, unclipped glyphs at the known 18px Inter layout. Layout changes
-    need review rather than silently granting readability from a hash.
+    visible, unclipped glyphs at the known 18px Inter layout, each column as wide as its
+    longest cell. Layout changes need review rather than silently granting readability
+    from a hash.
     """
     if table.headers != ("Fruit", "Colour", "Price") or len(table.rows) != 4:
         return None
@@ -154,30 +155,39 @@ def _template(table: MarkdownTable) -> Image.Image | None:
         return None
     regular = ImageFont.truetype(str(FONT_DIR / "Inter-Regular.ttf"), 18)
     bold = ImageFont.truetype(str(FONT_DIR / "Inter-Bold.ttf"), 18)
-    reference = Image.new("RGB", (900, 245), "white")
+    # Each column is as wide as its longest cell plus 12px padding either side.
+    widths: list[int] = []
+    for column in range(3):
+        longest = max(
+            (bold if row_index == 0 else regular).getlength(row[column])
+            for row_index, row in enumerate((table.headers, *table.rows))
+        )
+        widths.append(int(longest) + 25)
+    lefts = [sum(widths[:column]) for column in range(3)]
+    total = sum(widths)
+    reference = Image.new("RGB", (total, 245), "white")
     canvas = ImageDraw.Draw(reference)
     for row_index, row in enumerate((table.headers, *table.rows)):
         font = bold if row_index == 0 else regular
         y = row_index * 49
         canvas.rectangle(
-            (0, y, 900, y + 49),
+            (0, y, total, y + 49),
             fill="#0C1F40" if row_index == 0 else ("#F7F7F7" if row_index % 2 else "#FFFFFF"),
         )
         for column, cell in enumerate(row):
             if not cell or any(not 32 <= ord(char) <= 126 for char in cell):
                 return None
             width = font.getlength(cell)
-            if width > 276:
-                return None  # Wrapped/multiline cells are outside this proof.
-            x = column * 300 + 12
+            left = lefts[column]
+            x = left + 12
             if table.alignments[column] == "right":
-                x = (column + 1) * 300 - 12 - width
+                x = left + widths[column] - 12 - width
             elif table.alignments[column] == "center":
-                x = column * 300 + (300 - width) / 2
+                x = left + (widths[column] - width) / 2
             canvas.text(
                 (x, y + 12), cell, font=font, fill="#FFFFFF" if row_index == 0 else "#0C1F40"
             )
-        canvas.line((0, y + 48, 900, y + 48), fill="#B4E7DD", width=1)
+        canvas.line((0, y + 48, total, y + 48), fill="#B4E7DD", width=1)
     return reference
 
 

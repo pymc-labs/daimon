@@ -453,6 +453,13 @@ def skill_room(agent: SkillHolder, platform_skills: Sequence[MaSkill] = ()) -> i
     return max(0, AGENT_SKILL_CAP - len(held))
 
 
+def remove_label(shown: int, total: int) -> str:
+    """The label of a remove list that can tick only `shown` of a channel's `total` skills."""
+    if total <= shown:
+        return "Remove"
+    return f"Remove (first {shown} shown; remove some to reach the rest)"
+
+
 def platform_skill_refs(
     agent: BetaManagedAgentsAgent,
     platform: str,
@@ -728,6 +735,7 @@ __all__ = [
     "choose_channel_skill",
     "may_set_channel_skills",
     "platform_skill_refs",
+    "remove_label",
     "skill_room",
     "turn_channel_skills",
     "turn_platform_skills",

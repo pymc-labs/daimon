@@ -51,6 +51,7 @@ from daimon.core.caller_resources import (
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import GithubAppSettings, McpSettings
 from daimon.core.credential_env import (
+    ENV_REQUIREMENT_PREFIX,
     github_repo_map_sha256,
     github_repo_script_sha256,
     session_env_key,
@@ -63,6 +64,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_AGENT_CHAT,
     MA_METADATA_KEY_BILLING_EXEMPT,
     MA_METADATA_KEY_BUDGET_CHANNEL,
+    MA_METADATA_KEY_CHAT_SESSION,
     MA_METADATA_KEY_PRIVATE_DM,
     MA_METADATA_KEY_TENANT,
 )
@@ -507,7 +509,7 @@ async def project_session_resources(
     generations: list[tuple[str, dt.datetime]] = []
     for key, updated in keys:
         if session_env_key(key, exclude_github=app_mode):
-            identity = f"agent-env:{tenant_id}:{agent_uuid}:{key}"
+            identity = f"{ENV_REQUIREMENT_PREFIX}{tenant_id}:{agent_uuid}:{key}"
             requirements.append(
                 ResourceBinding(
                     id=identity, kind="credential", target_path=".env", credential_ref=identity
@@ -552,7 +554,13 @@ async def project_session_resources(
         or carried_natively
         or app_session_unmapped
         or (requester_is_headless and app_mode)
-        or (app_mode and agent_github_app is not None and repos)
+        # A provider host reaches GitHub through the relay, on the turn's own credential.
+        or (
+            app_mode
+            and agent_github_app is not None
+            and repos
+            and not caller_resources_on_credential
+        )
     ):
         # Opaque carry resources and private credentials are not absent obligations.
         requirements.append(ResourceBinding(id=CALLER_RESOURCES_ID, kind="native"))
@@ -719,6 +727,7 @@ async def create_session(
     origin_channel_id: str | None = None,
     origin_thread_id: str | None = None,
     origin_seal_ids: Collection[str] = (),
+    credential_seal_ids: Collection[str] = (),
     before_create: Callable[[], Awaitable[None]] | None = None,
     on_app_access: Callable[[AppSessionAccess], None] | None = None,
     channel_skills: Sequence[MaSkill] = (),
@@ -762,6 +771,14 @@ async def create_session(
     ``origin_channel_id``/``origin_thread_id``/``origin_seal_ids`` name the channel
     turn a session is opened for; they are stamped on it so the transcript tools
     can refuse a sealed conversation's transcript outside its channel.
+
+    ``credential_seal_ids`` signs seals into the session-specific Daimon credential
+    (`SEAL_CLAIM`), the one the agent's ``daimon-mcp`` server uses, so an unattended
+    run reads inside the room it fires into, as a chat turn there does. The ordinary
+    vault never carries them, so personal connections stay mounted. An agent without
+    ``daimon-mcp`` has no session credential and no Daimon read tools, so it needs
+    none. Only a run with such a room passes them; a ``hold`` outranks them.
+    ``origin_seal_ids`` alone only stamps the session.
 
     ``channel_skills`` are the turn's extra skills (the platform's, then the
     channel's), added after the agent's own (`session_skills`, the shape the
@@ -1040,6 +1057,7 @@ async def create_session(
                 slack_turn_context_id=slack_turn_context_id,
                 chat_session_id=chat_session_id,
                 hold=hold,
+                seal_ids=credential_seal_ids,
                 scope=scope,
             )
 
@@ -1066,6 +1084,7 @@ async def create_session(
                     session_key=relay_session_key,
                     routine_id=relay_routine_id,
                     owner=relay_owner,
+                    grant=chat_session_id if relay_session_key is not None else None,
                 ),
                 now=dt.datetime.now(dt.UTC),
                 scope=scope,
@@ -1338,7 +1357,7 @@ async def create_session(
             agent_chat=agent_chat,
         )
         if chat_session_id is not None:
-            metadata["daimon_chat_session_id"] = chat_session_id
+            metadata[MA_METADATA_KEY_CHAT_SESSION] = chat_session_id
         if github_transport == "router":
             metadata[MA_METADATA_KEY_GITHUB_TRANSPORT] = github_transport
         if slack_turn_context_id is not None:

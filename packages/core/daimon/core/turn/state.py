@@ -96,6 +96,20 @@ def daimon_tool_input(block: ToolUseBlock, tool: str) -> Mapping[str, object] | 
     return cast("dict[str, object]", arguments) if isinstance(arguments, dict) else None
 
 
+def tool_errors_by_server(content: list[ContentBlock]) -> dict[str, int]:
+    """Failed results per MCP server name, daimon's own excluded: its refusals are answers."""
+    counts: dict[str, int] = {}
+    for block in content:
+        if (
+            isinstance(block, ToolUseBlock)
+            and block.is_error
+            and (server := block.mcp_server_name) is not None
+            and server != DAIMON_SERVER_NAME
+        ):
+            counts[server] = counts.get(server, 0) + 1
+    return counts
+
+
 @dataclass(frozen=True, slots=True)
 class UsageTotals:
     """Per-turn token totals, folded from `span.model_request_end` events.
@@ -181,6 +195,8 @@ class TurnState:
     """Servers that failed this turn, newest status per server name."""
     retrying_error: TurnError | None = None
     """The last `retrying` error MA reported; only surfaces if nothing follows."""
+    rate_limit_wait: bool = False
+    """MA is retrying after a rate limit or overload, and nothing has arrived since."""
     package_install_error: TurnError | None = None
     """An `exhausted` package-installation failure the session carried on past;
     only surfaces if the turn then produced no content or did not end cleanly."""

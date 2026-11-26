@@ -632,12 +632,7 @@ async def register_callback_watch(
     Only the token's sha256 is stored. It lasts `lifetime`, the `callback_watch_lifetime`
     feature; None makes the watch and its link permanent.
     """
-    require_delivery(binding, delivery)
-    if binding.thread_id.startswith(DM_SCOPE_PREFIX) or binding.parent_channel_id.startswith(
-        DM_SCOPE_PREFIX
-    ):
-        # Its posts would be dropped, yet counted: nothing reports from a DM scope.
-        raise ValueError("A callback watch cannot be made in a DM. Make it in a channel or thread.")
+    delivery = require_delivery(binding, delivery)
     expires_at = callback_end(now, lifetime)
     watch = await register_page_watch(
         session,
@@ -687,9 +682,11 @@ async def wake_link(
     """A new link to the conversation's one wake watch for `server`, made on first use.
 
     Each call adds its own token (only its hash is stored), moves the watch onto the
-    conversation's newest session and gives it `lifetime` from now, so every job
-    started gets a link that lasts. Returns the watch id and the token.
+    conversation's newest session (a DM's watch has none: `require_delivery_place`) and gives
+    it `lifetime` from now, so every job started gets a link that lasts. Returns the watch
+    id and the token.
     """
+    delivery = require_delivery(binding, "thread")
     await _lock_owner(session, binding.requester_account_id)
     row = await session.scalar(
         select(Watch)
@@ -701,7 +698,7 @@ async def wake_link(
             Watch.parent_channel_id == binding.parent_channel_id,
             Watch.agent_id == binding.target_ma_agent_id,
             Watch.source == "callback",
-            Watch.delivery == "thread",
+            Watch.delivery == delivery,
             Watch.status == "active",
             Watch.source_state[WAKE_STATE_KEY].astext == server,
             _live_at(now),
@@ -725,7 +722,8 @@ async def wake_link(
         )
         return watch.id, token
     live = await _exact_live_binding(session, binding)
-    row.session_id = live.ma_session_id
+    if delivery == "thread":
+        row.session_id = live.ma_session_id
     await _set_callback_expiry(session, row, callback_end(now, lifetime), now)
     top = (
         await session.scalar(
@@ -1187,20 +1185,28 @@ async def delete_watch(session: AsyncSession, watch_id: uuid.UUID, *, now: datet
     await session.execute(delete(Watch).where(Watch.id == watch_id))
 
 
-def require_delivery(binding: ContinuationRequest, delivery: WatchDelivery) -> None:
-    """A DM or a new thread per fire is for Discord watches made outside a DM."""
-    require_delivery_place(binding.platform, binding.thread_id, binding.parent_channel_id, delivery)
+def require_delivery(binding: ContinuationRequest, delivery: WatchDelivery) -> WatchDelivery:
+    """Where a watch made at `binding` reports (`require_delivery_place`)."""
+    return require_delivery_place(
+        binding.platform, binding.thread_id, binding.parent_channel_id, delivery
+    )
 
 
 def require_delivery_place(
     platform: str, thread_id: str, parent_channel_id: str, delivery: WatchDelivery
-) -> None:
-    if delivery == "thread":
-        return
-    if platform != "discord":
-        raise ValueError("Watches here can only report in this thread. Leave delivery as thread.")
+) -> WatchDelivery:
+    """Where a watch reports. One made in a DM reports in that DM, each fire a fresh private
+    turn of its owner, as DM timers run (`direct_messages.run_dm_watch`); only Discord runs
+    those, so elsewhere it is refused rather than never report."""
     if thread_id.startswith(DM_SCOPE_PREFIX) or parent_channel_id.startswith(DM_SCOPE_PREFIX):
-        raise ValueError("A watch made in a DM reports in that DM")
+        if delivery == "new_thread":
+            raise ValueError("A watch made in a DM reports in that DM")
+        if platform != "discord":
+            raise ValueError("A watch can't be made in a DM here. Make it in a channel.")
+        return "dm"
+    if delivery != "thread" and platform != "discord":
+        raise ValueError("Watches here can only report in this thread. Leave delivery as thread.")
+    return delivery
 
 
 def _delivery_values(delivery: WatchDelivery) -> dict[str, object]:
@@ -1250,7 +1256,7 @@ async def register_poll_watch(
         evidence=evidence or (),
     )
     require_distinct_source(args, binding.thread_id)
-    require_delivery(binding, delivery)
+    delivery = require_delivery(binding, delivery)
     watch = await register_page_watch(
         session,
         binding,
@@ -1324,7 +1330,7 @@ async def register_mcp_poll_watch(
     validate_mcp_poll(
         args, projection=projection, rule=rule, interval=interval, key=key, evidence=evidence or ()
     )
-    require_delivery(binding, delivery)
+    delivery = require_delivery(binding, delivery)
     watch = await register_page_watch(
         session,
         binding,
@@ -1499,12 +1505,13 @@ async def update_watch(
             approved_by=admin_account_id,
             excluding=current.id,
         )
-    delivery = edit.delivery or current.delivery
+    delivery = current.delivery
+    if edit.delivery is not None:
+        delivery = require_delivery_place(
+            current.platform, current.thread_id, current.parent_channel_id, edit.delivery
+        )
     session_id = current.session_id
     if delivery != current.delivery:
-        require_delivery_place(
-            current.platform, current.thread_id, current.parent_channel_id, delivery
-        )
         session_id = None
         if delivery == "thread":
             # Back into its own thread: bind the owner's live conversation there now.
@@ -1654,14 +1661,17 @@ async def pause_unlisted(
     lease: str,
     *,
     reason: Literal["tool_unlisted", "source_changed", "credential_missing"] = "tool_unlisted",
-) -> None:
+) -> bool:
     """The operator delisted the tool, its server changed what the owner approved, or the
-    owner's own key for it is gone: pause and tell the owner, never retry."""
+    owner's own key for it is gone: pause and tell the owner, never retry.
+
+    True when it paused the watch, False when the lease was no longer this poll's."""
     await session.execute(text("SELECT pg_advisory_xact_lock(813749201)"))
     row = await session.scalar(select(Watch).where(Watch.id == watch_id).with_for_update())
     if row is None or row.lease_owner != lease:
-        return
+        return False
     await pause_watch(session, watch_id, reason=reason)
+    return True
 
 
 async def finish_poll(
@@ -1701,6 +1711,15 @@ async def hold_to_floor(
 DailyCap = Literal["watch", "owner"]
 
 
+@dataclass(frozen=True)
+class PollFailure:
+    """What a failed poll did to its watch, for the caller to log (stores stay log-free)."""
+
+    tenant_id: uuid.UUID
+    consecutive_errors: int
+    paused_reason: Literal["access_revoked", "failed"] | None
+
+
 async def poll_failed(
     session: AsyncSession,
     watch_id: uuid.UUID,
@@ -1710,19 +1729,21 @@ async def poll_failed(
     now: datetime,
     capped: bool = False,
     daily_cap: DailyCap | None = None,
-) -> None:
-    """Back off on errors, stop a watch that kept failing, note a reached daily cap."""
+) -> PollFailure | None:
+    """Back off on errors, stop a watch that kept failing, note a reached daily cap.
+
+    None when the lease was no longer this poll's."""
     # Invalid capabilities never contend on the global firing lock.
     current = await get_watch(session, watch_id)
     if current is None or current.lease_owner != lease:
-        return
+        return None
     await session.execute(text("SELECT pg_advisory_xact_lock(813749201)"))
     row = await session.scalar(select(Watch).where(Watch.id == watch_id).with_for_update())
     if row is None or row.lease_owner != lease:
-        return
+        return None
     if revoked:
         await pause_watch(session, watch_id, reason="access_revoked")
-        return
+        return PollFailure(row.tenant_id, row.consecutive_errors, "access_revoked")
     interval = int(row.source_state.get("interval", 60))
     if capped:
         # A capped poll read its source, so it ends any run of errors.
@@ -1770,10 +1791,11 @@ async def poll_failed(
         failing_since = datetime.fromisoformat(str(row.source_state["failing_since"]))
         if is_failed(row.consecutive_errors, failing_since=failing_since, now=now):
             await pause_watch(session, watch_id, reason="failed")
-            return
+            return PollFailure(row.tenant_id, row.consecutive_errors, "failed")
     row.lease_owner = None
     row.lease_expires_at = None
     await session.flush()
+    return PollFailure(row.tenant_id, row.consecutive_errors, None)
 
 
 FAIL_AFTER_ERRORS = 5
@@ -2086,8 +2108,11 @@ async def renew_callback_watch(
 
 async def rotate_callback_link(
     session: AsyncSession, watch_id: uuid.UUID, *, tenant_id: uuid.UUID, now: datetime
-) -> str:
-    """Operator: revoke every link of a callback watch and issue one new; shown once."""
+) -> tuple[str, str | None]:
+    """Operator: revoke every link of a callback watch and issue one new; shown once.
+
+    Returns the token and, for an imported watch, its id in the old system, which is
+    how that system's forwarder knows it (`watches import --urls-out` keys by it too)."""
     await session.execute(text("SELECT pg_advisory_xact_lock(813749201)"))
     row = await session.scalar(select(Watch).where(Watch.id == watch_id).with_for_update())
     if row is None or row.tenant_id != tenant_id or row.source != "callback":
@@ -2114,7 +2139,8 @@ async def rotate_callback_link(
         else max(row.expires_at, now + timedelta(minutes=1)),
     )
     await session.flush()
-    return token
+    legacy_id = row.source_state.get("legacy_id")
+    return token, legacy_id if isinstance(legacy_id, str) else None
 
 
 async def unpause_imported_watch(

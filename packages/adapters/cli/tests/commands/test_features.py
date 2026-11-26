@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from io import StringIO
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -21,6 +22,7 @@ from daimon.adapters.cli.commands.features import (
 from daimon.adapters.cli.runtime import CliRuntime
 from daimon.adapters.cli.tenant import TenantSelector
 from daimon.core.access_policy import AgentApprovals, TenantAccessPolicy
+from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.config import Settings
 from daimon.core.errors import StoreError
 from daimon.core.features.registry import FEATURES
@@ -28,7 +30,8 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.security_audit import list_events
-from daimon.testing.factories import make_tenant
+from daimon.core.stores.tenants import get_tenant
+from daimon.testing.factories import make_routine, make_tenant
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -151,6 +154,42 @@ async def test_set_writes_the_tier_the_place_names_and_default_clears_it(
     assert cleared["source"] != "channel"
 
 
+async def test_set_with_a_routine_writes_its_own_tier_and_refuses_another_place(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    rt = _runtime(db_session_factory, [])
+    selector = await _tenant(db_session_factory)
+    console, _ = _console()
+    kw: dict[str, Any] = {"rt": rt, "console": console, "selector": selector}
+    async with db_session_factory.begin() as session:
+        routine = await make_routine(
+            session, tenant=await get_tenant(session, uuid.UUID(selector.tenant_id or ""))
+        )
+    place: dict[str, Any] = {"agent": None, "channel": None, "thread": None}
+
+    await features_set(
+        **kw, key="routine_result_header", value="off", tier=None, routine=routine.id, **place
+    )
+
+    console, out = _console()
+    await features_list(
+        rt=rt, console=console, selector=selector, agent=None, channel=None, thread=None,
+        routine=routine.id, keys=["routine_result_header"], as_json=True,
+    )  # fmt: skip
+    (view,) = json.loads(out.getvalue())
+    assert [t["text"] for t in view["tiers"] if t["tier"] == "routine"] == ["off"]
+    assert (view["value"], view["source"]) == ("off", "routine")
+    with pytest.raises(StoreError, match="--routine takes no"):
+        await features_set(
+            **kw, key="routine_result_header", value="off", tier=None, routine=routine.id,
+            agent=None, channel="c1", thread=None,
+        )  # fmt: skip
+    with pytest.raises(StoreError, match="no routine"):
+        await features_set(
+            **kw, key="routine_result_header", value="off", tier=None, routine=uuid.uuid4(), **place
+        )
+
+
 async def test_a_thread_needs_its_channel(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -186,6 +225,30 @@ async def test_an_agent_tool_is_written_to_the_agents_own_tool_config(
     assert store["ag_helper"]["bash"] is False
     row = _row(await _rows(rt, selector, agent="helper"), "tool.bash")
     assert row["value"] in ("off", False)
+
+
+async def test_an_agents_own_name_is_not_taken_for_its_cli_change(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    selector = await _tenant(db_session_factory)
+    tenant_id = uuid.UUID(str(selector.tenant_id))
+    agents = [_agent_json(agent_id="ag_helper", name="helper", tenant_id=tenant_id)]
+    change = AsyncMock(side_effect=ChannelChangeRefused("stop", kind="invalid"))
+    monkeypatch.setattr(features_cmd, "change_feature", change)
+    console, _ = _console()
+    with pytest.raises(StoreError, match="stop"):
+        await features_set(
+            rt=_runtime(db_session_factory, agents),
+            console=console,
+            selector=selector,
+            key="display_name",
+            value="Helper",
+            tier=None,
+            agent="helper",
+            channel=None,
+            thread=None,
+        )
+    assert change.await_args.args[2].agent_names is not None, "its own slug is not another's"
 
 
 async def test_diff_lists_only_the_features_two_agents_differ_on(

@@ -24,6 +24,7 @@ from daimon.adapters.cli.commands.environments import environments_app
 from daimon.adapters.cli.commands.features import features_app
 from daimon.adapters.cli.commands.github import github_app
 from daimon.adapters.cli.commands.help import help_app
+from daimon.adapters.cli.commands.issues import issues_app
 from daimon.adapters.cli.commands.leads import leads_app
 from daimon.adapters.cli.commands.mcp import mcp_app
 from daimon.adapters.cli.commands.memory import memory_app
@@ -57,6 +58,7 @@ app.add_typer(environments_app, name="environments")
 app.add_typer(tenants_app, name="tenants")
 app.add_typer(usage_app, name="usage")
 app.add_typer(audit_app, name="audit")
+app.add_typer(issues_app, name="issues")
 app.add_typer(monitoring_app, name="monitoring")
 app.add_typer(sessions_app, name="sessions")
 app.add_typer(config_app, name="config")

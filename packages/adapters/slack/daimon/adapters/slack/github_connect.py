@@ -191,6 +191,7 @@ async def handle_github_command(runtime: SlackRuntime, payload: dict[str, Any]) 
             platform="slack",
             workspace_id=team_id,
             agent_name=target_name,
+            agent_id=target_ma_id,
         )
         await reply(
             "Connect GitHub",

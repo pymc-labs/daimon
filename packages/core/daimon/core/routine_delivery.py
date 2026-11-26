@@ -33,13 +33,14 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Final, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 import structlog
 from anthropic import AsyncAnthropic
 from daimon.core.access_policy import TenantAccessPolicy, agent_invoker_roles
 from daimon.core.agent_identity import (
     AgentIdentity,
+    agent_display_name,
     identity_enabled_for,
     is_builtin_agent,
     resolve_agent_identity,
@@ -61,6 +62,7 @@ from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.features.snapshot import place_feature_or_none
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.outbound.mentions import attribution_line, render_post
 from daimon.core.outbound.opt_out import opt_out_names
 from daimon.core.permissions import any_writers_none, limiting_ids_at
@@ -118,9 +120,13 @@ __all__ = [
     "poll_deliveries_once",
     "render_fallback_post",
     "render_routine_controls",
+    "routine_agent_name",
     "routine_knows",
     "run_delivery_poller",
 ]
+
+if TYPE_CHECKING:
+    from daimon.core.owner_notices import OwnerDm
 
 log = structlog.get_logger(__name__)
 
@@ -230,6 +236,45 @@ async def routine_knows(
     return found is not None and found.on
 
 
+#: How a run with nothing to deliver ends, on every destination kind and platform.
+#: A model keeps to a marker far more reliably than to writing nothing at all.
+NO_POST_MARKER: Final[str] = "NO_POST"
+_NO_POST_LINE: Final = re.compile(rf"^[\W_]*{NO_POST_MARKER}[*`_]*\s*(?::(?P<reason>.*)|$)")
+QUIET_RUN_SENTENCE = (
+    " daimon may deliver any final text you write, even a note that nothing was posted. "
+    "Whatever your instructions ask you to report, answer or summarize is your final reply, "
+    "even when it is short or the task only reads: write it out. Only when they say to stay "
+    "silent or post nothing for what you found, or you have already posted everything they "
+    f"ask for, your whole final reply must be one line: {NO_POST_MARKER}: and a short reason. "
+    "daimon keeps that line in the run's record and posts no reply; only files you made still "
+    "go out. Do this even if other guidance asks for a closing line. Never use "
+    f"{NO_POST_MARKER} because the task could not be done or checked: say what stopped you. "
+    "If unsure, write the reply."
+)
+
+
+@dataclass(frozen=True)
+class RunText:
+    """A run's final reply, split into what may be posted and what its record keeps."""
+
+    post: str
+    record: str
+
+
+def split_run_text(text: str) -> RunText:
+    """`text` as it may be posted: none of it when its first or last line is a `NO_POST`.
+
+    The record keeps the reason without the marker, which only the agent is told about.
+    """
+    lines = [line for line in text.splitlines() if line.strip()]
+    for line in (lines[:1] + lines[-1:]) if lines else ():
+        if match := _NO_POST_LINE.match(line):
+            return RunText(
+                post="", record=(match["reason"] or "").strip(" *`_") or "Nothing to post."
+            )
+    return RunText(post=text, record=text)
+
+
 def render_routine_controls(
     row: RoutineRow,
     *,
@@ -313,6 +358,7 @@ def render_routine_controls(
         + "\nThis is a scheduled routine run; nobody is watching it. Write your final reply "
         "for someone reading it later without context. "
         + delivery
+        + QUIET_RUN_SENTENCE
         + (words_sentence(platform) if platform in CHAT_PLATFORMS else "")
         + (ROUTINE_WEB_SENTENCE if links is not None else "")
         + " These controls grant no other posting or mutation permissions."
@@ -414,12 +460,15 @@ def lapsed_role(
     )
 
 
-def lapsed_role_card(row: RoutineRow) -> tuple[str, str]:
-    """The error card DMed to a routine's owner when it was paused for a lapsed role."""
+def lapsed_role_card(row: RoutineRow, agent_name: str | None = None) -> tuple[str, str]:
+    """The error card DMed to a routine's owner when it was paused for a lapsed role.
+
+    `agent_name` is the agent as people see it (`routine_agent_name`).
+    """
     label = row.name or routine_phrase(row.cron_expr, row.timezone)
     return (
-        f'Your routine "{label}" ({row.agent_name}) is paused: you no longer have a role'
-        " its agent needs.",
+        f'Your routine "{label}" ({agent_name or row.agent_name}) is paused: '
+        "you no longer have a role its agent needs.",
         "Ask an admin for the role, then resume it from /routines.",
     )
 
@@ -451,7 +500,7 @@ async def record_failure(
     error: str,
     reason: TerminationReason | None,
     expected_row: RoutineRow | None = None,
-) -> None:
+) -> bool:
     """Record a failed run and, for the first failure in a row, queue a notice.
 
     `reason` is why the run ended, classified where it was caught; `None`
@@ -459,16 +508,20 @@ async def record_failure(
     notice goes through the same outbox as a result, so the chat adapter
     posts it with every check a result gets. One per failing streak: a routine
     that keeps failing stays quiet until a run succeeds (`queue_failure_notice`).
+    Returns whether a notice was queued.
     """
+    queued = False
     if reason is not None:
         notice = failure_notice_text(
             reason, platform=await routine_platform(session, routine_id) or ""
         )
-        if await queue_failure_notice(
+        queued = await queue_failure_notice(
             session, routine_id, notice=notice, expected_row=expected_row
-        ):
+        )
+        if queued:
             log.info("routine.failure_notice_queued", routine_id=str(routine_id))
     await record_result(session, routine_id, tail=None, error=error, expected_row=expected_row)
+    return queued
 
 
 async def record_routine_failure(
@@ -477,12 +530,12 @@ async def record_routine_failure(
     *,
     error: str,
     reason: TerminationReason | None,
-) -> None:
+) -> bool:
     """Record a fire that failed or was refused, fenced on the row it was claimed as.
 
     An owner-DM routine records only the error, and only while its private
-    revision and destination are unchanged; any other routine goes through
-    `record_failure`.
+    revision and destination are unchanged: its owner is told by `tell_owner`. Any
+    other routine goes through `record_failure`. Returns whether its channel is told.
     """
     if row.destination_kind == "dm":
         await record_result(
@@ -493,8 +546,8 @@ async def record_routine_failure(
             expected_destination=(row.destination_kind, row.destination_id),
             expected_private=row,
         )
-    else:
-        await record_failure(session, row.id, error=error, reason=reason, expected_row=row)
+        return False
+    return await record_failure(session, row.id, error=error, reason=reason, expected_row=row)
 
 
 def render_fallback_post(
@@ -503,8 +556,13 @@ def render_fallback_post(
     as_agent: bool = False,
     platform: str | None = None,
     requester_name: str | None = None,
+    agent_name: str | None = None,
+    header: bool = True,
 ) -> str:
     """The message posted for a routine whose agent did not post itself.
+
+    `agent_name` is the agent as people see it (`routine_agent_name`). `header` False
+    (`routine_header_shown`) posts a result without its "Result from" line.
 
     `as_agent` is for a post that carries the agent's own name and face, which
     already say who it is from; the schedule is kept either way, in words
@@ -513,11 +571,13 @@ def render_fallback_post(
     """
     payload = decode_payload(payload_for(row)).text.strip()
     phrase = routine_phrase(row.cron_expr, row.timezone)
+    name = agent_name or row.agent_name
     if row.delivery_note == FAILURE_NOTICE:
-        owner = "The" if as_agent else f"{row.agent_name}'s"
+        owner = "The" if as_agent else f"{name}'s"
         return f"{owner} {phrase} failed, so there's no result this time.\n\n{payload}"
-    owner = "the" if as_agent else f"{row.agent_name}'s"
-    return _attributed(f"Result from {owner} {phrase}:\n\n{payload}", row, platform, requester_name)
+    owner = "the" if as_agent else f"{name}'s"
+    text = f"Result from {owner} {phrase}:\n\n{payload}" if header else payload
+    return _attributed(text, row, platform, requester_name, name)
 
 
 async def routine_requester_name(
@@ -533,7 +593,11 @@ async def routine_requester_name(
 
 
 def _attributed(
-    text: str, row: RoutineRow, platform: str | None, requester_name: str | None = None
+    text: str,
+    row: RoutineRow,
+    platform: str | None,
+    requester_name: str | None = None,
+    agent_name: str | None = None,
 ) -> str:
     """A routine's post says who asked for it, like every post Daimon makes unasked."""
     if platform not in ("discord", "slack", "teams"):
@@ -543,9 +607,20 @@ def _attributed(
         # Discord's routine posts never ping, so the creator's tag only names them.
         requester_id=row.created_by_user_id if platform == "discord" else None,
         requester_name=requester_name if platform != "discord" else None,
-        routine_name=row.name or row.agent_name,
+        routine_name=row.name or agent_name or row.agent_name,
     )
     return render_post(text, platform, do_not_tag=frozenset(), attribution=line).text
+
+
+async def routine_agent_name(
+    sessionmaker: async_sessionmaker[AsyncSession] | None, row: RoutineRow
+) -> str:
+    """The routine's agent as people see it: its display name, else its name."""
+    if sessionmaker is None:
+        return row.agent_name
+    return await agent_display_name(
+        sessionmaker, tenant_id=row.tenant_id, agent_id=row.agent_id, fallback=row.agent_name
+    )
 
 
 async def resolve_routine_identity(
@@ -577,6 +652,7 @@ async def resolve_routine_identity(
                 session,
                 tenant_id=row.tenant_id,
                 agent_name=row.agent_name,
+                display_name=await routine_agent_name(sessionmaker, row),
                 is_builtin=is_builtin_agent(
                     name=row.agent_name,
                     metadata=agent.metadata if agent is not None else None,
@@ -613,10 +689,11 @@ _DM_REASONS: Final[dict[str, tuple[str, ...]]] = {
 }
 
 
-def render_fallback_dm(row: RoutineRow, reason: str) -> str:
+def render_fallback_dm(row: RoutineRow, reason: str, agent_name: str | None = None) -> str:
     """The direct message sent to the creator when the destination is unusable.
 
-    The agent and schedule first, then why the result is here, then the result.
+    The agent (as people see it, `routine_agent_name`) and schedule first, then why the
+    result is here, then the result.
     """
     schedule = schedule_words(row.cron_expr, row.timezone)
     payload = decode_payload(payload_for(row)).text.strip()
@@ -624,7 +701,7 @@ def render_fallback_dm(row: RoutineRow, reason: str) -> str:
         why: tuple[str, ...] = ("Your routine failed, so there's no result this time.",)
     else:
         why = _DM_REASONS.get(reason, _DM_REASONS["destination_unavailable"])
-    return "\n\n".join((f"{row.agent_name}, {schedule}", *why, payload))
+    return "\n\n".join((f"{agent_name or row.agent_name}, {schedule}", *why, payload))
 
 
 def delivery_refusal(
@@ -917,12 +994,26 @@ async def tenant_dm_still_open(
         )
 
 
+#: Skip notes that mean a post was attempted and failed; every other skip is deliberate.
+_POST_FAILURE_NOTES = frozenset(
+    {
+        "post_failed",
+        "Delivery was interrupted; it will not be retried.",
+        "The DM could not be delivered; it will not be retried.",
+        "access_policy_unreadable",
+        "The server access settings could not be read.",
+    }
+)
+
+
 @dataclass(frozen=True)
 class DeliveryOutcome:
     status: Literal["delivered", "skipped"]
     #: A `SkipReason`, or `dm_fallback:<reason>` for a result delivered to the
     #: creator by direct message instead of the destination.
     note: str | None = None
+    #: The error class of a post that was tried and failed, such as a fallback DM.
+    failed: str | None = None
 
 
 #: The adapter hook: post `row`'s result (or refuse) and say what happened.
@@ -948,6 +1039,7 @@ async def poll_deliveries_once(
         )
     for row in claimed:
         payload = decode_payload(payload_for(row))
+        raised = False
         if not (payload.text.strip() or payload.files):
             outcome = DeliveryOutcome(status="skipped", note="no_result")
         else:
@@ -957,9 +1049,15 @@ async def poll_deliveries_once(
                 # Named boundary: the poster is adapter code talking to a chat
                 # API. Settling `skipped` (not back to pending) keeps delivery
                 # at most once — a failure may have landed after the post.
+                raised = True
                 log.warning(
-                    "routine.delivery_failed", routine_id=str(row.id), error_type=type(err).__name__
+                    "routine.delivery_failed",
+                    tenant_id=str(row.tenant_id),
+                    routine_id=str(row.id),
+                    status="post_failed",
+                    error_type=type(err).__name__,
                 )
+                _report_delivery_failed(sessionmaker, row, platform, type(err).__name__)
                 outcome = DeliveryOutcome(
                     status="skipped",
                     note=(
@@ -984,7 +1082,38 @@ async def poll_deliveries_once(
             note=outcome.note,
             settled=settled,
         )
+        if outcome.status == "skipped" and outcome.note != "no_result" and not raised:
+            # Real post failures page; deliberate skips (policy, archive, ...) only log.
+            failed = outcome.failed is not None or outcome.note in _POST_FAILURE_NOTES
+            (log.warning if failed else log.info)(
+                "routine.delivery_failed" if failed else "routine.delivery_skipped",
+                tenant_id=str(row.tenant_id),
+                routine_id=str(row.id),
+                status="skipped",
+                note=outcome.note,
+            )
+            if failed:
+                _report_delivery_failed(
+                    sessionmaker, row, platform, outcome.failed or "post_failed"
+                )
     return len(claimed)
+
+
+def _report_delivery_failed(
+    sm: async_sessionmaker[AsyncSession], row: RoutineRow, platform: str, reason: str
+) -> None:
+    report_ops_event(
+        sm,
+        OpsEvent(
+            "routine.delivery_failed",
+            row.tenant_id,
+            reason=reason,
+            routine_id=row.id,
+            agent_id=row.agent_id,
+            platform=platform,
+        ),
+        logged=False,
+    )
 
 
 async def run_delivery_poller(
@@ -994,14 +1123,20 @@ async def run_delivery_poller(
     post: RoutinePoster,
     should_stop: Callable[[], bool],
     interval_s: float = DELIVERY_POLL_INTERVAL_S,
+    owner_dm: OwnerDm | None = None,
 ) -> None:
-    """Poll until `should_stop`, one `poll_deliveries_once` per interval."""
+    """Poll until `should_stop`, one `poll_deliveries_once` per interval; with `owner_dm`,
+    also send the failure notices waiting for this platform's routine owners."""
+    from daimon.core.owner_notices import poll_owner_notices_once  # imports this module
+
     owner = f"{platform}:{uuid.uuid4()}"
     while not should_stop():
         try:
             await poll_deliveries_once(
                 sessionmaker, platform=platform, post=post, now=datetime.now(UTC), owner=owner
             )
+            if owner_dm is not None:
+                await poll_owner_notices_once(sessionmaker, platform=platform, send=owner_dm)
         except Exception:
             log.exception("routine.delivery_poll_failed", platform=platform)
         await asyncio.sleep(interval_s)

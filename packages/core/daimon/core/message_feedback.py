@@ -73,14 +73,11 @@ def vote_for_reaction(
     emoji_is_custom: bool,
     reactor_id: int,
     bot_user_id: int,
-    guild_id: int | None,
 ) -> Vote | None:
     """Classify a raw reaction-add gateway payload as a vote, or not.
 
-    Returns `None` (not a vote) when any of the following hold: the reaction
-    has no resolvable guild (a DM reaction resolves no tenant, so it is
-    ignored entirely, not attributed to any install); the reactor is the bot
-    itself (the bot's own seeded reactions must never count as votes); the
+    Returns `None` (not a vote) when any of the following hold: the reactor
+    is the bot itself (the bot's own seeded reactions must never count as votes); the
     emoji is a custom (non-Unicode) emoji; or the emoji is not exactly
     `THUMBS_UP` or `THUMBS_DOWN`. Skin-tone-modified thumbs emoji are
     deliberately NOT matched -- they are distinct codepoint sequences from
@@ -93,8 +90,6 @@ def vote_for_reaction(
     `is_bot_authored`, because that field is not reliably present on every
     gateway payload that carries a reaction.
     """
-    if guild_id is None:
-        return None
     if reactor_id == bot_user_id:
         return None
     if emoji_is_custom:

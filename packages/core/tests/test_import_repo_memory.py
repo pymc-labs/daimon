@@ -87,21 +87,75 @@ async def test_dry_run_rolls_back_and_apply_replays_exactly(
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
     )
-    entries = importer.prepare_entries(
-        [source],
-        {"owner": owner.id},
-        {"owner/repo": importer.RepoTarget(tenant_id=tenant.id, repo_id=17)},
-    )
+    repos = {"owner/repo": importer.RepoTarget(tenant_id=tenant.id, repo_id=17)}
+    entries = importer.prepare_entries([source], {"owner": owner.id}, repos)
     engine = SimpleNamespace(dispose=AsyncMock())
     monkeypatch.setattr(importer, "create_async_engine", lambda *args, **kwargs: engine)
     monkeypatch.setattr(importer, "async_sessionmaker", lambda engine: committing_sessionmaker)
-    await importer.run_import(entries, database_url="unused", apply=False)
+    run = importer.run_import
+    await run([source], {"owner": owner.id}, repos, tenant=None, database_url="-", apply=False)
     async with committing_sessionmaker() as session:
         assert not await list_entries(session, tenant_id=tenant.id, repo_id=17, account_id=owner.id)
     for _ in range(2):
-        await importer.run_import(entries, database_url="unused", apply=True)
+        await run([source], {"owner": owner.id}, repos, tenant=None, database_url="-", apply=True)
     async with committing_sessionmaker() as session:
         assert (
             await list_entries(session, tenant_id=tenant.id, repo_id=17, account_id=owner.id)
             == entries
         )
+
+
+async def test_a_creator_with_no_account_gets_one_in_the_tenant(
+    db_committing_engine: AsyncEngine, db_clean: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With `--tenant` a creator new to this deployment gets an identity, only on apply,
+    and the dry run's manifest matches the apply's."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from daimon.core.stores.identity import find_platform_principal
+    from daimon.testing.factories import make_tenant
+
+    committing_sessionmaker = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session)
+        other = await make_tenant(session)
+    stamp = datetime.now(UTC)
+    source = importer.ExportEntry(
+        id="source", repo_owner="owner", repo_name="repo", name="note", title="Note",
+        body="Fact", created_by_discord_id="4242", created_at=stamp, updated_at=stamp,
+    )  # fmt: skip
+    repos = {"owner/repo": importer.RepoTarget(tenant_id=tenant.id, repo_id=17)}
+    engine = SimpleNamespace(dispose=AsyncMock())
+    monkeypatch.setattr(importer, "create_async_engine", lambda *args, **kwargs: engine)
+    monkeypatch.setattr(importer, "async_sessionmaker", lambda engine: committing_sessionmaker)
+
+    async def run(apply: bool, into: uuid.UUID = tenant.id) -> dict[str, dict[str, str | int]]:
+        entries, owners = await importer.run_import(
+            [source], {}, repos, tenant=into, database_url="-", apply=apply
+        )
+        return importer.manifest_for(entries, {a: d for d, a in owners.items()})
+
+    async def newcomer() -> object:
+        async with committing_sessionmaker() as session:
+            return await find_platform_principal(
+                session, tenant_id=tenant.id, platform="discord", external_id="4242"
+            )
+
+    dry = await run(apply=False)
+    assert await newcomer() is None, "a dry run creates nobody"
+    assert await run(apply=True) == dry, "the apply matches the dry run"
+    assert await newcomer() is not None, "the apply gives the creator an identity"
+    with pytest.raises(ValueError, match="another tenant"):
+        await run(apply=False, into=other.id)
+    elsewhere = source.model_copy(update={"id": "later", "repo_name": "other", "name": "more"})
+    repos["owner/other"] = importer.RepoTarget(tenant_id=other.id, repo_id=18)
+    with pytest.raises(ValueError, match="another tenant"):
+        await importer.run_import(
+            [source, elsewhere], {}, repos, tenant=tenant.id, database_url="-", apply=False
+        )  # the creator's later row is checked too, not only the first
+    with pytest.raises(ValueError, match="Discord user id"):
+        await importer.run_import(
+            [source.model_copy(update={"created_by_discord_id": "system"})],
+            {}, repos, tenant=tenant.id, database_url="-", apply=False,
+        )  # fmt: skip

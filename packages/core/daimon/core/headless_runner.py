@@ -637,6 +637,13 @@ async def run_turn_impl(
             origin_channel_id=origin_place.channel_id if origin_place is not None else None,
             origin_thread_id=origin_place.thread_id if origin_place is not None else None,
             origin_seal_ids=origin_place.seal_ids if origin_place is not None else (),
+            # A run into a room reads inside it, as a turn there does: its credential
+            # signs the room's seals. A held fire has its hold instead.
+            credential_seal_ids=(
+                origin_place.seal_ids
+                if origin_place is not None and origin_place.reads_inside and hold is None
+                else ()
+            ),
             private_dm_id=origin_place.private_dm_id if origin_place is not None else None,
             model_override=model_override,
             system_override=identity.system(agent.system, platform),

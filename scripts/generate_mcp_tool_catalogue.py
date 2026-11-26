@@ -97,6 +97,7 @@ TAG_LABELS: dict[str, str] = {
     "host-memory": "OpenAI and Gemini agents",
     "host-web-fetch": "OpenAI, Gemini and self-hosted agents",
     "scope:agents:archive": "operator tokens with agents:archive",
+    "scope:issues:read": "operator tokens with issues:read",
     "scope:channels:write": "operator tokens with channels:write",
     "scope:promo:create": "operator tokens with promo:create",
     "scope:promo:redeem": "operator tokens with promo:redeem",

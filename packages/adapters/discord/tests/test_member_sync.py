@@ -1,4 +1,5 @@
-"""A server's member list follows the gateway: reload, joins, leaves, role changes, removal."""
+"""A server's member list follows the gateway: reload, joins, leaves, role changes, removal.
+The list never decides a room fact: a reload only asks for the REST reconcile."""
 
 from __future__ import annotations
 
@@ -7,13 +8,20 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
+from daimon.adapters.discord.audience_sync import AudienceSync
 from daimon.adapters.discord.member_sync import MemberSync, tenant_of
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.stores import audience_facts as facts_store
 from daimon.core.stores import workspace_members as members_store
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.testing.factories import make_tenant
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+from . import audience_fakes as fake
 
 _GUILD = 123456789012345678
 _OWNER, _MOD, _PLAIN, _BOT = 11, 22, 33, 44
@@ -30,6 +38,7 @@ def _member(guild: Any, user_id: int, *, manage: bool = False, bot: bool = False
 def _guild() -> Any:
     guild = MagicMock()
     guild.id, guild.name, guild.owner_id, guild.chunked = _GUILD, "Guild", _OWNER, False
+    guild.unavailable = False
     guild.chunk = AsyncMock()
     guild.members = [
         _member(guild, _OWNER),
@@ -165,3 +174,112 @@ async def test_a_stuck_or_failing_server_leaves_the_rest_to_load(
             session, tenant_ids=[tenant_of(g.id) for g in (stuck, failing, fine)]
         )
     assert set(synced) == {tenant_of(fine.id)}, "only the healthy server loaded, and it did"
+
+
+async def _with_room_facts(
+    db_session: AsyncSession, factory: async_sessionmaker[AsyncSession]
+) -> tuple[AudienceSync, MemberSync, asyncio.Event]:
+    """An installed server with internal roles, its REST twin, and a gate that holds the
+    publisher's next member read."""
+    await make_tenant(db_session, platform="discord", workspace_id=str(_GUILD))
+    await set_access_policy(
+        db_session,
+        tenant_id=tenant_of(_GUILD),
+        policy=TenantAccessPolicy(internal_role_ids=(str(fake.CORE), str(fake.FRIEND))),
+    )
+    await db_session.commit()
+    server = fake.RestServer(_GUILD)
+    audience = AudienceSync(factory, reader=fake.RestDiscord(server).reader(), debounce_s=0)
+    gate = asyncio.Event()
+    held = [False]
+
+    async def hold(_request: httpx.Request) -> None:
+        if held[0]:
+            await gate.wait()
+
+    server.hooks["members"] = hold
+    sync = MemberSync(factory, clock=lambda: datetime(2026, 5, 1, tzinfo=UTC), audience=audience)
+    held[0] = True
+    return audience, sync, gate
+
+
+async def _usable(factory: async_sessionmaker[AsyncSession]) -> bool:
+    async with factory() as session:
+        status = await facts_store.read_status(
+            session, tenant_id=tenant_of(_GUILD), now=datetime.now(UTC)
+        )
+    return status is not None and status.usable
+
+
+async def test_a_reload_asks_for_a_reconcile_and_never_publishes_room_facts(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    audience, sync, gate = await _with_room_facts(db_session, db_session_factory)
+
+    await sync.reload(_guild())
+    assert await _rows(db_session_factory), "the member list loaded"
+    assert not await _usable(db_session_factory), "the gateway cache published nothing"
+
+    gate.set()
+    await audience.settle()
+    assert await _usable(db_session_factory), "the REST read the reload asked for did"
+
+
+async def test_a_failed_reload_leaves_the_room_facts_alone(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    audience, sync, gate = await _with_room_facts(db_session, db_session_factory)
+    gate.set()
+    assert await audience.reconcile(_guild())
+    gate.clear()
+
+    stuck = _guild()
+    stuck.chunk.side_effect = TimeoutError
+    await sync.reload_all([stuck])
+    assert await _usable(db_session_factory), "a failed member reload withdraws nothing"
+    gate.set()
+    await audience.settle()
+
+
+async def test_a_reload_that_crosses_a_disconnect_reads_nothing_until_the_next_ready(
+    db_clean: None, db_committing_engine: AsyncEngine
+) -> None:
+    """`reload_all` goes on to its next server after the gateway closed. That server's
+    reconcile must not publish: events are lost until the next ready or resume."""
+    db_session_factory = async_sessionmaker(db_committing_engine, expire_on_commit=False)
+    async with db_session_factory() as db_session:
+        audience, sync, gate = await _with_room_facts(db_session, db_session_factory)
+    gate.set()
+    chunking = asyncio.Event()
+    first = _guild()
+
+    async def slow_chunk(**_kwargs: Any) -> None:
+        await chunking.wait()
+
+    first.chunk = AsyncMock(side_effect=slow_chunk)
+    reloading = asyncio.create_task(sync.reload_all([first, _guild()]))
+    while not first.chunk.await_count:  # the first reload asked for its read and chunks
+        await asyncio.sleep(0)
+    await audience.settle()
+    assert await _usable(db_session_factory), "the first server's read published"
+
+    reader = audience._reader  # pyright: ignore[reportPrivateUsage]
+    assert reader is not None
+    reads = [0]
+    real_read = reader.read
+
+    async def counted(*args: Any, **kwargs: Any) -> Any:
+        reads[0] += 1
+        return await real_read(*args, **kwargs)
+
+    reader.read = counted  # type: ignore[method-assign]
+    await audience.disconnected([first])
+    chunking.set()
+    await reloading  # the second server's reload asks for a reconcile now
+    await audience.settle()
+    assert reads == [0], "no read starts while disconnected"
+    assert not await _usable(db_session_factory), "nothing published while disconnected"
+    assert not await audience.reconcile(_guild())
+
+    audience.connected()
+    assert await audience.reconcile(_guild())

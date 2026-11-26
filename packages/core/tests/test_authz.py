@@ -15,11 +15,13 @@ from daimon.core.access_policy import (
     AgentRule,
     ChannelRule,
     TenantAccessPolicy,
+    attach_automatic_rules,
 )
 from daimon.core.authz import (
     Action,
     AgentRef,
     Decision,
+    OwnDmRead,
     Place,
     SessionFacts,
     Subject,
@@ -1274,3 +1276,117 @@ def test_agent_names_when_builtin_name_then_only_the_renamed_seed_takes_the_old_
     policy = TenantAccessPolicy(agent_rules={other: AgentRule(invoker_role_ids=("1234",))})
     names = agent_names(name, metadata)
     assert bool(agent_invoker_roles(policy, names)) is aliased, f"{names} under {other}'s rule"
+
+
+def _reach(*checked: str, platform: str = "discord") -> OwnDmRead:
+    return OwnDmRead(platform, frozenset(checked))
+
+
+#: The room facts made C_SEAL narrow; no admin limited its readers by hand.
+NARROW = attach_automatic_rules(
+    TenantAccessPolicy(), {"C_SEAL": ChannelRule(readers="inside")}, unknown_narrow=False
+)
+
+
+def _read_limited(
+    subject: Subject = MEMBER, policy: TenantAccessPolicy = NARROW, **extra: object
+) -> Decision:
+    return authorize(
+        policy,
+        subject=subject,
+        action=Action.READ_CHANNEL,
+        place=Place(channel_id="C_SEAL"),
+        **extra,  # pyright: ignore[reportArgumentType]
+    )
+
+
+def test_own_dm_reach_lets_a_checked_target_past_not_a_reader_and_nothing_else() -> None:
+    assert _read_limited(own_dm_read=_reach("C_SEAL")) == ALLOW
+    # Every other caller keeps today's answer.
+    assert _read_limited().reason == "not_a_reader"
+    assert _read_limited(own_dm_read=_reach()).reason == "not_a_reader", "nothing was checked"
+    assert _read_limited(own_dm_read=_reach("C_OTHER")).reason == "not_a_reader", "exact target"
+    assert _read_limited(own_dm_read=_reach("C_SEAL", platform="slack")).reason == "not_a_reader"
+    assert _read_limited(own_dm_read=_reach("C_SEAL", platform="teams")).reason == "not_a_reader"
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [
+        BEARER,
+        AGENT_KEY_ADMIN,
+        Subject(platform_user_id="U_MEM", client=True),
+    ],
+    ids=["no-person", "agent-key", "client"],
+)
+def test_own_dm_reach_is_for_a_person_never_a_key_or_a_client(subject: Subject) -> None:
+    assert not _read_limited(subject, own_dm_read=_reach("C_SEAL"))
+
+
+def test_own_dm_reach_does_not_lift_a_hold_or_a_limit_an_admin_set_by_hand() -> None:
+    held = TurnHold(platform="discord", channel_id="C_HELD", client=False)
+    assert not _read_limited(own_dm_read=_reach("C_SEAL"), hold=held)
+    # A room an admin sealed keeps its rule, with or without a narrow fact on it.
+    reach = _reach("C_SEAL")
+    assert _read_limited(policy=SEALED, own_dm_read=reach).reason == "not_a_reader"
+    both = attach_automatic_rules(
+        SEALED, {"C_SEAL": ChannelRule(readers="inside")}, unknown_narrow=False
+    )
+    assert _read_limited(policy=both, own_dm_read=reach).reason == "not_a_reader"
+    own = TenantAccessPolicy(channel_rules={"C_SEAL": ChannelRule(readers="own", writers="own")})
+    assert not _read_limited(policy=own, own_dm_read=reach)
+    # A thread under a room sealed by hand follows it.
+    thread = authorize(
+        SEALED,
+        subject=MEMBER,
+        action=Action.READ_CHANNEL,
+        place=Place(channel_id="T1", parent_channel_id="C_SEAL"),
+        own_dm_read=_reach("T1"),
+    )
+    assert thread.reason == "not_a_reader"
+
+
+def test_own_dm_reach_reads_a_thread_under_a_narrow_room() -> None:
+    def read(checked: str) -> Decision:
+        return authorize(
+            NARROW,
+            subject=MEMBER,
+            action=Action.READ_CHANNEL,
+            place=Place(channel_id="T1", parent_channel_id="C_SEAL"),
+            own_dm_read=_reach(checked),
+        )
+
+    assert read("T1") == ALLOW
+    assert read("C_SEAL").reason == "not_a_reader", "the thread itself was not checked"
+
+
+def test_a_reach_latched_turn_posts_only_into_its_own_dm() -> None:
+    def post(place: Place) -> Decision:
+        return authorize(OPEN, subject=MEMBER, action=Action.POST, place=place, reach_latched=True)
+
+    assert post(Place(channel_id="C_OPEN")).reason == "reach_latched"
+    assert post(Place(channel_id="T1", parent_channel_id="C_OPEN")).reason == "reach_latched"
+    assert post(Place(channel_id="D1", own_dm=True)) == ALLOW
+    unlatched = authorize(
+        OPEN, subject=MEMBER, action=Action.POST, place=Place(channel_id="C_OPEN")
+    )
+    assert unlatched == ALLOW, "a turn that used no reach posts as before"
+
+
+def test_a_reach_latched_turn_sends_direct_messages_to_its_own_person_only() -> None:
+    def send(recipient: str, subject: Subject = MEMBER) -> Decision:
+        return authorize(
+            OPEN,
+            subject=subject,
+            action=Action.DIRECT_MESSAGE,
+            recipient_id=recipient,
+            reach_latched=True,
+        )
+
+    assert send("U_OTHER").reason == "reach_latched"
+    assert send("U_MEM") == ALLOW
+    assert send("U_MEM", BEARER).reason == "reach_latched", "no person to send to"
+    unlatched = authorize(
+        OPEN, subject=MEMBER, action=Action.DIRECT_MESSAGE, recipient_id="U_OTHER"
+    )
+    assert unlatched == ALLOW

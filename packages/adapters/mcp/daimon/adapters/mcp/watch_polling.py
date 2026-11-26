@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import discord
+import structlog
 from anthropic import NotFoundError, PermissionDeniedError
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -41,6 +42,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
 )
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
 from daimon.core.authz import Action, Place, Surface, authorize, build_agent_ref
+from daimon.core.bot_access import BotAccessUnavailable, bot_access_wait_on, is_missing_access
 from daimon.core.config import load_watches_settings
 from daimon.core.continuity.poll_tools import (
     SourceChanged,
@@ -77,6 +79,8 @@ from daimon.core.mcp_tool_call import McpToolSession, mcp_tool_session
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
+from daimon.core.ops_catalog import OpsCode
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.stores import agent_mcp_credentials as credential_store
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
@@ -292,9 +296,16 @@ async def poll_read_place(
         raise PollAccessRevoked("Missing owner identity")
     async with rest_client(_require_bot_token(runtime)) as client:
         _, member = await _resolve_member(client, auth.external_id, auth.platform_user_id)
-        channel = _require_guild_channel(
-            await _resolve_channel(client, resource_id), auth.external_id
-        )
+        try:
+            resolved = await _resolve_channel(client, resource_id)
+        except discord.Forbidden as err:
+            # The bot's own read of the channel. A missing channel keeps its old handling.
+            if is_missing_access(err.status, err.code) and await bot_access_wait_on(
+                runtime.session_factory, tenant_id=auth.tenant_id, platform="discord"
+            ):
+                raise BotAccessUnavailable from None
+            raise
+        channel = _require_guild_channel(resolved, auth.external_id)
         if isinstance(channel, discord.Thread):
             await _check_thread_view(client, channel, member, auth.platform_user_id)
             parent = await _ensure_thread_parent_cached(channel)
@@ -589,10 +600,56 @@ async def listed_read_tool(
     return entry
 
 
+log = structlog.get_logger(__name__)
+
+
+def _log_poll_failed(
+    runtime: McpRuntime,
+    watch_id: uuid.UUID,
+    watch: WatchRow | None,
+    *,
+    kind: str,
+    benign: bool = False,
+    error_class: str | None = None,
+    consecutive_errors: int | None = None,
+) -> None:
+    """Fixed fields only: the watch's source, arguments and exception text stay out.
+
+    A `benign` failure (a busy source, the daily cap) is logged at info and records no issue."""
+    (log.info if benign else log.warning)(
+        "watch.poll_failed",
+        tenant_id=str(watch.tenant_id) if watch is not None else None,
+        watch_id=str(watch_id),
+        kind=kind,
+        error_class=error_class,
+        consecutive_errors=consecutive_errors,
+    )
+    if not benign and watch is not None:
+        _report_watch(runtime, "watch.poll_failed", watch, error_class or kind)
+
+
+def _report_watch(runtime: McpRuntime, code: OpsCode, watch: WatchRow, reason: str) -> None:
+    report_ops_event(
+        runtime.session_factory,
+        OpsEvent(code, watch.tenant_id, reason=reason, watch_id=watch.id, agent_id=watch.agent_id),
+        logged=False,
+    )
+
+
+def _log_paused(watch_id: uuid.UUID, watch: WatchRow | None, reason: str) -> None:
+    log.info(
+        "watch.paused",
+        tenant_id=str(watch.tenant_id) if watch is not None else None,
+        watch_id=str(watch_id),
+        reason=reason,
+    )
+
+
 async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool:
     if not load_watches_settings().enabled:
         return False
     floor = 0
+    watch: WatchRow | None = None
     try:
         async with asyncio.timeout(25):
             async with runtime.session_factory() as db:
@@ -687,32 +744,46 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                 )
                 await hold_to_floor(db, watch_id, floor=floor, now=datetime.now(UTC))
             return True
-    except SourceBusy:
-        # This server's own budget is spent. Step back in the claim queue, or due
+    except (SourceBusy, BotAccessUnavailable) as exc:
+        _log_poll_failed(
+            runtime, watch_id, watch, kind=type(exc).__name__, benign=isinstance(exc, SourceBusy)
+        )
+        # This server's own budget is spent, or the bot cannot read the source yet (not an
+        # error, not a revocation). Step back in the claim queue, or due
         # watches on one busy server would fill every claim and starve the rest.
         until = datetime.now(UTC) + timedelta(seconds=BUSY_DEFER_S + random.uniform(0, 30))
         async with runtime.session_factory.begin() as db:
             await defer_busy_poll(db, watch_id, lease, until=until)
         return False
     except WatchFeatureUnreadable:
+        _log_poll_failed(runtime, watch_id, watch, kind="WatchFeatureUnreadable")
         # The feature could not be read, which is not Off: keep the watch, retry next claim.
         async with runtime.session_factory.begin() as db:
             await release_poll_lease(db, watch_id, lease)
         return False
     except ToolUnlisted:
+        _log_poll_failed(runtime, watch_id, watch, kind="ToolUnlisted")
         # The operator took the tool off the registry: pause and tell the owner.
         async with runtime.session_factory.begin() as db:
-            await pause_unlisted(db, watch_id, lease)
+            paused = await pause_unlisted(db, watch_id, lease)
+        if paused:
+            _log_paused(watch_id, watch, "tool_unlisted")
         return False
     except SourceChanged:
+        _log_poll_failed(runtime, watch_id, watch, kind="SourceChanged")
         # The server no longer offers what the owner approved: pause and tell them.
         async with runtime.session_factory.begin() as db:
-            await pause_unlisted(db, watch_id, lease, reason="source_changed")
+            paused = await pause_unlisted(db, watch_id, lease, reason="source_changed")
+        if paused:
+            _log_paused(watch_id, watch, "source_changed")
         return False
     except CredentialMissing:
+        _log_poll_failed(runtime, watch_id, watch, kind="CredentialMissing")
         # The owner forgot or never sent their key: pause and tell them how to send it.
         async with runtime.session_factory.begin() as db:
-            await pause_unlisted(db, watch_id, lease, reason="credential_missing")
+            paused = await pause_unlisted(db, watch_id, lease, reason="credential_missing")
+        if paused:
+            _log_paused(watch_id, watch, "credential_missing")
         return False
     except Exception as exc:
         # Never log remote content, arguments, credentials, lease capabilities or
@@ -722,7 +793,7 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
 
         capped = isinstance(exc, DBAPIError) and getattr(exc.orig, "sqlstate", None) == "54000"
         async with runtime.session_factory.begin() as db:
-            await poll_failed(
+            failure = await poll_failed(
                 db,
                 watch_id,
                 lease,
@@ -745,6 +816,26 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
             )
             if floor:
                 await hold_to_floor(db, watch_id, floor=floor, now=datetime.now(UTC))
+        _log_poll_failed(
+            runtime,
+            watch_id,
+            watch,
+            kind="daily_cap" if capped else "other",
+            benign=capped,
+            error_class=type(exc).__name__,
+            consecutive_errors=failure.consecutive_errors if failure else None,
+        )
+        if failure is not None and failure.paused_reason == "failed":
+            log.warning(
+                "watch.paused_failing",
+                tenant_id=str(failure.tenant_id),
+                watch_id=str(watch_id),
+                consecutive_errors=failure.consecutive_errors,
+            )
+            if watch is not None:
+                _report_watch(runtime, "watch.paused_failing", watch, type(exc).__name__)
+        elif failure is not None and failure.paused_reason is not None:
+            _log_paused(watch_id, watch, failure.paused_reason)
         return False
 
 

@@ -12,7 +12,7 @@ const PRICING: Turn[] = [
 ]
 const MMM: Turn[] = [
   { q: "Which channel had the best return in the last model run?", tools: [["ssr_runs", "completed"]], a: "Paid search returned the most per dollar, at 3.1 against 1.8 for display." },
-  { q: "Refit with the new April spend.", tools: [["fly_task_status", "error"], ["fly_task_status", "completed"]], a: "The refit finished on the second try. Paid search still leads, and the interval is a little narrower." },
+  { q: "Refit with the new April spend.", tools: [["compute_task_status", "error"], ["compute_task_status", "completed"]], a: "The refit finished on the second try. Paid search still leads, and the interval is a little narrower." },
   { q: "Share the summary with Tomás.", tools: [["notion_get_page", "cancelled"]], a: "I stopped before posting. Tell me where it should go and I will send it." },
 ]
 

@@ -134,3 +134,49 @@ async def test_a_linked_member_with_no_internal_role_is_an_outsider_on_the_web_i
                 action=Action.START_TURN,
                 surface=surface,
             )
+
+
+@pytest.mark.parametrize(
+    ("mirror_roles", "runs"),
+    [(["9001"], True), (["9002"], False), (None, False), ("unlisted", False)],
+)
+async def test_the_web_chat_runs_a_role_gated_agent_for_a_linked_holder_of_its_role(
+    db_session: AsyncSession, mirror_roles: list[str] | str | None, runs: bool
+) -> None:
+    """The linked Discord account's roles come from the member mirror; unknown refuses."""
+    from datetime import UTC, datetime
+
+    from daimon.core.access_policy import AgentRule, TenantAccessPolicy
+    from daimon.core.authz import Action, AgentRef, Place, Surface, authorize
+    from daimon.core.stores.workspace_members import upsert_member
+    from daimon.core.web_identity import principal_of
+    from daimon.testing.factories import make_account, make_platform_principal, make_web_person
+
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="g-roles")
+    account = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session, platform="discord", external_id="8123", tenant=tenant, account=account
+    )
+    person = await make_web_person(db_session, tenant=tenant, account=account)
+    if not isinstance(mirror_roles, str):
+        await upsert_member(
+            db_session,
+            tenant_id=tenant.id,
+            platform_user_id="8123",
+            is_admin=False,
+            now=datetime.now(UTC),
+            role_ids=mirror_roles,
+        )
+
+    principal = await principal_of(db_session, person, "admin")
+
+    gated = TenantAccessPolicy(agent_rules={"helper": AgentRule(invoker_role_ids=("9001",))})
+    decision = authorize(
+        gated,
+        subject=principal.subject,
+        action=Action.RUN_AGENT,
+        surface=Surface.WEB,
+        agent=AgentRef.of("helper"),
+        place=Place(channel_id="web:p1", parent_channel_id="web:p1"),
+    )
+    assert bool(decision) is runs, "an admin needs the role too"

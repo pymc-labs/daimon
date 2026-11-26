@@ -33,10 +33,10 @@ cancellation audit rows cascade from the job. Worker sessions carry the same
 account/tenant stamps as other owned sessions and use the existing upstream
 session-deletion work item. No separate retained job-content exception applies.
 
-Fly registrations, their conversation metadata and background command rows
+Compute session registrations, their conversation metadata and background command rows
 (including stored output tails) cascade on account deletion.
-The compute reconciler deletes the remaining tagged apps as unregistered orphans;
-upstream machine/file deletion requires the scheduler and Fly to be available.
+The compute reconciler deletes the remaining labelled services as unregistered orphans;
+upstream machine/file deletion requires the scheduler and the provider to be available.
 
 Deliberate carve-outs:
 - Sessions at other model providers: an OpenAI session an account's private slot named is
@@ -180,6 +180,7 @@ class PurgeReport(BaseModel):
     dm_rules: int = 0
     dm_grant_users: int = 0
     credential_requests: int = 0
+    secret_shares: int = 0
     wizard_sessions: int = 0
     message_feedback: int = 0
     support_escalations: int = 0
@@ -190,12 +191,14 @@ class PurgeReport(BaseModel):
     support_settlers_cleared: int = 0
     daimon_admins: int = 0
     agent_post_requesters: int = 0
+    agent_chat_session_links: int = 0
     platform_user_names: int = 0
     teams_messages: int = 0
     microsoft_user_tokens: int = 0
     lead_intakes: int = 0
     web_people: int = 0
     monitored_events: int = 0
+    ops_events: int = 0
     web_admin_grants: int = 0
     # The account's private provider slots and what hangs off them (stores.mux_erasure).
     mux_slots: int = 0
