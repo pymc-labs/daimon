@@ -111,7 +111,7 @@ one turned Off since.
 | Approvals in direct messages | `dm_approvals` | Guardrail | Off | ✓ | ✓ |  |  |  |  |  |
 | Rooms with outside people | `audience_hold` | Guardrail | Off | ✓ | ✓ |  |  |  |  | Only Discord |
 | Tool safety | `tool_safety` | Guardrail | On | ✓ |  |  |  |  |  |  |
-| Package registries in eval sandboxes | `eval_package_registries` | Guardrail | Block package registries | ✓ |  |  |  |  |  |  |
+| Eval sandbox registries | `eval_package_registries` | Guardrail | Block registries | ✓ |  |  |  |  |  |  |
 | Approve cards for OpenAI and Gemini | `host_call_gate` | Guardrail | On | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
 | Connectors on OpenAI and Gemini | `mcp_connector_relay` | Guardrail | On | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
 | Keys on OpenAI and Gemini | `provider_keys_file` | Guardrail | On | ✓ |  |  |  |  |  |  |
@@ -1242,14 +1242,14 @@ A change through a connected tool waits for the person to press Approve. In a ro
 | Combines | Stricter wins |
 | Deprecated | `DAIMON_TOOL_SAFETY__ENABLED` |
 
-## Package registries in eval sandboxes
+## Eval sandbox registries
 
-Block answers package installs from the fake world.
+Block answers installs from the fake world.
 
 | | |
 | --- | --- |
 | Key | `eval_package_registries` |
-| Values | `passthrough` (Reach package registries), `deny` (Block package registries) |
+| Values | `passthrough` (Reach registries), `deny` (Block registries) |
 | Default | `deny` |
 | Levels | Deployment |
 | Combines | Stricter wins |
