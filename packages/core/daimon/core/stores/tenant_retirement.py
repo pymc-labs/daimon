@@ -81,7 +81,7 @@ KEEP_FOR_ACCOUNTING: dict[str, str] = {
     "accounting_binding_context": "what settling an outbox row reads once its slot is gone",
     "tenant_retirements": "the retirement's own queue of upstream cleanup",
     "support_escalations": "support credits spent, so a reinstall does not reset them",
-    "support_limits": "the workspace's support credits those requests spend",
+    "support_limits": "the support credits those requests spend",
 }
 
 # Person identifiers in kept rows, cleared on retirement.
