@@ -113,6 +113,8 @@ class RunResult:
     updated: int = 0
     deleted: int = 0
     error: str | None = None
+    warning: str | None = None
+    """What an `ok` run could not read; shown as the source's last error."""
 
 
 class _Busy(Exception):
@@ -681,7 +683,7 @@ async def _locked(
     )
     run_id: UUID = started["id"]
     deadline = time.monotonic() + budget if budget else None
-    status, error, scan = "ok", None, None
+    status, error, scan, warning = "ok", None, None, None
     run: _Run | None = None
     source: Source | None = None
     try:
@@ -711,10 +713,11 @@ async def _locked(
         if scan is not None:
             await unlock(conn, scan)
         if source is not None:
+            warning = connector.warning(source)
             with suppress(Exception):  # a connector's cleanup must not hide the run's result
                 await connector.release(source)
     counts = run.c if run else _Counts()
-    result = RunResult(run_id, status, counts.added, counts.updated, counts.deleted, error)
+    result = RunResult(run_id, status, counts.added, counts.updated, counts.deleted, error, warning)
     await _finish(conn, env, row, started["started_at"], result)
     if run and not result.error and env.embed and env.data is not None:
         await embed_pending(conn, env.schemas, source_id, settings=env.data, meter=env.meter)
@@ -748,7 +751,7 @@ async def _finish(
             " errors = case when %(st)s = 'error' then errors + 1 else 0 end,"
             " requested_at = case when requested_at > %(at)s then requested_at end"
             " where source_id = %(src)s".encode(),
-            {"st": r.status, "err": r.error, "at": started, "src": row["id"]},
+            {"st": r.status, "err": r.error or r.warning, "at": started, "src": row["id"]},
         )
         failing_before = bool(row["errors"])
         for kind, when in (

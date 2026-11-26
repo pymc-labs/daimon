@@ -323,6 +323,7 @@ class FakeSlack:
         self.members: dict[str, list[str]] = {}
         self.messages: dict[str, list[Json]] = {}
         self.calls: list[str] = []
+        self.private_scope = True
         self._n = count(1)
 
     def person(
@@ -405,7 +406,11 @@ class FakeSlack:
         if method == "auth.test":
             return reply(ok=True, team_id=TEAM, team="Example", url="https://example.slack.com/")
         if method == "conversations.list":
-            return reply(ok=True, channels=list(self.channels.values()))
+            private = "private_channel" in q.get("types", "")
+            if private and not self.private_scope:
+                return reply(ok=False, error="missing_scope", needed="groups:read")
+            chans = [c for c in self.channels.values() if private or not c.get("is_private")]
+            return reply(ok=True, channels=chans)
         if method == "users.list":
             return reply(ok=True, members=list(self.users.values()))
         if method == "users.info":
@@ -505,6 +510,28 @@ async def test_a_lost_slack_channel_is_hidden_at_once_restored_on_return_and_gon
     await store.run(src)
     assert leads not in await store.bodies(src), "lost for 30 days: its records go"
     assert day_window(PUBLIC, D1) in await store.bodies(src)
+
+
+async def test_slack_without_private_scopes_still_syncs_and_private_off_deletes_at_once(
+    store: Store, workspace: FakeSlack
+) -> None:
+    src = await store.add("slack", "xoxb-example", workspace=TEAM)
+    await store.run(src)
+    leads = day_window(PRIV, TODAY)
+
+    workspace.private_scope = False
+    result = await store.run(src)
+    assert result.warning and "groups:read" in result.warning, "synced, with a warning"
+    assert leads in await store.bodies(src), "kept while the scope may come back"
+    assert leads not in await store.sees("slack", TEAM, SALICE), "hidden at once"
+
+    workspace.private_scope = True
+    await store.conn.execute(
+        f"update {store.d}.sources set config = config || %s where id = %s".encode(),
+        (Jsonb({"private": False}), src),
+    )
+    await store.run(src)
+    assert leads not in await store.bodies(src), "turned off by an admin: gone at once"
 
 
 def test_slack_and_discord_recheck_a_week_and_slack_reads_private_channels_by_default() -> None:

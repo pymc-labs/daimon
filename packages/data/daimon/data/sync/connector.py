@@ -260,6 +260,10 @@ class Connector:
     async def release(self, source: Source) -> None:
         """End of a run: close what the connector kept open for it."""
 
+    def warning(self, source: Source) -> str | None:
+        """What this run could not read while the source still synced, for its status."""
+        return None
+
     async def test(self, source: Source) -> tuple[bool, str]:
         return True, "ok"
 

@@ -49,23 +49,28 @@ roles and permission overwrites. A private thread is readable by its members who
 the channel, and by those who manage threads. The bot lists every human member as an account,
 without email addresses. Attachments are listed on the record and fetched on demand.
 
+A channel the bot can no longer read is hidden at once. Readable again within 30 days, it
+shows again without a re-read; after that its records are deleted. A channel the config
+leaves out is deleted at once. Slack channels follow the same rule.
+
 ## Slack
 
 A source of kind `slack` reads one workspace with its own bot token, never Daimon's chat
 bot. Create an app with the scopes `channels:read`, `channels:history`, `users:read` and
-`files:read`, add `groups:read` and `groups:history` for private channels, and install it.
+`files:read`, plus `groups:read` and `groups:history` for private channels, and install it.
 Invite the bot to each channel to read. The optional `users:read.email` scope lists people
 with their confirmed email addresses. The credential is `{"token": "xoxb-..."}`. The
 source's config:
 
 ```json
-{"workspace": "T0123456789", "private": "yes", "exclude": ["random"], "rewalk_days": 30}
+{"workspace": "T0123456789", "private": "no", "exclude": ["random"], "rewalk_days": 7}
 ```
 
-`workspace` is the team id, and the token must belong to it. `private` adds the private
-channels the bot is in. `exclude` lists channel ids or names to leave out. A channel's
+`workspace` is the team id, and the token must belong to it. The private channels the bot
+is in are read unless `private` is `no`. A token without the private scopes skips them, and
+the source's status says so. `exclude` lists channel ids or names to leave out. A channel's
 messages become one record per day, and a thread becomes records of its own, rebuilt when it
-changes. Messages from the last `rewalk_days` days (30 by default) are read again once per
+changes. Messages from the last `rewalk_days` days (7 by default) are read again once per
 sync cycle.
 
 A public channel is readable by the workspace's active members and by the guests in it. A
@@ -179,8 +184,9 @@ plus every organization member while the repository is public or internal.
 The list is read again every run and each record is checked
 against it when shown, so a repository made private or a person removed takes effect at once.
 A repository whose collaborators cannot be listed publishes nobody, and its records go dark
-within three hours. A repository the source no longer lists is hidden at once; listed again
-within 30 days its records show again without a re-read, after that they are deleted.
+within three hours. A repository taken out of `repos` is deleted at once. One the token no
+longer sees is hidden at once; seen again within 30 days its records show again without a
+re-read, after that they are deleted.
 
 GitHub verifies no address: a person who signs in with GitHub is linked in every
 organization that lists their id, and a data admin links anyone else. Each run reads what

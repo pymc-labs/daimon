@@ -152,6 +152,10 @@ def epoch(d: date) -> str:
     return f"{datetime(d.year, d.month, d.day, tzinfo=UTC).timestamp():.6f}"
 
 
+class MissingScope(Upstream):
+    """The token lacks a scope the call needs."""
+
+
 class Api:
     """Method calls inside the source's budget."""
 
@@ -174,7 +178,8 @@ class Api:
         if err in AUTH:
             raise Upstream(f"Slack rejected the token ({err})")
         if err == "missing_scope":
-            raise Upstream(f"the Slack token is missing the {j.get('needed', 'required')} scope")
+            needed = j.get("needed", "required")
+            raise MissingScope(f"the Slack token is missing the {needed} scope")
         raise Upstream(f"Slack: {err}")
 
     async def pages(
@@ -205,6 +210,8 @@ class World:
     """Every human of ours, deactivated included."""
     user_token: bool
     private: bool
+    warning: str | None = None
+    """What the run could not read, for the source's status."""
     inside: dict[str, frozenset[str]] = field(default_factory=dict[str, frozenset[str]])
     """Private channel id to its members among our active humans."""
 
@@ -234,11 +241,21 @@ async def read_world(api: Api, cfg: Config, token: str) -> World:
     if str(me.get("team_id") or "") != cfg.team:
         raise Upstream("the token reads another workspace than the declared one")
     user_token = token.startswith("xoxp-")
-    private = cfg.private and not user_token
-    types = "public_channel,private_channel" if private else "public_channel"
-    chans = await api.pages(
-        "conversations.list", "channels", types=types, exclude_archived="false", limit=PAGE
-    )
+    private, warning = cfg.private and not user_token, None
+    try:
+        types = "public_channel,private_channel" if private else "public_channel"
+        chans = await api.pages(
+            "conversations.list", "channels", types=types, exclude_archived="false", limit=PAGE
+        )
+    except MissingScope:
+        if not private:
+            raise
+        private, warning = False, "Private channels skipped: the token needs groups:read."
+        log.warning("slack.private_skipped", team=cfg.team)
+        chans = await api.pages(
+            "conversations.list", "channels", types="public_channel", exclude_archived="false",
+            limit=PAGE,
+        )  # fmt: skip
     users = [
         u for u in await api.pages("users.list", "members", limit=PAGE) if is_human(u, cfg.team)
     ]
@@ -255,6 +272,7 @@ async def read_world(api: Api, cfg: Config, token: str) -> World:
         {u["id"]: u for u in users},
         user_token,
         private,
+        warning,
     )
     for cid, ch in sorted(world.roots(cfg.exclude).items()):
         if ch.get("is_private") or guests:
@@ -353,7 +371,12 @@ class SlackConnector(Connector):
                 world = await read_world(Api(client, source), cfg, token_of(source))
         except (ValueError, Upstream) as e:
             return False, str(e)
-        return True, f"{world.name}: {len(world.roots(cfg.exclude))} channels to read"
+        note = f"{world.name}: {len(world.roots(cfg.exclude))} channels to read"
+        return True, f"{note}. {world.warning}" if world.warning else note
+
+    def warning(self, source: Source) -> str | None:
+        world = self._worlds.get(source.id)
+        return world.warning if world else None
 
     # ---- who reads what ----
 
@@ -394,7 +417,10 @@ class SlackConnector(Connector):
         had = obj(old.get("streams"))
 
         def excluded(cid: str) -> bool:
-            name = str((world.channels.get(cid) or {}).get("name") or "")
+            """Left out by the config: excluded, or private with `private` off (not listed)."""
+            if cid not in world.channels:
+                return not cfg.private
+            name = str(world.channels[cid].get("name") or "")
             return bool({cid.lower(), name.lower()} & cfg.exclude)
 
         lost = dict(obj(old.get("lost")))
