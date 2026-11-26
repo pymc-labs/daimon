@@ -17,6 +17,7 @@ import anthropic as anthropic_errors
 import httpx
 import structlog
 from anthropic import AsyncAnthropic
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import list_agents_by_tenant, list_environments_by_tenant
 from daimon.core.errors import SettlePending
@@ -197,7 +198,12 @@ async def _clean_item(
         except anthropic_errors.NotFoundError:
             pass
         except (anthropic_errors.APIError, ProviderError, httpx.HTTPError) as error:
-            fields = {"tenant_id": str(tenant_id), "kind": kind, "error": type(error).__name__}
+            fields = {
+                "tenant_id": str(tenant_id),
+                "kind": kind,
+                "error": type(error).__name__,
+                "causes": backend_refusal_causes(error),
+            }
             if not _permanent(error):
                 log.warning("tenant_retirement.upstream_failed", **fields)
                 return True
