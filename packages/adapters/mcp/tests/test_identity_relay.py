@@ -26,7 +26,6 @@ from daimon.adapters.mcp.identity_relay import (
     build_relay_clients,
 )
 from daimon.adapters.mcp.tools import _session_gate
-from daimon.core._models import LeadIntakeExecution
 from daimon.core.agent_chat_requester import EarlierTurn, record_driver
 from daimon.core.config import SignedIdentityServer
 from daimon.core.continuity.continuation import ContinuationRequest
@@ -225,11 +224,13 @@ async def _dm_fire(
     async with factory() as db, db.begin():
         row = await get_routine(db, routine_id, tenant_id=person.tenant_id)
         assert row is not None
-        db.add(
-            LeadIntakeExecution(
-                tenant_id=person.tenant_id, id=execution, routine_id=routine_id,
-                expires_at=now + dt.timedelta(minutes=5),
-            )
+        await db.execute(
+            text(
+                "INSERT INTO lead_intake_executions (tenant_id, id, routine_id, expires_at)"
+                " VALUES (:tenant, :id, :routine, :expires)"
+            ),
+            {"tenant": person.tenant_id, "id": execution, "routine": routine_id,
+             "expires": now + dt.timedelta(minutes=5)},
         )  # fmt: skip
         await create_thread_session(
             db, id=mapping_id, tenant_id=person.tenant_id, platform="discord",
