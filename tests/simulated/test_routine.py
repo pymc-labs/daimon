@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from .discord import CHANNEL, GUILD, PERSON, Discord
 from .test_without_anthropic import MCP, _Daimon  # pyright: ignore[reportPrivateUsage]
-from .world import World, metering, world
+from .world import World, metering, switch_to, world
 
 
 async def test_a_routine_fires_and_records_its_answer(
@@ -92,7 +92,8 @@ async def _gemini_install(
 ) -> AsyncIterator[tuple[World, Discord]]:
     """A Gemini-only install with Daimon's own MCP server reachable, as the provider sees it."""
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    async with world(sessions, keyed=("gemini",), mcp=MCP, **overrides) as w:
+    overrides = {"keyed": ("gemini",), **overrides}
+    async with world(sessions, mcp=MCP, **overrides) as w:
         rest = DiscordAPI(guild=GUILD, owner=PERSON)
         w.network.fakes[rest.host] = rest
         app = create_mcp_app(settings=w.settings, sessionmaker=w.sessions, anthropic=w.anthropic)
@@ -212,3 +213,25 @@ async def test_a_gemini_routine_follows_its_channels_tool_rules_unattended(
     assert results == [
         f"Refused: this agent's tool rule denies {DAIMON_SERVER_NAME}/list_agents. Do not retry it."
     ], "the channel's deny decides the call, as on Claude"
+
+
+async def test_a_routine_into_a_thread_runs_on_the_provider_the_thread_kept(
+    db_preflight: None, db_nullpool_engine: AsyncEngine
+) -> None:
+    """A thread keeps the provider it started on after the agent moves; a routine
+    posting there runs on that one too, not on the agent's new provider."""
+    async with _gemini_install(db_nullpool_engine, keyed=("gemini", "openai")) as (w, discord):
+        moved = {"platform": "discord", "user_id": str(PERSON)}
+        await switch_to(w, discord.tenant_id, "gemini", **moved)
+        w.script.add(Turn("Hello."))
+        await discord.say("hello")
+        thread = discord.thread_of_last_reply()
+        await switch_to(w, discord.tenant_id, "openai", **moved)
+        routine = await _scheduled(
+            w, discord, destination_kind="thread", destination_id=str(thread)
+        )
+        w.script.add(Turn("Found the launch notes."))
+        ran = len(w.gemini.reported)
+        fired = await _fire(w, routine)
+    assert fired.last_error is None, f"it ran, on the thread's Gemini: {fired.last_error}"
+    assert len(w.gemini.reported) == ran + 1, "the fire ran on Gemini"
