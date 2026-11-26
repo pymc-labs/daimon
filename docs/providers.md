@@ -143,7 +143,7 @@ Memory settings show as needing setup.
   with App tokens for that reply. Self-hosted agents get the others, and their
   harness asks before an `ask` tool.
   The provider receives what the connectors return; turn the
-  `mcp_connector_relay` feature off to keep them out of OpenAI and Gemini.
+  `mcp_connector_relay` feature off to keep them out.
 - **Keys.** The agent's saved keys go with it as a `.env` file at
   `/workspace/.daimon/.env` in the provider's sandbox, so the provider receives
   them. Copies of itself get none. Turn it off with the `provider_keys_file` feature.

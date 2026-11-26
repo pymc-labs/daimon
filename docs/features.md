@@ -38,7 +38,7 @@ Where each feature can be set, and its default.
 | Web app | `web_awareness` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Connected server briefing | `mcp_briefing` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
 | Notes on non-chat messages | `origin_fragments` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
-| Keys file | `agent_env_file` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
+| Keys file | `agent_env_file` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Platform prompt | `platform_prompt` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Always Off on OpenAI |
 | Platform skills | `platform_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
 | Agent skills | `agent_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Always On on Gemini, OpenAI |
@@ -114,6 +114,7 @@ Where each feature can be set, and its default.
 | Tool safety | `tool_safety` | Guardrail | On | ✓ |  |  |  |  |  |  |
 | Approve cards for OpenAI and Gemini | `host_call_gate` | Guardrail | On | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
 | Connectors on OpenAI and Gemini | `mcp_connector_relay` | Guardrail | On | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
+| Keys on OpenAI and Gemini | `provider_keys_file` | Guardrail | On | ✓ |  |  |  |  |  |  |
 | Reach check | `reach_budget` | Guardrail | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Built-in tools in routines | `unattended_capabilities` | Guardrail | Allowed | ✓ | ✓ | ✓ |  |  |  |  |
 | Sandbox tools in routines | `routine_sandbox_tools` | Guardrail | Off |  | ✓ | ✓ |  |  | ✓ |  |
@@ -398,7 +399,7 @@ A short note in front of a message that did not come from chat, such as a routin
 
 ## Keys file
 
-The agent's saved keys as a .env file in its working files. Off leaves the file out; the keys stay saved. Applies from the next message. Claude agents only.
+The agent's saved keys as a .env file in its sandbox; Off leaves it out. Applies from the next message.
 
 | | |
 | --- | --- |
@@ -407,8 +408,6 @@ The agent's saved keys as a .env file in its working files. Off leaves the file 
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
-| Levels on Gemini | Not available |
-| Levels on OpenAI | Not available |
 
 ## Platform prompt
 
@@ -1238,6 +1237,18 @@ An agent's own connectors work on OpenAI and Gemini agents with the person's sig
 | --- | --- |
 | Key | `mcp_connector_relay` |
 | Values | `off` (Off), `on` (On) |
+| Default | `on` |
+| Levels | Deployment |
+| Combines | Stricter wins |
+
+## Keys on OpenAI and Gemini
+
+Sends the keys file to OpenAI and Gemini.
+
+| | |
+| --- | --- |
+| Key | `provider_keys_file` |
+| Values | `on` (On), `off` (Off) |
 | Default | `on` |
 | Levels | Deployment |
 | Combines | Stricter wins |

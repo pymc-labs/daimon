@@ -328,7 +328,7 @@ class ProviderSession:
     account_scope_id: str | None
     profile: str
     # The binding's refs, which name the session's keys file (`replace_binding.ENV_FILE_REF`).
-    native_refs: Mapping[str, str] = field(default_factory=dict, compare=False)
+    native_refs: Mapping[str, str] = field(default_factory=dict[str, str], compare=False)
 
 
 async def provider_sessions(
