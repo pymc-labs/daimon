@@ -61,6 +61,7 @@ from daimon.core.tool_safety import (
     ToolCall,
     ToolSafetyPolicy,
 )
+from daimon.core.turn.io import TurnEvent
 from daimon.testing import ma_agent, ma_environment, with_coordinator, with_hidden_capability
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter
@@ -1920,6 +1921,14 @@ async def test_a_pause_whose_calls_are_all_confirmed_reads_as_running(
     assert fake.confirmations == [] and _no_workers()
 
 
+@dataclasses.dataclass(frozen=True)
+class _Unwaited:
+    """A stream event of a kind no wait is for."""
+
+    id: str
+    type: str = "span.model_request_end"
+
+
 class _BusyStream:
     """A stream on which an event outside every caller's `kinds` is always ready."""
 
@@ -1929,7 +1938,7 @@ class _BusyStream:
     async def __anext__(self) -> Any:
         self.read += 1
         await asyncio.sleep(0)
-        return MagicMock(native=MagicMock(type="span.model_request_end", id=f"evt_{self.read}"))
+        return TurnEvent(native=_Unwaited(f"evt_{self.read}"))  # type: ignore[arg-type]
 
     async def close(self) -> None:
         return None
