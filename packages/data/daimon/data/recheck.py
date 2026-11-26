@@ -71,12 +71,13 @@ async def reader_subjects(
     prefix = f"{source.provider}/{workspace}:user:"
     accounts = [r.removeprefix("account:") for r in readers if r.startswith("account:")]
     linked: dict[str, list[str]] = {}
+    own = " and proof <> 'admin'" if own_links else ""
     if accounts:
         cur = await conn.execute(
             f"select account_id::text as account, subject from {schemas.data}.identities"
             " where tenant_id = %s and provider = %s and workspace = %s"
             " and account_id::text = any(%s) and (active or proof = 'oauth')"
-            f"{' and linked_by is null' if own_links else ''}".encode(),
+            f"{own}".encode(),
             (source.tenant_id, source.provider, workspace, accounts),
         )
         for row in await cur.fetchall():

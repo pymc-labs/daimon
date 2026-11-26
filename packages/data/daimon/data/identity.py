@@ -197,8 +197,9 @@ async def link(
     proof: Proof,
 ) -> None:
     """Link the identity `proof` verified to the person who presented it; a link they already
-    hold keeps its proof. An identity linked to someone else raises Conflict, and one a data
-    admin rejected or unlinked for them NotAllowed, writing nothing."""
+    hold keeps its proof, but their own proof replaces an admin's. An identity linked to someone
+    else raises Conflict, and one a data admin rejected or unlinked for them NotAllowed,
+    writing nothing."""
     k = proof.key
     async with conn.transaction():
         await fence_account(conn, schemas, account_id)
@@ -215,7 +216,10 @@ async def link(
             " account_id, proof, email, email_verified, linked_at)"
             " values (%s, %s, %s, %s, %s, %s, %s, %s, now())"
             " on conflict (tenant_id, provider, workspace, subject) do update set"
-            " account_id = excluded.account_id, proof = coalesce(i.proof, excluded.proof),"
+            " account_id = excluded.account_id,"
+            " proof = case when i.proof = 'admin' then excluded.proof"
+            " else coalesce(i.proof, excluded.proof) end,"
+            " linked_by = case when i.proof = 'admin' then null else i.linked_by end,"
             " email = coalesce(excluded.email, i.email),"
             " email_verified = excluded.email is not null or i.email_verified,"
             " linked_at = coalesce(i.linked_at, now())"

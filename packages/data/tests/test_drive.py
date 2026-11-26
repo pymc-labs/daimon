@@ -648,16 +648,26 @@ async def test_a_link_an_admin_made_by_hand_never_reads_the_persons_own_drive(
         key=IdentityKey("google", DOMAIN, "bob"), account_id=admin, admin=True,
     )  # fmt: skip
     reader = f"account:{admin}"
-    assert (
-        await personal.google_connection(
+
+    async def reads() -> tuple[bool, int]:
+        found = await personal.google_connection(
             store.conn, store.schemas, store.env, [store.tenant], [reader]
         )
-        is None
-    ), "no Google connection acts as bob for the admin"
-    hits = await my_drive.search(
-        store.conn, store.schemas, store.env, store.tenant, admin, "budget"
-    )
-    assert hits == [], "and bob's own Drive stays unread"
+        hits = await my_drive.search(
+            store.conn, store.schemas, store.env, store.tenant, admin, "budget"
+        )
+        return found is not None, len(hits)
+
+    assert await reads() == (False, 0), "no connection acts as bob; his own Drive stays unread"
+    await store.conn.execute(
+        f"update {store.d}.identities set linked_by = null where subject = 'bob'".encode()
+    )  # the admin's account was erased
+    assert await reads() == (False, 0), "an erased admin does not make the link bob's own"
+    await identity.link(
+        store.conn, store.schemas, tenant_id=store.tenant, account_id=admin,
+        proof=Proof(IdentityKey("google", DOMAIN, "bob"), "oauth"),
+    )  # fmt: skip
+    assert await reads() == (True, 1), "bob's own sign-in makes it his own proof"
 
 
 async def test_calendar_and_drive_read_through_a_source_of_either_kind(
