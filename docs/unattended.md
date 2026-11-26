@@ -159,8 +159,10 @@ provider's own status, so a paused turn lists as `idle`.
 A turn on a backend other than Managed Agents has no session to check, so it
 refuses every tool call that pauses. With the `host_call_gate` deployment
 feature on, an OpenAI or Gemini turn nobody watches keeps its Daimon tools:
-each call gets the unattended verdict above. Automatic custom tools are always
-refused before the first message.
+each call gets the unattended verdict above. A DM routine runs there too, as
+its owner's private turn; before each send Daimon rechecks its source's seal
+and the owner's roles. Automatic custom tools are always refused before the
+first message.
 
 OpenAI's persistent workspace always has a shell, so its unattended turns run
 only where sandbox tools are allowed, such as a long job. With the feature off,

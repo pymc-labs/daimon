@@ -39,7 +39,7 @@ pypdf) instead.
 - **Self-hosted:** memory, routines, effort and a
   spend limit, workspace export and import. An agent can pick it only with
   its own runtime file row (`daimon selfhosted init --agent`).
-- **OpenAI and Gemini:** a routine that sends a direct message. An OpenAI
+- **OpenAI and Gemini:** a routine's output files, watches and timers. An OpenAI
   routine needs [sandbox tools](unattended.md#opt-a-routine-into-sandbox-tools),
   since its hosted shell cannot be left out. A channel's own deployment where a
   channel or thread switches a built-in tool off. Workspace export and import.

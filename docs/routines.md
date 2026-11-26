@@ -93,9 +93,10 @@ Slots that pass while the same routine is still running are skipped under both
 policies. `get_routine` and `list_routines` show the latest skipped range and
 reason (`stale` or `in_flight`), not a history.
 
-On OpenAI or Gemini a routine runs as an unattended reply. On OpenAI it stops
-with `backend_unsupported` unless sandbox tools are on, and a direct-message
-routine stops with a message. Self-hosted stops with
+On OpenAI or Gemini a routine runs as an unattended reply, a DM routine as
+the owner's private turn. On OpenAI it stops with `backend_unsupported` unless
+sandbox tools are on. A routine into a thread runs on the provider that thread
+kept. Self-hosted stops with
 `last_error=selfhosted_routines_unsupported`. A thread destination with an unknown parent
 channel stops with `routine_destination_parent_unknown`. Set the destination
 again to record the parent.
@@ -208,7 +209,7 @@ After a successful run, Daimon collects the session's output files and
 delivers up to ten with the reply. Discord and Slack attach them, and a Teams
 post says files are not supported there. A file over 200 MB or the
 destination's limit (10 MB in a Discord DM) is named in text and stays in the
-workspace.
+workspace. On OpenAI and Gemini a routine's files are not delivered yet.
 
 Files share the result's at-most-once claim, and each send rechecks the
 destination and the owner's access. Changing the destination cancels pending
