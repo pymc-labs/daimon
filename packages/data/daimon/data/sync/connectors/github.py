@@ -7,7 +7,9 @@ the repository is public or internal. Each run publishes that list as one group 
 (`github/<org>:repo:<id>`); every record of the repository is readable by exactly that group,
 so a repository made private, or a person removed, takes effect on the next run. A repository
 whose list cannot be read is not published and its records go dark when its last list lapses
-(three hours). Issues turned off hide the repository's issues.
+(three hours). Issues turned off hide the repository's issues. A repository the source no longer
+lists publishes nobody, so its records are hidden at once; listed again within `LOST` (30 days)
+they show again, later they go.
 
 Content, by `config.content` (default `issues, pulls`): issues and pull requests with their
 conversation comments, discussions with their comments and replies, and the text files of
@@ -49,7 +51,7 @@ from daimon.data.sync.connector import (
     Source,
     SyncState,
 )
-from daimon.data.sync.connectors.chat import names, obj, rows
+from daimon.data.sync.connectors.chat import lost_for_good, names, obj, rows
 from daimon.data.sync.connectors.github_api import (
     Api,
     Refused,
@@ -73,6 +75,8 @@ OVERLAP: Final = timedelta(minutes=5)
 TEXT_MAX: Final = 100_000
 OPEN_TO_ORG: Final = ("public", "internal")
 CHECK_EVERY: Final = 25
+HELD: Final = (("issue", "#"), ("pull_request", "#"), ("discussion", "#"), ("file", ":"))
+"""The id prefixes of one repository's records: `<kind>:<repo id><separator>`."""
 ID: Final = re.compile(r"[a-z_]+:(\d+)[#:]")
 
 DISCUSSIONS: Final = (
@@ -226,7 +230,8 @@ class GitHubConnector(Connector):
         members: set[str] | None = None
         async with client_of(source, self.transport) as client:
             api = Api(client, source)
-            for repo in await self._repos(api, cfg):
+            repos = await self._repos(api, cfg)
+            for repo in repos:
                 ids = await self._readers(api, repo)
                 if ids is None:
                     continue
@@ -247,6 +252,11 @@ class GitHubConnector(Connector):
                     },
                     time.time_ns() // 1000,
                 )
+        for rid in set(obj(source.state.get("since"))) - {str(r["id"]) for r in repos}:
+            # No longer listed: nobody reads it from now, not from when its last list lapses.
+            yield PermissionUnit(
+                "repo", rid, UNIT_MINUTES, {repo_group(cfg.org, rid): ()}, time.time_ns() // 1000
+            )
 
     async def accounts(self, source: Source) -> Roster | None:
         """Organization members and outside collaborators. GitHub verifies no address, so
@@ -318,12 +328,18 @@ class GitHubConnector(Connector):
             "since": dict(since),
             "blobs": dict(blobs),
             "full_at": old.get("full_at"),
+            "lost": dict(obj(old.get("lost"))),
         }
         live: set[str] = set()
         n = 0
         async with client_of(source, self.transport) as client:
             api = Api(client, source)
-            for repo in await self._repos(api, cfg):
+            repos = await self._repos(api, cfg)
+            missing = set(since) - {str(r["id"]) for r in repos}
+            for rid in lost_for_good(state["lost"], missing, started):
+                del state["since"][rid]
+                state["blobs"].pop(rid, None)
+            for repo in repos:
                 rid = str(repo["id"])
                 mark = None if full else since.get(rid)
                 async for rec in self._repo(api, cfg, repo, mark, state, live):
@@ -335,7 +351,8 @@ class GitHubConnector(Connector):
                 yield Checkpoint(state)
         if full:
             state["full_at"] = started.isoformat()
-        yield SyncState(state, live if full else None)
+        keep = tuple(f"{k}:{r}{s}" for r in state["lost"] for k, s in HELD)
+        yield SyncState(state, live if full else None, keep=keep)
 
     async def _repo(
         self,

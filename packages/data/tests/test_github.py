@@ -252,6 +252,35 @@ async def test_a_record_is_read_by_the_people_github_lets_read_its_repository(
     assert set(await store.stored(src)) == set(stored), "an incremental run removes nothing"
 
 
+async def test_a_lost_repository_is_hidden_kept_through_full_passes_and_gone_after_30_days(
+    store: Store, github: FakeGitHub
+) -> None:
+    src = await store.add("github", org=ORG, content=["issues"])
+    await store.ok(src)
+    vault = github.repos.pop(1)
+
+    async def full_pass(**lost_at: str) -> None:
+        state = {"full_at": "2000-01-01T00:00:00+00:00", **({"lost": lost_at} if lost_at else {})}
+        await store.conn.execute(
+            f"update {store.d}.source_cursors set state = state || %s where source_id = %s".encode(),
+            (Jsonb(state), src),
+        )
+        await store.ok(src)
+
+    await full_pass()
+    assert "issue:1#1" in await store.stored(src), "a full pass keeps a lost repository's records"
+    assert await store.sees(11) == {"issue:2#1"}, "hidden from every read at once"
+
+    github.repos[1] = vault
+    await store.ok(src)
+    assert "issue:1#1" in await store.sees(11), "access back restores it"
+
+    del github.repos[1]
+    await store.ok(src)
+    await full_pass(**{"1": "2000-01-01T00:00:00+00:00"})
+    assert set(await store.stored(src)) == {"issue:2#1"}, "lost for 30 days: its records go"
+
+
 async def test_paging_never_follows_a_next_link_to_another_host() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.host == "api.github.com", "the token went to another host"

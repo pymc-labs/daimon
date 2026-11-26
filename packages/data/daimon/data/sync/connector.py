@@ -174,6 +174,8 @@ class SyncState:
     trust_empty: bool = False
     """A `live` that is empty while records are stored is refused, as a wrong database or a
     revoked grant looks like it; set this when empty is the truth."""
+    keep: tuple[str, ...] = ()
+    """Prefixes of ids a `live` pass keeps though unlisted: a container lost for now."""
 
 
 @dataclass

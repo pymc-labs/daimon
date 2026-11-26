@@ -485,11 +485,13 @@ class _Run:
         """Delete the source's records that are not upstream any more. An empty list while
         records are stored is refused: a wrong database or a revoked grant looks like it."""
         live = sorted(sync.live or ())
+        keep = list(sync.keep)
         if not live and not sync.trust_empty:
             row = await _one(
                 self.conn,
-                f"select count(*) as n from {self.d}.records where source_id = %s",
-                (self.src.id,),
+                f"select count(*) as n from {self.d}.records where source_id = %s and not exists"
+                " (select 1 from unnest(%s::text[]) p where starts_with(external_id, p))",
+                (self.src.id, keep),
             )
             if row and row["n"]:
                 raise EmptySnapshot(
@@ -500,8 +502,9 @@ class _Run:
             res = await self.conn.execute(
                 f"delete from {self.d}.records where source_id = %s and external_id in ("
                 f"select external_id from {self.d}.records where source_id = %s"
-                " except select unnest(%s::text[]))".encode(),
-                (self.src.id, self.src.id, live),
+                " except select unnest(%s::text[])) and not exists"
+                " (select 1 from unnest(%s::text[]) p where starts_with(external_id, p))".encode(),
+                (self.src.id, self.src.id, live, keep),
             )
             self.c.deleted += res.rowcount
             await self.conn.execute(
