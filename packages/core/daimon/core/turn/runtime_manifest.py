@@ -87,6 +87,8 @@ _WILDCARD = "*"
 #: Built-in web tools an agent template never carries off Anthropic: named losses.
 #: Web search maps to the provider's own search, metered per search.
 _WEB_TOOLS = frozenset({"web_fetch"})
+_EXECUTION_TOOLS = frozenset({"bash", "read", "edit", "write", "grep", "glob"})
+"""Source tools the provider's one execution tool carries: any one off cuts them all."""
 """Reserved sentinel for 'every value' on `platform`, `channel_id` and
 `account_id` only. Never accepted for `tenant_id` or `profile`: a manifest
 row always authorizes resources for exactly one tenant, so the one hard
@@ -804,7 +806,15 @@ async def _capture_source_capabilities(
             # The catalogue lists every tool (`_lists_everything`); a feature Off here leaves
             # its tools out of a template's allowlist, as a Claude session's toolset does. A
             # pinned install keeps its exact allowlist; the server refuses them on call.
-            hidden = request.admission.toolset.hidden_daimon_tools if template else frozenset[str]()
+            # A built-in a place switched off leaves this reply, as on Claude.
+            off = {name for name, on in request.admission.toolset.builtins.items() if not on}
+            if off & _EXECUTION_TOOLS:
+                off |= _EXECUTION_TOOLS
+            hidden = (
+                request.admission.toolset.hidden_daimon_tools | (off & {WEB_FETCH_TOOL})
+                if template
+                else frozenset[str]()
+            )
             if settings is not None and deployment_on_everywhere(
                 settings, "host_call_gate", request.answers_on or (request.platform,)
             ):
@@ -830,25 +840,22 @@ async def _capture_source_capabilities(
             # treating shell HTTP execution as the provider's fetch tool.
             # Daimon's own `web_fetch` (`daimon.core.host_web_fetch`) carries it when listed.
             host_fetch = permissions.get(WEB_FETCH_TOOL) == "auto"
+            own_tools = tuple(
+                tool
+                for tool in tools
+                if tool.kind != "mcp_toolset" and not (tool.kind == "builtin" and tool.name in off)
+            )
             unavailable_builtin_tools = (
                 ("builtin_tool:web_fetch",)
                 if profile.provider == PERSISTENT_WORKSPACE.provider
                 and not host_fetch
-                and any(tool.kind == "builtin" and tool.name == "web_fetch" for tool in tools)
+                and any(tool.kind == "builtin" and tool.name == "web_fetch" for tool in own_tools)
                 else ()
             )
-            own_tools = tuple(tool for tool in tools if tool.kind != "mcp_toolset")
             template_losses: tuple[str, ...] = ()
             # A template's custom and channel skills, where its provider installs them.
             carried: tuple[SkillRef, ...] = ()
             if template:
-                if request.admission.toolset.builtins.get("web_search") is False:
-                    # A place with `tool.web_search` off leaves it out, as on Claude.
-                    own_tools = tuple(
-                        tool
-                        for tool in own_tools
-                        if not (tool.kind == "builtin" and tool.name == "web_search")
-                    )
                 # A template maps the source's execution tools to the provider's own
                 # (OpenAI bash in its hosted environment, Gemini code_execution): both
                 # are billed as tokens and container time already measured, never per

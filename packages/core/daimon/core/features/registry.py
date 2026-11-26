@@ -68,11 +68,6 @@ _OFF_ON: Final[Mapping[str, str]] = {"off": "Off", "on": "On"}
 """A guardrail's on/off: On is the stricter value, so it comes last."""
 EVERY_PLATFORM: Final[frozenset[str]] = frozenset({"*"})
 """`platforms` for a feature that applies wherever a turn runs, chat or not (web, CLI, MCP)."""
-_PROVIDER_ONLY: Final[Mapping[str, tuple[Tier, ...]]] = {
-    _GEMINI: ("deployment", "workspace", "agent"),
-    _OPENAI: ("deployment", "workspace", "agent"),
-}
-"""Gemini and OpenAI compile one revision per agent, so a model feature stops at the agent."""
 _MANAGED_AGENTS_ONLY: Final[Mapping[str, tuple[Tier, ...]]] = {_GEMINI: (), _OPENAI: ()}
 """Runs only on Claude agent turns; Gemini and OpenAI agents never get it."""
 BACKEND_NAMES: Final[Mapping[str, str]] = {
@@ -255,7 +250,6 @@ def _builtin(tool: str) -> FeatureSpec:
             "agent's own tool settings allow. Applies from the next message."
             + (_SEARCH_BILLING if tool == "web_search" else "")
         ),
-        backend_tiers=_PROVIDER_ONLY,
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     )

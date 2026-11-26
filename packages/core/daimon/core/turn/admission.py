@@ -180,7 +180,7 @@ from mux.contracts.config import BackendConfig, ConfigRevision, ResolvedBackend,
 from mux.contracts.ids import ChannelRef, Provider, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.errors import ScopeViolation
-from mux.profiles import MANAGED_AGENTS
+from mux.profiles import INLINE_REUSE, MANAGED_AGENTS, PERSISTENT_WORKSPACE
 from mux.profiles.selfhosted import LOOP
 from mux.state.lease import Slot
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -3167,22 +3167,27 @@ async def place_features(
 
 
 async def require_tool_limits_hold(deps: TurnDeps, admission: Admission) -> None:
-    """Refuse a native turn where a channel or thread switched a built-in tool off.
+    """Refuse a channel's own Gemini or OpenAI deployment where a channel or thread
+    switched a built-in tool off.
 
-    Gemini and OpenAI compile one revision per agent, so a switch below the agent never
-    reaches them; the same place on Claude would hide the tool. Running anyway would
-    quietly give the agent a tool the people there turned off.
+    An agent's own copy leaves such a tool out of the reply (`runtime_manifest`), as
+    Claude does. A channel's deployment is the operator's fixed agent: running it anyway
+    would quietly give the agent a tool the people there turned off.
     """
     native = admission.features
-    if native is None or native.place.backend in (None, MANAGED_AGENTS.provider):
+    if (
+        native is None
+        or native.place.backend not in (INLINE_REUSE.provider, PERSISTENT_WORKSPACE.provider)
+        or admission.backend_revision_origin == "agent"
+    ):
         return
-    claude = await place_features(
+    above = await place_features(
         deps,
-        replace(native.place, backend=MANAGED_AGENTS.provider),
+        replace(native.place, channel_id=None, thread_id=None),
         admission.agent,
         keys=TOOL_KEYS,
     )
-    if any(native.on(key) and not claude.on(key) for key in TOOL_KEYS):
+    if any(above.on(key) and not native.on(key) for key in TOOL_KEYS):
         raise AdmissionDenied(
             reason="backend_unsupported", cause="tool_limits", provider=native.place.backend
         )

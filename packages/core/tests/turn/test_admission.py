@@ -1284,13 +1284,14 @@ def _admittable_router(tenant: TenantRow) -> MARouter:
     )
 
 
-async def test_a_native_turn_is_refused_where_a_channel_switched_a_tool_off(
+async def test_a_channel_deployment_is_refused_where_a_channel_switched_a_tool_off(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Gemini and OpenAI never read a channel's tool switches, so a turn there is refused
-    rather than run with a tool the channel turned off; the same turn on Claude is not."""
+    """A channel's own Gemini or OpenAI deployment is fixed, so a turn there is refused
+    rather than run with a tool the channel turned off. An agent's own copy leaves the
+    tool out of the reply instead (`runtime_manifest`), as Claude does."""
     from daimon.core.features.model_input import TOOL_KEYS
     from daimon.core.features.snapshot import FeaturePlace
     from daimon.core.turn.admission import place_features, require_tool_limits_hold
@@ -1334,6 +1335,8 @@ async def test_a_native_turn_is_refused_where_a_channel_switched_a_tool_off(
     assert (refused.value.reason, refused.value.cause) == ("backend_unsupported", "tool_limits"), (
         "a channel's switched-off tool should refuse the native turn by name"
     )
+    own_copy = replace(await on_gemini(), backend_revision_origin="agent")
+    await require_tool_limits_hold(deps, own_copy)
 
 
 async def test_admit_without_the_mcp_servers_setup_keeps_its_tools_until_turned_off(

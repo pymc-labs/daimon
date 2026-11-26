@@ -1,7 +1,7 @@
 """Executable record of what GPT and Gemini turns deliberately do not take from Claude.
 
-A routine runs only on Anthropic Managed Agents, and a built-in tool's switch stops at
-the agent on a provider that compiles one revision per agent. Both are refused with a
+A routine runs only on Anthropic Managed Agents, and a built-in tool switched off in a
+channel or thread refuses a channel's own deployment there. Both are refused with a
 message, never run quietly without the limit, and the provider guide says so.
 """
 
@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 from daimon.adapters.scheduler.main import routines_unsupported_error
-from daimon.core.features.registry import FEATURES
+from daimon.core.features.registry import BUILTIN_TOOLS, FEATURES
 
 DOCS = Path(__file__).resolve().parents[2] / "docs" / "providers.md"
 
@@ -31,8 +31,7 @@ def test_a_routine_on_a_native_provider_is_refused_in_words(provider: str) -> No
 
 
 @pytest.mark.parametrize("provider", ["openai", "gemini"])
-def test_a_native_provider_reads_no_channel_or_thread_tool_switch(provider: str) -> None:
-    tiers = FEATURES["tool.bash"].tiers_on(provider)
-    assert "channel" not in tiers and "thread" not in tiers, (
-        "so admission refuses a turn where a channel or thread switched a tool off"
-    )
+@pytest.mark.parametrize("tool", BUILTIN_TOOLS)
+def test_a_native_provider_reads_channel_and_thread_tool_switches(provider: str, tool: str) -> None:
+    tiers = FEATURES[f"tool.{tool}"].tiers_on(provider)
+    assert "channel" in tiers and "thread" in tiers, "so the reply there leaves the tool out"

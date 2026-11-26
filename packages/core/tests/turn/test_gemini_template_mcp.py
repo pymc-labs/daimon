@@ -1293,17 +1293,31 @@ async def test_a_switch_that_lost_web_search_runs_google_search_once_it_is_on(
 
 
 @pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
-async def test_a_place_with_web_search_off_leaves_it_out_unasked(template, monkeypatch):
-    """`tool.web_search` off at a place removes Google Search, as it removes Claude's."""
+@pytest.mark.parametrize(
+    ("switched", "gone", "kept"),
+    [
+        ("web_search", "google_search", "code_execution"),
+        # One execution tool carries all six: any one off cuts it (a deliberate gap).
+        ("grep", "code_execution", "google_search"),
+        ("web_fetch", "web_fetch", "code_execution"),
+    ],
+)
+async def test_a_place_with_a_builtin_off_leaves_it_out_unasked(
+    template, monkeypatch, switched, gone, kept
+):
+    """A built-in a channel or thread switched off leaves the reply, as it leaves Claude's."""
     from daimon.core.features.model_input import SessionToolset
     from daimon.core.turn.admission import Admission
 
     request, *_ = template
-    off = property(lambda _: SessionToolset(builtins={"web_search": False}))
+    off = property(lambda _: SessionToolset(builtins={switched: False}))
     monkeypatch.setattr(Admission, "toolset", off)
     selected, _ = await _prepared(request)
-    assert "google_search" not in [tool.name for tool in selected.target_spec.tools or ()]
-    assert "builtin_tool:web_search" not in selected.target_spec.declared_drops
+    names = [tool.name for tool in selected.target_spec.tools or ()]
+    names += _connection(selected).tool_policy["allowed_tools"]
+    assert gone not in names
+    assert kept in names
+    assert f"builtin_tool:{switched}" not in selected.target_spec.declared_drops
 
 
 @pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
