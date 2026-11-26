@@ -326,7 +326,8 @@ async def answer_redactors(
         " on r.tenant_id = s.tenant_id and r.name = s.redaction_set"
         f" left join {d}.source_cursors c on c.source_id = s.id"
         " where s.tenant_id = %s and r.rules is not null and (r.rules ->> 'at' = 'answer'"
-        " or c.last_sync_at is null or c.last_sync_at < r.rules_changed_at)".encode(),
+        " or c.last_sync_at is null or c.last_sync_at < r.rules_changed_at)"
+        " order by r.name, s.id".encode(),
         (tenant_id,),
     )
     built: dict[str, Redactor] = {}
