@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   draft their pass criteria after a cost estimate, and mark near-duplicates.
   `daimon evals bundle scrub` scrubs a bundle offline with a dictionary of names.
 
+- **A signed-identity MCP server can learn which routine is calling, and for which room.**
+  With `"routine_claims": true` on the server, a routine run that posts to a Discord room
+  signs its routine, that room and the room's kind. It is off by default
+  ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).
+
 - **A signed-identity MCP server learns what kind of Discord place the answer goes to.**
   The token's new `room` claim says `dm`, `team`, `narrow` or `contained`, so the server can
   limit what it returns to what that place may read

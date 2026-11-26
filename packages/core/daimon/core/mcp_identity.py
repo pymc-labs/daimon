@@ -44,6 +44,8 @@ if TYPE_CHECKING:
 RELAY_PATH: Final = "/mcp-identity"
 #: Signed chat-credential claim binding a relay credential to one session.
 RELAY_CLAIM: Final = "daimon_relay"
+#: The longest `routine` claim a server accepts.
+ROUTINE_CLAIM_MAX: Final = 80
 #: Servers accept at most 300 s between iat and exp; 120 s leaves room for skew.
 TOKEN_TTL: Final = timedelta(seconds=120)
 _SEED_BYTES: Final = 32
@@ -170,6 +172,10 @@ class RelayBinding:
     #: alone. The relay names a person only while that session's driver is one signed in
     #: to the hub (`daimon.core.agent_chat_requester`).
     agent_chat: str | None = None
+    #: Where a routine's run posts, as `routine_destination_key` named it when the run
+    #: started; only with `routine_id`. The relay signs routine claims only while the
+    #: routine still posts there.
+    destination: str | None = None
 
     def claim(self) -> dict[str, str]:
         value = {"agent_name": self.agent_name}
@@ -185,6 +191,8 @@ class RelayBinding:
             value["owner"] = self.owner
         if self.agent_chat is not None:
             value["agent_chat"] = self.agent_chat
+        if self.destination is not None:
+            value["destination"] = self.destination
         return value
 
 
@@ -195,11 +203,21 @@ def parse_relay_claim(raw: object) -> RelayBinding:
     claim = cast("Mapping[str, object]", raw)
     name, key, routine = claim.get("agent_name"), claim.get("session"), claim.get("routine")
     owner, watch, grant = claim.get("owner"), claim.get("watch"), claim.get("grant")
-    agent_chat = claim.get("agent_chat")
+    agent_chat, destination = claim.get("agent_chat"), claim.get("destination")
     unattended = routine is not None or watch is not None
     if (
         not set(claim)
-        <= {"agent_name", "session", "routine", "watch", "owner", "grant", "agent_chat"}
+        <= {
+            "agent_name",
+            "session",
+            "routine",
+            "watch",
+            "owner",
+            "grant",
+            "agent_chat",
+            "destination",
+        }
+        or not (destination is None or (isinstance(destination, str) and routine is not None))
         or not (owner is None or (isinstance(owner, str) and owner and unattended))
         or not (grant is None or (isinstance(grant, str) and grant and key is not None))
         or not isinstance(name, str)
@@ -226,6 +244,7 @@ def parse_relay_claim(raw: object) -> RelayBinding:
         watch_id=None if watch is None else uuid.UUID(watch),
         grant=grant,
         agent_chat=agent_chat,
+        destination=destination,
     )
 
 
@@ -254,6 +273,8 @@ class IdentityClaims:
     msg: str | None = None
     #: What kind of place the answer goes to (`daimon.core.signed_room`); only with `channel`.
     room: str | None = None
+    #: The routine a run posts for, with its `channel` and `room` and never a `sub` or `msg`.
+    routine: str | None = None
 
     def payload(self, *, now: datetime, ttl: timedelta = TOKEN_TTL) -> dict[str, str | int]:
         issued = int(now.timestamp())
@@ -271,6 +292,7 @@ class IdentityClaims:
             ("channel", self.channel),
             ("msg", self.msg),
             ("room", self.room),
+            ("routine", self.routine),
         ):
             if value:
                 claims[name] = value
@@ -288,6 +310,7 @@ def caller_claims(
     agent_name: str,
     place: TurnPlace | None,
     room: SignedRoom | None = None,
+    routine: str | None = None,
 ) -> IdentityClaims:
     """Claims for one relayed request.
 
@@ -297,8 +320,20 @@ def caller_claims(
     organisation. The token then names no person and no message rather than
     guess; it still names the agent. `room` is the kind of place the turn's answer
     goes to (`daimon.core.signed_room.turn_room`), sent only with the place's channel.
+
+    `routine` names the routine a run posts for; `place` is then the room it posts to
+    (`daimon.core.signed_room.routine_room`) and `room` its kind. Such a token names no
+    person and no message, and is never signed without the room and its kind.
     """
-    person = place is not None and bool(platform_user_id)
+    if routine is not None and not (
+        0 < len(routine) <= ROUTINE_CLAIM_MAX
+        and place is not None
+        and place.channel_id
+        and room is not None
+        and room != "dm"
+    ):
+        raise ValueError("a routine claim needs the room the routine posts to, and its kind")
+    person = routine is None and place is not None and bool(platform_user_id)
     channel = place.channel_id if place is not None else None
     return IdentityClaims(
         iss=issuer,
@@ -310,6 +345,7 @@ def caller_claims(
         channel=channel,
         msg=place.message_id if person and place is not None else None,
         room=room if channel else None,
+        routine=routine,
     )
 
 
@@ -446,6 +482,17 @@ def routine_conversation(row: RoutineRow) -> dict[str, str | None] | None:
             "parent_channel_id": row.channel_id,
         }
     return None
+
+
+def routine_destination_key(row: RoutineRow) -> str:
+    """Where a routine posts, as one string a run's credential keeps (`RelayBinding`):
+    `routine_conversation`'s place type, channel and parent, or `none`."""
+    conversation = routine_conversation(row)
+    if conversation is None:
+        return "none"
+    return ":".join(
+        conversation.get(key) or "" for key in ("place_type", "channel_id", "parent_channel_id")
+    )
 
 
 def watch_conversation(row: WatchRow) -> dict[str, str | None]:
