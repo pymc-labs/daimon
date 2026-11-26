@@ -110,6 +110,7 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
         assert "--ci-shard-suite=${{ matrix.suite }}" in shard_options[0]
     assert set(deploy["needs"]) == {
         "lint",
+        "conventions",
         "shard-check",
         "pytest-db",
         "pytest-discord",

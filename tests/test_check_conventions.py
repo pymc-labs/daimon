@@ -78,24 +78,99 @@ def test_tree_violations(tmp_path: Path, files: dict[str, str], rule: str, secti
     _assert_explains(found[0], section)
 
 
-def test_changelog_edit_is_flagged_unless_it_folds_fragments() -> None:
-    edit = [("M", "CHANGELOG.md")]
-    found = conv.check_diff(edit, history=True)
-    assert [v.rule for v in found] == ["changelog-edit"], "a direct edit must fail"
+def _git(repo: Path, *args: str) -> str:
+    done = subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return done.stdout
+
+
+def _history(tmp_path: Path) -> Path:
+    """A repo with CHANGELOG.md, two fragments and a migration, committed as the base."""
+    files = {
+        "CHANGELOG.md": "# Changelog\n\n## [Unreleased]\n\n- **Old.** entry.\n",
+        "changes/a.md": "- **A.**\n  Body a.\n",
+        "changes/b.md": "- **B.**\n  Body b.\n",
+        "packages/core/alembic/versions/0001_a.py": "x = 1\n",
+        "packages/core/alembic/versions/helper.py": "x = 1\n",
+    }
+    for name, text in files.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text)
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-qm", "base")
+    return tmp_path
+
+
+def _violations(repo: Path, *, staged: bool = False) -> list[object]:
+    args = conv.diff_args(repo, None if staged else "HEAD~1", staged)
+    return conv.check_diff(repo, args)
+
+
+def _commit(repo: Path) -> None:
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "change")
+
+
+def test_changelog_edit_is_flagged(tmp_path: Path) -> None:
+    repo = _history(tmp_path)
+    (repo / "CHANGELOG.md").write_text("# Changelog\n\n## [Unreleased]\n\n- **Mine.** by hand.\n")
+    _commit(repo)
+    found = _violations(repo)
+    assert [v.rule for v in found] == ["changelog-edit"], "a direct edit must fail"  # type: ignore[attr-defined]
     _assert_explains(found[0], "Changelog")
-    fold = [*edit, ("D", "changes/topic.md")]
-    assert conv.check_diff(fold, history=True) == [], "a fold deletes fragments and may edit it"
-    readme_only = [*edit, ("D", "changes/README.md")]
-    assert conv.check_diff(readme_only, history=True), "deleting the README is not a fold"
 
 
-def test_edited_base_migration_is_flagged_only_against_a_base() -> None:
-    path = "packages/core/alembic/versions/0001_a.py"
-    found = conv.check_diff([("M", path), ("A", path.replace("0001", "0002"))], history=True)
-    assert [(v.rule, v.file) for v in found] == [("migration-edit", path)], "only the edit fails"
+def test_a_fold_may_edit_the_changelog_but_a_stray_line_may_not(tmp_path: Path) -> None:
+    repo = _history(tmp_path)
+    folded = "# Changelog\n\n## [Unreleased]\n\n- **A.**\n  Body a.\n\n- **Old.** entry.\n"
+    (repo / "CHANGELOG.md").write_text(folded)
+    (repo / "changes/a.md").unlink()
+    _commit(repo)
+    assert _violations(repo) == [], "folding a.md adds exactly its lines"
+    _git(repo, "reset", "-q", "--hard", "HEAD~1")
+    # Delete an unrelated fragment and slip in a hand-written line.
+    (repo / "CHANGELOG.md").write_text(folded.replace("Body a.", "Body a.\n  Hand-written."))
+    (repo / "changes/b.md").unlink()
+    _commit(repo)
+    found = _violations(repo)
+    assert [v.rule for v in found] == ["changelog-edit"], (
+        "lines no deleted fragment holds must fail"
+    )  # type: ignore[attr-defined]
+    assert "- **A.**" in found[0].message(), "the message names the stray line"  # type: ignore[attr-defined]
+
+
+def test_only_numbered_base_migrations_are_protected(tmp_path: Path) -> None:
+    repo = _history(tmp_path)
+    for name in ("0001_a.py", "helper.py"):
+        (repo / "packages/core/alembic/versions" / name).write_text("x = 2\n")
+    _commit(repo)
+    found = _violations(repo)
+    assert [v.file for v in found] == ["packages/core/alembic/versions/0001_a.py"], f"got {found}"
     _assert_explains(found[0], "Migrations")
-    assert conv.check_diff([("M", path)], history=False) == [], (
-        "staged edits may touch own migrations"
+
+
+def test_staged_edit_of_a_migration_is_not_flagged(tmp_path: Path) -> None:
+    repo = _history(tmp_path)
+    (repo / "packages/core/alembic/versions/0001_a.py").write_text("x = 2\n")
+    _git(repo, "add", "-A")
+    assert _violations(repo, staged=True) == [], (
+        "staged edits may touch the branch's own migrations"
+    )
+
+
+def test_staged_diff_is_skipped_while_merging(tmp_path: Path) -> None:
+    repo = _history(tmp_path)
+    (repo / "CHANGELOG.md").write_text("# Changelog\n\n- **Main's fold.**\n")
+    _git(repo, "add", "-A")
+    assert _violations(repo, staged=True), "a staged changelog edit fails outside a merge"
+    (repo / ".git/MERGE_HEAD").write_text(_git(repo, "rev-parse", "HEAD"))
+    assert _violations(repo, staged=True) == [], (
+        "main's own fold in a merge is not the author's edit"
     )
 
 

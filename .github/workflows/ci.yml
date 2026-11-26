@@ -794,7 +794,7 @@ jobs:
 
   deploy-gcp:
     name: Deploy to GCP (staging)
-    needs: [lint, shard-check, pytest-db, pytest-discord, pytest-light, mux-standalone, pytest-notebook-host, pytest-staging-config, journeys-offline, docker-publish-candidate]
+    needs: [lint, conventions, shard-check, pytest-db, pytest-discord, pytest-light, mux-standalone, pytest-notebook-host, pytest-staging-config, journeys-offline, docker-publish-candidate]
     # vars.GCP_WIF_PROVIDER doubles as the deploy switch: repository variables
     # don't propagate to forks/clones, so a repo with no GCP config skips this
     # job cleanly (green CI) instead of failing at the auth step. Operators

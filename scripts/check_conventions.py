@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import tomllib
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -22,6 +23,8 @@ ROOT = Path(__file__).resolve().parents[1]
 _BLOB = "https://github.com/pymc-labs/daimon/blob/main"
 VERSIONS = "packages/core/alembic/versions/"
 HEAD_FILE = "packages/core/alembic/head.txt"
+_FRAGMENT = re.compile(r"^changes/(?!README\.md$)[^/]+\.md$")
+_REVISION = re.compile(r"^\d+[a-z]?_[^/]*\.py$")
 GENERATED = ("docs/configuration.md", "docs/features.md", "docs/mcp-tools.md")
 
 
@@ -138,32 +141,62 @@ def _git(*args: str, root: Path) -> str:
     return done.stdout
 
 
-def changed(root: Path, base: str | None, staged: bool) -> list[tuple[str, str]]:
-    """(status, path) per file the change touches; renames count as delete + add."""
+def diff_args(root: Path, base: str | None, staged: bool) -> list[str] | None:
+    """The `git diff` arguments for the change being checked; None when it is not checkable."""
     if staged:
-        args = ["diff", "--cached"]
-    elif base:
-        args = ["diff", base, "HEAD"]
-    else:
+        # The index of a merge in progress holds main's own commits, fold included.
+        merging = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+            capture_output=True,
+        )
+        return None if merging.returncode == 0 else ["diff", "--cached"]
+    return ["diff", base, "HEAD"] if base else None
+
+
+def changed(root: Path, args: list[str] | None) -> list[tuple[str, str]]:
+    """(status, path) per file the change touches; renames count as delete + add."""
+    if args is None:
         return []
     out = _git(*args, "--name-status", "--no-renames", root=root)
     return [(line[0], line[2:]) for line in out.splitlines() if line]
 
 
-def check_diff(files: list[tuple[str, str]], *, history: bool) -> list[Violation]:
+def _fold_stray(root: Path, args: list[str], files: list[tuple[str, str]]) -> str | None:
+    """The first line added to CHANGELOG.md that no deleted fragment holds, else None.
+
+    `changelog.py fold` writes fragment text and nothing else, so a fold adds exactly
+    the lines of the fragments it deletes.
+    """
+    before = "HEAD" if args[-1] == "--cached" else args[1]
+    allowed: Counter[str] = Counter()
+    for status, path in files:
+        if status == "D" and _FRAGMENT.match(path):
+            allowed.update(_git("show", f"{before}:{path}", root=root).splitlines())
+    patch = _git(*args, "-U0", "--", "CHANGELOG.md", root=root)
+    for line in patch.splitlines():
+        if line.startswith("+") and not line.startswith("+++") and line[1:].strip():
+            if allowed[line[1:]] <= 0:
+                return line[1:]
+            allowed[line[1:]] -= 1
+    return None
+
+
+def check_diff(root: Path, args: list[str] | None) -> list[Violation]:
+    files = changed(root, args)
     found: list[Violation] = []
-    paths = {path for _, path in files}
-    folded = any(
-        s == "D" and p.startswith("changes/") and p.endswith(".md") and p != "changes/README.md"
-        for s, p in files
-    )
-    if "CHANGELOG.md" in paths and not folded:
-        found.append(Violation("changelog-edit", "CHANGELOG.md"))
-    if history:  # a staged edit may be to a migration this branch added
+    if args is not None and "CHANGELOG.md" in {p for _, p in files}:
+        stray = _fold_stray(root, args, files)
+        if stray is not None:
+            found.append(
+                Violation("changelog-edit", "CHANGELOG.md", detail=f"added: {stray[:60]!r}")
+            )
+    if (
+        args is not None and args[-1] != "--cached"
+    ):  # a staged edit may be to a migration this branch added
         found += [
             Violation("migration-edit", p)
             for s, p in files
-            if s in "MD" and p.startswith(VERSIONS) and p.endswith(".py")
+            if s in "MD" and p.startswith(VERSIONS) and _REVISION.match(p[len(VERSIONS) :])
         ]
     return found
 
@@ -233,9 +266,8 @@ def main(argv: list[str] | None = None) -> int:
         "--staged", action="store_true", help="measure the staged change (pre-commit)"
     )
     args = parser.parse_args(argv)
-    files = changed(ROOT, args.base, args.staged)
     violations = [
-        *check_diff(files, history=bool(args.base)),
+        *check_diff(ROOT, diff_args(ROOT, args.base, args.staged)),
         *check_tree(ROOT),
         *check_scripts(ROOT),
     ]
