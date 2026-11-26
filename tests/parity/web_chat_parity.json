@@ -294,6 +294,9 @@
   "POST /api/evals/suites/{suite_id}/dedupe": {
    "tool": "eval_cases_dedupe"
   },
+  "POST /api/github/connect/{step}": {
+   "exempt": "the GitHub connect pages every platform's link opens; the invitation is the authority"
+  },
   "POST /api/integrations/tokens": {
    "panel": {
     "discord": "daimon.adapters.discord.agent_setup.operator_tokens_view",

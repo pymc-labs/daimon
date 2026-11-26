@@ -18,6 +18,7 @@ from daimon.adapters.mcp.tools import github_connect as connect_tool
 from daimon.adapters.mcp.tools.teams._client import TeamsBotClient
 from daimon.core.config import (
     AnthropicSettings,
+    CryptoSettings,
     DatabaseSettings,
     GithubAppSettings,
     McpSettings,
@@ -155,6 +156,7 @@ async def test_teams_connect_link_goes_to_the_requesters_one_to_one_chat(
         account = await make_account(session, tenant=tenant)
         await set_role(session, account.id, Role.ADMIN)
     fake = _FakeTeams()
+    key = Fernet.generate_key().decode()
     runtime = McpRuntime(
         session_factory=committing_sessionmaker,
         client=AsyncMock(),  # type: ignore[arg-type]
@@ -162,6 +164,7 @@ async def test_teams_connect_link_goes_to_the_requesters_one_to_one_chat(
             database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://test/test")),
             anthropic=AnthropicSettings(api_key=SecretStr("test")),
             mcp=McpSettings(public_url=HttpUrl("https://mcp.test/mcp")),
+            crypto=CryptoSettings(keys=(SecretStr(key),)),
             github_app=GithubAppSettings(
                 app_id="42",
                 app_slug="sample-app",
@@ -171,7 +174,7 @@ async def test_teams_connect_link_goes_to_the_requesters_one_to_one_chat(
             ),
         ),
         deployment_default=DeploymentDefault(),
-        fernet=build_multifernet((Fernet.generate_key().decode(),)),
+        fernet=build_multifernet((key,)),
         teams_client=TeamsBotClient(
             httpx.AsyncClient(transport=httpx.MockTransport(fake)),
             client_id="app",
