@@ -142,6 +142,8 @@ def test_a_set_applies_every_rule_at_storage_or_at_answer_time() -> None:
         {"source_id": str(own), "t": "client A wrote Globex"},
         {"source_id": str(other), "t": text},
     ], "only its own source"
+    rows = {"rows": [{"source_id": str(other), "t": text}]}  # select ... as source_id
+    assert shown.show(rows, ids=False)["rows"][0]["t"] != text, "caller SQL picks no rules"
     assert shown.show(text, other) == text and shown.show({"t": text})["t"] != text
     assert shown.names_hidden("Acme"), "a query naming a ruled term finds nothing"
     assert not shown.redacted, "answer rules alone refuse no sql or file: they redact them"

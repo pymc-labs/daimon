@@ -168,22 +168,27 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool()
     async def data_file(ctx: Context, record_id: str, index: int) -> str:  # pyright: ignore[reportUnusedFunction]
         """Read a file attached to a record (`index` from `data_get`'s files), fetched now from
-        its source with the source's permissions and never stored. Text files return their
-        text, through the source's redaction rules best effort; other files only their type
-        and size. Refused when names are hidden from someone the answer is for."""
+        its source with the source's permissions and never stored. Text and Office files
+        return their text, through the source's redaction rules best effort; other files only
+        their type and size. Refused when names are hidden from someone the answer is for."""
         auth = await _auth(ctx)
         async with reading(auth) as (conn, r, audience):
             if r.redacted:
                 raise ToolError(REDACTED)
             got = await reads.read_file(
-                conn, schemas, r.ctx, env, _uuid(record_id), index, r.answer
+                conn, schemas, r.ctx, env, _uuid(record_id), index, r.answer, text=True
             )
         if got is None:
             raise ToolError(NOT_FOUND)
         await noted(auth, [f"record:{_uuid(record_id)}"])
-        data, content_type = got
-        text = data.decode("utf-8", "replace")[:PAGE] if reads.textual(content_type) else None
-        return _text({"content_type": content_type, "size": len(data), "text": text}, audience)
+        out = {
+            "content_type": got.content_type,
+            "size": got.size,
+            "text": got.text and got.text[:PAGE],
+        }
+        if got.best_effort:
+            out["redaction"] = "best effort"
+        return _text(out, audience)
 
     @mcp.tool()
     async def data_sql(ctx: Context, query: str) -> str:  # pyright: ignore[reportUnusedFunction]
@@ -200,4 +205,4 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             except SqlRefused as e:
                 raise ToolError(str(e)) from None
         await noted(auth, [audience_ref(audience)])
-        return _text(r.show(dataclasses.asdict(result)), audience)
+        return _text(r.show(dataclasses.asdict(result), ids=False), audience)

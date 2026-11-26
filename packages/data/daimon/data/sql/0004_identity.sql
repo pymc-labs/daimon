@@ -3,8 +3,8 @@
 -- An identity is one user of a provider's workspace (`<provider>/<workspace>:user:<subject>`).
 -- A source's listing records it; a proof links it to a Daimon account. A person reads as their
 -- account plus every identity linked to it in the reading tenant, so a link is a grant: it is
--- written only by a proof the provider or platform verified, or by a data admin acting on
--- someone else (daimon.data.identity). Nothing here is granted to a reader.
+-- written only by a proof the provider or platform verified, or by a workspace admin, for
+-- anyone, themselves included (daimon.data.identity). Nothing here is granted to a reader.
 
 create table {{data}}.identities (
   tenant_id uuid not null,

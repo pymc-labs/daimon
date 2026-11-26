@@ -37,7 +37,6 @@ RefusalReason = Literal["no_person", "contained", "agent_request"]
 UNKNOWN_READ: Final = "unknown"
 """A read no one may recall: who read it could not be told."""
 _AUDIENCE: Final = "audience:"
-_ANYWHERE: Final = "*"
 
 
 def subject(provider: str, workspace: str, kind: str, id_: str) -> str:
@@ -83,8 +82,7 @@ class DataOrigin:
 
 @dataclass(frozen=True)
 class DataAudience:
-    """Everyone the answer must be readable by. `people` bound the scopes; `reached` are those
-    of them who see it (all but an agent owner who is not asking or viewing)."""
+    """Everyone the answer must be readable by. `people` bound the scopes."""
 
     people: frozenset[uuid.UUID]
     guests: frozenset[str]
@@ -93,7 +91,6 @@ class DataAudience:
     redact: bool
     place: str | None = None
     notice: str | None = None
-    reached: frozenset[uuid.UUID] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -122,7 +119,6 @@ def data_audience(
     if origin.kind != "private" and origin.viewers:
         readers |= origin.viewers
     people = {r.account_id for r in readers if r.account_id is not None}
-    reached = frozenset(people)
     if agent_owner is not None:
         people.add(agent_owner)
     guests = frozenset(r.subject for r in readers if r.account_id is None)
@@ -143,7 +139,6 @@ def data_audience(
         redact=public_only or bool(people & redacted),
         place=origin.place,
         notice=origin.notice,
-        reached=reached,
     )
 
 
@@ -155,27 +150,19 @@ def audience_ref(audience: DataAudience) -> str:
     return f"{_AUDIENCE}{','.join(sorted(map(str, audience.people)))}@{audience.place}"
 
 
-def saver_ref(account_id: uuid.UUID) -> str:
-    """How a memory saved with no chat session records its saver: recalled only where the
-    saver is the only person reached, anywhere."""
-    return f"{_AUDIENCE}{account_id}@{_ANYWHERE}"
-
-
 def is_audience_ref(ref: str) -> bool:
     return ref.startswith(_AUDIENCE)
 
 
 def audience_ref_holds(ref: str, audience: DataAudience) -> bool:
-    """Whether `audience` may recall an `audience_ref` (same place, all its people among those
-    who read it) or a `saver_ref` (the saver is the only person reached)."""
+    """Whether `audience` may recall an `audience_ref`: same place, all its people among
+    those who read it."""
     ids, _, where = ref.removeprefix(_AUDIENCE).partition("@")
-    readers = set(ids.split(","))
-    present = audience.reached if where == _ANYWHERE else audience.people
     return (
         not audience.public_only
-        and where in (_ANYWHERE, audience.place)
-        and bool(present)
-        and {str(p) for p in present} <= readers
+        and where == audience.place
+        and bool(audience.people)
+        and {str(p) for p in audience.people} <= set(ids.split(","))
     )
 
 

@@ -126,8 +126,7 @@ and is held from then on, so an agent that read data starts afresh there.
 After a data read, a conversation asks only agents that read data too, and their reads count
 as its own. A memory saved after a data read records what was read; recalling it counts as
 reading that, and an update keeps it. It shows only where everyone could read all of it. After a live result or SQL, it shows only in that room or
-private chat, while everyone there was already a reader. Saved outside a chat (the CLI, a
-key) where an agent reads data, it shows only where its saver is the only person.
+private chat, while everyone there was already a reader.
 
 ## Redaction sets
 
@@ -138,7 +137,7 @@ and rewrites answers instead, entity names hiding as when unset. `exclude_ids` a
 
 A set applies to the sources that name it. When its rules change, answers from those sources
 apply them too until each source syncs again. Answer-time rules reach SQL values and file text
-best effort.
+best effort; a file under them shows only its text, so one with none is not shown.
 
 ## Declared config
 
