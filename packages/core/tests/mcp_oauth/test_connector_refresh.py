@@ -431,3 +431,13 @@ def test_watches_never_read_connector_tokens() -> None:
             if any("connector_tokens" in name for name in names):
                 readers.append(str(path.relative_to(root)))
     assert readers == [], f"watch code must not read connector tokens: {readers}"
+
+
+def test_a_vault_copy_is_refreshed_early_enough_to_outlive_the_longest_turn() -> None:
+    """Nothing refreshes a vault copy mid-turn, so the margin covers the whole ceiling."""
+    from daimon.core.mcp_oauth.connector_tokens import VAULT_REFRESH_EARLY
+    from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S
+
+    assert VAULT_REFRESH_EARLY > timedelta(seconds=LONGEST_TURN_CEILING_S), (
+        f"{VAULT_REFRESH_EARLY} must exceed the {LONGEST_TURN_CEILING_S}s turn ceiling"
+    )

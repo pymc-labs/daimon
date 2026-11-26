@@ -35,6 +35,7 @@ from daimon.core.mcp_server_url import same_mcp_url
 from daimon.core.stores import agent_mcp_credentials as agent_tokens_store
 from daimon.core.stores import connector_tokens as store
 from daimon.core.stores.domain import ConnectorTokenRow, McpOAuthFlowRow
+from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
@@ -43,8 +44,8 @@ REFRESH_LEASE = dt.timedelta(seconds=60)
 """A claim older than this belongs to a refresher that died; another may take it."""
 REFRESH_EARLY = dt.timedelta(seconds=60)
 """Refresh a token this close to expiry before handing it to a turn."""
-VAULT_REFRESH_EARLY = dt.timedelta(minutes=30)
-"""A vault copy is not refreshed mid-turn, so it must outlive the Managed Agents turn."""
+VAULT_REFRESH_EARLY = dt.timedelta(seconds=LONGEST_TURN_CEILING_S) + dt.timedelta(minutes=5)
+"""A vault copy is not refreshed mid-turn, so it must outlive the longest turn, with margin."""
 _WAIT_STEP_S = 0.2
 
 Clock = Callable[[], dt.datetime]
