@@ -144,11 +144,17 @@ Agent chat and the hub drive only sessions that agent chat created. They
 cannot continue, cancel or archive a platform conversation, even for the same
 account and agent.
 
-Reading a session never answers a tool call. If the service restarts while an
-agent-chat turn waits on one, `get_session` reports `paused` with the hint
-"paused: call continue_turn to resume". Only the session's own account can
-resume it. The waiting calls are then decided by the policy in force at that
-moment.
+To wait for a turn, call `await_turn`. It returns when the agent says something,
+when the turn ends, or after about four minutes, so nothing is polled. One call
+per return carries a long job to its end.
+
+Reading a session with `get_session` or `list_events` never answers a tool
+call. If the service restarts while an agent-chat turn waits on one,
+`get_session` reports `paused` with the hint "paused: call continue_turn to
+resume". `await_turn` and `continue_turn` resume it, for the session's own
+account only. The waiting calls are then decided by the policy in force at that
+moment. A turn that reaches the [unattended run time limit](features.md) pauses
+the same way, and resumes the same way.
 
 A chat turn waiting on someone's card reads as "paused: waiting for approval
 where it was asked", and `continue_turn` refuses it. The list tools report the

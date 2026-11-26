@@ -16,10 +16,11 @@ from daimon.core.platform_words import (
 )
 from daimon.core.stores.domain import CHAT_PLATFORMS
 
-__all__ = ["admin_noun", "setup_instruction", "space_noun", "top_up_noun"]
+__all__ = ["admin_noun", "app_noun", "setup_instruction", "space_noun", "top_up_noun"]
 
 _NEUTRAL_ADMIN = NEUTRAL_ADMIN
 _NEUTRAL_SPACE = NEUTRAL_SPACE
+_NEUTRAL_APP = "The chat app"
 _NEUTRAL_SETUP = "open the setup panel"
 _NEUTRAL_TOP_UP = "the billing command"
 
@@ -32,6 +33,12 @@ def admin_noun(platform: str | None) -> str:
     """Who can change settings, e.g. "a server admin"; "an admin" for an unknown platform."""
     words = _words(platform)
     return words.admin if words is not None else _NEUTRAL_ADMIN
+
+
+def app_noun(platform: str | None) -> str:
+    """The chat app's own name, to start a sentence; "The chat app" for an unknown platform."""
+    words = _words(platform)
+    return words.label if words is not None else _NEUTRAL_APP
 
 
 def space_noun(platform: str | None) -> str:
