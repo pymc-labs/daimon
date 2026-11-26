@@ -37,12 +37,14 @@ a different reader; exact technical words are right for them.
 2. **Do less.** Each concept, mode, setting and step costs every person who meets
    it. Add one only when a person needs the choice, and give it a default that
    works for most people. Name each choice by its effect, so a person can tell
-   what changes. More choices make each decision slower, and most people keep
-   the default.
+   what changes. Send an answer with no extra card when no permission, decision
+   or error needs one, and do not fill a chat with cards. More choices make each
+   decision slower, and most people keep the default.
 3. **Ask late.** Ask for a sign-in, a permission or a decision only when a task
    needs it, and say why in one line. Keep what the decision needs in view (a
-   cost, who receives it, what is deleted) and put other detail behind a button.
-   A person who has not met the problem does not need its explanation.
+   cost, who receives it, whose account is used, what is deleted) and put other
+   detail behind a button. A person who has not met the problem does not need
+   its explanation.
 4. **One thing, one name, in the person's words.** Use the name a person would
    say ("cloud computer") on cards, in tool descriptions and results, in settings
    and in the docs. Never show a name made for code: a tool name, an argument, a
@@ -51,7 +53,9 @@ a different reader; exact technical words are right for them.
 5. **Two lines and a button.** One line for what is happening, one line for what
    to do. A button over prose; never ask someone to type what a button can do.
    No " · " separators: each fact gets its own line. Use the same words on every
-   platform. People scan a card, and few read it.
+   platform. A card is a piece of UI, not a message from an assistant: no
+   greeting, no filler, and space between things that are separate. People scan
+   a card, and few read it.
 6. **A problem ends with a next step.** Say what happened as the person saw it,
    not what broke inside. Then give a step that resolves it, as a button or a
    link where one exists, or name who can help ("Ask an admin or an owner").
