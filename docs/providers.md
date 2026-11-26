@@ -29,6 +29,11 @@ in one conversation.
 
 A provider that cannot meet a channel's requirements refuses the reply.
 
+Anthropic's built-in Word, PowerPoint, Excel and PDF skills run only on Anthropic.
+On OpenAI and Gemini an agent that has them gets short open equivalents
+(`defaults/skills/open-*`, built on python-docx, python-pptx, openpyxl and
+pypdf) instead.
+
 ### What is not supported yet
 
 - **Self-hosted:** memory, routines, effort and a

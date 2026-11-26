@@ -52,6 +52,7 @@ from mux.profiles.anthropic import (
     MODEL_CONFIG_NAMESPACE,
     MULTIAGENT_NAMESPACE,
     SESSION_RESOURCE_CREATE_NAMESPACE,
+    is_builtin_skill,
 )
 from mux.profiles.gemini import INLINE_REUSE
 from mux.profiles.openai import PERSISTENT_WORKSPACE
@@ -505,6 +506,7 @@ async def _capture_source_capabilities(
         environment_inline_bytes,
         fitting_skills,
         measure_carried_skills,
+        open_skills,
         skill_losses,
         skill_names,
     )
@@ -879,7 +881,16 @@ async def _capture_source_capabilities(
                     # Tools it can't map (custom tools, a partial toolset) go whole.
                     mapped_tools, unavailable_builtin_tools = (), ()
                     template_losses = ("tools",)
-                carried = carried_skills(spec)
+                # Anthropic's built-in skills have no bytes to carry: their open
+                # equivalents go instead.
+                carried = (
+                    *carried_skills(spec),
+                    *await open_skills(
+                        request.deps.sessionmaker,
+                        source.tenant_id,
+                        (s.id for s in spec.skills or () if is_builtin_skill(s)),
+                    ),
+                )
                 if carried and not attaches_session_skills(profile):
                     template_losses, carried = ("skills", *template_losses), ()
             else:
@@ -962,7 +973,7 @@ async def _capture_source_capabilities(
             mounted = {f"mcp_server:{server.name}" for server in relayed}
             connector_losses = tuple(c for c in connector_losses if c not in mounted)
             # The provider's built-in skills (docx, pptx, ...) have no bytes to
-            # carry and run only there: another backend goes without them.
+            # carry and run only there; a template carries open ones instead.
             portable = tuple(
                 s for s in spec.skills or () if s.source in (None, "custom") and not template
             )
