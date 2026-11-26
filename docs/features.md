@@ -919,7 +919,7 @@ The integrations pages of the web app. Off hides them for everyone on the team.
 
 ## Watches
 
-The agent can watch a page or feed and start a conversation when it changes. Off removes the watch tools here and stops the watches made here. Watches run only once whoever runs Daimon allows them.
+The agent can watch a page or feed and start a conversation when it changes. Off removes the watch tools here and stops the watches made here. Watches only run once whoever runs Daimon allows them.
 
 | | |
 | --- | --- |

@@ -1168,7 +1168,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "Watches",
         (
             "The agent can watch a page or feed and start a conversation when it changes. Off "
-            "removes the watch tools here and stops the watches made here. Watches run only once "
+            "removes the watch tools here and stops the watches made here. Watches only run once "
             "whoever runs Daimon allows them."
         ),
         legacy_env=("DAIMON_WATCHES__ENABLED",),

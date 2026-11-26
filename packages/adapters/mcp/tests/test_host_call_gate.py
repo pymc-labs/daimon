@@ -31,6 +31,7 @@ from daimon.core.authz import Subject
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.confirmation import (
     ServerSkillUpdateCard,
+    SharedConnectionCard,
     compute_card_skipped,
     confirmed_tools_for_turn,
 )
@@ -406,6 +407,10 @@ async def skill_update(_: ToolCall) -> ServerSkillUpdateCard:
     return ServerSkillUpdateCard(name="s", version="1", new_version="2", changes={})
 
 
+async def shared_connection(_: ToolCall) -> SharedConnectionCard:
+    return SharedConnectionCard("crm", "https://crm.example/mcp", tool="send")
+
+
 async def _claude_outcome(
     rig: Rig, policy: ToolSafetyPolicy, name: str, args: dict[str, Any]
 ) -> str:
@@ -434,6 +439,7 @@ async def _claude_outcome(
         daimon_rules=True,
         # Claude's card shows the skill's diff; a host card shows the call's own arguments.
         skill_update_for=skill_update,
+        shared_connection_for=shared_connection,
     )
     call = ToolCall(
         tool_use_id="claude", server_name=DAIMON_SERVER_NAME, tool_name=name, input=args
