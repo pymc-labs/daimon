@@ -9,12 +9,16 @@ A rule set is a JSON or YAML document, named per tenant:
     exclude_ids: ["doc:42"]                                      # records never stored
     entities:    [{name: "Acme", aliases: ["Acme Inc"], scope: "client:acme", label: "[client]"}]
 
-At ingest a source applies its set's regex, aliases and removals to every record's text before
-it is chunked or embedded, and drops `exclude_ids`. A replacement that starts with an article
+`at` says when a set applies. Unset, as before: at ingest a source applies its set's regex,
+aliases and removals to every record's text before it is chunked or embedded, and `entities`
+apply at read time. `at: storage` applies all of them at ingest, entity names becoming their
+label for everyone. `at: answer` stores text as the source has it and applies regex, aliases
+and removals to every answer, and entities as below. `exclude_ids` always drops records at
+ingest, so they are never stored. A replacement that starts with an article
 ("an engineer") takes the place of a preceding "the", "a" or "an" and is capitalised at the
-start of a sentence. Terms of four letters or more match in any case. `entities` apply at read
-time only: when the audience holds a guest or a person marked redacted, an entity's names
-become its label unless the audience holds its `scope`.
+start of a sentence. Terms of four letters or more match in any case. Read-time `entities`:
+when the audience holds a guest or a person marked redacted, an entity's names become its
+label unless the audience holds its `scope`.
 
 A set is inline (declared) or a repo file pinned by blob sha. Only the approved sha counts:
 when the file upstream changes, its new rules wait as `pending` and every source using the set
@@ -30,7 +34,7 @@ import re
 import uuid
 from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, replace
-from typing import Any, Final, cast
+from typing import Any, Final, Literal, cast
 
 import httpx
 import structlog
@@ -122,6 +126,8 @@ class Entity(BaseModel):
 
 class Rules(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    at: Literal["storage", "answer"] | None = None
+    """When the set applies (module docstring); None keeps text at ingest, names at read."""
     aliases: dict[str, str] = Field(default={}, max_length=LIMIT)
     removals: list[str] = Field(default=[], max_length=LIMIT)
     regex: list[Pattern] = Field(default=[], max_length=1000)
@@ -181,9 +187,13 @@ def walk[T](value: T, fn: Callable[[str], str]) -> T:
 
 
 class Redactor:
-    """What a source applies to its records as it ingests them."""
+    """What a source applies to its records as it ingests them, or, for an `answer` set,
+    what every answer goes through (`answer_redactor`)."""
 
-    def __init__(self, rules: Rules) -> None:
+    def __init__(self, rules: Rules, *, answer: bool = False) -> None:
+        if rules.at == "answer" and not answer:
+            rules = Rules(exclude_ids=rules.exclude_ids)  # only what is never stored
+        self._names = Entities(rules.entities, ()) if rules.at == "storage" else None
         self._regex = [(re.compile(p.pattern), p.replace) for p in rules.regex]
         self._ids = frozenset(rules.exclude_ids)
         self._aliases = dict(rules.aliases)
@@ -213,7 +223,10 @@ class Redactor:
             s = self._alias_re.sub(lambda m: self._alias(s, m), s)
         if self._removal_re:
             s = self._removal_re.sub(REMOVED, s)
-        return s
+        return s if self._names is None else self._names.text(s)
+
+    def __call__[T](self, value: T) -> T:
+        return walk(value, self.text)
 
     def _alias(self, s: str, m: re.Match[str]) -> str:
         term = m["term"]
@@ -298,7 +311,29 @@ async def read_redactor(
         (tenant_id,),
     )
     rules = [Rules.model_validate(r["rules"]) for r in await cur.fetchall()]
-    return Entities((e for r in rules for e in r.entities), held)
+    return Entities((e for r in rules if r.at != "storage" for e in r.entities), held)
+
+
+async def answer_redactor(
+    conn: AsyncConnection[DictRow], schemas: Schemas, tenant_id: uuid.UUID
+) -> Redactor | None:
+    """The regex, aliases and removals of the tenant's approved `answer` sets, which every
+    answer goes through; None when it has none."""
+    cur = await conn.execute(
+        f"select rules from {schemas.data}.redaction_sets where tenant_id = %s"
+        " and rules ->> 'at' = 'answer' order by name".encode(),
+        (tenant_id,),
+    )
+    sets = [Rules.model_validate(r["rules"]) for r in await cur.fetchall()]
+    if not sets:
+        return None
+    merged = Rules(
+        at="answer",
+        aliases={k: v for r in sets for k, v in r.aliases.items()},
+        removals=[t for r in sets for t in r.removals],
+        regex=[p for r in sets for p in r.regex],
+    )
+    return Redactor(merged, answer=True)
 
 
 async def redacted_among(

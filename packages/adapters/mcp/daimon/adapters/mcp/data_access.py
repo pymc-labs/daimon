@@ -99,7 +99,7 @@ async def readable_by_audience(
         audience = await data_audience_for(runtime, auth)
         async with pool.connection(settings) as conn:
             r = await open_read(conn, schemas, auth.tenant_id, audience, salt="memory")
-            if r.redacted:
+            if r.entities is not None:  # what it saw may name what someone here may not see
                 return [False] * len(ref_sets)
             env = Env.of(settings)
             return [await reads.readable(conn, schemas, r.ctx, refs, env) for refs in ref_sets]
