@@ -543,7 +543,9 @@ async def test_github_goes_through_the_router_and_never_asks_to_reconnect(rig: R
     """With the App, `github` calls the router with the turn's own bearer (`TurnRouters`);
     no repository access names GitHub, since a Reconnect cannot grant one."""
     github = Connector("github", GITHUB_COPILOT_MCP_URL, "auto")
-    rig.connectors = route_github({"github": github, _KEY: rig.connectors[_KEY]}, _PUBLIC)
+    rig.connectors = route_github(
+        {"github": github, _KEY: rig.connectors[_KEY]}, _PUBLIC, carded=True
+    )
     assert rig.connectors["github"].url == github_router_url(_PUBLIC)
     assert rig.connectors[_KEY].url == _UP, "other connectors keep their own server"
     rig.token[0] = None
@@ -551,6 +553,13 @@ async def test_github_goes_through_the_router_and_never_asks_to_reconnect(rig: R
     assert body["error"]["message"] == GITHUB_TEXT, f"names GitHub: {body}"
     body = (await rig.send("tools/list")).json()
     assert body["error"]["message"] == RECONNECT_TEXT, f"others still reconnect: {body}"
+
+
+def test_a_self_hosted_harness_keeps_its_own_github_server() -> None:
+    """An uncarded turn has no router bearer, so the App never reroutes its `github`."""
+    github = Connector("github", GITHUB_COPILOT_MCP_URL, "auto")
+    routed = route_github({"github": github}, _PUBLIC, carded=False)
+    assert routed["github"].url == GITHUB_COPILOT_MCP_URL, "the harness keeps its own server"
 
 
 async def test_a_failing_connector_answers_a_plain_failure(rig: Rig) -> None:

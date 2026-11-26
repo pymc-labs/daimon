@@ -521,8 +521,16 @@ def is_github_connector(url: str, public_url: str) -> bool:
     )
 
 
-def route_github(connectors: Mapping[str, Connector], public_url: str) -> dict[str, Connector]:
-    """Point the `github` connector at Daimon's router, which picks each call's App token."""
+def route_github(
+    connectors: Mapping[str, Connector], public_url: str, *, carded: bool
+) -> dict[str, Connector]:
+    """Point the `github` connector at Daimon's router, which picks each call's App token.
+
+    Only on a carded provider turn: a self-hosted harness's uncarded credential has no
+    router bearer (`TurnRouters.bearer`), so its `github` keeps its own server.
+    """
+    if not carded:
+        return dict(connectors)
     router = github_router_url(public_url)
     return {
         key: replace(c, url=router) if is_github_connector(c.url, public_url) else c
@@ -629,7 +637,7 @@ def build_connector_relay(
     async def load_connectors(turn: RelayTurn, origin: TurnOriginRow) -> Mapping[str, Connector]:
         found = await _load_connectors(turn, origin)
         # With the GitHub App, `github` reaches the agent's repos as on Claude.
-        return route_github(found, public_url) if routers.configured else found
+        return route_github(found, public_url, carded=turn.carded) if routers.configured else found
 
     async def _load_connectors(turn: RelayTurn, origin: TurnOriginRow) -> Mapping[str, Connector]:
         if origin.responder_ma_agent_id.startswith(DAIMON_ID_PREFIXES):
