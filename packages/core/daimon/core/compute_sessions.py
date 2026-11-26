@@ -26,6 +26,7 @@ from typing import Literal
 
 import structlog
 from daimon.core import compute_tasks as scripts
+from daimon.core.access_policy import AGENT_CHAT_SCOPE_PREFIX
 from daimon.core.compute_models import (
     ACTIVE_TASK_STATES,
     ComputeResource,
@@ -46,6 +47,7 @@ from daimon.core.features.snapshot import FeaturePlace, feature_in_or_none
 from daimon.core.stores import compute_sessions as store
 from daimon.core.stores import compute_tasks as task_store
 from daimon.core.stores.domain import TurnOriginRow
+from daimon.core.stores.session_settle_state import find_agent_chat_session
 from daimon.core.stores.tenants import list_tenants_by_platform
 from daimon.core.stores.turn_origins import get_active_origin
 from pydantic import JsonValue
@@ -94,12 +96,83 @@ _DEADLINE_GRACE = timedelta(minutes=5)
 READ_OPERATIONS = frozenset({"read_file", "list_files"})
 
 
-def owner_present(origin: TurnOriginRow) -> bool:
-    """The owner sent this turn's message and waits for its reply."""
+#: What an agent-chat session is told when cloud computers from agent chat are off for it.
+AGENT_CHAT_OFF = (
+    "Cloud computers from agent chat are turned off here. Nothing was done. "
+    "Ask a server admin to turn them on."
+)
+
+
+@dataclass(frozen=True)
+class ComputePlace:
+    """Where an agent-chat session uses cloud computers (`agent_chat_owner`).
+
+    It is no turn origin: its thread is a scope of compute alone (`AGENT_CHAT_SCOPE_PREFIX`),
+    never given to origin, seal or audience code, and its parent channel is empty. The
+    agent fields are named as an origin's, for the session row. `feature_channel_id` is the
+    channel the session's tools were chosen for, where its features are read. Its owner
+    counts as present: the rule that made it is checked again on every call (`_origin`).
+    """
+
+    platform: str
+    thread_id: str
+    responder_ma_agent_id: str
+    responder_name: str
+    feature_channel_id: str | None
+    parent_channel_id: str = ""
+
+
+def agent_chat_thread(chat_session_id: str) -> str:
+    """The compute scope of the agent-chat session whose credential signs `chat_session_id`."""
+    return AGENT_CHAT_SCOPE_PREFIX + chat_session_id
+
+
+async def agent_chat_owner(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    chat_session_id: str,
+    platform: str,
+    agent_id: str,
+    agent_name: str,
+) -> ComputePlace | None:
+    """The one rule for cloud computers from agent chat: the place of the agent-chat session
+    whose credential signs `chat_session_id`, or None.
+
+    The session was found by that grant for the account that created it
+    (`find_agent_chat_session`), and `compute` and `compute_agent_chat` are both on for its
+    channel and agent (`feature_in_or_none` checks no `depends_on`, so both are read; a
+    feature that can't be read is off). The credential's own checks (a chat execution of
+    a person's account, no agent key, routine, helper or held turn) are its caller's
+    (`tools.compute._caller`).
+    """
+    found = await find_agent_chat_session(db, grant=chat_session_id, account_id=account_id)
+    if found is None:
+        return None
+    place = FeaturePlace.of(tenant_id, platform, found.channel_id, agent_id=agent_id)
+    compute = await feature_in_or_none(db, None, place, "compute")
+    agent_chat = await feature_in_or_none(db, None, place, "compute_agent_chat")
+    if compute is None or agent_chat is None or not (compute.on and agent_chat.on):
+        return None
+    return ComputePlace(
+        platform=platform,
+        thread_id=agent_chat_thread(chat_session_id),
+        responder_ma_agent_id=agent_id,
+        responder_name=agent_name,
+        feature_channel_id=found.channel_id,
+    )
+
+
+def owner_present(origin: TurnOriginRow | ComputePlace) -> bool:
+    """The owner sent this turn's message and waits for its reply. An agent-chat session's
+    owner counts as present wherever its rule holds (`agent_chat_owner`)."""
+    if isinstance(origin, ComputePlace):
+        return True
     return origin.attended and origin.human_invocation is True
 
 
-def made_here(session: ComputeSession, origin: TurnOriginRow) -> bool:
+def made_here(session: ComputeSession, origin: TurnOriginRow | ComputePlace) -> bool:
     """Whether `session` started in `origin`'s conversation, the only one that may use it."""
     return (session.platform, session.thread_id, session.parent_channel_id) == (
         origin.platform,
@@ -109,7 +182,11 @@ def made_here(session: ComputeSession, origin: TurnOriginRow) -> bool:
 
 
 async def turn_may_read(
-    db: AsyncSession, origin: TurnOriginRow, session: ComputeSession, *, now: datetime
+    db: AsyncSession,
+    origin: TurnOriginRow | ComputePlace,
+    session: ComputeSession,
+    *,
+    now: datetime,
 ) -> bool:
     """Whether this turn may read this session: the one rule for every compute read.
 
@@ -118,11 +195,18 @@ async def turn_may_read(
     and reports; only `turn_may_act` lets it run, write or stop, and it never launches
     or extends.
     """
-    return owner_present(origin) or await task_store.wake_turn_of(db, origin, session, now=now)
+    if isinstance(origin, ComputePlace) or owner_present(origin):
+        return True
+    return await task_store.wake_turn_of(db, origin, session, now=now)
 
 
 async def turn_may_act(
-    db: AsyncSession, origin: TurnOriginRow, session: ComputeSession, *, now: datetime, limit: int
+    db: AsyncSession,
+    origin: TurnOriginRow | ComputePlace,
+    session: ComputeSession,
+    *,
+    now: datetime,
+    limit: int,
 ) -> bool | Literal["limit"]:
     """Whether this turn may run commands, write files or stop this session.
 
@@ -132,7 +216,7 @@ async def turn_may_act(
     file (`ComputeSession.wake_turns`, read from the locked row). A wake turn already on
     that list may act again. `"limit"` says the list stopped it.
     """
-    if owner_present(origin):
+    if isinstance(origin, ComputePlace) or owner_present(origin):
         return True
     if not task_store.wake_reads_in(session) or not await task_store.wake_turn_of(
         db, origin, session, now=now
@@ -145,7 +229,10 @@ async def turn_may_act(
 
 
 async def note_act(
-    db: AsyncSession, caller_account_id: uuid.UUID, origin: TurnOriginRow, session: ComputeSession
+    db: AsyncSession,
+    caller_account_id: uuid.UUID,
+    origin: TurnOriginRow | ComputePlace,
+    session: ComputeSession,
 ) -> ComputeSession:
     """Record an act on `session`, in the transaction that holds its lock: the one rule
     for every act path (a command, inline or background, a file write and a stop).
@@ -155,7 +242,11 @@ async def note_act(
     """
     if owner_present(origin) and caller_account_id == session.owner_account_id:
         turns: list[str] = []
-    elif owner_present(origin) or origin.id.hex in session.wake_turns:
+    elif (
+        isinstance(origin, ComputePlace)
+        or owner_present(origin)
+        or origin.id.hex in session.wake_turns
+    ):
         return session
     else:
         turns = [*session.wake_turns, origin.id.hex]
@@ -168,9 +259,12 @@ async def note_act(
 
 @dataclass(frozen=True)
 class ComputeCaller:
+    """Who calls a compute tool. `origin` is a chat turn's verified origin, or the place of
+    an agent-chat session (`agent_chat_owner`)."""
+
     tenant_id: uuid.UUID
     account_id: uuid.UUID
-    origin: TurnOriginRow
+    origin: TurnOriginRow | ComputePlace
     chat_session_id: str
     external_user_id: str
     admin: bool = False
@@ -220,9 +314,23 @@ class ComputeSessions:
 
     async def _origin(
         self, db: AsyncSession, caller: ComputeCaller, *, absent_ok: bool = False
-    ) -> TurnOriginRow:
-        """The caller's live origin. ``absent_ok`` leaves a turn with no owner present to
-        `turn_may_read` or `turn_may_act`."""
+    ) -> TurnOriginRow | ComputePlace:
+        """The caller's live origin, or its agent-chat place with its rule checked again.
+        ``absent_ok`` leaves a turn with no owner present to `turn_may_read` or
+        `turn_may_act`."""
+        if isinstance(caller.origin, ComputePlace):
+            place = await agent_chat_owner(
+                db,
+                tenant_id=caller.tenant_id,
+                account_id=caller.account_id,
+                chat_session_id=caller.chat_session_id,
+                platform=caller.origin.platform,
+                agent_id=caller.origin.responder_ma_agent_id,
+                agent_name=caller.origin.responder_name,
+            )
+            if place is None or place != caller.origin:
+                raise StoreError(AGENT_CHAT_OFF)
+            return place
         origin = await get_active_origin(
             db,
             tenant_id=caller.tenant_id,
@@ -615,19 +723,21 @@ class ComputeSessions:
 
     async def _allowed(self, db: AsyncSession, session: ComputeSession) -> bool | None:
         """Whether a session still waiting to launch may: the deployment switch and the
-        `compute` feature at its place. Off here stops it instead of provisioning; None
-        when the feature cannot be read, so this tick leaves the session as it is."""
-        place = FeaturePlace.of(
-            session.tenant_id,
-            session.platform,
-            session.parent_channel_id,
-            session.thread_id,
-            agent_id=session.agent_id,
-        )
+        `compute` feature at its place (`store.feature_place`). Off here stops it instead of
+        provisioning; None when a feature cannot be read, so this tick leaves the session
+        as it is. An agent-chat session's machine also needs `compute_agent_chat`, and is
+        stopped when its session's record is not found."""
         if not self.settings.enabled:
             return False
-        found = await feature_in_or_none(db, None, place, "compute")
-        return None if found is None else found.on
+        place = await store.feature_place(db, session)
+        if place is None:
+            return False
+        found = [await feature_in_or_none(db, None, place, "compute")]
+        if store.in_agent_chat(session):
+            found.append(await feature_in_or_none(db, None, place, "compute_agent_chat"))
+        if any(feature is not None and not feature.on for feature in found):
+            return False
+        return None if None in found else True
 
     async def _reconcile_one(self, session: ComputeSession, *, archived: bool) -> None:
         async with self.sm.begin() as db:

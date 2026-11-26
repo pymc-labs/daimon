@@ -5,11 +5,11 @@ access lists and their functions, the row policies, scopes, grants and the audit
 plus `0001_grants.sql` (grants, and the vector table and BM25 index where the server has
 those extensions). Nothing reads them until the `data_sources` feature is on.
 
-As with 0230, a server that lacks what the store needs, or an install without the
+As with 0233, a server that lacks what the store needs, or an install without the
 `daimon-data` package, logs a warning and does nothing here; `daimon data init` applies
 it later.
 
-Downgrading drops both store schemas and everything in them, as 0230 does.
+Downgrading drops both store schemas and everything in them, as 0233 does.
 
 downgrade: destructive
 """
@@ -18,8 +18,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision: str = "0231_data_store_tables"
-down_revision: str | None = "0230_data_store"
+revision: str = "0234_data_store_tables"
+down_revision: str | None = "0233_data_store"
 branch_labels: str | None = None
 depends_on: str | None = None
 

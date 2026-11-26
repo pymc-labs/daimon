@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Literal
 
 import structlog
@@ -31,15 +32,19 @@ from daimon.adapters.mcp.resource_ports import (
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _policy_gate  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._session_access import hub_access_mode
+from daimon.core.agent_chat_requester import UNREAD, EarlierTurn
+from daimon.core.compute_sessions import agent_chat_owner
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_AGENT_CHAT,
     MA_METADATA_KEY_CHANNEL,
+    MA_METADATA_KEY_CHAT_SESSION,
     MA_METADATA_KEY_PRIVATE_DM,
 )
 from daimon.core.headless_runner import unattended_ceiling_s
 from daimon.core.mcp_tool_annotations import relay_catalogues
 from daimon.core.stores import session_settle_state
+from daimon.core.tool_safety import COMPUTE_APPROVAL_TOOLS
 from daimon.core.turn.approvals import (
     AnnotationLookup,
     build_decision_events,
@@ -163,12 +168,18 @@ def rules_channel(auth: AuthIdentity, session: BetaManagedAgentsSession) -> str 
 
 
 async def record_turn(
-    runtime: McpRuntime, handle: str, *, turn_event_id: str, rules_channel_id: str | None
+    runtime: McpRuntime,
+    handle: str,
+    *,
+    turn_event_id: str,
+    rules_channel_id: str | None,
+    send: int | None,
 ) -> None:
     """Note that agent chat started `turn_event_id`, after its send was accepted.
 
-    Without this record nobody can resume the turn after a restart, which
-    fails closed; the sending worker does not need it.
+    `send` is the number `record_driver` gave that send, under the same fence.
+    Without this record nobody can resume the turn after a restart, and the next
+    send names nobody, which fails closed; the sending worker does not need it.
     """
     try:
         async with runtime.session_factory.begin() as db:
@@ -177,6 +188,7 @@ async def record_turn(
                 managed_session_id=handle,
                 turn_event_id=turn_event_id,
                 rules_channel_id=rules_channel_id,
+                send=send,
             )
     except Exception:
         # Named boundary: the message was accepted; only a later resume is lost.
@@ -188,6 +200,13 @@ async def _recorded_turn(
 ) -> session_settle_state.UnattendedTurn | None:
     async with runtime.session_factory() as db:
         return await session_settle_state.unattended_turn(db, managed_session_id=handle)
+
+
+async def _agent_chat_sends(
+    runtime: McpRuntime, handle: str
+) -> session_settle_state.AgentChatSends | None:
+    async with runtime.session_factory() as db:
+        return await session_settle_state.count_agent_chat_sends(db, managed_session_id=handle)
 
 
 def _public_url(runtime: McpRuntime) -> str | None:
@@ -219,6 +238,10 @@ class _Turn:
     boundary_id: str | None = None
     state: TurnState = field(default_factory=TurnState)
     confirmed: set[str] = field(default_factory=set[str])
+    #: The provider's `processed_at` of the boundary and of the turn's latest idle, as
+    #: listed: None while a message is queued, so possibly not a datetime at all.
+    boundary_processed_at: object = None
+    idle_processed_at: object = None
 
 
 async def _read_turn(runtime: McpRuntime, auth: AuthIdentity, handle: str) -> _Turn:
@@ -241,6 +264,7 @@ async def _read_turn(runtime: McpRuntime, auth: AuthIdentity, handle: str) -> _T
         for event in result.data:
             if event.type == "user.message":
                 turn.boundary_id = event.id
+                turn.boundary_processed_at = event.processed_at
                 break
             events.append(event)
         if turn.boundary_id is not None or result.next_page is None:
@@ -250,9 +274,79 @@ async def _read_turn(runtime: McpRuntime, auth: AuthIdentity, handle: str) -> _T
         raise RuntimeError("MCP turn history exceeds the confirmation page limit")
     for event in reversed(events):
         turn.state = apply(turn.state, event)
+        if event.type == "session.status_idle":
+            turn.idle_processed_at = event.processed_at
         if event.type == "user.tool_confirmation":
             turn.confirmed.add(event.tool_use_id)
     return turn
+
+
+async def earlier_turn_open(
+    runtime: McpRuntime, auth: AuthIdentity, handle: str, *, new_session: bool
+) -> EarlierTurn:
+    """Whether a turn sent earlier on `handle` may still be running.
+
+    Read from Daimon's own count of the sends (`record_driver`, `record_turn`), written
+    only under the session fence, not from the session's status or transcript alone:
+    the status can still read idle, and the transcript may not list the message yet,
+    just after a send was accepted.
+
+    - On a session this caller just created, any send begun is another caller's.
+    - Otherwise the latest send begun must be the one whose turn was recorded; a send
+      that may have been accepted unrecorded (a 5xx or a timeout) is open and logged.
+      The recorded turn then counts as ended only once the transcript's newest
+      boundary is that turn, processed, and an idle that is not a pause was processed
+      after it. Anything else, or an unreadable transcript, is open.
+
+    Nothing is read for a caller who is not a signed-in person, or while no server
+    names the agent-chat requester: the send then names nobody (counted as open), so
+    with the option off a send does what it did before it existed. The count of sends
+    read is returned with the answer, for the write to check it is unchanged.
+    """
+    if not (auth.signed_in_person and runtime.settings.mcp_identity.names_agent_chat_requester):
+        return UNREAD
+    sends = await _agent_chat_sends(runtime, handle)
+    if new_session:
+        return EarlierTurn(open=sends is not None and sends.begun is not None)
+    if sends is None or sends.turn_event_id is None:
+        return UNREAD
+    if sends.begun is None or sends.recorded != sends.begun:
+        log.info(
+            "agent_chat.requester_withheld",
+            session_id=handle,
+            reason="unrecorded_send",
+            sends_begun=sends.begun,
+            send_recorded=sends.recorded,
+        )
+        return UNREAD
+    try:
+        turn = await _read_turn(runtime, auth, handle)
+    except RuntimeError:
+        return UNREAD
+    stop = turn.state.stop_reason
+    ended = (
+        turn.boundary_id == sends.turn_event_id
+        and stop is not None
+        and stop.type != "requires_action"
+        and _processed_in_order(turn.boundary_processed_at, turn.idle_processed_at)
+    )
+    return EarlierTurn(open=not ended, sends=sends.begun)
+
+
+def _processed_in_order(boundary: object, idle: object) -> bool:
+    """Whether the idle was processed after the boundary message.
+
+    The list order alone does not show it: a message queued behind a running turn is
+    listed with no `processed_at` and may sort before that turn's idle. Equal times
+    show no order either: a queued message picked up as the earlier turn ends may share
+    its idle's time. A missing or unparsed timestamp is not in order.
+    """
+    if not (isinstance(boundary, datetime) and isinstance(idle, datetime)):
+        return False
+    try:
+        return idle > boundary
+    except TypeError:  # one naive, one aware
+        return False
 
 
 def watch_turn(
@@ -350,6 +444,31 @@ async def _watch(
         return False
 
 
+async def owner_tools(
+    runtime: McpRuntime, auth: AuthIdentity, session: BetaManagedAgentsSession
+) -> frozenset[str]:
+    """The protected tools whose owner counts as present in this turn: starting a cloud
+    computer and giving it more time, where the agent-chat rule holds for the session
+    (`agent_chat_owner`), read from the grant Daimon stamped on it; none otherwise.
+
+    The sender drives the session (`require_session_driver`) as a person's account. The
+    session's own credential is checked again when the call reaches the server."""
+    grant = (session.metadata or {}).get(MA_METADATA_KEY_CHAT_SESSION)
+    if not grant or not auth.platform_user_id or auth.client or auth.hold is not None:
+        return frozenset()
+    async with runtime.session_factory() as db:
+        place = await agent_chat_owner(
+            db,
+            tenant_id=auth.tenant_id,
+            account_id=auth.account_id,
+            chat_session_id=grant,
+            platform=auth.platform or "mcp",
+            agent_id=session.agent.id,
+            agent_name=session.agent.name,
+        )
+    return COMPUTE_APPROVAL_TOOLS if place is not None else frozenset()
+
+
 async def _answer(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -368,6 +487,7 @@ async def _answer(
         channel_id=rules_channel_id,
         annotations_for=annotations_for,
         entry_point="mcp_chat",
+        owner_tools=await owner_tools(runtime, auth, session),
     )
     decisions = [
         (call.tool_use_id, await posture.decide(call)) for call in tool_calls_for(turn.state, ids)

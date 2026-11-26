@@ -178,7 +178,11 @@ async def _hub(
     if recorded:
         async with factory.begin() as db:
             await session_settle_state.record_unattended_turn(
-                db, managed_session_id=_SESSION, turn_event_id="evt_user", rules_channel_id=None
+                db,
+                managed_session_id=_SESSION,
+                turn_event_id="evt_user",
+                rules_channel_id=None,
+                send=None,
             )
     paused = _Paused(
         str(principal.account_id) if owner_is_caller else str(uuid.uuid4()), fresh=fresh

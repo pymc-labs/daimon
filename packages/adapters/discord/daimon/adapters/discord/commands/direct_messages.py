@@ -20,6 +20,7 @@ from daimon.adapters.discord.bot import (
     DaimonBot,
     admission_refusal_message,
     log_anthropic_overload,
+    turn_model_label,
 )
 from daimon.adapters.discord.checks import (
     is_member_daimon_admin,
@@ -1468,7 +1469,7 @@ class DirectMessageCog(commands.Cog):
                 # With no delete a late replacement edits the card, as before the toggle.
                 delete=delete if pings else None,
                 agent_name=admission.display_name(admission.agent.name),
-                model_id=admission.agent.model.id,
+                model_id=turn_model_label(admission),
                 markup=runtime.turn_deps.markup,
                 cancel_view=CancelView(allowed_user_id=message.author.id, cancel=cancel),
                 requester_id=message.author.id,

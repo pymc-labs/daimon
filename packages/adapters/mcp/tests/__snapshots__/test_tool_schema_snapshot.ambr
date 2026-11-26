@@ -1585,7 +1585,8 @@
         Set your session's expiry to this many hours from now.
         <blank line>
         Needs the owner in the conversation; a card asks first unless an admin turned the
-        card off. Without the card, hours cannot exceed the default time. Use the
+        card off. Without the card, as in agent chat, hours cannot exceed the default time.
+        Use the
         original attended conversation. Hours cannot exceed the operator TTL. This does
         not change the idle window used by subsequent command/file writes.
       ''',
@@ -1596,7 +1597,15 @@
             'type': 'integer',
           }),
           'origin_context_id': dict({
-            'type': 'string',
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'session_id': dict({
             'format': 'uuid',
@@ -1606,7 +1615,6 @@
         'required': list([
           'session_id',
           'hours',
-          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -1622,7 +1630,15 @@
         'additionalProperties': False,
         'properties': dict({
           'origin_context_id': dict({
-            'type': 'string',
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'session_id': dict({
             'format': 'uuid',
@@ -1631,7 +1647,6 @@
         }),
         'required': list([
           'session_id',
-          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -1641,11 +1656,14 @@
         Launch your own temporary machine from an operator image profile.
         <blank line>
         Needs the owner in the conversation; a card asks first unless an admin turned the
-        card off. Without the card, leave ttl_hours out: only the default time runs. List
-        profiles first: each names its fixed CPU/RAM, image and the regions you may pass.
-        Leave `region` out to use the profile's first region. No shared credentials are
-        mounted. Sessions are deleted after their idle lease; export files before
-        stopping or expiry.
+        card off. Without the card, as in agent chat, leave ttl_hours out: only the default
+        time runs. List profiles first: each names its fixed CPU/RAM, image and the regions
+        you may pass. Leave `region` out to use the profile's first region. No shared
+        credentials are mounted. Sessions are deleted after their idle lease; export files
+        before stopping or expiry.
+        <blank line>
+        Do not retry an uncertain response automatically: check compute_list_sessions first.
+        In agent chat a retried launch starts a second machine.
         <blank line>
         The result's state is `running` once the machine has started. `launching` means
         it is still starting: read compute_get_session_status until it says `running`
@@ -1656,7 +1674,15 @@
         'additionalProperties': False,
         'properties': dict({
           'origin_context_id': dict({
-            'type': 'string',
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'region': dict({
             'anyOf': list([
@@ -1686,7 +1712,6 @@
         }),
         'required': list([
           'template',
-          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -1697,7 +1722,15 @@
         'additionalProperties': False,
         'properties': dict({
           'origin_context_id': dict({
-            'type': 'string',
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'path': dict({
             'type': 'string',
@@ -1714,7 +1747,6 @@
         'required': list([
           'session_id',
           'path',
-          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -1730,12 +1762,17 @@
         'additionalProperties': False,
         'properties': dict({
           'origin_context_id': dict({
-            'type': 'string',
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
         }),
-        'required': list([
-          'origin_context_id',
-        ]),
         'type': 'object',
       }),
     }),
@@ -1745,12 +1782,17 @@
         'additionalProperties': False,
         'properties': dict({
           'origin_context_id': dict({
-            'type': 'string',
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
         }),
-        'required': list([
-          'origin_context_id',
-        ]),
         'type': 'object',
       }),
     }),
@@ -1773,7 +1815,15 @@
             'type': 'integer',
           }),
           'origin_context_id': dict({
-            'type': 'string',
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'path': dict({
             'type': 'string',
@@ -1786,7 +1836,6 @@
         'required': list([
           'session_id',
           'path',
-          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -1798,8 +1847,8 @@
         A command that ends in time returns its exit_code and stdout, the last 16 KiB
         of its output. truncated says there is more: read output_path with
         compute_read_file. A command that needs longer keeps running and returns its
-        task_id with state `running`; this conversation gets one message when it
-        ends. Check it with compute_task_status and compute_task_result.
+        task_id with state `running`; a chat gets one message when it ends, agent chat
+        none. Check it with compute_task_status and compute_task_result.
         run_in_background returns at once, in the same way.
         <blank line>
         timeout, in milliseconds, ends an inline command at that time; a background
@@ -1828,7 +1877,15 @@
             'default': None,
           }),
           'origin_context_id': dict({
-            'type': 'string',
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'run_in_background': dict({
             'default': False,
@@ -1868,7 +1925,6 @@
         'required': list([
           'session_id',
           'command',
-          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -1885,7 +1941,15 @@
         'additionalProperties': False,
         'properties': dict({
           'origin_context_id': dict({
-            'type': 'string',
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'session_id': dict({
             'format': 'uuid',
@@ -1894,7 +1958,6 @@
         }),
         'required': list([
           'session_id',
-          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -1910,7 +1973,15 @@
         'additionalProperties': False,
         'properties': dict({
           'origin_context_id': dict({
-            'type': 'string',
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'task_id': dict({
             'format': 'uuid',
@@ -1919,7 +1990,6 @@
         }),
         'required': list([
           'task_id',
-          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -1930,8 +2000,9 @@
         <blank line>
         A running command is waited for up to wait_seconds (at most 40), and the result
         comes as soon as it ends. A finished command returns at once. Do not call this
-        in a loop: end your reply, and this conversation gets a message when the command
-        ends. A running command keeps its session alive up to the maximum lifetime. The
+        in a loop: end your reply. A chat gets a message when the command ends; in agent
+        chat, check again in a later turn. A running command keeps its session alive up
+        to the maximum lifetime. The
         call can take a little longer than wait_seconds when the machine or the database
         is slow.
       ''',
@@ -1939,7 +2010,15 @@
         'additionalProperties': False,
         'properties': dict({
           'origin_context_id': dict({
-            'type': 'string',
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'task_id': dict({
             'format': 'uuid',
@@ -1952,7 +2031,6 @@
         }),
         'required': list([
           'task_id',
-          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -1966,7 +2044,15 @@
             'type': 'string',
           }),
           'origin_context_id': dict({
-            'type': 'string',
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
           }),
           'path': dict({
             'type': 'string',
@@ -1980,7 +2066,6 @@
           'session_id',
           'path',
           'content',
-          'origin_context_id',
         ]),
         'type': 'object',
       }),
