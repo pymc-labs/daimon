@@ -100,10 +100,11 @@ sandbox.
    server's own URL, with no token. Daimon forwards each request with an
    `Authorization: Bearer <EdDSA JWT>` valid for two minutes.
 
-The token carries `iss`, `aud`, `iat`, `exp`, `agent`, `agent_name`, `ws`
+The token carries `iss`, `aud`, `iat`, `exp`, `jti`, `agent`, `agent_name`, `ws`
 (`<platform>:<workspace id>`) and, when a person asked, `sub`
 (`<platform>:<user id>`), `channel` and `msg`. Routines, agent chat, the web
-app's tool list and senders from another organisation name no person. Without `workspaces`, every
+app's tool list and senders from another organisation name no person. Each request gets
+a new token with its own `jti`, so a server may accept each one once. Without `workspaces`, every
 workspace's agents reach the server. Request bodies over 4 MiB are refused.
 
 A channel turn of an agent with a relay server runs held: it posts only in its
