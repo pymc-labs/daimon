@@ -74,8 +74,9 @@ are never read. Deactivated people, bots and people from other workspaces read n
 
 ## Google Drive
 
-A source of kind `gdrive` reads the files of a Google Workspace domain's shared drives and,
-when asked, its My Drives. It acts through a service account with domain-wide delegation:
+A source of kind `gdrive` reads the files of a Google Workspace domain's shared drives, and
+lets each person have their own My Drive read as them. It acts through a service account
+with domain-wide delegation:
 
 1. Create a service account and enable the Drive and Admin SDK APIs in its project.
 2. In the Workspace admin console, under domain-wide delegation, authorize the account's
@@ -93,12 +94,11 @@ when asked, its My Drives. It acts through a service account with domain-wide de
    shared drives, add that admin to each drive as a manager.
 
 ```json
-{"domain": "example.com", "admin": "admin@example.com", "my_drives": "yes",
+{"domain": "example.com", "admin": "admin@example.com", "personal_drive": "yes",
  "exclude_folders": ["1AbC..."], "relist_hours": 24}
 ```
 
-`drives` lists shared drive IDs (all when empty). `my_drives: yes` also reads the My Drive of
-every active person, or only of the emails in `users`. `include_folders` keeps only files
+`drives` lists shared drive IDs (all when empty). `include_folders` keeps only files
 under those folders; `exclude_folders` are never read, with everything below them. `max_mb`
 (20) caps the file size read.
 
@@ -109,14 +109,23 @@ the directory by this source), and the whole domain when a share is discoverable
 shares, outside people and expiring shares grant nothing, and a file nobody inside can read is
 not stored.
 
-Changes arrive through each scope's change feed. A person's feed never removes a file, since
-another scope may hold it; a shared drive's feed does. Everything is listed again every
-`relist_hours`, which is also how soon a new share on a folder reaches the files below it
-and how soon a deleted My Drive file goes.
+Changes arrive through each shared drive's change feed. Everything is listed again every
+`relist_hours`, which is also how soon a new share on a folder reaches the files below it.
 
 A person's read is checked in Drive again when a record is shown: a file Drive no longer opens
 to them is left out, even before the next sync. Each request checks a limited number of files
 and shows only those that pass.
+
+### Personal Drive
+
+My Drives are never stored. A person linked to the domain can ask the agent to search their
+own My Drive (`data_my_drive`); it reads as them, returning the text of Docs, Slides and
+Sheets. Every read shows a card only they can answer, saying that everyone in the
+conversation will see the result; **Allow for this conversation** stops asking for the rest
+of that conversation (kept in the running process: a restart asks again). It works in direct
+messages and rooms wherever data reads are on. `personal_drive: no` turns it off for the
+workspace's source; the `data_personal_drive` feature (on by default) turns it off for a
+workspace, agent or channel.
 
 ## Google Calendar
 

@@ -16,6 +16,9 @@ DATA_TOOLS: Final[frozenset[str]] = frozenset(
     {"data_sources", "data_search", "data_get", "data_file", "data_sql"}
 )
 """The data tools registered behind `data_reads` (`daimon.adapters.mcp.tools.data`)."""
+PERSONAL_DRIVE: Final = "data_personal_drive"
+PERSONAL_DRIVE_TOOLS: Final[frozenset[str]] = frozenset({"data_my_drive"})
+"""Reading a person's own Drive as them, each read on their card (`daimon.data.my_drive`)."""
 DATA_RESULT_MARK: Final = "[data source result]"
 REDACTED_DATA_RESULT: Final = f"{DATA_RESULT_MARK} hidden: only its own conversation sees it."
 

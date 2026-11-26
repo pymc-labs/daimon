@@ -98,6 +98,7 @@ Where each feature can be set, and its default.
 | GitHub access | `github` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Lead intake | `lead_intake` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Data source reads | `data_reads` | Capability | Off |  | ✓ | ✓ | ✓ |  |  |  |
+| Personal Drive reads | `data_personal_drive` | Capability | On |  | ✓ | ✓ | ✓ |  |  |  |
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Long job dollar cap | `long_jobs_max_usd` | Limit | $5 | ✓ | ✓ | ✓ |  |  |  |  |
 | Long job time limit | `long_jobs_max_deadline` | Limit | 70 minutes | ✓ | ✓ | ✓ |  |  |  |  |
@@ -1106,6 +1107,18 @@ The agent can search the team's data sources, showing only what everyone who wil
 | Key | `data_reads` |
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
+| Levels | Workspace, Agent, Channel |
+| Combines | Off above is a ceiling |
+
+## Personal Drive reads
+
+A person can have the agent read their own Google Drive as them. Each read asks them on a card first, and everyone in the conversation sees what it finds.
+
+| | |
+| --- | --- |
+| Key | `data_personal_drive` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
 | Levels | Workspace, Agent, Channel |
 | Combines | Off above is a ceiling |
 

@@ -19,10 +19,11 @@ from typing import Final
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.data_access import data_audience_for
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._card import require_card
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.core.data_tools import mark_data_result
 from daimon.core.ports.data_metering import SessionMeter
-from daimon.data import caller_sql, federated, pool, reads
+from daimon.data import caller_sql, federated, my_drive, pool, reads
 from daimon.data.caller_sql import SqlRefused
 from daimon.data.metering import Payer
 from daimon.data.reading import Reading, open_read
@@ -175,3 +176,22 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             except SqlRefused as e:
                 raise ToolError(str(e)) from None
         return _text(dataclasses.asdict(result))
+
+    @mcp.tool()
+    async def data_my_drive(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, query: str, origin_context_id: str, limit: int = 10
+    ) -> str:
+        """Search your own Google Drive (My Drive) as you for `query`, with the text of Docs,
+        Slides and Sheets; never stored. Each call asks you on a card first, and everyone who
+        can see this conversation sees what it finds. Shared drives are in `data_search`."""
+        auth = await _auth(ctx)
+        if auth.is_external_agent or auth.hold is not None or auth.client:
+            raise ToolError("Only a person can have their own Drive read.")
+        await require_card(
+            runtime, auth, tool_name="data_my_drive", origin_context_id=origin_context_id
+        )
+        async with pool.connection(settings) as conn:
+            hits = await my_drive.search(
+                conn, schemas, env, auth.tenant_id, auth.account_id, query, min(max(limit, 1), 25)
+            )
+        return _text({"files": [dataclasses.asdict(h) for h in hits]})

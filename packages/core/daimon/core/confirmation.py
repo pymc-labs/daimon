@@ -518,6 +518,16 @@ def prompt_for_tool_call(
     denied_action: str
     consequence: str | None = None
     detail_lines: tuple[str, ...]
+    if call.tool_name == "data_my_drive" and own_server:
+        return ConfirmationPrompt(
+            title="Read your Google Drive as you?",
+            consequence="Everyone who can see this conversation will see what it finds.",
+            action="Read your Google Drive",
+            denied_action="Drive not read",
+            detail_lines=(f"Search: {_one_line(data.get('query'), limit=200)}",),
+            requester_platform_user_id=requester_platform_user_id,
+            expires_at=now + timeout,
+        )
     if call.tool_name in {"request_provider_allowlist"} and own_server:
         reference = ConfigurationReference.model_validate(
             {

@@ -1,9 +1,9 @@
-"""Google Drive: files of shared drives and My Drives, readable by the people Drive itself lets
-read them, never more.
+"""Google Drive: files of shared drives, readable by the people Drive itself lets read them,
+never more. A person's own My Drive is never stored: `my_drive_search` reads it as them, at
+their request (`daimon.data.my_drive`), while `config.personal_drive` is on (the default).
 
-Each file's readers come from its own permission list, read as an identity that may share it
-(a shared drive's files as the admin, by domain admin access; a My Drive file as its owner, by
-delegation). A permission grants a person of the domain by primary email, a group (its members
+Each file's readers come from its own permission list, read as the admin by domain admin
+access. A permission grants a person of the domain by primary email, a group (its members
 come from the Directory API, read by this source with its own credentials), the whole domain
 when the share is discoverable, and nobody else: link-only shares, other domains, external
 people, deleted and expiring permissions grant nothing here. A file nobody inside may read is
@@ -44,6 +44,7 @@ from daimon.data.sync.connector import (
     Field,
     ItemRecord,
     Json,
+    LiveHit,
     PermissionUnit,
     Record,
     Replaced,
@@ -96,6 +97,8 @@ GONE: Final = (403, 404)
 END: Final = "\x01"
 """Sorts after every character of a file id: a `Replaced` that ends here removes one record."""
 YES: Final = {"yes", "true", "1", "on"}
+MY_DRIVE_TEXT: Final = 200_000
+"""Bytes of one file's text a personal Drive search returns at most (larger: none)."""
 
 
 class Expired(Exception):
@@ -106,8 +109,7 @@ class Expired(Exception):
 class Config:
     domain: str
     admin: str
-    my_drives: bool
-    users: frozenset[str]
+    personal_drive: bool
     drives: tuple[str, ...]
     include: frozenset[str]
     exclude: frozenset[str]
@@ -125,8 +127,7 @@ class Config:
         return cls(
             domain,
             admin,
-            str(config.get("my_drives") or "").strip().lower() in YES,
-            frozenset(x.lower() for x in names(config, "users")),
+            str(config.get("personal_drive") or "yes").strip().lower() in YES,
             tuple(names(config, "drives")),
             frozenset(names(config, "include_folders")),
             frozenset(names(config, "exclude_folders")),
@@ -266,12 +267,6 @@ class Run:
                 )
             ]
         found += [Key(f"drive:{d['id']}", cfg.admin, d["id"], d.get("name")) for d in drives]
-        if cfg.my_drives:
-            found += [
-                Key(f"user:{uid}", email)
-                for email, uid in sorted(self.directory.active.items())
-                if not cfg.users or email in cfg.users
-            ]
         return found
 
     def listing(self, key: Key) -> AsyncIterator[Json]:
@@ -452,8 +447,13 @@ class GDriveConnector(Connector):
             placeholder="reader@project.iam.gserviceaccount.com",
         ),
         Field("drives", "Shared drives", "list", required=False, placeholder="IDs; all if empty"),
-        Field("my_drives", "My Drives", "select", ("no", "yes"), required=False),
-        Field("users", "Only the My Drives of", "list", required=False, placeholder="emails"),
+        Field(
+            "personal_drive",
+            "People may have their own Drive read as them",
+            "select",
+            ("yes", "no"),
+            required=False,
+        ),
         Field("include_folders", "Only these folders", "list", required=False, placeholder="IDs"),
         Field("exclude_folders", "Never read", "list", required=False, placeholder="folder IDs"),
         Field("max_mb", "Largest file read, in MB", required=False, placeholder="20"),
@@ -520,6 +520,61 @@ class GDriveConnector(Connector):
             return any(
                 [await self.can_open_as(g, external_id.removeprefix("file:"), e) for e in emails]
             )
+        finally:
+            await g.aclose()
+
+    async def my_drive_search(
+        self, source: Source, user_id: str, query: str, limit: int
+    ) -> list[LiveHit]:
+        """Files of this person's own My Drive that match `query`, read as them now (Docs,
+        Slides and Sheets with their text); never stored. Empty when the source does not allow
+        it or the directory does not list them as active."""
+        cfg = Config.of(source.config)
+        if not cfg.personal_drive:
+            return []
+        g = self._google(source)
+        try:
+            email = await person_email(g, cfg.admin, user_id)
+            if email is None:
+                return []
+            words = query.replace("\\", "\\\\").replace("'", "\\'")
+            listed = await g.get(
+                email,
+                "drive",
+                "/drive/v3/files",
+                {
+                    "corpora": "user",
+                    "q": f"'me' in owners and trashed = false and fullText contains '{words}'",
+                    "pageSize": min(max(limit, 1), 25),
+                    "fields": "files(id,name,mimeType,modifiedTime,webViewLink)",
+                },
+            )
+            hits: list[LiveHit] = []
+            for f in rows(listed.get("files")):
+                mime, text = str(f.get("mimeType") or ""), ""
+                if mime in EXPORT:
+                    raw = await g.raw(
+                        email,
+                        "drive",
+                        f"/drive/v3/files/{f['id']}/export",
+                        {"mimeType": EXPORT[mime]},
+                        MY_DRIVE_TEXT,
+                    )
+                    text = (raw or b"").decode("utf-8", "replace")
+                hits.append(
+                    LiveHit(
+                        f"file:{f['id']}",
+                        str(f.get("name") or ""),
+                        text,
+                        "file",
+                        str(f["webViewLink"]) if f.get("webViewLink") else None,
+                        None,
+                        datetime.fromisoformat(str(f["modifiedTime"]).replace("Z", "+00:00"))
+                        if f.get("modifiedTime")
+                        else None,
+                    )
+                )
+            return hits
         finally:
             await g.aclose()
 

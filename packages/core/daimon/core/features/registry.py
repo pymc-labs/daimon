@@ -1331,6 +1331,23 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         depends_on=("data_sources", "tool_safety"),
         authority=_ADMIN_NOT_OWNER,
     ),
+    FeatureSpec(
+        key="data_personal_drive",
+        name="Personal Drive reads",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="on",
+        tiers=("workspace", "agent", "channel"),
+        binds="session_mutable",
+        doc=(
+            "A person can have the agent read their own Google Drive as them. Each read asks "
+            "them on a card first, and everyone in the conversation sees what it finds."
+        ),
+        platforms=EVERY_PLATFORM,
+        depends_on=("data_reads",),
+        authority=_ADMIN_NOT_OWNER,
+    ),
     _limit(
         "long_jobs_max_usd",
         "Long job dollar cap",

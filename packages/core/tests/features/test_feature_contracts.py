@@ -129,6 +129,7 @@ _NARROWED: dict[str, str] = {
     "turn_time_limit": "a workspace or agent limit, read once when the turn starts",
     "unattended_time_limit": "a workspace or agent limit, read once when the run starts",
     "data_reads": "an admin's choice for the team, an agent or a room; a thread shares its room's readers",
+    "data_personal_drive": "follows data_reads, whose tiers it narrows",
     **{f"web.{module}": "workspace-only web app surface" for module in WEB_MODULES},
 }
 

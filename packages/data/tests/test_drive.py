@@ -17,7 +17,7 @@ import pytest
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
-from daimon.data import federated, identity, recheck
+from daimon.data import federated, identity, my_drive, recheck
 from daimon.data.access import ReadContext, scoped, subject
 from daimon.data.identity import IdentityKey, Proof
 from daimon.data.schema import Schemas
@@ -204,6 +204,7 @@ class FakeGoogle:
             )
         if path == "/drive/v3/files":
             self.lists += 1
+            words = q.get("q", "").partition("fullText contains '")[2].removesuffix("'")
             mine = [
                 f
                 for f in self.files.values()
@@ -212,6 +213,7 @@ class FakeGoogle:
                     if q["corpora"] == "drive"
                     else f.get("owner") == who
                 )
+                and words.lower() in (f["name"] + f["body"].decode()).lower()
             ]
             return httpx.Response(
                 200, json={"files": [self.meta(f, who) for f in mine if not f.get("trashed")]}
@@ -319,7 +321,7 @@ async def test_a_file_is_read_by_the_people_its_sharing_names(
     google.add("expiring", [{**to("alice"), "expirationTime": "2030-01-01T00:00:00Z"}])
     google.add("alias", [grant("user", f"alice.b@{DOMAIN}")])
     google.my("mine", f"alice@{DOMAIN}", [to("alice"), to("bob")])
-    src = await add_source(store, my_drives="yes")
+    src = await add_source(store)
 
     await store.run(src)
 
@@ -327,11 +329,10 @@ async def test_a_file_is_read_by_the_people_its_sharing_names(
         "file:direct",
         "file:by_group",
         "file:domain",
-        "file:mine",
-    }, "a file nobody inside may read (link-only, expiring, alias, outsiders) is not stored"
+    }, "a file nobody inside may read (link-only, expiring, alias, outsiders), or of a My Drive"
     assert await readers(store, PEOPLE) == {
-        "alice": {"file:direct", "file:domain", "file:mine"},
-        "bob": {"file:by_group", "file:domain", "file:mine"},
+        "alice": {"file:direct", "file:domain"},
+        "bob": {"file:by_group", "file:domain"},
         "carol": {"file:domain"},
         "gone": set(),
     }, "a suspended person reads nothing, even when named or in a group"
@@ -395,21 +396,6 @@ async def test_changes_follow_the_feed_and_a_lost_cursor_lists_everything_again(
     await store.run(src)
     assert set(await store.bodies(src)) == {"file:c"}, "a deletion the feed lost is pruned"
     assert google.lists == 2
-
-
-async def test_a_persons_feed_never_removes_or_replaces_a_file_another_key_holds(
-    store: Store, google: FakeGoogle
-) -> None:
-    google.add("a", [to("alice")])
-    src = await add_source(store, my_drives="yes")
-    await store.run(src)
-
-    google.feed += [(f"alice@{DOMAIN}", "a", True), (f"alice@{DOMAIN}", "a", False)]
-    await store.run(src)
-
-    assert set(await store.bodies(src)) == {"file:a"}, (
-        "alice's feed reports a shared drive's file gone and then changed; its key holds neither"
-    )
 
 
 async def test_google_formats_are_exported_and_files_are_read_to_their_cap(
@@ -568,3 +554,27 @@ async def test_an_event_shows_only_to_the_people_on_it(store: Store, google: Fak
     assert await titles(carol) == set(), "not on any event"
     assert await titles(alice, bob) == {"Planning standup"}, "only what every reader may see"
     assert await titles() == set(), "no reader, no answer"
+
+
+async def test_a_persons_own_drive_is_searched_as_them_and_never_stored(
+    store: Store, google: FakeGoogle
+) -> None:
+    google.my("plan", f"alice@{DOMAIN}", [to("alice")], mime=DOC, body=b"budget plan")
+    google.my("other", f"alice@{DOMAIN}", [to("alice")], name="lunch.txt")
+    google.my("bobs", f"bob@{DOMAIN}", [to("bob")], mime=DOC, body=b"budget too")
+    src = await add_source(store)
+    await store.run(src)
+    alice = uuid.UUID((await link(store, "alice")).removeprefix("account:"))
+
+    hits = await my_drive.search(
+        store.conn, store.schemas, store.env, store.tenant, alice, "budget"
+    )
+    assert [(h.ref, h.text) for h in hits] == [("file:plan", "budget plan")], "hers, as her"
+    assert await store.bodies(src) == {}, "nothing of a My Drive is stored"
+    await store.conn.execute(
+        f'update {store.d}.sources set config = config || \'{{"personal_drive": "no"}}\''
+        " where id = %s".encode(),
+        (src,),
+    )
+    off = await my_drive.search(store.conn, store.schemas, store.env, store.tenant, alice, "budget")
+    assert off == [], "an admin turned it off for the workspace"
