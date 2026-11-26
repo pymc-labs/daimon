@@ -865,8 +865,8 @@ def _calls_inside_the_vault_lock(source: str, function: str) -> set[str]:
 
 
 def test_every_mirror_reads_the_tokens_under_the_vault_lock() -> None:
-    """Rule contract: a copy of the agent's stored tokens into a vault reads them
-    under the vault lock, through `mirror_stored_credentials`.
+    """Rule contract: a copy of the agent's stored tokens or a person's grants into
+    a vault reads them under the vault lock, through `mirror_stored_credentials`.
 
     `forget_mirrored_mcp_token` clears each copy under that lock after the
     stored token is deleted, so a writer that read the tokens first writes a
@@ -882,10 +882,9 @@ def test_every_mirror_reads_the_tokens_under_the_vault_lock() -> None:
     offenders = {
         f"{path.relative_to(_PACKAGES)}:{line} in {function}"
         for path in sources
+        for copy in ("mirror_credentials_into_vault", "mirror_grants_into_vault")
         for line, function in _calls_outside(
-            "mirror_credentials_into_vault",
-            "mirror_stored_credentials",
-            path.read_text(encoding="utf-8"),
+            copy, "mirror_stored_credentials", path.read_text(encoding="utf-8")
         )
     }
     assert offenders == set(), (
@@ -893,9 +892,14 @@ def test_every_mirror_reads_the_tokens_under_the_vault_lock() -> None:
         f"which reads them under the vault lock: {sorted(offenders)}"
     )
     helper = (_PACKAGES / "core/daimon/core/agent_mcp_credentials.py").read_text(encoding="utf-8")
-    assert {"_read_agent_mcp_credentials", "mirror_credentials_into_vault"} <= (
-        _calls_inside_the_vault_lock(helper, "mirror_stored_credentials")
-    ), "mirror_stored_credentials must read the tokens and copy them inside the vault lock"
+    assert {
+        "_read_agent_mcp_credentials",
+        "mirror_credentials_into_vault",
+        "list_connector_tokens",
+        "mirror_grants_into_vault",
+    } <= _calls_inside_the_vault_lock(helper, "mirror_stored_credentials"), (
+        "mirror_stored_credentials must read the tokens and grants and copy them inside the lock"
+    )
 
 
 def test_the_mirror_contract_flags_a_mirror_outside_the_helper() -> None:

@@ -21,7 +21,7 @@ from daimon.core.mcp_oauth.connector_tokens import (
     connector_access_token,
     connector_token_for_turn,
     refresh_connector_token,
-    refresh_owner_for,
+    refresh_due_grants,
 )
 from daimon.core.mcp_oauth.discovery import discover_authorization_server
 from daimon.core.mcp_oauth.flow import (
@@ -40,8 +40,6 @@ from daimon.core.stores import connector_tokens as store
 from daimon.core.stores.domain import ConnectorTokenRow, McpOAuthGrantRow
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_tenant
-from mux.contracts.config import ResolvedBackend
-from mux.profiles import MANAGED_AGENTS
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 _URL = "https://mcp.example.com/mcp"
@@ -221,11 +219,52 @@ async def test_no_personal_token_where_personal_servers_are_hidden(
     assert theirs is None, "a token is keyed by its requester, never shared with another"
 
 
-def test_refresh_owner_is_ma_only_on_the_managed_agents_profile() -> None:
-    ma = ResolvedBackend(backend="anthropic", profile=MANAGED_AGENTS.profile_id, model=None)
-    other = ma.model_copy(update={"profile": "openai.responses"})
-    assert refresh_owner_for(ma) == "ma", "the MA vault refreshes an MA agent's grant"
-    assert refresh_owner_for(other) == "daimon", "Daimon refreshes every other backend's grant"
+async def test_a_vault_mirror_refreshes_only_a_grant_that_would_lapse_mid_turn(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Before an Anthropic turn: within `VAULT_REFRESH_EARLY` the grant is
+    refreshed; a token endpoint outage keeps the current token and no error."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    fernet = make_fernet()
+    row = await _seed(
+        db_session,
+        fernet,
+        account_id=account.id,
+        tenant_id=tenant.id,
+        expires_in=timedelta(minutes=10),
+    )
+    calls: list[int] = []
+
+    async def down(_req: httpx.Request) -> httpx.Response:
+        calls.append(503)
+        return httpx.Response(503)
+
+    async def up(_req: httpx.Request) -> httpx.Response:
+        calls.append(200)
+        return httpx.Response(200, json={"access_token": "new-at", "expires_in": 3600})
+
+    async def tokens() -> str:
+        async with db_session_factory() as session:
+            current = await store.get_connector_token_by_id(
+                session, tenant_id=tenant.id, token_id=row.id
+            )
+        assert current is not None, "the grant is kept"
+        return decrypt_token(fernet, current.access_token_encrypted)
+
+    for handler in (down, up, up):
+        await refresh_due_grants(
+            db_session_factory,
+            tenant_id=tenant.id,
+            agent_id=_AGENT,
+            account_id=account.id,
+            fernet=fernet,
+            http_factory=_pinned(handler),
+        )
+        if handler is down:
+            assert await tokens() == "old-at", "an outage keeps the current token"
+    assert calls == [503, 200], "a token good for the next hour is not refreshed again"
+    assert await tokens() == "new-at", "the refreshed token is stored"
 
 
 def test_a_grant_without_a_daimon_token_reads_as_ungranted() -> None:

@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import AsyncIterator, Collection, Mapping, MutableMapping
+from collections.abc import AsyncIterator, Collection, Mapping, MutableMapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -69,6 +69,7 @@ from daimon.core.mux_compat import (
 from daimon.core.stores import agent_mcp_credentials as cred_store
 from daimon.core.stores import connector_tokens as connector_tokens_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
+from daimon.core.stores.domain import ConnectorTokenRow
 from mux.contracts.ids import Scope
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -437,7 +438,11 @@ async def sync_agent_mcp_credentials(
             if credential.mcp_server_url != GITHUB_COPILOT_MCP_URL
         )
     if not credentials:
-        return
+        async with sessionmaker() as session:
+            if not await connector_tokens_store.list_connector_token_urls(
+                session, tenant_id=tenant_id, agent_id=agent_id, account_id=account_id
+            ):
+                return
     scope = resource_scope(tenant_id=str(tenant_id), account_id=str(account_id))
 
     async def ensure() -> str:
@@ -605,10 +610,30 @@ async def mirror_stored_credentials(
     thread's synthetic owner. ``prune`` is for a shared thread's vault, which
     nobody else writes: anything that is not a stored token is deleted first,
     so a removed token stops authenticating on the thread's next turn.
+
+    A caller's vault (no ``prune``) also gets the caller's own OAuth grants
+    Daimon holds (`mirror_grants_into_vault`), refreshed first when near expiry.
     """
+    from daimon.core.mcp_oauth.connector_tokens import refresh_due_grants  # import cycle
+
+    if not prune:
+        await refresh_due_grants(
+            sessionmaker,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            account_id=lock_account_id,
+            fernet=fernet,
+        )
     async with hold_agent_vault_lock(
         sessionmaker, account_id=lock_account_id, agent_id=agent_id
     ) as locked:
+        if not prune:
+            grants = await connector_tokens_store.list_connector_tokens(
+                locked, tenant_id=tenant_id, agent_id=agent_id, account_id=lock_account_id
+            )
+            await mirror_grants_into_vault(
+                client, vault_id=vault_id, grants=grants, fernet=fernet, scope=scope
+            )
         credentials = await _read_agent_mcp_credentials(
             locked, fernet=fernet, tenant_id=tenant_id, agent_id=agent_id
         )
@@ -635,6 +660,89 @@ async def mirror_stored_credentials(
                 )
         await mirror_credentials_into_vault(
             client, vault_id=vault_id, credentials=credentials, scope=scope
+        )
+
+
+async def mirror_grants_into_vault(
+    client: AsyncAnthropic,
+    *,
+    vault_id: str,
+    grants: Sequence[ConnectorTokenRow],
+    fernet: MultiFernet,
+    scope: Scope,
+) -> None:
+    """Put each of the caller's Daimon-held OAuth grants into their vault, access token only.
+
+    Daimon refreshes the grant, so the copy carries no refresh token for
+    Anthropic to spend. Per URL, by the copy's `METADATA_VERSION_KEY` stamp:
+    a copy of this grant's version is current; an older stamped copy is
+    updated in place, never deleted, so a turn in another thread keeps a
+    credential; an unstamped grant (Anthropic-refreshed, signed in before
+    Daimon held grants) or the agent's stamped shared token is replaced, since
+    a sign-in outranks both; an unstamped static token is the person's own
+    pasted one and stays. Callers hold the vault lock (`mirror_stored_credentials`).
+    """
+    from daimon.core.mcp_oauth.models import ClientRegistration, TokenResponse  # import cycle
+    from daimon.core.mcp_oauth.vault import build_mcp_oauth_auth, put_mcp_oauth_credential
+
+    if not grants:
+        return
+    slots: dict[str, tuple[str, str, str | None]] = {}
+    async for existing in list_credentials(client, vault_id, scope=scope):
+        if existing.auth.type != "mcp_oauth" and existing.auth.type != "static_bearer":
+            continue
+        stamp = (existing.metadata or {}).get(METADATA_VERSION_KEY)
+        slots[_url_key(existing.auth.mcp_server_url)] = (existing.id, existing.auth.type, stamp)
+    now = dt.datetime.now(dt.UTC)
+    for grant in grants:
+        version = grant.updated_at.isoformat()
+        left = None if grant.expires_at is None else grant.expires_at - now
+        tokens = TokenResponse(
+            access_token=decrypt_token(fernet, grant.access_token_encrypted),
+            expires_in=None if left is None else max(0, int(left.total_seconds())),
+        )
+        client_registration = ClientRegistration(client_id=grant.client_id)
+        found = slots.get(_url_key(grant.server_url))
+        if found is not None:
+            credential_id, kind, stamp = found
+            if stamp == version or (kind == "static_bearer" and stamp is None):
+                continue
+            if kind == "mcp_oauth" and stamp is not None:
+                auth = build_mcp_oauth_auth(
+                    mcp_server_url=grant.server_url,
+                    tokens=tokens,
+                    client=client_registration,
+                    token_endpoint=grant.token_endpoint,
+                    resource=None,
+                    now=now,
+                )
+                # The URL is immutable: an update naming it is a 400.
+                await update_credential(
+                    client,
+                    vault_id,
+                    credential_id,
+                    {
+                        "auth": {
+                            "type": "mcp_oauth",
+                            "access_token": tokens.access_token,
+                            "expires_at": auth.get("expires_at"),
+                        },
+                        "metadata": {METADATA_VERSION_KEY: version},
+                    },
+                    scope=scope,
+                )
+                continue
+        await put_mcp_oauth_credential(
+            client,
+            vault_id=vault_id,
+            mcp_server_url=grant.server_url,
+            tokens=tokens,
+            client=client_registration,
+            token_endpoint=grant.token_endpoint,
+            resource=None,
+            now=now,
+            scope=scope,
+            metadata={METADATA_VERSION_KEY: version},
         )
 
 
