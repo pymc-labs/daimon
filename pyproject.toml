@@ -407,6 +407,7 @@ source_modules = [
     "daimon.core.settings_panel",
     "daimon.core.setup_conversations",
     "daimon.core.shared_threads",
+    "daimon.core.signed_room",
     "daimon.core.skill_sync",
     "daimon.core.skill_zip",
     "daimon.core.skills",

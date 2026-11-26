@@ -53,6 +53,7 @@ from daimon.core.mcp_identity import (
 from daimon.core.mcp_server_url import same_ascii_mcp_url
 from daimon.core.ops_catalog import OpsCode
 from daimon.core.ops_events import OpsEvent, report_ops_event
+from daimon.core.signed_room import turn_room
 from daimon.core.stores import watches
 from daimon.core.stores.agent_avatars import normalize_agent_name
 from daimon.core.stores.domain import ChatPlatform, RoutineRow, TurnOriginRow, WatchRow
@@ -588,6 +589,11 @@ def build_identity_relay_route(
             headers["authorization"] = f"Bearer {bearer.get_secret_value()}"
         else:
             assert tokens is not None
+            room = (
+                await turn_room(sessionmaker, origin, now=now)
+                if origin is not None and origin.platform_channel_id
+                else None
+            )
             identity = caller_claims(
                 issuer=server.issuer,
                 audience=server.audience,
@@ -597,6 +603,7 @@ def build_identity_relay_route(
                 platform_user_id=person if isinstance(person, str) else None,
                 agent_name=origin.responder_name if origin is not None else binding.agent_name,
                 place=origin_turn_place(origin) if origin is not None else None,
+                room=room,
             )
             headers["authorization"] = f"Bearer {tokens.token(identity, now=now)}"
         if request.method in ("GET", "DELETE"):
