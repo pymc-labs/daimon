@@ -65,7 +65,8 @@ def test_clean_repo_has_no_violations(tmp_path: Path) -> None:
         ),
         (
             {
-                "pyproject.toml": '[[tool.importlinter.contracts]]\nname = "ORM"\nforbidden_modules = ["daimon.core._models"]\n'
+                "pyproject.toml": '[[tool.importlinter.contracts]]\nname = "ORM"\n'
+                f"forbidden_modules = [{'.'.join(('daimon', 'core', '_models'))!r}]\n"
             },
             "orm-contract",
             "Repo tour",

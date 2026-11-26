@@ -150,7 +150,14 @@ def test_jobs_match_ci_yml() -> None:
         legs = plan.matrix_legs(job)
         if legs and "suite" in legs[0]:
             assert {leg["suite"] for leg in legs} == set(owned), name
-    selected = {"changes", "journeys-offline", "docker-publish-candidate", "deploy-gcp"}
+    selected = {
+        "changes",
+        "conventions",
+        "journeys-offline",
+        "docker-publish-candidate",
+        "staging-quiet",
+        "deploy-gcp",
+    }
     assert set(jobs) == set(plan.JOBS) | selected
 
 
