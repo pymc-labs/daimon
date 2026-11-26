@@ -552,7 +552,13 @@ async def project_session_resources(
         or carried_natively
         or app_session_unmapped
         or (requester_is_headless and app_mode)
-        or (app_mode and agent_github_app is not None and repos)
+        # A provider host reaches GitHub through the relay, on the turn's own credential.
+        or (
+            app_mode
+            and agent_github_app is not None
+            and repos
+            and not caller_resources_on_credential
+        )
     ):
         # Opaque carry resources and private credentials are not absent obligations.
         requirements.append(ResourceBinding(id=CALLER_RESOURCES_ID, kind="native"))

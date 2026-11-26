@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from daimon.core.caller_resources import APP_REPO_CREDENTIAL_PREFIX, APP_SESSION_VAULT_PREFIX
 from daimon.core.channel_backend import AgentSettings
 from daimon.core.stores.domain import SourceRepresentation
 from daimon.core.turn.runtime_manifest import (
@@ -203,6 +204,31 @@ def test_a_credentialed_repository_is_lost_only_as_declared_repository_and_crede
         update={"declared_drops": tuple(d for d in target.declared_drops if d != "credentials")}
     )
     assert "credentials" in classify_source_obligations(source, only_repository, environment=None)
+
+
+@pytest.mark.parametrize(
+    "provider,model", [("openai", "gpt-6-luna"), ("gemini", "gemini-3.8-flash")]
+)
+def test_github_app_repositories_lose_only_the_repository_off_claude(captured, provider, model):
+    """The App vault's shell tokens go with the repository; `github` MCP is relayed."""
+    source = captured.model_copy(
+        update={
+            "repository_sources": (
+                WorkspaceSource(
+                    kind="repository",
+                    target_path="/workspace/acme/app",
+                    repository_url="https://github.com/acme/app",
+                    credential_ref=f"{APP_REPO_CREDENTIAL_PREFIX}t:a:1:1:1",
+                ),
+            ),
+            "resource_requirements": (
+                ResourceBinding(id=f"{APP_SESSION_VAULT_PREFIX}t:a", kind="native"),
+            ),
+        }
+    )
+    target = preview_source_drops(source, ModelRef(provider=provider, id=model))
+    assert "repository" in target.declared_drops
+    assert "credentials" not in target.declared_drops
 
 
 @pytest.mark.parametrize("attachment", ["foreign_file", "opaque_file"])

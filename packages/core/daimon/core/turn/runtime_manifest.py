@@ -15,7 +15,12 @@ from typing import TYPE_CHECKING, Annotated, Final, Literal, Protocol, Self, cas
 from uuid import UUID
 
 import structlog
-from daimon.core.caller_resources import CALLER_RESOURCES_ID, CALLER_VAULT_PREFIX
+from daimon.core.caller_resources import (
+    APP_REPO_CREDENTIAL_PREFIX,
+    APP_SESSION_VAULT_PREFIX,
+    CALLER_RESOURCES_ID,
+    CALLER_VAULT_PREFIX,
+)
 from daimon.core.config import get_repo_memory_settings
 from daimon.core.connector_relay import relay_key
 from daimon.core.constants import DEFAULT_AGENT_MODEL
@@ -1542,10 +1547,31 @@ def classify_source_obligations(
     if (
         not native_retained
         and "credentials" not in drops
-        and any(repository.credential_ref for repository in source.repository_sources)
+        # An App repository's token is minted per session, never one of the
+        # agent's keys: it goes with the repository.
+        and any(
+            repository.credential_ref
+            and not repository.credential_ref.startswith(APP_REPO_CREDENTIAL_PREFIX)
+            for repository in source.repository_sources
+        )
     ):
         missing.add("credentials")
+    # A provider turn's relay routes `github` through a turn's own App tokens.
+    github_relayed = target is not None and target.model.provider in (
+        PERSISTENT_WORKSPACE.provider,
+        INLINE_REUSE.provider,
+    )
     for resource in source.resource_requirements:
+        if (
+            github_relayed
+            and resource.kind == "native"
+            and resource.id.startswith(APP_SESSION_VAULT_PREFIX)
+        ):
+            # The App vault's shell tokens stay with the repository; its `github`
+            # MCP is relayed (`relayed_connectors`, `github_turn_router`).
+            if "repository" not in drops:
+                missing.add("repository")
+            continue
         if (
             native_retained
             and resource.kind == "credential"
