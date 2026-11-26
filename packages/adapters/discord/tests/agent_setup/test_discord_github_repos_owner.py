@@ -64,6 +64,7 @@ async def world(db_session: AsyncSession, db_session_factory: async_sessionmaker
         deployment_default=DeploymentDefault(),
         settings=SimpleNamespace(
             mcp=SimpleNamespace(app_root_url="https://mcp.test"),
+            web=None,
             github_app=SimpleNamespace(
                 app_id="1",
                 app_slug="app",
