@@ -138,13 +138,6 @@ class IdentityView:
 
 
 @dataclass(frozen=True)
-class AdminView:
-    account_id: uuid.UUID
-    granted_by: uuid.UUID | None
-    created_at: datetime
-
-
-@dataclass(frozen=True)
 class PersonConnection:
     source_id: uuid.UUID
     source: str
@@ -412,7 +405,7 @@ async def create_scope(
     if not name.strip():
         raise Invalid("Give the scope a name.")
     async with conn.transaction():
-        await identity.require_admin(conn, schemas, tenant_id, by, admin=admin)
+        identity.require_admin(admin)
         cur = await conn.execute(
             f"insert into {schemas.data}.scopes (tenant_id, id, kind, name, description)"
             " values (%s, %s, %s, %s, %s) on conflict do nothing returning id".encode(),
@@ -438,7 +431,7 @@ async def delete_scope(
     is the default of a source."""
     d = schemas.data
     async with conn.transaction():
-        await identity.require_admin(conn, schemas, tenant_id, by, admin=admin)
+        identity.require_admin(admin)
         row = await _one(
             conn,
             f"select bound from {d}.scopes where tenant_id = %s and id = %s for update",
@@ -479,7 +472,7 @@ async def grant(
     if not HOLDER.match(holder):
         raise Invalid("Name who holds the scope.")
     async with conn.transaction():
-        await identity.require_admin(conn, schemas, tenant_id, by, admin=admin)
+        identity.require_admin(admin)
         # A grant to oneself is allowed and marked so in the trail.
         own = holder in (await identity.holders_of(conn, schemas, tenant_id, [by]))[by]
         await _one(
@@ -513,7 +506,7 @@ async def revoke(
 ) -> None:
     d = schemas.data
     async with conn.transaction():
-        await identity.require_admin(conn, schemas, tenant_id, by, admin=admin)
+        identity.require_admin(admin)
         row = await _one(
             conn,
             f"select bound from {d}.grants where tenant_id = %s and scope = %s and holder = %s"
@@ -556,17 +549,6 @@ async def identities(
         {"t": tenant_id, "a": account_id, "l": linked, "n": limit},
     )
     return [IdentityView(**r) for r in await cur.fetchall()]
-
-
-async def data_admins(
-    conn: AsyncConnection[DictRow], schemas: Schemas, tenant_id: uuid.UUID
-) -> list[AdminView]:
-    cur = await conn.execute(
-        f"select account_id, granted_by, created_at from {schemas.data}.data_admins"
-        " where tenant_id = %s order by created_at".encode(),
-        (tenant_id,),
-    )
-    return [AdminView(**r) for r in await cur.fetchall()]
 
 
 async def person_connections(

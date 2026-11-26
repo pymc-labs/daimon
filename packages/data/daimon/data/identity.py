@@ -1,4 +1,4 @@
-"""Who each source identity is: proofs, links, candidates and data admins (`0004_identity.sql`).
+"""Who each source identity is: proofs, links and candidates (`0004_identity.sql`).
 
 A link makes a person read as that identity, so one is written only
 - for the person a provider or platform verified (`link`), at a web sign-in (Discord by
@@ -7,7 +7,7 @@ A link makes a person read as that identity, so one is written only
 - on an exact match of emails both providers verified, in an auto-link domain the source
   names (`record_accounts`, for a connector that lists accounts; none in this package
   does), never for a subject or account an admin decided on there;
-- by a data admin for someone else (`admin_link`): never for themselves, with an audit
+- by a workspace admin for someone else (`admin_link`): never for themselves, with an audit
   row and a notice row (`take_notices`) for the person.
 An email Microsoft reports proves nothing (any directory user may set it), so it is never
 kept as verified.
@@ -143,18 +143,10 @@ async def _row(
     return await cur.fetchone()
 
 
-async def require_admin(
-    conn: AsyncConnection[DictRow],
-    schemas: Schemas,
-    tenant_id: uuid.UUID,
-    account_id: uuid.UUID,
-    *,
-    admin: bool,
-) -> None:
-    """Refuse anyone but a data admin; `admin` (a workspace admin or owner, which the caller
-    checks) counts as one."""
-    if not admin and not await is_data_admin(conn, schemas, tenant_id, account_id):
-        raise NotAllowed("Only a data admin or a workspace admin can do this.")
+def require_admin(admin: bool) -> None:
+    """Refuse anyone but a workspace admin or owner, which the caller checks (`admin`)."""
+    if not admin:
+        raise NotAllowed("Only a workspace admin can do this.")
 
 
 async def _decide(
@@ -217,7 +209,7 @@ async def link(
             (tenant_id, k.provider, k.workspace, k.subject, account_id),
         )
         if await cur.fetchone() is not None:
-            raise NotAllowed("A data admin unlinked that account from you. Ask one to link it.")
+            raise NotAllowed("An admin unlinked that account from you. Ask one to link it.")
         cur = await conn.execute(
             f"insert into {schemas.data}.identities as i (tenant_id, provider, workspace, subject,"
             " account_id, proof, email, email_verified, linked_at)"
@@ -353,7 +345,7 @@ where i.tenant_id = %(tenant)s and i.account_id is null and i.active and i.email
 async def list_candidates(
     conn: AsyncConnection[DictRow], schemas: Schemas, tenant_id: uuid.UUID
 ) -> list[Candidate]:
-    """Open link candidates for a data admin to approve or reject."""
+    """Open link candidates for a workspace admin to approve or reject."""
     cur = await conn.execute(
         (_CANDIDATES.format(d=schemas.data) + " order by 1, 2, 3, 4").encode(),
         {"tenant": tenant_id, "proofs": list(EMAIL_PROOFS)},
@@ -489,73 +481,7 @@ async def _auto_link(
     return linked
 
 
-# ---- data admins and their decisions ---------------------------------------------------------
-
-
-async def is_data_admin(
-    conn: AsyncConnection[DictRow], schemas: Schemas, tenant_id: uuid.UUID, account_id: uuid.UUID
-) -> bool:
-    cur = await conn.execute(
-        f"select 1 from {schemas.data}.data_admins where tenant_id = %s"
-        " and account_id = %s".encode(),
-        (tenant_id, account_id),
-    )
-    return await cur.fetchone() is not None
-
-
-async def grant_data_admin(
-    conn: AsyncConnection[DictRow],
-    schemas: Schemas,
-    *,
-    tenant_id: uuid.UUID,
-    by: uuid.UUID,
-    account_id: uuid.UUID,
-    admin: bool = False,
-) -> None:
-    """Make `account_id` a data admin: only a workspace admin or another data admin may."""
-    async with conn.transaction():
-        await fence_account(conn, schemas, by, account_id)
-        await require_admin(conn, schemas, tenant_id, by, admin=admin)
-        await conn.execute(
-            f"insert into {schemas.data}.data_admins (tenant_id, account_id, granted_by)"
-            " values (%s, %s, %s) on conflict do nothing".encode(),
-            (tenant_id, account_id, by),
-        )
-        await record_audit(
-            conn,
-            schemas,
-            tenant_id=tenant_id,
-            kind="data_admin.grant",
-            account_id=by,
-            target=person(account_id),
-        )
-
-
-async def revoke_data_admin(
-    conn: AsyncConnection[DictRow],
-    schemas: Schemas,
-    *,
-    tenant_id: uuid.UUID,
-    by: uuid.UUID,
-    account_id: uuid.UUID,
-    admin: bool = False,
-) -> None:
-    async with conn.transaction():
-        await fence_account(conn, schemas, by)
-        await require_admin(conn, schemas, tenant_id, by, admin=admin)
-        await conn.execute(
-            f"delete from {schemas.data}.data_admins where tenant_id = %s"
-            " and account_id = %s".encode(),
-            (tenant_id, account_id),
-        )
-        await record_audit(
-            conn,
-            schemas,
-            tenant_id=tenant_id,
-            kind="data_admin.revoke",
-            account_id=by,
-            target=person(account_id),
-        )
+# ---- admins' decisions -----------------------------------------------------------------------
 
 
 async def admin_link(
@@ -568,13 +494,13 @@ async def admin_link(
     account_id: uuid.UUID,
     admin: bool = False,
 ) -> LinkProof:
-    """A data admin links a known identity to someone else: proof `email` when it is that
+    """A workspace admin links a known identity to someone else: proof `email` when it is that
     person's open candidate, else `admin`. The person gets a notice; the trail gets a row."""
     if by == account_id:
         raise NotAllowed("You can't link an account to yourself. Ask another admin.")
     async with conn.transaction():
         await fence_account(conn, schemas, by, account_id)
-        await require_admin(conn, schemas, tenant_id, by, admin=admin)
+        require_admin(admin)
         row = await _row(conn, schemas, tenant_id, key)
         if row is None:
             raise Missing("No such account.")
@@ -620,7 +546,7 @@ async def reject_candidate(
     """The pair is never proposed again, and neither side is auto-linked in that workspace."""
     async with conn.transaction():
         await fence_account(conn, schemas, by, account_id)
-        await require_admin(conn, schemas, tenant_id, by, admin=admin)
+        require_admin(admin)
         await _decide(conn, schemas, tenant_id, key, account_id, "rejected", by)
         await record_audit(
             conn,
@@ -642,7 +568,7 @@ async def unlink(
     key: IdentityKey,
     admin: bool = False,
 ) -> uuid.UUID:
-    """A data admin ends a link; the pair is not linked automatically again. A platform
+    """A workspace admin ends a link; the pair is not linked automatically again. A platform
     principal's link is who that user is here, so it stays. Returns who was unlinked."""
     cur = await conn.execute(
         f"select account_id from {schemas.data}.identities where tenant_id = %s and provider = %s"
@@ -652,7 +578,7 @@ async def unlink(
     seen = await cur.fetchone()
     async with conn.transaction():
         await fence_account(conn, schemas, by, seen["account_id"] if seen else None)
-        await require_admin(conn, schemas, tenant_id, by, admin=admin)
+        require_admin(admin)
         row = await _row(conn, schemas, tenant_id, key)
         if row is None or row["account_id"] is None or seen is None:
             raise Missing("That account is not linked.")

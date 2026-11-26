@@ -16,10 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 def test_registered_tools_are_gated_by_their_own_feature(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tool_gate, "_REGISTERED", {})
-    tool_gate.register_gated_tools("data_sources", ["search_the_store"])
-    assert "data_sources" in tool_gate.gated_keys()
-    assert "search_the_store" in tool_gate.gated_tools(["data_sources"])
-    assert tool_gate.server_gate_key("search_the_store") == "data_sources"
+    tool_gate.register_gated_tools("installed_feature", ["search_the_store"])
+    assert "installed_feature" in tool_gate.gated_keys()
+    assert "search_the_store" in tool_gate.gated_tools(["installed_feature"])
+    assert tool_gate.server_gate_key("search_the_store") == "installed_feature"
     with pytest.raises(ValueError, match="already gates"):
         tool_gate.register_gated_tools(tool_gate.GATED_KEYS[0], [])
 

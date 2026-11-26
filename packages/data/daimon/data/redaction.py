@@ -22,7 +22,7 @@ label unless the audience holds its `scope`.
 
 A set is inline (declared) or a repo file pinned by blob sha. Only the approved sha counts:
 when the file upstream changes, its new rules wait as `pending` and every source using the set
-stops syncing until a data admin approves that sha (`approve`).
+stops syncing until a workspace admin approves that sha (`approve`).
 """
 
 from __future__ import annotations
@@ -326,7 +326,8 @@ async def answer_redactors(
         " on r.tenant_id = s.tenant_id and r.name = s.redaction_set"
         f" left join {d}.source_cursors c on c.source_id = s.id"
         " where s.tenant_id = %s and r.rules is not null and (r.rules ->> 'at' = 'answer'"
-        " or c.last_sync_at is null or c.last_sync_at < r.rules_changed_at)".encode(),
+        " or c.last_sync_at is null or c.last_sync_at < r.rules_changed_at)"
+        " order by r.name, s.id".encode(),
         (tenant_id,),
     )
     built: dict[str, Redactor] = {}
@@ -519,7 +520,7 @@ async def list_sets(
     by: uuid.UUID,
     admin: bool = False,
 ) -> list[SetInfo]:
-    await identity.require_admin(conn, schemas, tenant_id, by, admin=admin)
+    identity.require_admin(admin)
     cur = await conn.execute(
         f"select * from {schemas.data}.redaction_sets where tenant_id = %s order by name".encode(),
         (tenant_id,),
@@ -536,7 +537,7 @@ async def show_set(
     by: uuid.UUID,
     admin: bool = False,
 ) -> SetDetail:
-    await identity.require_admin(conn, schemas, tenant_id, by, admin=admin)
+    identity.require_admin(admin)
     cur = await conn.execute(
         f"select * from {schemas.data}.redaction_sets where tenant_id = %s and name = %s".encode(),
         (tenant_id, name),
@@ -564,7 +565,7 @@ async def approve(
     """Approve the pending file `sha` of set `name`: its rules replace the approved ones and
     the sources using the set sync again from the start."""
     async with conn.transaction():
-        await identity.require_admin(conn, schemas, tenant_id, by, admin=admin)
+        identity.require_admin(admin)
         cur = await conn.execute(
             f"update {schemas.data}.redaction_sets set rules = pending, approved_sha = pin_sha,"
             " pending = null, approved_by = %s, approved_at = now() where tenant_id = %s"
@@ -598,7 +599,7 @@ async def set_redacted(
 ) -> None:
     """Mark a person, by their account, as one whose reads always hide what a guest's would."""
     async with conn.transaction():
-        await identity.require_admin(conn, schemas, tenant_id, by, admin=admin)
+        identity.require_admin(admin)
         await conn.execute(
             f"update {schemas.data}.identities set redacted = %s where tenant_id = %s"
             " and account_id = %s".encode(),

@@ -747,9 +747,17 @@ def _error_text(e: Exception) -> str:
 async def _finish(
     conn: AsyncConnection[DictRow], env: Env, row: DictRow, started: datetime, r: RunResult
 ) -> None:
-    """Record the run and the source's standing, and the audit rows of a change of it."""
+    """Record the run and the source's standing, and the audit rows of a change of it. Rules
+    approved after the run started were not applied, so it neither counts as complete nor
+    keeps its cursor: answers apply them until a later run rewrites what is stored."""
     d = env.schemas.data
     async with conn.transaction():
+        stale = await _one(
+            conn,
+            f"select 1 from {d}.sources s join {d}.redaction_sets r on r.tenant_id = s.tenant_id"
+            " and r.name = s.redaction_set where s.id = %s and r.rules_changed_at > %s",
+            (row["id"], started),
+        )
         await conn.execute(
             f"update {d}.sync_runs set status = %s, finished_at = now(), added = %s, updated = %s,"
             " deleted = %s, error = %s where id = %s".encode(),
@@ -757,11 +765,19 @@ async def _finish(
         )
         await conn.execute(
             f"update {d}.source_cursors set last_status = %(st)s, last_error = %(err)s,"
-            " last_sync_at = case when %(st)s = 'ok' then now() else last_sync_at end,"
+            " last_sync_at = case when %(ok)s then now() else last_sync_at end,"
+            " state = case when %(stale)s then '{}'::jsonb else state end,"
             " errors = case when %(st)s = 'error' then errors + 1 else 0 end,"
             " requested_at = case when requested_at > %(at)s then requested_at end"
             " where source_id = %(src)s".encode(),
-            {"st": r.status, "err": r.error or r.warning, "at": started, "src": row["id"]},
+            {
+                "st": r.status,
+                "ok": r.status == "ok" and stale is None,
+                "stale": stale is not None,
+                "err": r.error or r.warning,
+                "at": started,
+                "src": row["id"],
+            },
         )
         failing_before = bool(row["errors"])
         for kind, when in (

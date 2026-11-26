@@ -33,14 +33,20 @@ ERROR_CHARS: Final = 300
 
 
 async def data_is_on(runtime: McpRuntime, auth: AuthIdentity) -> None:
-    """Refuse unless the deployment and this workspace have data sources on, and the store
-    exists."""
-    if not data_sources_on(runtime.settings) or not await pool.ready(runtime.settings):
+    """Refuse unless the deployment and this workspace have data sources on, the store
+    exists, and the web app's data section is on, as the web's data pages need."""
+    web = runtime.settings.web
+    if (
+        not data_sources_on(runtime.settings)
+        or (web is not None and "data" not in web.modules)
+        or not await pool.ready(runtime.settings)
+    ):
         raise ToolError(NOT_ON)
     place = FeaturePlace(auth.tenant_id, auth.platform or "web")
     async with runtime.session_factory() as db:
-        if not (await feature_in(db, runtime.settings, place, "data_sources")).on:
-            raise ToolError(NOT_ON)
+        for at, key in ((place, "data_sources"), (FeaturePlace(auth.tenant_id, "web"), "web.data")):
+            if not (await feature_in(db, runtime.settings, at, key)).on:
+                raise ToolError(NOT_ON)
 
 
 async def manager(runtime: McpRuntime, auth: AuthIdentity) -> WebAdmin:

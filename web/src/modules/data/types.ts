@@ -29,7 +29,6 @@ export type SourceIdentity = {
   account_id: string | null; account_name: string | null; proof: string | null; linked_at: string | null; redacted: boolean
 }
 export type Candidate = { provider: string; workspace: string; subject: string; name: string; email: string; account_id: string; account_name: string | null }
-export type Admins = { admins: { account_id: string; name: string | null; created_at: string }[]; you: boolean; can_grant: boolean }
 export type RedactionSet = {
   name: string; repo: string | null; path: string | null; ref: string | null; approved_sha: string | null; pin_sha: string | null
   pending: boolean; usable: boolean; checked_at: string | null; error: string | null

@@ -698,10 +698,11 @@ jobs:
         run: |
           # Optional: a deployment that syncs data sources on its own VM names it
           # <repo>-data-sync and puts compose.data-sync.yml in the assets bucket.
-          # Recreated like the workers above; skipped only when absent or stopped.
+          # Recreated like the workers above; skipped when absent, stopped or not ours to see.
+          set -o pipefail
           if ! STATUS=$(gcloud compute instances describe ${{ vars.GCP_AR_REPO }}-data-sync --zone "$ZONE" \
             --format='value(status)' 2>"$RUNNER_TEMP/data-sync-describe.err"); then
-            grep -qi "not found" "$RUNNER_TEMP/data-sync-describe.err" || { cat "$RUNNER_TEMP/data-sync-describe.err" >&2; exit 1; }
+            grep -qiE "not found|permission|forbidden" "$RUNNER_TEMP/data-sync-describe.err" || { cat "$RUNNER_TEMP/data-sync-describe.err" >&2; exit 1; }
             STATUS=none
           fi
           if [ "$STATUS" != "RUNNING" ]; then
@@ -728,8 +729,8 @@ jobs:
               sudo -E docker compose -f compose.data-sync.yml up -d --remove-orphans --timeout 95
               sleep 20
               # No service may be restarting, dead or failed after the refresh.
-              if sudo -E docker compose -f compose.data-sync.yml ps -a --format "{{.Service}} {{.State}} {{.ExitCode}}" \
-                | grep -E " (restarting|dead) | exited [1-9]"; then
+              states=$(sudo -E docker compose -f compose.data-sync.yml ps -a --format "{{.Service}} {{.State}} {{.ExitCode}}")
+              if grep -E " (restarting|dead) | exited [1-9]" <<<"$states"; then
                 echo "a data-sync service failed after the refresh" >&2
                 exit 1
               fi

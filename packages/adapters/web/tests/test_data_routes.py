@@ -99,7 +99,7 @@ async def test_feature_off_hides_the_routes(rig: Rig) -> None:
 
 
 async def test_only_admins_write(rig: Rig) -> None:
-    """Workspace admins manage data access as data admins do; a self-grant is audited."""
+    """Workspace admins manage data access; a self-grant is audited."""
     scope = {"id": "ops", "kind": "internal", "name": "Ops"}
     async with rig.open(as_="member") as (client, _):
         assert (await client.get("/api/data/sources")).status_code == 200, "members read"

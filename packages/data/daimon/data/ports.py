@@ -11,15 +11,16 @@ from __future__ import annotations
 import uuid
 from typing import Final
 
-import psycopg
 from daimon.core.config import Settings, load_data_settings
 from daimon.core.ports.audit import register_audit_source
-from daimon.core.ports.data_ready import register_has_sources
+from daimon.core.ports.data_ready import Sessions, register_has_sources
 from daimon.core.ports.erasure import ErasureStatement, register_erasure
 from daimon.core.ports.tool_gate import register_gated_tools
-from daimon.data import pool
 from daimon.data.audit import AUDIT_SOURCE
+from daimon.data.migrate import STORE_FILES
 from daimon.data.schema import Schemas
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 GATED_TOOLS: Final[dict[str, frozenset[str]]] = {}
 
@@ -77,7 +78,6 @@ def erasure(schemas: Schemas) -> tuple[ErasureStatement, ...]:
             account(f"{table}.{col}", f"delete from {d}.{table} where {col} = :account_id")
             for table, col in (
                 ("link_decisions", "account_id"),
-                ("data_admins", "account_id"),
                 ("identity_notices", "account_id"),
                 ("person_connections", "account_id"),
                 ("connect_pending", "account_id"),
@@ -87,10 +87,6 @@ def erasure(schemas: Schemas) -> tuple[ErasureStatement, ...]:
         account(
             "decided_by",
             f"update {d}.link_decisions set decided_by = null where decided_by = :account_id",
-        ),
-        account(
-            "admin_granted_by",
-            f"update {d}.data_admins set granted_by = null where granted_by = :account_id",
         ),
         account(
             "audit_detail",
@@ -105,7 +101,6 @@ def erasure(schemas: Schemas) -> tuple[ErasureStatement, ...]:
             for table in (
                 "identities",
                 "link_decisions",
-                "data_admins",
                 "identity_notices",
                 "redaction_sets",
                 "personal_off",
@@ -115,22 +110,22 @@ def erasure(schemas: Schemas) -> tuple[ErasureStatement, ...]:
     )
 
 
-async def _has_sources(settings: Settings, tenant_id: uuid.UUID) -> bool:
-    """A live source in a ready store; a store error reads as none."""
-    if not await pool.ready(settings):
-        return False
+async def _has_sources(sessions: Sessions, settings: Settings, tenant_id: uuid.UUID) -> bool:
+    """A live source in a store with every file applied; a missing store reads as none."""
     d = Schemas.of(settings.data).data
     try:
-        async with pool.connection(settings) as conn:
-            cur = await conn.execute(
-                f"select exists (select 1 from {d}.sources where tenant_id = %s"
-                f" and publication <> 'retired') as found".encode(),
-                (tenant_id,),
+        async with sessions() as session:
+            found = await session.scalar(
+                text(
+                    f"select (select count(*) from {d}.schema_version where file = any(:files))"
+                    f" = :count and exists (select 1 from {d}.sources where tenant_id = :tenant"
+                    " and publication <> 'retired')"
+                ),
+                {"files": list(STORE_FILES), "count": len(STORE_FILES), "tenant": tenant_id},
             )
-            row = await cur.fetchone()
-    except psycopg.Error:
+    except SQLAlchemyError:
         return False
-    return row is not None and bool(row["found"])
+    return bool(found)
 
 
 def register() -> None:

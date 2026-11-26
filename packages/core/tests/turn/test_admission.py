@@ -673,6 +673,10 @@ async def test_a_session_that_read_data_stays_data_reading_but_unsealed_until_a_
         m.setattr("daimon.core.turn.admission.reads_data", AsyncMock(side_effect=RuntimeError))
         failed = await admit_chat(deps, tenant, now=_NOW)
     assert failed.data_reading, "a failed lookup keeps it data-reading"
+    with monkeypatch.context() as m:
+        m.setattr("daimon.core.turn.admission.has_sources", AsyncMock(return_value=False))
+        retired = await admit_chat(deps, tenant, now=_NOW)
+    assert retired.data_reading, "with every source retired, the read is still remembered"
     async with db_session_factory.begin() as session:
         await request_fresh_start(session, id=row.id, at=_NOW)
     fresh = await admit_chat(deps, tenant, now=_NOW)

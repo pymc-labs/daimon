@@ -174,14 +174,6 @@ async def test_candidates_need_two_verified_emails_and_auto_link_respects_every_
     await people.link(you, sign_in_proof("slack", "T1", "Uy", verified_email="you@example.com"))
     await people.link(third, sign_in_proof("slack", "T1", "Ut", verified_email="third@example.com"))
     await people.link(admin, github_proof(7))
-    await identity.grant_data_admin(
-        people.conn,
-        people.schemas,
-        tenant_id=people.tenant,
-        by=admin,
-        account_id=admin,
-        admin=True,
-    )
     rows = [
         SourceAccount("a-me", email="ME@example.com", email_verified=True),
         SourceAccount("a-unverified", email="third@example.com"),
@@ -200,6 +192,7 @@ async def test_candidates_need_two_verified_emails_and_auto_link_respects_every_
         by=admin,
         key=IdentityKey("acme", "w", "a-you"),
         account_id=you,
+        admin=True,
     )
     assert await people.listing("acme", *rows, domain="other.example") == [], "outside the domain"
     assert await people.listing("acme", *rows, domain="example.com") == ["a-me"], (
@@ -221,37 +214,21 @@ async def test_candidates_need_two_verified_emails_and_auto_link_respects_every_
     ), "an email two users share links"
 
 
-async def test_a_data_admin_links_others_with_a_notice_and_a_trail_and_never_a_platform_unlink(
+async def test_a_workspace_admin_links_others_with_a_notice_and_a_trail_and_never_a_platform_unlink(
     people: People,
 ) -> None:
     d, admin, other, you = people.schemas.data, uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     key = IdentityKey("acme", "w", "u1")
     await people.listing("acme", SourceAccount("u1"))
 
-    def link(by: uuid.UUID, to: uuid.UUID, k: IdentityKey = key):
+    def link(by: uuid.UUID, to: uuid.UUID, *, admin: bool = True):
         return identity.admin_link(
-            people.conn, people.schemas, tenant_id=people.tenant, by=by, key=k, account_id=to
-        )
+            people.conn, people.schemas, tenant_id=people.tenant, by=by, key=key, account_id=to,
+            admin=admin,
+        )  # fmt: skip
 
     with pytest.raises(NotAllowed):
-        await link(admin, you)
-    with pytest.raises(NotAllowed):
-        await identity.grant_data_admin(
-            people.conn,
-            people.schemas,
-            tenant_id=people.tenant,
-            by=other,
-            account_id=other,
-            admin=False,
-        )
-    await identity.grant_data_admin(
-        people.conn,
-        people.schemas,
-        tenant_id=people.tenant,
-        by=other,
-        account_id=admin,
-        admin=True,
-    )
+        await link(admin, you, admin=False)
     with pytest.raises(NotAllowed):
         await link(admin, admin)
     assert await link(admin, you) == "admin"
@@ -260,7 +237,7 @@ async def test_a_data_admin_links_others_with_a_notice_and_a_trail_and_never_a_p
     assert await people.reads(you, await people.record_for(key.ref()))
     assert (
         await identity.unlink(
-            people.conn, people.schemas, tenant_id=people.tenant, by=admin, key=key
+            people.conn, people.schemas, tenant_id=people.tenant, by=admin, key=key, admin=True
         )
         == you
     )
@@ -306,6 +283,7 @@ async def test_a_data_admin_links_others_with_a_notice_and_a_trail_and_never_a_p
             tenant_id=people.tenant,
             by=admin,
             key=IdentityKey("chat", "g1", "p1"),
+            admin=True,
         )
 
 
