@@ -7,7 +7,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import httpx
 import pytest
@@ -18,6 +18,7 @@ from daimon.data import identity, recheck
 from daimon.data.access import ReadContext, scoped, subject
 from daimon.data.identity import IdentityKey, Proof
 from daimon.data.schema import Schemas
+from daimon.data.sync import engine
 from daimon.data.sync.connector import CONNECTORS, Json, Source
 from daimon.data.sync.connectors.github_api import API, Api, app_token
 from daimon.data.sync.credentials import seal
@@ -319,7 +320,7 @@ async def test_a_lost_grant_is_dropped_at_read_before_any_sync(
 
 
 async def test_the_github_app_mints_a_read_token_for_the_repositories_the_workspace_connected(
-    store: Store,
+    store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     pem = key.private_bytes(
@@ -397,3 +398,10 @@ async def test_the_github_app_mints_a_read_token_for_the_repositories_the_worksp
         RateBudget(0),
     )
     assert await app_token(store.conn, ("1", pem), other, mock) is None, "nothing connected"
+
+    async def refused(*_a: object) -> str:
+        raise Upstream("GitHub refused the App a token (HTTP 422)")
+
+    monkeypatch.setattr(engine, "app_token", refused)
+    got = await engine.ready(store.conn, replace(store.env, github_app=("1", pem)), other)
+    assert "token" not in got.credentials, "a failed mint leaves no token: its reads fail closed"

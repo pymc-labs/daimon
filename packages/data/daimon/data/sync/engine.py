@@ -13,6 +13,7 @@ never readable by scope.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -23,6 +24,7 @@ from datetime import datetime, timedelta
 from typing import Final
 from uuid import UUID
 
+import httpx
 import psycopg
 import structlog
 from daimon.core.config import DataSettings, Settings
@@ -48,7 +50,7 @@ from daimon.data.sync.connector import (
 from daimon.data.sync.connectors.github_api import app_token
 from daimon.data.sync.credentials import unseal
 from daimon.data.sync.embedding import embed_pending
-from daimon.data.sync.http import GuardedTransport
+from daimon.data.sync.http import GuardedTransport, Upstream
 from daimon.data.sync.rate import RateBudget
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
@@ -529,6 +531,8 @@ class EmptySnapshot(RuntimeError):
 
 
 DEFAULT_RATE: Final = 60.0
+MINT_SECONDS: Final = 10.0
+"""How long minting a GitHub App token may take before the source reads without one."""
 """Upstream calls per minute a source may make unless `rate_per_minute` says otherwise
 (0 is unlimited)."""
 
@@ -603,7 +607,13 @@ async def ready(
     if env.keyless_accounts:
         source = replace(source, keyless_accounts=await _keyless(conn, env, source))
     if source.kind == "github" and env.github_app and not source.credentials.get("token"):
-        token = await app_token(conn, env.github_app, source, GuardedTransport(env.private_hosts))
+        try:  # no token: this source's reads fail closed, never the whole read
+            async with asyncio.timeout(MINT_SECONDS):
+                transport = GuardedTransport(env.private_hosts)
+                token = await app_token(conn, env.github_app, source, transport)
+        except (Upstream, httpx.HTTPError, TimeoutError, ValueError) as e:
+            log.warning("data.app_token_failed", source=str(source.id), error=type(e).__name__)
+            token = None
         if token:
             source = replace(source, credentials={**source.credentials, "token": token})
     return source
