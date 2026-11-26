@@ -1,10 +1,11 @@
 """What one read may see and how its answer goes out: the one rule every reading surface uses.
 
 The caller resolves the audience (`daimon.core.data_audience`) from signed facts. `open_read`
-turns it into the store's `ReadContext` and the read-time redaction: when a guest or a person
-marked redacted will read the answer, every string goes through the tenant's entity lists,
-and what redaction cannot cover is refused (`Reading.redacted`): caller SQL, file bytes, and a
-query that names a hidden entity, whose hit or miss would tell what the lists hide.
+turns it into the store's `ReadContext` and the read-time redaction: every string goes
+through the tenant's answer-time rules, and, when a guest or a person marked redacted will read
+the answer, its entity lists. What redaction cannot cover is refused (`Reading.redacted`):
+caller SQL, file bytes, and a query that names a hidden term, whose hit or miss would tell
+what the rules hide.
 """
 
 from __future__ import annotations
@@ -24,19 +25,23 @@ from psycopg.rows import DictRow
 class Reading:
     ctx: ReadContext
     entities: redaction.Entities | None
-    """The names hidden from this audience; None when nothing is redacted."""
+    """The names hidden from this audience; None when none are."""
+    answer: redaction.Redactor | None = None
+    """The tenant's answer-time rules, for every audience; None when it has none."""
 
     @property
     def redacted(self) -> bool:
-        return self.entities is not None
+        """Whether this audience reads anything other than what is stored."""
+        return self.entities is not None or self.answer is not None
 
     def show[T](self, value: T) -> T:
         """`value` (JSON-like) as this audience may read it."""
-        return value if self.entities is None else self.entities(value)
+        shown = value if self.answer is None else self.answer(value)
+        return shown if self.entities is None else self.entities(shown)
 
     def names_hidden(self, text: str) -> bool:
-        """Whether `text` names an entity this audience may not see."""
-        return self.entities is not None and self.entities.text(text) != text
+        """Whether `text` names a term this audience may not see."""
+        return self.show(text) != text
 
 
 async def open_read(
@@ -68,4 +73,4 @@ async def open_read(
     entities = (
         await redaction.read_redactor(conn, schemas, tenant_id, ctx.scopes) if hidden else None
     )
-    return Reading(ctx, entities)
+    return Reading(ctx, entities, await redaction.answer_redactor(conn, schemas, tenant_id))

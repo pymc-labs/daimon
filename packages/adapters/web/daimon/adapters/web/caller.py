@@ -34,6 +34,7 @@ from daimon.core.web_roles_rules import (
 from daimon.core.web_roles_rules import (
     role_of as role_of,
 )
+from daimon.data import pool
 from fastapi import Depends, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -106,8 +107,9 @@ async def signin_allowed_in(db: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
 async def workspace_data_sources_on(
     runtime: WebRuntime, db: AsyncSession, tenant_id: uuid.UUID
 ) -> bool:
-    """Whether the workspace has data sources on: the deployment's value, then its own."""
-    if not data_sources_on(runtime.settings):
+    """Whether the workspace has data sources on: the deployment's value, then its own, and
+    the store is installed (`pool.ready`)."""
+    if not data_sources_on(runtime.settings) or not await pool.ready(runtime.settings):
         return False
     return (
         await feature_in(db, runtime.settings, FeaturePlace(tenant_id, "web"), "data_sources")

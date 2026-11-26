@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **Data sources are on by default and inert until used.** `DAIMON_FEATURES__DATA_SOURCES=off`
+  turns them off. A data-reading agent no longer starts a fresh session each turn or loses
+  long-term memory: other agents still cannot ask it, writes out still ask first, and a
+  memory saved after a data read shows only to people who could read that data. Workspace
+  admins manage data access, and may grant themselves a scope (audited). Redaction sets
+  take `at: storage` or `at: answer`. Teams rooms get data answers for their members once
+  the app (0.6.3) is re-uploaded and a team owner or chat member grants
+  `ChannelMember.Read.Group` or `ChatMember.Read.Chat`
+  ([Data sources](docs/data-sources.md#who-sees-an-answer)).
+
 - **The web app gets pages for data sources, with the feature on.** A Data section searches
   and browses what the person may read and opens items with their files. Integrations lists
   sources with their runs, parity result and publish control. Admin gains Data access for

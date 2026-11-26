@@ -1,9 +1,11 @@
-"""Whether an agent reads data sources at a place: the one read every sealing path asks.
+"""Whether an agent reads data sources at a place: the one read every data path asks.
 
-An agent with `data_reads` On is sealed by the relay rule (`daimon.core.relay_scope`): a
-fresh session per channel turn, no long-term memory, held to its room. Other agents may
-not ask it (helpers, agent chat, handoff) unless they read data in the same room. The
-read resolves `data_reads` with its dependencies; a failed read raises, so a caller
+A data-reading agent keeps its sessions and memory; what leaves the conversation is
+guarded instead. Other agents may not ask it (agent chat, handoff; a helper ask only from
+an agent that reads data in the same room), writes out ask first
+(`tool_safety.after_data_read`), its provider memory stores mount read-only, and what it
+saves to Daimon's own memory records the data it read (`daimon.core.stores.data_memory`).
+The read resolves `data_reads` with its dependencies; a failed read raises, so a caller
 refuses rather than guess.
 """
 

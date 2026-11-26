@@ -48,7 +48,7 @@ from daimon.core.continuity.tool_messages import (
     render_tool_refusal_unreachable,
     render_tool_unsaved_work_question,
 )
-from daimon.core.data_seal import AGENT_REQUEST_REFUSAL, reads_data
+from daimon.core.data_reading import AGENT_REQUEST_REFUSAL, reads_data
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_FORKED_FROM,
@@ -252,7 +252,7 @@ async def _hand_off_task_impl(
             "That agent is not here, or it was recreated and has a new id. "
             "Look it up with list_agents and pass the id it reports now. Nothing was changed."
         )
-    # A data-reading agent takes no conversation from another agent (`daimon.core.data_seal`).
+    # A data-reading agent takes no conversation from another agent (`daimon.core.data_reading`).
     destination_place = FeaturePlace.of(
         auth.tenant_id,
         platform,

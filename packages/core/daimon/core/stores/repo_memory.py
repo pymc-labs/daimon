@@ -27,6 +27,8 @@ class MemoryEntry(BaseModel):
     scope: Literal["repo", "user"]
     created_by_account_id: uuid.UUID | None
     source_id: str | None = None
+    # Data items read before the save (`daimon.core.stores.data_memory`); None: none.
+    data_refs: list[str] | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -85,6 +87,7 @@ async def save_entry(session: AsyncSession, *, entry: MemoryEntry) -> str | None
         row.body = entry.body
         row.kind = entry.kind
         row.created_by_account_id = entry.created_by_account_id
+        row.data_refs = entry.data_refs
         row.updated_at = entry.updated_at
     else:
         session.add(RepoMemory(**entry.model_dump()))
@@ -120,7 +123,8 @@ async def turn_entries(
 ) -> tuple[str, list[tuple[str, str, str, str, str]], str | None]:
     """One indexed query: live working grant, scoped confirmation and bounded catalog.
 
-    Primary-key prefixes select the agent's grants and the repo's memory slots.
+    Primary-key prefixes select the agent's grants and the repo's memory slots. An entry
+    that records data reads only through the tools, which check its audience.
     References never transfer bodies. At most 512 rows and 12,001 characters per
     directive cross the DB boundary. There is no per-entry or network lookup.
     Agent-specific confirmations shadow shared ones even when revoked. The same
@@ -157,6 +161,7 @@ async def turn_entries(
                 FROM repo_memory
                 WHERE tenant_id = :tenant_id AND repo_id = w.repo_id
                   AND (scope = 'repo' OR created_by_account_id = :account_id)
+                  AND data_refs IS NULL
                 ORDER BY kind, name LIMIT 512
             ), sized AS (
                 SELECT *, sum(octet_length(title) + octet_length(body) + 256)
