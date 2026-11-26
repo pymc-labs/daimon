@@ -698,11 +698,14 @@ jobs:
         run: |
           # Optional: a deployment that syncs data sources on its own VM names it
           # <repo>-data-sync and puts compose.data-sync.yml in the assets bucket.
-          # Recreated like the workers above; skipped when absent or stopped.
-          STATUS=$(gcloud compute instances describe ${{ vars.GCP_AR_REPO }}-data-sync --zone "$ZONE" \
-            --format='value(status)' 2>/dev/null || true)
+          # Recreated like the workers above; skipped only when absent or stopped.
+          if ! STATUS=$(gcloud compute instances describe ${{ vars.GCP_AR_REPO }}-data-sync --zone "$ZONE" \
+            --format='value(status)' 2>"$RUNNER_TEMP/data-sync-describe.err"); then
+            grep -qi "not found" "$RUNNER_TEMP/data-sync-describe.err" || { cat "$RUNNER_TEMP/data-sync-describe.err" >&2; exit 1; }
+            STATUS=none
+          fi
           if [ "$STATUS" != "RUNNING" ]; then
-            echo "no running data-sync VM (${STATUS:-none}): skipping"
+            echo "::notice::no running data-sync VM ($STATUS): skipping its refresh"
             exit 0
           fi
           # A new runner key reaches each VM on its own; wait for this one.
@@ -723,6 +726,12 @@ jobs:
               sudo -E docker compose -f compose.data-sync.yml pull
               # Time for a sync in flight to stop cleanly on SIGTERM.
               sudo -E docker compose -f compose.data-sync.yml up -d --remove-orphans --timeout 95
+              sleep 20
+              # Every service must still run after the refresh.
+              if sudo -E docker compose -f compose.data-sync.yml ps -a --format "{{.Service}} {{.State}}" | grep -v " running$"; then
+                echo "a data-sync service is not running" >&2
+                exit 1
+              fi
               sudo docker image prune -af || true
           '
 
