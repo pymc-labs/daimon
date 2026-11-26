@@ -18,6 +18,8 @@ any other platform sends no claim.
 
 from __future__ import annotations
 
+import uuid
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Final, Literal
 
@@ -42,32 +44,77 @@ def room_of(facts: RoomFacts) -> SignedRoom:
     return "narrow" if facts.narrow else "team"
 
 
-async def turn_room(
-    sessionmaker: async_sessionmaker[AsyncSession], origin: TurnOriginRow, *, now: datetime
-) -> SignedRoom | None:
-    """The kind of place a turn's answer goes to; None off Discord.
-
-    The place is the origin's thread (its channel when they are the same). A public thread
-    with no fact of its own yet takes its parent's; any other thread with none is narrow
-    (`read_channel_facts`). A fact that cannot be read makes the room contained.
-    """
-    if origin.platform not in ROOM_PLATFORMS:
-        return None
-    if origin_place(origin) == "dm":
-        return "dm"
-    room = origin.thread_id
-    parent = origin.parent_channel_id if origin.parent_channel_id != room else None
+async def _place_room(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    room: str,
+    parent: str | None,
+    public_thread: bool,
+    now: datetime,
+) -> SignedRoom:
+    """The kind of a room or thread by its stored facts. A public thread with no fact of its
+    own yet takes its parent's; any other thread with none is narrow (`read_channel_facts`).
+    A fact that cannot be read makes the room contained."""
     try:
         async with sessionmaker() as session:
             facts = await read_channel_facts(
                 session,
-                tenant_id=origin.tenant_id,
+                tenant_id=tenant_id,
                 channel_id=room,
-                parent_id=parent,
-                public_thread=origin.public_thread,
+                parent_id=parent if parent != room else None,
+                public_thread=public_thread,
                 now=now,
             )
     except Exception as err:  # boundary: an unreadable room counts as contained
         log.warning("signed_room.facts_unreadable", error_type=type(err).__name__)
         return "contained"
     return room_of(facts)
+
+
+async def turn_room(
+    sessionmaker: async_sessionmaker[AsyncSession], origin: TurnOriginRow, *, now: datetime
+) -> SignedRoom | None:
+    """The kind of place a turn's answer goes to: its thread, or its channel when they are
+    the same. None off Discord."""
+    if origin.platform not in ROOM_PLATFORMS:
+        return None
+    if origin_place(origin) == "dm":
+        return "dm"
+    return await _place_room(
+        sessionmaker,
+        tenant_id=origin.tenant_id,
+        room=origin.thread_id,
+        parent=origin.parent_channel_id,
+        public_thread=origin.public_thread,
+        now=now,
+    )
+
+
+async def routine_room(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    destination: Mapping[str, str | None] | None,
+    now: datetime,
+) -> tuple[str, SignedRoom] | None:
+    """The room a routine posts to and its kind, from its `routine_conversation`.
+
+    None off Discord, for a DM destination and for no destination: such a run names no
+    room. The thread kind is not recorded, so a thread with no fact of its own is narrow.
+    """
+    if platform not in ROOM_PLATFORMS or destination is None:
+        return None
+    channel = destination.get("channel_id")
+    if destination.get("place_type") not in ("channel", "thread") or not channel:
+        return None
+    room = await _place_room(
+        sessionmaker,
+        tenant_id=tenant_id,
+        room=channel,
+        parent=destination.get("parent_channel_id"),
+        public_thread=False,
+        now=now,
+    )
+    return channel, room
