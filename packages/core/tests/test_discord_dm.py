@@ -1,4 +1,4 @@
-"""The scheduler's Discord error-card DM, against a fake transport."""
+"""The scheduler's Discord DMs (error card, opening a DM), against a fake transport."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 
 import httpx
 import pytest
-from daimon.core.discord_membership import send_discord_error_dm
+from daimon.core.discord_membership import open_discord_dm, send_discord_error_dm
 
 
 async def _send(handler: httpx.MockTransport, user_id: str = "42", text: str = "hi") -> None:
@@ -63,3 +63,44 @@ async def test_errors_never_carry_the_token_or_message_text() -> None:
         await send_discord_error_dm("tok-SECRET", "42", "private text", "x", transport=failing)
     for leaked in ("tok-SECRET", "body-text", "private text"):
         assert leaked not in str(raised.value), "no token, reply body or message text"
+
+
+async def test_open_makes_one_request_for_the_dm_channel_and_sends_nothing() -> None:
+    calls: list[tuple[str, str, dict[str, object]]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path, json.loads(request.content)))
+        return httpx.Response(200, json={"id": "77", "type": 1})
+
+    assert await open_discord_dm("token", "42", transport=httpx.MockTransport(handle)) == "77"
+    assert calls == [("POST", "/api/v10/users/@me/channels", {"recipient_id": "42"})], (
+        "one open, no message"
+    )
+
+
+@pytest.mark.parametrize(
+    ("reply", "raised"),
+    [
+        (httpx.Response(403, json={"code": 50007}), httpx.HTTPStatusError),
+        (httpx.Response(429, json={"retry_after": 1.5}), httpx.HTTPStatusError),
+        (httpx.Response(200, json={"id": "abc"}), ValueError),
+        (httpx.Response(200, content=b"<html>"), ValueError),
+    ],
+    ids=["refused", "rate-limited", "malformed", "garbled"],
+)
+async def test_open_raises_on_a_refusal_a_rate_limit_or_a_bad_reply_without_the_token(
+    reply: httpx.Response, raised: type[Exception]
+) -> None:
+    calls: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return reply
+
+    with pytest.raises(raised) as caught:
+        await open_discord_dm("tok-SECRET", "42", transport=httpx.MockTransport(handle))
+    assert "tok-SECRET" not in str(caught.value), "the token never reaches the error"
+    assert len(calls) == 1, "no retry and no send"
+    with pytest.raises(ValueError, match="decimal"):
+        await open_discord_dm("tok-SECRET", "not-an-id", transport=httpx.MockTransport(handle))
+    assert len(calls) == 1, "a bad user id reaches no endpoint"

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import uuid
 
 import pytest
@@ -17,15 +18,20 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .test_identity_relay import (
+    OWNER,
     SERVER,
     _call,
     _chat_session,
+    _dm_fire,
     _identity,
+    _owner,
     _Person,
     _person,
+    _post,
     _relay,
     _routine,
     _token,
+    _tool_call,
     _Upstream,
 )
 
@@ -339,3 +345,118 @@ async def test_a_routine_reads_a_public_thread_with_no_fact_as_narrow_where_a_tu
         {"destination_kind": "thread", "destination_id": "thr-1", "channel_id": "chan-1"},
     )
     assert (claims["channel"], claims["room"]) == ("thr-1", "narrow"), "a routine reads narrow"
+
+
+# A routine posting to its owner's DM
+
+DM_SERVER = SERVER.model_copy(update={"routine_claims": True, "dm_routine_claims": True})
+#: Claims that differ on every token.
+_PER_TOKEN = {"iat", "exp", "jti"}
+
+
+async def _signed(
+    factory: async_sessionmaker[AsyncSession],
+    token: str,
+    server: SignedIdentityServer,
+    body: str | None = None,
+) -> tuple[dict[str, object], bytes]:
+    """The claims `server` is sent for `token`, less those every token has its own of, and
+    the body it is sent."""
+    upstream, key = _Upstream(), generate_signing_key()
+    async with _relay(factory, upstream, key, server) as client:
+        await (_call(client, token) if body is None else _post(client, token, body))
+    (sent,) = upstream.requests
+    claims = {k: v for k, v in _identity(sent, key).items() if k not in _PER_TOKEN}
+    return claims, sent.content
+
+
+async def _sql(factory: async_sessionmaker[AsyncSession], sql: str, **params: object) -> None:
+    async with factory() as db, db.begin():
+        await db.execute(text(sql), params)
+
+
+async def test_a_live_dm_routine_fire_names_its_routine_owner_and_dm(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    person = await _owner(db_session_factory)
+    routine_id, token, _ = await _dm_fire(db_session_factory, person)
+    on, _ = await _signed(db_session_factory, token, DM_SERVER)
+    off, _ = await _signed(db_session_factory, token, SERVER)
+    assert on == {**off, "routine": str(routine_id), "channel": "555", "room": "dm"}, (
+        "today's claims, with the routine, the owner's DM and room dm"
+    )
+    assert (on["sub"], on["ws"]) == (f"discord:{OWNER}", "discord:guild-1"), "the owner"
+    assert not {"msg", "wake"} & set(on), "no message and no wake"
+    every, _ = await _signed(
+        db_session_factory, token, DM_SERVER.model_copy(update={"wake_claims": True})
+    )
+    assert every == on, "wake claims on as well add no wake to a routine"
+
+
+_CHECKS = {
+    "finished": "DELETE FROM lead_intake_executions",
+    "expired": "UPDATE lead_intake_executions SET expires_at = now() - interval '1 second'",
+    "another-routines-fire": "UPDATE lead_intake_executions SET routine_id = :other",
+    "paused": "UPDATE routines SET enabled = false WHERE id = :routine",
+    "edited": "UPDATE routines SET updated_at = updated_at + interval '1 microsecond'"
+    " WHERE id = :routine",
+    "handed-to-another-owner": "UPDATE routines SET created_by_user_id = '5678',"
+    " destination_id = '5678' WHERE id = :routine",
+    "another-agent": "UPDATE routines SET agent_id = 'agent_b' WHERE id = :routine",
+    "now-to-a-channel": "UPDATE routines SET destination_kind = 'channel',"
+    " destination_id = 'chan-1' WHERE id = :routine",
+    "a-persons-dm-turn": "UPDATE turn_origins SET human_invocation = true, attended = true,"
+    " platform_message_id = 'm-1'",
+    "a-dm-watch-or-timer": "UPDATE turn_origins SET own_dm_reach = false",
+    "a-helper": "UPDATE turn_origins SET helper_of = :parent, helper_key = 'k'",
+    "grant-moved": "UPDATE turn_origins SET chat_session_id = 'g-other'",
+    "foreign-sender": "UPDATE turn_origins SET sender_foreign = true",
+    "another-signed-in-person": "UPDATE platform_principals SET external_id = '5678'"
+    " WHERE account_id = :account",
+}
+
+
+@pytest.mark.parametrize("case", [*_CHECKS, "grant-less", "routine-claims-only", "both-off"])
+async def test_a_dm_routine_call_any_check_fails_signs_what_it_signs_today(
+    db_session_factory: async_sessionmaker[AsyncSession], case: str
+) -> None:
+    person = await _owner(db_session_factory)
+    routine_id, token, _ = await _dm_fire(db_session_factory, person, combined=case != "grant-less")
+    if case in _CHECKS:
+        other = await _routine(db_session_factory, person, destination_kind="dm", owner=OWNER)
+        await _sql(
+            db_session_factory, _CHECKS[case], routine=routine_id, other=other,
+            parent=uuid.uuid4(), account=person.account_id,
+        )  # fmt: skip
+    server = {"routine-claims-only": ROUTINE_SERVER, "both-off": SERVER}.get(case, DM_SERVER)
+    on, _ = await _signed(db_session_factory, token, server)
+    off, _ = await _signed(db_session_factory, token, SERVER)
+    assert "routine" not in on and on.get("room") != "dm", f"{case}: no DM routine claims"
+    assert on == off, f"{case}: the call signs what it signs without the setting"
+
+
+@pytest.mark.parametrize(
+    "server",
+    [
+        SERVER.model_copy(update={"requester_meta": True}),
+        ROUTINE_SERVER.model_copy(update={"requester_meta": True}),
+        DM_SERVER.model_copy(update={"requester_meta": True}),
+    ],
+    ids=["signed", "routine-claims", "dm-routine-claims"],
+)
+async def test_a_dm_routines_credential_stamps_as_today_and_signs_more_only_with_the_setting(
+    db_session_factory: async_sessionmaker[AsyncSession], server: SignedIdentityServer
+) -> None:
+    """The fields a fire adds to its credential change nothing a server gets unless it
+    signs DM routines; the requester fields it is stamped with never change."""
+    person = await _owner(db_session_factory)
+    routine_id, combined, today = await _dm_fire(db_session_factory, person)
+    body = _tool_call(requester_platform_user_id="666", requester_kind="person")
+    new, new_body = await _signed(db_session_factory, combined, server, body)
+    old, old_body = await _signed(db_session_factory, today, server, body)
+    assert new_body == old_body, "byte for byte today's body and requester stamp"
+    assert json.loads(new_body)["params"]["_meta"]["requester_kind"] == "routine"
+    added = {"routine": str(routine_id), "channel": "555", "room": "dm"}
+    assert new == ({**old, **added} if server.dm_routine_claims else old), (
+        "only a server signing DM routines gets more"
+    )

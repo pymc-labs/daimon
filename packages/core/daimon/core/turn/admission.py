@@ -112,6 +112,7 @@ from daimon.core.ma_resolver import (
     retrieve_agent_cached,
     retrieve_environment_cached,
 )
+from daimon.core.mcp_identity import DmRoutineRelay
 from daimon.core.membership_subject import resolve_subject, resolve_subject_authority
 from daimon.core.permissions import (
     agent_permissions,
@@ -465,6 +466,9 @@ class Admission:
     # The origin channel is shared with another organisation (stamped on the turn origin).
     shared_channel: bool = False
     private_dm_id: str | None = None
+    # A routine posting to its owner's DM, with that DM opened: bound into the turn's
+    # relay credential (`daimon.core.mcp_identity.DmRoutineRelay`). None otherwise.
+    dm_routine_relay: DmRoutineRelay | None = None
     # A relay agent's turn (`daimon.core.relay_scope`): held, sealed, no memory, a fresh session.
     relay_scoped: bool = False
     # The channel and thread the turn runs in, and every sealed id that seals
