@@ -1307,6 +1307,8 @@ class DmRoutineReply:
     producing_agent_id: str
     #: False for an OpenAI or Gemini routine, whose session has no Anthropic files.
     on_managed_agents: bool = True
+    #: That other provider's session outputs, staged for delivery while it is live.
+    outputs: OutputRuntime | None = None
 
 
 #: Recorded on a DM watch or timer when its agent runs on another provider.
@@ -1722,6 +1724,7 @@ async def _run_unattended_turn(
         session_id=done.session_id,
         producing_agent_id=prepared.admission.agent.id,
         on_managed_agents=prepared.backend is None,
+        outputs=None if prepared.backend is None else done.outputs,
     )
 
 

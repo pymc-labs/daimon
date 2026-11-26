@@ -1,14 +1,29 @@
 """Routine file references and bounded, fail-fast delivery through fake provider I/O."""
 
+import uuid
 from datetime import UTC, datetime
+from typing import Any, cast
 
 import httpx
 import pytest
+from daimon.core.checkpoint_prompt import HANDOFF_FILENAME_PREFIX
 from daimon.core.output_delivery import MAX_BYTES_CEILING
-from daimon.core.routine_files import collect_routine_files, decode_payload, deliver_routine_files
+from daimon.core.output_runtime import SessionOutput
+from daimon.core.routine_files import (
+    collect_routine_files,
+    decode_payload,
+    deliver_routine_files,
+    stage_routine_files,
+)
+from daimon.core.stores.file_uploads import get_upload
 from daimon.testing.builders import file_meta
+from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+#: Files API references never touch the staging table.
+FILES_API_ONLY: dict[str, Any] = {"sessions": cast(Any, None), "tenant_id": uuid.UUID(int=1)}
 
 
 def file_client(sizes: list[int]):
@@ -69,14 +84,26 @@ async def test_delivery_rechecks_and_applies_destination_limit(allowed):
 
     if allowed:
         await deliver_routine_files(
-            client, payload, max_bytes=3, post=post, notice=notice, may_post=may_post
+            client,
+            payload,
+            max_bytes=3,
+            post=post,
+            notice=notice,
+            may_post=may_post,
+            **FILES_API_ONLY,
         )
         assert not sent
         assert "upload limit" in notices[0]
     else:
         with pytest.raises(RuntimeError, match="destination or owner changed"):
             await deliver_routine_files(
-                client, payload, max_bytes=4, post=post, notice=notice, may_post=may_post
+                client,
+                payload,
+                max_bytes=4,
+                post=post,
+                notice=notice,
+                may_post=may_post,
+                **FILES_API_ONLY,
             )
         assert not sent and not notices
 
@@ -99,7 +126,13 @@ async def test_partial_failure_stops_remaining_files():
 
     with pytest.raises(RuntimeError, match="uncertain send"):
         await deliver_routine_files(
-            client, payload, max_bytes=4, post=post, notice=notice, may_post=may_post
+            client,
+            payload,
+            max_bytes=4,
+            post=post,
+            notice=notice,
+            may_post=may_post,
+            **FILES_API_ONLY,
         )
     assert sent == [b"data", b"data"]
 
@@ -120,7 +153,13 @@ async def test_owner_revocation_during_download_stops_upload():
 
     with pytest.raises(RuntimeError, match="destination or owner changed"):
         await deliver_routine_files(
-            client, payload, max_bytes=4, post=post, notice=notice, may_post=may_post
+            client,
+            payload,
+            max_bytes=4,
+            post=post,
+            notice=notice,
+            may_post=may_post,
+            **FILES_API_ONLY,
         )
 
 
@@ -183,3 +222,66 @@ def test_legacy_outbox_text_cannot_supply_file_references():
     decoded = decode_payload(payload_for(row))
     assert decoded.text == forged
     assert decoded.files == []
+
+
+class _Outputs:
+    """A provider session's outputs, as `ArtifactOutputRuntime` lists them."""
+
+    session_id = "ses_provider"
+    settles = False
+
+    def __init__(self, files: dict[SessionOutput, bytes]) -> None:
+        self.files = files
+
+    async def list_outputs(self) -> tuple[SessionOutput, ...]:
+        return tuple(self.files)
+
+    async def read_output(self, output_id: str) -> bytes:
+        return next(data for meta, data in self.files.items() if meta.id == output_id)
+
+    async def delete_output(self, output_id: str) -> None:
+        pass
+
+
+async def test_a_provider_fires_files_are_staged_then_delivered_and_dropped(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Read while the fire is live, posted from the staged bytes, then deleted."""
+    tenant = await make_tenant(db_session)
+    outputs = _Outputs(
+        {
+            SessionOutput("a1", "report.csv", "text/csv", 4): b"a,b\n",
+            SessionOutput("a2", "big.bin", "application/octet-stream", 9, max_read_bytes=8): b"",
+            SessionOutput("a3", f"{HANDOFF_FILENAME_PREFIX}x.md", "text/markdown", 2): b"hi",
+        }
+    )
+    payload = await stage_routine_files(
+        db_session_factory, outputs, tenant_id=tenant.id, text="Done"
+    )
+    decoded = decode_payload(payload)
+    assert [f.filename for f in decoded.files] == ["report.csv"], "handoff notes stay behind"
+    assert decoded.files[0].staged and "big.bin" in decoded.text, decoded
+    sent: list[bytes] = []
+
+    async def post(file: Any) -> None:
+        sent.append(file.content)
+
+    async def notice(text: str) -> None:
+        pytest.fail(text)
+
+    async def may_post() -> bool:
+        return True
+
+    await deliver_routine_files(
+        None,
+        payload,
+        max_bytes=10,
+        post=post,
+        notice=notice,
+        may_post=may_post,
+        sessions=db_session_factory,
+        tenant_id=tenant.id,
+    )
+    assert sent == [b"a,b\n"], "the staged bytes are what posts"
+    gone = await get_upload(db_session, tenant_id=tenant.id, handle_id=decoded.files[0].file_id)
+    assert gone is None, "a delivered file leaves the staging table"

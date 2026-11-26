@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 
 from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX
 from daimon.core.authz import Subject, Surface
+from daimon.core.output_runtime import OutputRuntime
 from daimon.core.routine_provider import routine_thread_id
 from daimon.core.routine_sandbox import RoutineSandbox, builtins_allowed, provider_run_matches_pin
 from daimon.core.rule_views import RoutineOrigin, routine_destination_channel
@@ -54,10 +55,11 @@ class _Unrendered(TurnLifecycle):
 
 @dataclass(frozen=True)
 class ProviderRoutineRun:
-    """A finished provider fire: its final text and state (for the agent's own posts)."""
+    """A finished provider fire: its final text, state (for the agent's own posts) and files."""
 
     text: str
     state: TurnState
+    outputs: OutputRuntime | None = None
 
 
 def routine_scope_channel(row: RoutineRow) -> str:
@@ -216,4 +218,6 @@ async def run_provider_routine(
     )
     if outcome.state.error is not None:
         raise outcome.state.error
-    return ProviderRoutineRun(extract_final_response(outcome.state.content), outcome.state)
+    return ProviderRoutineRun(
+        extract_final_response(outcome.state.content), outcome.state, outcome.outputs
+    )
