@@ -21,7 +21,7 @@ import hashlib
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, TypedDict
 
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsModelConfig
 from daimon.core.admin_actions import DelegatedAction
@@ -367,6 +367,12 @@ def with_model_override(
     )
 
 
+class _ThreadKey(TypedDict):
+    tenant_id: uuid.UUID
+    platform: str
+    thread_id: str
+
+
 @dataclass(frozen=True, slots=True)
 class AppliedThreadModel:
     agent: BetaManagedAgentsAgent
@@ -404,7 +410,7 @@ async def thread_backend(
     """
     if conversation_id is None:
         return None
-    key = {"tenant_id": tenant_id, "platform": platform, "thread_id": conversation_id}
+    key = _ThreadKey(tenant_id=tenant_id, platform=platform, thread_id=conversation_id)
     choice = await get_thread_choice(session, **key)
     effort = await get_thread_effort(session, **key)
     if choice is None:

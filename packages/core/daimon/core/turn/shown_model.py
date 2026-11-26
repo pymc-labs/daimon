@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 def card_label(model_id: str) -> str:
     """A model id as a card names it: Claude's short name ("Opus 5.5"), another provider's
     full one ("GPT-6 Luna"), and an id nobody knows as it is."""
-    others = (p for p in PROVIDERS if p != MANAGED_AGENTS.provider)
+    others: list[Provider] = [p for p in PROVIDERS if p != MANAGED_AGENTS.provider]
     if model_id not in MODEL_DISPLAY_NAMES and any(
         model_id in selectable_models(p) for p in others
     ):

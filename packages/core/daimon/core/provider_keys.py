@@ -44,7 +44,7 @@ def default_enabled_backends() -> tuple[Provider, ...]:
     opts in one by one. An admin's own allowlist (`backends_explicit`) wins, and
     an allowlist always lists Anthropic.
     """
-    keyed = tuple(p for p in DEFAULT_KEY_ENV if provider_key_present(p))
+    keyed: list[Provider] = [p for p in DEFAULT_KEY_ENV if provider_key_present(p)]
     return (MANAGED_AGENTS.provider, *keyed)
 
 
