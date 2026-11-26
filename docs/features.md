@@ -44,7 +44,7 @@ Where each feature can be set, and its default.
 | Platform skills | `platform_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
 | Agent skills | `agent_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Always On on Gemini, OpenAI |
 | Channel skills | `channel_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
-| Shared connections | `shared_connections` | Model input | Off | ✓ | ✓ |  |  |  |  |  |
+| Shared connections | `shared_connections` | Model input | On | ✓ | ✓ |  |  |  |  |  |
 | Thread participation | `participation` | Chat | Off | ✓ | ✓ |  | ✓ | ✓ |  | Only Discord, Teams |
 | Progress plans | `progress_plans` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Cost footer | `cost_footer` | Chat | Shown |  | ✓ |  | ✓ | ✓ |  |  |
@@ -120,6 +120,7 @@ Where each feature can be set, and its default.
 | Reach check | `reach_budget` | Guardrail | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Built-in tools in routines | `unattended_capabilities` | Guardrail | Allowed | ✓ | ✓ | ✓ |  |  |  |  |
 | Sandbox tools in routines | `routine_sandbox_tools` | Guardrail | Off |  | ✓ | ✓ |  |  | ✓ |  |
+| Approval for shared connection changes | `shared_write_approval` | Guardrail | Ask | ✓ | ✓ | ✓ |  |  |  |  |
 | Approval for watches | `watch_approval` | Guardrail | Ask |  | ✓ | ✓ |  |  |  |  |
 | Approval for cloud computers | `compute_approval` | Guardrail | Ask |  | ✓ | ✓ |  |  |  |  |
 | Cloud computers continue after a job | `compute_wake_runs` | Guardrail | Off |  | ✓ | ✓ |  |  |  |  |
@@ -762,13 +763,13 @@ Every message in private and shared channels is read through Microsoft Graph, no
 
 ## Shared connections
 
-Tool servers the team shares: an admin adds one once and approves its tools, and the team's agents and connected apps use them as tools named after the connection. A tool acts with the connection's own credential, not as the person. Off hides them all.
+Tool servers the team shares: an admin adds one once and approves its tools, and the team's agents and connected apps use them as tools named after the connection. A tool acts with the connection's own credential, not as the person. Nothing shows until an admin adds one. Off hides them all.
 
 | | |
 | --- | --- |
 | Key | `shared_connections` |
 | Values | `on` (On), `off` (Off) |
-| Default | `off` |
+| Default | `on` |
 | Levels | Deployment, Workspace |
 | Combines | Off above is a ceiling |
 
@@ -1332,6 +1333,18 @@ On gives an agent's or one routine's runs its built-in tools, for the agent and 
 | Values | `on` (On), `off` (Off) |
 | Default | `off` |
 | Levels | Workspace, Agent, Routine |
+| Combines | Most specific wins |
+
+## Approval for shared connection changes
+
+Ask shows a card before an agent runs a shared connection's tool that changes things. Skip runs it without one in chat; routines still need whoever runs Daimon to allow it. After a data read every call still asks.
+
+| | |
+| --- | --- |
+| Key | `shared_write_approval` |
+| Values | `skip` (Skip the card), `ask` (Ask) |
+| Default | `ask` |
+| Levels | Deployment, Workspace, Agent |
 | Combines | Most specific wins |
 
 ## Approval for watches

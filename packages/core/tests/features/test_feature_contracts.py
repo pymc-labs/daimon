@@ -112,6 +112,7 @@ _NARROWED: dict[str, str] = {
     "data_sources": "the store is shared by the whole server, so the deployment and a workspace set it",
     "compute_wake_runs": "a server admin's choice for the team or one agent, read by a wake turn",
     "watch_approval": "an operator's choice for the team or one agent; a channel or thread cannot loosen it",
+    "shared_write_approval": "an admin's choice for the team or one agent; a channel or thread cannot loosen it",
     "compute_approval": "an operator's choice for the team or one agent; a channel or thread cannot loosen it",
     "secret_sharing": "a workspace or agent choice: a share has no channel or thread",
     "bot_access_wait": "a workspace choice, read by background work with no agent or thread",

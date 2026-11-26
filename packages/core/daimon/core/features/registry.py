@@ -723,14 +723,14 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         category="model_input",
         effect="capability",
         values=_ON_OFF,
-        default="off",
+        default="on",
         tiers=("deployment", "workspace"),
         binds="turn",
         doc=(
             "Tool servers the team shares: an admin adds one once and approves its tools, and "
             "the team's agents and connected apps use them as tools named after the "
             "connection. A tool acts with the connection's own credential, not as the person. "
-            "Off hides them all."
+            "Nothing shows until an admin adds one. Off hides them all."
         ),
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,
@@ -950,6 +950,25 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         # routine's own On. The nearer tier decides; a Lock above still wins.
         combine_override="most_specific",
         pinned=True,
+    ),
+    FeatureSpec(
+        key="shared_write_approval",
+        name="Approval for shared connection changes",
+        category="guardrails",
+        effect="guardrail",
+        values={"skip": "Skip the card", "ask": "Ask"},
+        default="ask",
+        tiers=("deployment", "workspace", "agent"),
+        binds="turn",
+        doc=(
+            "Ask shows a card before an agent runs a shared connection's tool that changes "
+            "things. Skip runs it without one in chat; routines still need whoever runs "
+            "Daimon to allow it. After a data read every call still asks."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN_NOT_OWNER,
+        # Ask is the default and the strict value: the nearer tier decides, as for watches.
+        combine_override="most_specific",
     ),
     FeatureSpec(
         key="watch_approval",

@@ -2,8 +2,8 @@
 
 Each approved tool of a connection appears as `<connection>_<tool>` to a caller who has the
 `shared_connections` feature on and holds the tool's scope. Safety (`IdentityMiddleware`) runs
-first: the agent's tool rules refuse a name, a write is carded for a chat credential and
-refused for a client with no way to answer one, and every call leaves a security audit row.
+first: the agent's tool rules refuse a name, a write is carded for an agent's credential, an
+outside client is told to ask its user first, and every call leaves a security audit row.
 The description and schema shown are the ones an admin approved, never the upstream's live text.
 What a caller sees is read once per request; a Daimon tool's name is never looked up here.
 """
@@ -70,12 +70,14 @@ class SharedConnectionTool(Tool):
         return ToolResult(content=[TextContent(type="text", text=result.text)])
 
 
-def tool_of(runtime: McpRuntime, served: shared.SharedTool) -> SharedConnectionTool:
+def tool_of(
+    runtime: McpRuntime, served: shared.SharedTool, *, outside: bool = False
+) -> SharedConnectionTool:
     """The tool as it is shown: the approved words, flagged for clients by what it does."""
     tool = served.tool
     made = SharedConnectionTool(
         name=served.name,
-        description=(tool.description or f"{served.connection.name}: {tool.name}"),
+        description=shared.shown_description(served, outside=outside),
         parameters=tool.input_schema or {"type": "object"},
         annotations=ToolAnnotations(
             readOnlyHint=not tool.writes, destructiveHint=tool.writes, openWorldHint=True
@@ -105,16 +107,22 @@ class SharedConnectionProvider(Provider):
         if not isinstance(auth, AuthIdentity):
             return []
         runtime = self._runtime
-        found: list[shared.SharedTool] = []
-        places = await caller_places(runtime, auth, None)
-        if await shared.shared_connections_on(runtime.session_factory, runtime.settings, places):
-            async with runtime.session_factory() as session:
-                found = await shared.served_tools(session, caller_of(auth))
+        async with runtime.session_factory() as session:
+            found = await shared.served_tools(session, caller_of(auth))
+        # Nothing stored, nothing more read: the feature is on by default.
+        if found and not await shared.shared_connections_on(
+            runtime.session_factory, runtime.settings, await caller_places(runtime, auth, None)
+        ):
+            found = []
         await ctx.set_state(_SEEN, found, serializable=False)
         return found
 
     async def _list_tools(self) -> Sequence[Tool]:
-        return [tool_of(self._runtime, found) for found in await self._visible()]
+        found = await self._visible()
+        auth = await get_context().get_state("auth") if found else None
+        # An outside client has no card: a write's description tells it to ask its user.
+        outside = isinstance(auth, AuthIdentity) and auth.chat_agent_id is None
+        return [tool_of(self._runtime, f, outside=outside) for f in found]
 
     async def _get_tool(self, name: str, version: VersionSpec | None = None) -> Tool | None:
         if name in shared.DAIMON_TOOL_NAMES or not shared.is_served_name(name):

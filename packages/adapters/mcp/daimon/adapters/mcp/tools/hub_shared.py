@@ -4,8 +4,8 @@ A hub caller is one platform user across several workspaces, so both tools name 
 workspace. Each call first passes the checks every hub tool runs (`_auth_for`, `_admit`): the
 workspace is live, the account exists, and the access policy admits the caller now. The
 feature, the tool's scope and the safety rules are the ones `/mcp` applies; a hub client has
-no card to answer, so it gets reads only. Every call leaves a security audit row, the hub
-having no identity middleware of its own to write it.
+no card to answer, so a tool that changes things says to ask its user first. Every call
+leaves a security audit row, the hub having no identity middleware of its own to write it.
 """
 
 from __future__ import annotations
@@ -35,10 +35,7 @@ from mcp.types import TextContent
 _UNKNOWN = "Not found. Call list_daimons for the workspace_id values you can reach."
 _NAME_MAX = 128
 _OFF = "Shared connections are turned off there."
-_NO_WRITES = (
-    "This tool changes things and needs a person's approval, which this client can't ask "
-    "for. Nothing was done. Use it from a chat with a Daimon."
-)
+_REFUSED = "This workspace's rules refuse this tool. Nothing was done."
 
 
 class SharedToolInfo(BaseModel):
@@ -107,15 +104,15 @@ def register_hub_shared_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """List the tools a workspace has shared from its connected MCP servers.
 
         ``workspace_id`` is the ``workspace_id`` of a Daimon from list_daimons. Pass a
-        tool's ``name`` to call_shared_tool. A tool with ``writes`` true changes things
-        and can't be called from here.
+        tool's ``name`` to call_shared_tool. A tool with ``writes`` true changes things:
+        ask your user and get their yes before you call it.
         """
         hub = await _hub_auth(ctx)
         found = await _served(hub, _tenant(hub, workspace_id), "list_shared_tools")
         return [
             SharedToolInfo(
                 name=t.name,
-                description=t.tool.description,
+                description=shared.shown_description(t, outside=True),
                 writes=t.tool.writes,
                 input_schema=t.tool.input_schema,
             )
@@ -127,7 +124,7 @@ def register_hub_shared_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context, workspace_id: str, name: str, arguments: dict[str, Any] | None = None
     ) -> ToolResult:
         """Call one shared tool of a workspace's connected MCP servers, as listed by
-        list_shared_tools. Only tools that don't change anything run from here."""
+        list_shared_tools. Before a tool with ``writes`` true, ask your user first."""
         hub = await _hub_auth(ctx)
         tenant = _tenant(hub, workspace_id)
         served = await _served(hub, tenant, "call_shared_tool")
@@ -149,7 +146,7 @@ def register_hub_shared_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         )
         if verdict.outcome != "allow":
             await _audit(hub, tenant, name, "denied", f"verdict_{verdict.reason}")
-            raise ToolError(_NO_WRITES)
+            raise ToolError(_REFUSED)
         if runtime.fernet is None:
             raise ToolError("Shared connections aren't set up here.")
         try:

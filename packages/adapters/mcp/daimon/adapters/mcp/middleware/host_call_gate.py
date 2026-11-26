@@ -17,7 +17,7 @@ import structlog
 from daimon.adapters.mcp.confirmed_call import host_confirmed_call
 from daimon.core import host_calls
 from daimon.core.data_seal import reads_data
-from daimon.core.features.snapshot import FeaturePlace, deployment_on
+from daimon.core.features.snapshot import FeaturePlace, deployment_on, place_guardrail
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.security_audit import record_denial
 from daimon.core.stores import host_call_cards as cards
@@ -141,6 +141,16 @@ class HostCallGate:
     def off_for(self, identity: AuthIdentity) -> bool:
         """Whether the host call gate is off on this credential's platform."""
         return not deployment_on(self._runtime.settings, "host_call_gate", identity.platform or "")
+
+    async def _asks_writes(self, identity: AuthIdentity, origin: TurnOriginRow) -> bool:
+        """Whether a shared write asks at the turn's agent; a failed read asks."""
+        place = FeaturePlace.of(
+            identity.tenant_id, origin.platform, None, agent_id=origin.responder_ma_agent_id
+        )
+        found = await place_guardrail(
+            self._runtime.session_factory, self._runtime.settings, place, "shared_write_approval"
+        )
+        return found.value != "skip"
 
     async def _read_data(self, identity: AuthIdentity, origin: TurnOriginRow) -> bool:
         """Whether the turn's session reads data sources, now or in an earlier turn
@@ -267,6 +277,7 @@ class HostCallGate:
                 attended=origin.attended,
                 agent_rule=rule,
                 data_read=await self._read_data(identity, origin),
+                ask_writes=not tool.served.tool.writes or await self._asks_writes(identity, origin),
             )
         else:
             verdict = await tool_call_verdict(

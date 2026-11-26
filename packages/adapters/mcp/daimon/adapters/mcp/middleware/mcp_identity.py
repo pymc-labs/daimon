@@ -753,8 +753,9 @@ class IdentityMiddleware(Middleware):
         identity: AuthIdentity,
         served: SharedTool,
     ) -> object:
-        """A third-party tool's rules: a chat credential is asked or carded as its agent's rules
-        say; a client with no card to answer gets reads only."""
+        """A third-party tool's rules: an agent's credential is asked or carded as its agent's
+        rules say (and refused when it names no session); an outside client, which asks its
+        own user as the tool's description says, runs what the operator does not refuse."""
         from daimon.adapters.mcp.middleware.host_call_gate import schema_problem
         from daimon.adapters.mcp.shared_connections import refuse
         from daimon.core.shared_connections import decide_shared_call
@@ -762,11 +763,7 @@ class IdentityMiddleware(Middleware):
         def run(context: MiddlewareContext) -> Awaitable[object]:
             return self._run_backend(context, call_next, identity)
 
-        if (
-            identity.chat_agent_id is not None
-            and identity.chat_session_id is not None
-            and identity.platform_user_id is not None
-        ):
+        if identity.chat_agent_id is not None:
             return await self._require_host_call_gate().ask(context, identity, run)
         raw: object = getattr(context.message, "arguments", None)
         args = cast("dict[str, object]", raw) if isinstance(raw, dict) else {}
@@ -783,11 +780,7 @@ class IdentityMiddleware(Middleware):
         )
         if verdict.outcome == "allow":
             return await run(context)
-        raise refuse(
-            f"verdict_{verdict.reason}",
-            "This connection's tool changes things and needs a person's approval, which this "
-            "client can't ask for. Nothing was done. Use it from a chat with a Daimon.",
-        )
+        raise refuse(f"verdict_{verdict.reason}", "This workspace's rules refuse this tool.")
 
     def attach_host_call_gate(self, gate: HostCallGate) -> None:
         """Set once the runtime exists; the middleware is built before it."""

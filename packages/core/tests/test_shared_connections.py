@@ -10,7 +10,7 @@ from daimon.core import shared_connections as shared
 from daimon.core.stores import mcp_connections as store
 from daimon.core.stores.domain import DiscoveredTool, McpConnectionToolRow
 from daimon.core.stores.web_people import update_person
-from daimon.core.tool_safety import ANY_KEY, ResolvedAgentToolRule, ToolSafetyPolicy
+from daimon.core.tool_safety import ResolvedAgentToolRule, ToolSafetyPolicy
 from daimon.testing.factories import make_tenant, make_web_person
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -188,17 +188,31 @@ async def test_visitors_get_no_shared_tools(db_session: AsyncSession) -> None:
     assert await shared.served_tools(db_session, caller) == [], "a visitor sees none"
 
 
-def test_outside_clients_get_reads_only() -> None:
-    """`unattended_writes` lets a routine write, never an outside client."""
-    policy = ToolSafetyPolicy(unattended_writes=(ANY_KEY,))
+@pytest.mark.parametrize(
+    ("outside", "attended", "ask_writes", "expected"),
+    [
+        (True, False, True, ("allow", "approval_skipped")),
+        (False, True, False, ("allow", "approval_skipped")),
+        (False, False, False, ("deny", "unattended_write")),
+    ],
+    ids=["outside client writes", "asking off runs a chat write", "routine still refused"],
+)
+def test_who_asks_before_a_write(
+    outside: bool, attended: bool, ask_writes: bool, expected: tuple[str, str]
+) -> None:
+    """An outside client asks its own user; with asking off a chat write runs, a routine's not."""
+    verdict = shared.decide_shared_call(
+        ToolSafetyPolicy(),
+        "crm_send",
+        {},
+        writes=True,
+        attended=attended,
+        agent_rule=None,
+        outside=outside,
+        ask_writes=ask_writes,
+    )
 
-    def outcome(*, outside: bool) -> str:
-        return shared.decide_shared_call(
-            policy, "crm_send", {}, writes=True, attended=False, agent_rule=None, outside=outside
-        ).outcome
-
-    assert outcome(outside=False) == "allow", "a routine may write when the operator allows"
-    assert outcome(outside=True) == "deny", "an outside client may not"
+    assert (verdict.outcome, verdict.reason) == expected, f"verdict: {verdict}"
 
 
 @pytest.mark.parametrize(

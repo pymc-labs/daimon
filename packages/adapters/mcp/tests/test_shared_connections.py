@@ -40,7 +40,6 @@ from daimon.testing.factories import (
 )
 from daimon.testing.membership import FixtureMembershipResolver
 from fastmcp import Client, FastMCP
-from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from pydantic import HttpUrl, JsonValue, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -127,12 +126,12 @@ async def _admin(_: object) -> bool:
     return True
 
 
-async def _feature(world: World, value: str) -> None:
+async def _feature(world: World, value: str, key: str = "shared_connections") -> None:
     await change_feature(
         world.sessions,
         world.runtime.settings,
         FeatureActor(world.tenant_id, None, "web", None, _admin),
-        key="shared_connections",
+        key=key,
         tier="workspace",
         value=value,
         place=FeaturePlace(world.tenant_id, "discord"),
@@ -252,8 +251,7 @@ async def world(
     monkeypatch.setattr(
         "daimon.adapters.mcp.tools.discord._switch_card.post_switch_card", post_switch_card
     )
-    await _feature(made, "on")
-    return made
+    return made  # `shared_connections` is on by default
 
 
 async def test_a_read_runs_with_the_connections_own_token(world: World) -> None:
@@ -292,14 +290,23 @@ async def test_after_a_data_read_a_read_waits_on_a_card(
     assert world.upstream == [], "nothing reached the upstream before the press"
 
 
-async def test_a_client_with_no_card_gets_reads_only(world: World) -> None:
-    """An outside client can't answer a card: its read runs and its write is refused."""
+async def test_an_outside_client_is_told_to_ask_and_may_write(world: World) -> None:
+    """An outside client can't answer a card: a write's description says to ask its user,
+    and the write runs."""
     outside = world.chat(chat_agent_id=None, chat_session_id=None, no_confirmation_surface=False)
+    async with Client(world.server(outside)) as client:
+        described = {t.name: t.description or "" for t in await client.list_tools()}
 
-    assert await world.call(outside, "crm_lookup") == "lookup ran", "the read runs"
-    with pytest.raises(ToolError, match="needs a person's approval"):
-        await world.call(outside, "crm_send")
-    assert [name for name, _, _ in world.upstream] == ["lookup"], "the write never ran"
+    assert shared.WRITE_NOTE in described["crm_send"], f"the write says to ask: {described}"
+    assert shared.WRITE_NOTE not in described["crm_lookup"], "a read says nothing more"
+    assert await world.call(outside, "crm_send") == "send ran", "the write runs"
+
+
+async def test_a_chat_write_runs_unasked_with_approval_skipped(world: World) -> None:
+    """`shared_write_approval` Skip runs a chat write without a card."""
+    await _feature(world, "skip", "shared_write_approval")
+
+    assert await world.call(world.chat(), "crm_send") == "send ran", "no card, it ran"
 
 
 async def test_nothing_is_served_while_the_feature_is_off(world: World) -> None:
@@ -312,7 +319,7 @@ async def test_nothing_is_served_while_the_feature_is_off(world: World) -> None:
 
 
 async def test_the_hub_audits_each_call(world: World) -> None:
-    """A hub call leaves a security audit row, allowed for a read and denied for a write."""
+    """A hub call leaves a security audit row, allowed for a read and for a write."""
     hub = FastMCP("hub")
     register_hub_shared_tools(hub, world.runtime)  # pyright: ignore[reportArgumentType]
     caller = HubIdentity(
@@ -339,13 +346,12 @@ async def test_the_hub_audits_each_call(world: World) -> None:
         read = await client.call_tool(
             "call_shared_tool", {"workspace_id": _GUILD, "name": "crm_lookup"}
         )
-        with pytest.raises(ToolError, match="needs a person's approval"):
-            await client.call_tool("call_shared_tool", {"workspace_id": _GUILD, "name": "crm_send"})
+        await client.call_tool("call_shared_tool", {"workspace_id": _GUILD, "name": "crm_send"})
 
     async with world.sessions() as session:
         rows = await list_events(session, tenant_id=world.tenant_id)
     assert "lookup ran" in str(read.content), f"the read answered: {read}"
     assert [(r.tool_name, r.outcome, r.operation) for r in rows] == [
         ("crm_lookup", "allowed", OPERATION),
-        ("crm_send", "denied", OPERATION),
+        ("crm_send", "allowed", OPERATION),
     ], f"one row per call: {rows}"

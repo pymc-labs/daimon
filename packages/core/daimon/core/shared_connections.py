@@ -24,7 +24,7 @@ from collections.abc import Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from importlib.resources import files
-from typing import Final, Protocol
+from typing import Final, Literal, Protocol
 from urllib.parse import urlsplit
 
 from cryptography.fernet import MultiFernet
@@ -61,8 +61,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 __all__ = [
+    "ASK_FEATURE",
     "DAIMON_TOOL_NAMES",
     "FEATURE",
+    "WRITE_NOTE",
     "NAME_PATTERN",
     "SCOPE_PATTERN",
     "ScopeCheck",
@@ -82,9 +84,13 @@ __all__ = [
     "seen_digest",
     "served_tools",
     "shared_connections_on",
+    "shown_description",
 ]
 
 FEATURE: Final = "shared_connections"
+ASK_FEATURE: Final = "shared_write_approval"
+"""Whether a shared write asks on a card in chat: on (`ask`) by default."""
+WRITE_NOTE: Final = "This tool changes things. Ask your user and get their yes before you call it."
 NAME_PATTERN: Final = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 """A connection name carries no underscore: the first one in `<connection>_<tool>` ends it."""
 SCOPE_PATTERN: Final = re.compile(r"[a-z0-9][a-z0-9_.:-]{0,63}")
@@ -108,8 +114,17 @@ def open_upstream(url: str, token: str | None) -> AbstractAsyncContextManager[Mc
     return mcp_tool_session(url, token, limits=INTERACTIVE_LIMITS)
 
 
+ErrorKind = Literal["invalid", "conflict", "read_only", "missing"]
+
+
 class SharedConnectionError(Exception):
-    """A connection could not be added, read or called; the message is safe to show."""
+    """A connection could not be added, read or called; the message is safe to show.
+    `kind` says why: a bad value, a change that raced another, a declared connection or
+    a connection or tool that isn't there."""
+
+    def __init__(self, message: str, kind: ErrorKind = "invalid") -> None:
+        super().__init__(message)
+        self.kind: ErrorKind = kind
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,7 +190,8 @@ async def shared_connections_on(
 async def served_tools(session: AsyncSession, caller: SharedCaller) -> list[SharedTool]:
     """The tools `caller` may see: approved and unchanged since, on an active connection,
     within both scopes, under a name no Daimon tool has. A web visitor sees none."""
-    if caller.account_id is None:
+    rows = await store.list_served(session, tenant_id=caller.tenant_id)
+    if caller.account_id is None or not rows:
         return []
     person = await get_person_for_account(
         session, tenant_id=caller.tenant_id, account_id=caller.account_id
@@ -193,7 +209,7 @@ async def served_tools(session: AsyncSession, caller: SharedCaller) -> list[Shar
 
     out: list[SharedTool] = []
     taken: set[str] = set()  # the first connection, by name, keeps a served name
-    for connection, tool in await store.list_served(session, tenant_id=caller.tenant_id):
+    for connection, tool in rows:
         name = _served_name(connection.name, tool.name)
         if name is None or name in DAIMON_TOOL_NAMES or name in taken:
             continue
@@ -213,35 +229,46 @@ def decide_shared_call(
     agent_rule: ResolvedAgentToolRule | None,
     outside: bool = False,
     data_read: bool = False,
+    ask_writes: bool = True,
 ) -> ToolVerdict:
     """Run, ask or refuse one call by the rules for any third-party tool: never trusted, a
     write asks (and is refused unattended), the operator's and the agent's rules apply.
-    `name` is the served name; `writes` is the tool's flag. An `outside` client (no card, no
-    routine: the hub, a CLI) gets reads only, whatever `unattended_writes` allows. After a
-    `data_read`, any call that would run asks, or is refused unattended: its arguments go
-    to a third party."""
+    `name` is the served name; `writes` is the tool's flag. An `outside` client (the hub, a
+    key, a CLI) has no card: it asks its own user, as the tool's description tells it, so
+    what would ask runs. With `ask_writes` off (`ASK_FEATURE`) a write in chat runs unasked;
+    unattended it is still refused unless the operator allows it. After a `data_read`, any
+    call that would run asks, or is refused unattended: its arguments go to a third party."""
     call = ToolCall(
         tool_use_id=f"shared-{uuid.uuid4()}",
         server_name=DAIMON_SERVER_NAME,
         tool_name=name,
         input=arguments,
     )
-    # A shared write always asks, whatever the operator's global switch for tools.
+    # A shared write asks whatever the operator's global switch for tools; `ask_writes` is
+    # the one switch for these.
     verdict = decide_tool_call(
         policy.model_copy(update={"enabled": True}),
         call,
-        attended=attended,
+        attended=attended or outside,
         trusted_servers=frozenset(),
         annotations=ToolAnnotations(read_only_hint=not writes, destructive_hint=None),
         agent_rule=agent_rule,
     )
-    if outside and verdict.outcome == "allow" and verdict.effect == "write":
-        return ToolVerdict(outcome="deny", effect="write", reason="unattended_write")
+    if verdict.outcome == "ask" and (
+        outside or (not ask_writes and verdict.reason == "write_needs_confirmation")
+    ):
+        verdict = ToolVerdict(outcome="allow", effect=verdict.effect, reason="approval_skipped")
     if data_read and verdict.outcome == "allow":
         return ToolVerdict(
             outcome="ask" if attended else "deny", effect="write", reason="data_read"
         )
     return verdict
+
+
+def shown_description(shared: SharedTool, *, outside: bool) -> str:
+    """The approved description; for an outside client a write also says to ask first."""
+    text = shared.tool.description or f"{shared.connection.name}: {shared.tool.name}"
+    return f"{text}\n\n{WRITE_NOTE}" if outside and shared.tool.writes else text
 
 
 def seen_digest(tool: McpConnectionToolRow) -> str:
@@ -264,9 +291,11 @@ async def approve_tool(
     rows = await store.list_tools(session, tenant_id=tenant_id, connection_id=connection_id)
     tool = next((t for t in rows if t.name == name), None)
     if tool is None:
-        raise SharedConnectionError("This tool isn't here.")
+        raise SharedConnectionError("This tool isn't here.", "conflict")
     if seen_digest(tool) != seen:
-        raise SharedConnectionError("The server changed this tool just now. Review it again.")
+        raise SharedConnectionError(
+            "The server changed this tool just now. Review it again.", "conflict"
+        )
     await store.update_tool(
         session,
         tenant_id=tenant_id,
