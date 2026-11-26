@@ -534,7 +534,7 @@ async def test_an_agent_edit_cannot_add_a_scoped_library_skill(
         skills=[SkillDoc(type="custom", skill_id="sk_scoped", title="Notes", version="1")]
     )
 
-    with pytest.raises(AgentEditError, match="data scope"):
+    with pytest.raises(AgentEditError, match="isn.t available"):
         await agent_changes._check_added_skills(  # pyright: ignore[reportPrivateUsage]
             cast(Any, deps),
             actor=cast(AgentActor, SimpleNamespace(tenant_id=tenant.id)),

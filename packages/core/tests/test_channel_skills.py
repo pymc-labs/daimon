@@ -148,7 +148,7 @@ async def test_a_scoped_library_skill_cannot_be_added_to_a_channel(
         platform_skills={},
     )
 
-    assert choice == "scoped"
+    assert choice == "not_found"
 
 
 async def test_a_skill_scoped_after_it_was_added_is_not_mounted_in_the_channel(

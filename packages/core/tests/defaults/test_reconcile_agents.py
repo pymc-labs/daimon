@@ -26,6 +26,7 @@ from daimon.core.defaults.reconcile_agents import reconcile_agent
 from daimon.core.defaults.report import Action
 from daimon.core.specs import AgentSpec, SkillRef
 from daimon.testing.builders import skill_listed
+from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
@@ -226,6 +227,54 @@ async def test_reconcile_agent_creates_with_custom_skills() -> None:
     assert created_payload["skills"] == [{"type": "custom", "skill_id": "sk_resolved"}], (
         "resolved MA skill id must be sent in the POST body"
     )
+
+
+async def test_reconcile_agent_drops_a_scoped_skill(db_session_factory: Any) -> None:
+    """A declared agent never carries a skill limited to a data scope."""
+    from daimon.core.stores import workspace_skills
+
+    async with db_session_factory() as session, session.begin():
+        await make_tenant(session, id=TENANT_ID)
+        await workspace_skills.record_version(
+            session,
+            tenant_id=TENANT_ID,
+            skill_id="sk_resolved",
+            name="brainstorming",
+            version="1",
+            digest="d",
+            files={"SKILL.md": b"x"},
+            scope="finance",
+        )
+    spec = _agent_spec(skills=[SkillRef(type="custom", skill_id="brainstorming")])
+    router = MARouter()
+    title = tenant_scoped_display_title(tenant_id=TENANT_ID, name="brainstorming")
+    router.add(
+        "GET",
+        r"/v1/skills",
+        lambda req, _m: list_response(
+            [skill_listed(id="sk_resolved", display_title=title).model_dump(mode="json")]
+        ),
+    )
+    router.add("GET", r"/v1/agents", lambda req, _m: list_response([]))
+    created: dict[str, Any] = {}
+
+    def on_create(req: httpx.Request, _m: object) -> httpx.Response:
+        created.update(json.loads(req.content))
+        return httpx.Response(
+            200, json=_tagged_agent(id_="ag_new", name=spec.name, tenant_id=TENANT_ID)
+        )
+
+    router.add("POST", r"/v1/agents", on_create)
+
+    await reconcile_agent(
+        build_fake_anthropic_http(router.dispatch),
+        spec,
+        tenant_id=TENANT_ID,
+        dry_run=False,
+        sessions=db_session_factory,
+    )
+
+    assert created["skills"] == []
 
 
 async def test_reconcile_agent_appends_default_mcp_when_public_url_set_on_create() -> None:

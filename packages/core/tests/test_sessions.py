@@ -210,6 +210,57 @@ async def test_create_session_names_a_deleted_channel_skill_from_its_rule(
     assert "remove_channel_skill" in str(refused.value)
 
 
+async def test_create_session_leaves_a_scoped_skill_off_the_agent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A skill scoped after it was attached is not mounted: a mount cannot check who reads it."""
+    from daimon.core.stores import workspace_skills
+
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session)
+        await workspace_skills.record_version(
+            session,
+            tenant_id=tenant.id,
+            skill_id="skill_scoped",
+            name="notes",
+            version="1",
+            digest="d",
+            files={"SKILL.md": b"x"},
+            scope="finance",
+        )
+    agent = ma_agent(
+        id="ag_s",
+        name="a",
+        model="claude-opus-4-7",
+        skills=[
+            {"type": "custom", "skill_id": "skill_scoped", "version": "1"},
+            {"type": "custom", "skill_id": "skill_open", "version": "1"},
+        ],
+    )
+    sent: list[dict[str, Any]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        sent.append(body)
+        return httpx.Response(
+            200,
+            json=_session_body(
+                session_id="sess_s", agent_id=agent.id, environment_id=body["environment_id"]
+            ),
+        )
+
+    await create_session(
+        build_fake_anthropic_http(_handler),
+        agent=agent,
+        environment=_make_env(),
+        tenant_id=tenant.id,
+        session_factory=db_session_factory,
+        tool_safety=OPEN_TOOL_SAFETY,
+    )
+
+    assert [s["skill_id"] for s in sent[0]["agent"]["skills"]] == ["skill_open"]
+
+
 async def test_create_session_keeps_other_400s_unchanged() -> None:
     import anthropic
 

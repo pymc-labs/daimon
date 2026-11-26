@@ -1,4 +1,4 @@
-"""The library backfill lists the provider account once and runs once for each workspace."""
+"""The library backfill lists the account once and runs once per workspace, again if a skill was skipped."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import pytest
 from daimon.adapters.web import server_skills
 
 
-async def test_the_backfill_lists_once_and_runs_once_per_workspace(
+async def test_the_backfill_lists_once_and_retries_only_a_skipped_workspace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tenants = [SimpleNamespace(id=uuid.uuid4(), platform="discord") for _ in range(2)]
@@ -30,7 +30,7 @@ async def test_the_backfill_lists_once_and_runs_once_per_workspace(
 
     async def record(_edit: Any, *, writer: Any, rows: Any) -> int:
         recorded.append(writer.tenant_id)
-        return 0
+        return 1 if writer.tenant_id == tenants[0].id else 0
 
     async def nothing(*_a: Any, **_k: Any) -> None:
         return None
@@ -58,8 +58,9 @@ async def test_the_backfill_lists_once_and_runs_once_per_workspace(
     monkeypatch.setattr(server_skills.store, "list_mirrors", no_mirrors)
     runtime: Any = SimpleNamespace(sessionmaker=_Sessionmaker(), settings=None)
 
-    await server_skills.sync_source_skills(runtime)
-    await server_skills.sync_source_skills(runtime)
+    for _ in range(3):
+        await server_skills.sync_source_skills(runtime)
 
-    assert listed == 1, "the account is listed once for every workspace, then not again"
-    assert recorded == [t.id for t in tenants]
+    assert listed == 3, "one listing per pass, shared by the workspaces still pending"
+    # The workspace with an unreadable skill is tried again; the other is done.
+    assert recorded == [tenants[0].id, tenants[1].id, tenants[0].id, tenants[0].id]

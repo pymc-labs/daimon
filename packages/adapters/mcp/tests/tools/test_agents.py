@@ -2515,7 +2515,7 @@ async def test_update_agent_impl_resolves_skill_names_to_skill_ids(
         skills=["build-models"],
     )
     if scoped:
-        with pytest.raises(ToolError, match="data scope"):
+        with pytest.raises(ToolError, match="isn.t available"):
             await attach
         assert not captured, "nothing reached the provider"
         return

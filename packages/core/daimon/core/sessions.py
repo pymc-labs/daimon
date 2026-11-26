@@ -125,7 +125,12 @@ from daimon.core.skills.unresolved import (
     skill_unavailable,
     unresolved_skill_id,
 )
-from daimon.core.stores import agent_files, agent_memory_stores, github_router_sessions
+from daimon.core.stores import (
+    agent_files,
+    agent_memory_stores,
+    github_router_sessions,
+    workspace_skills,
+)
 from daimon.core.stores import agent_mcp_credentials as credential_store
 from daimon.core.stores.agent_daimon_tools import record_enabled_daimon_tools
 from daimon.core.stores.channel_skills import list_skill_channel_rules
@@ -679,6 +684,18 @@ async def _channel_skill_name(
     except SQLAlchemyError:
         return None
     return next((row.name for row in rows if row.tenant_id == tenant_id), None)
+
+
+async def _scoped_skills(
+    session_factory: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    agent: BetaManagedAgentsAgent,
+) -> set[str]:
+    """The agent's own skills that are limited to a scope."""
+    async with session_factory() as session:
+        return await workspace_skills.scoped_among(
+            session, tenant_id=tenant_id, skill_ids={skill.skill_id for skill in agent.skills}
+        )
 
 
 async def create_session(
@@ -1278,10 +1295,21 @@ async def create_session(
         )
         gated = list(tools) != list(visible_tools(agent, hidden))
         healed = list(servers) != list(visible_mcp_servers(agent, hidden))
+        # A library skill limited to a data scope is read through the library tools, which
+        # check who may read it; a mount cannot, so one an agent carries (a declared agent,
+        # or a scope set as it was attached) is left off the session.
+        scoped = (
+            set[str]()
+            if session_factory is None or tenant_id is None or not agent.skills
+            else await _scoped_skills(session_factory, tenant_id, agent)
+        )
+        if scoped:
+            _log.warning("session.scoped_skills_withheld", agent_id=agent.id, skills=sorted(scoped))
         if (
             hidden
             or gated
             or healed
+            or scoped
             or channel_skills
             or (agent.skills and not identity.agent_skills)
             or model_override is not None
@@ -1324,13 +1352,14 @@ async def create_session(
                 )
             if system_override is not None:
                 overrides["system"] = system_override
-            if channel_skills or not identity.agent_skills:
+            if channel_skills or scoped or not identity.agent_skills:
                 # A full replacement too: the agent's own at the versions it pins.
                 overrides["skills"] = [
                     cast(BetaManagedAgentsSkillParams, skill.model_dump(mode="json"))
                     for skill in session_skills(
                         agent, channel_skills, agent_skills=identity.agent_skills
                     )
+                    if skill.skill_id not in scoped
                 ]
                 _log.info("session.channel_skills_applied", agent_id=agent.id)
             agent_argument = overrides

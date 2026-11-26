@@ -222,8 +222,11 @@ async def sync_source_skills(runtime: WebRuntime) -> None:
             pending = []
         for tenant_id in pending:
             try:
-                await record_library_skills(edit, writer=SystemWriter(tenant_id), rows=listed)
-                _backfilled.add(tenant_id)
+                skipped = await record_library_skills(
+                    edit, writer=SystemWriter(tenant_id), rows=listed
+                )
+                if not skipped:  # unreadable skills are retried on the next pass
+                    _backfilled.add(tenant_id)
             # Boundary: one workspace's library must not stop the others or the loop.
             except Exception:
                 log.warning(

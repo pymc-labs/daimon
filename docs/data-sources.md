@@ -233,9 +233,8 @@ writes the store. The checks:
 
 A coding key reads data as its maker; one made in a limited channel keeps its rule. The hub lists data tools only where `data_reads` is On.
 
-`library_skills` serves `list_library_skills` and `read_library_skill` to coding keys, the hub
-and outside clients. A scoped skill shows only to holders of its scope: everyone in the room for chat's
-`list_skills` and `get_skill`, the agent's owner in a direct message. It can't be attached to an agent or channel, nor an attached skill scoped.
+`library_skills` serves `list_library_skills` and `read_library_skill` to coding keys, the hub and outside clients. A scoped skill shows only to its holders: in chat's
+`list_skills` and `get_skill`, everyone in the room; in a direct message, the asker and the agent's owner both. It can't be attached to an agent or channel, nor an attached one scoped.
 
 ## After a restore
 

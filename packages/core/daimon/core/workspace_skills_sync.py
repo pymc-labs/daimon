@@ -28,8 +28,7 @@ async def record_library_skills(
     """Record the latest version of each custom library skill the local record lacks, from
     `rows` (`list_account_skills`); a workspace with none costs nothing.
 
-    Returns how many were recorded. A skill whose files can't be read is skipped and tried
-    again on the next pass.
+    Returns how many were skipped: a skill whose files can't be read is left for the next pass.
     """
     if not any(row.source == "custom" for row, _ in own_skills(writer, rows)):
         return 0
@@ -38,7 +37,7 @@ async def record_library_skills(
             s.skill_id: s.current_version
             for s in await store.list_skills(session, tenant_id=writer.tenant_id)
         }
-    recorded = 0
+    skipped = 0
     for row, name in own_skills(writer, rows):
         version = row.latest_version
         if row.source != "custom" or not version or held.get(row.id) == version:
@@ -47,6 +46,7 @@ async def record_library_skills(
             files = await download_files(deps, actor=writer, skill_id=row.id, version=version)
         except AgentEditError:
             log.warning("workspace_skill.backfill_unreadable", skill_id=row.id, version=version)
+            skipped += 1
             continue
         await record_published(
             deps.session_factory,
@@ -56,5 +56,4 @@ async def record_library_skills(
             version=version,
             files=files,
         )
-        recorded += 1
-    return recorded
+    return skipped
