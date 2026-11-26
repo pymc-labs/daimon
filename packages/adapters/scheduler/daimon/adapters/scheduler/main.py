@@ -130,7 +130,7 @@ from daimon.core.routine_delivery import (
     routine_links,
     split_run_text,
 )
-from daimon.core.routine_files import collect_routine_files
+from daimon.core.routine_files import collect_routine_files, plain_payload
 from daimon.core.routine_hold import delivery_hold_value, routine_hold
 from daimon.core.routine_provider import routine_provider
 from daimon.core.routine_sandbox import routine_sandbox
@@ -213,9 +213,7 @@ from daimon.core.usage_recording import record_turn_usage
 from daimon.core.usage_sweep import sweep_headless_usage
 from daimon.core.wizard_sweep import sweep_expired_wizard_sessions
 from mux.contracts.config import DEFAULT_BACKEND
-from mux.contracts.ids import Provider
 from mux.errors import ScopeViolation
-from mux.profiles import PROVIDER_LABELS
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -372,15 +370,8 @@ async def _blocked(
 RESTRICTED_SOURCE_ERROR = "restricted source cannot deliver by DM"
 
 
-def routines_unsupported_error(provider: Provider) -> str:
-    """The `last_error` of a routine on the self-hosted backend, or of a DM routine on
-    OpenAI or Gemini (a private DM turn needs a Managed Agents session to gate)."""
-    if provider == "selfhosted":
-        return "selfhosted_routines_unsupported"
-    return (
-        "Routines that send a direct message run only on Anthropic, and this one is set to "
-        f"{PROVIDER_LABELS[provider]}. Switch its agent back to Anthropic."
-    )
+#: The `last_error` of a routine on the self-hosted backend.
+SELFHOSTED_ROUTINES_UNSUPPORTED = "selfhosted_routines_unsupported"
 
 
 async def _build_fire(
@@ -590,14 +581,20 @@ async def _build_fire(
                     sm,
                     row,
                     error.reason,
+                    # An OpenAI fire without the sandbox opt-in says who can help.
+                    error=str(error)
+                    if isinstance(error, AdmissionDenied) and error.detail
+                    else None,
                     notify_owner=notify_owner,
                     expected_destination=("dm", owner_user_id),
                     expected_private=row,
                 )
             return
         run_text = split_run_text(reply.text)
-        payload = await collect_routine_files(
-            client, session_id=reply.session_id, text=run_text.post
+        payload = (
+            await collect_routine_files(client, session_id=reply.session_id, text=run_text.post)
+            if reply.on_managed_agents
+            else plain_payload(run_text.post) or ""
         )
         async with sm() as s, s.begin():
             await record_result(
@@ -906,10 +903,8 @@ async def _build_fire(
                 return
             provider = await routine_provider(s, row, platform=platform)
             native = provider if provider != DEFAULT_BACKEND else None
-            if native is not None and (native == "selfhosted" or row.destination_kind == "dm"):
-                await _refuse(
-                    s, row, "routines_unsupported", error=routines_unsupported_error(native)
-                )
+            if native == "selfhosted":
+                await _refuse(s, row, "routines_unsupported", error=SELFHOSTED_ROUTINES_UNSUPPORTED)
                 return
             principal = await get_or_create_platform_principal(
                 s,
