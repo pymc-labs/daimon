@@ -3890,7 +3890,8 @@
       'description': '''
         Search your own Google Drive (My Drive) as you for `query`, with the text of Docs,
         Slides and Sheets; never stored. Each call asks you on a card first, and everyone who
-        can see this conversation sees what it finds. Shared drives are in `data_search`.
+        can see this conversation sees what it finds. Not in rooms people outside the team can
+        read. Shared drives are in `data_search`.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -3917,7 +3918,7 @@
       'description': '''
         Turn on or off Daimon reading your own `drive` (My Drive) or `calendar` as you in
         this workspace; both stay on until you turn them off. Each call asks you on a card first.
-        Returns each part and whether it is on.
+        Returns each part a source here reads, and whether it is on.
       ''',
       'parameters': dict({
         '$defs': dict({
