@@ -44,5 +44,6 @@ export type Account = { provider: string; workspace: string; name: string; email
 export type Connection = { source_id: string; source: string; provider: string; subject: string; status: string; last_ok_at: string | null }
 export type Connectable = { source_id: string; name: string; provider: string }
 export type PersonalPart = "drive" | "calendar"
-export type Connected = { accounts: Account[]; connections: Connection[]; connectable: Connectable[]; personal: Record<PersonalPart, boolean> }
+export type Notice = { kind: "linked" | "unlinked"; identity: string; provider: string; name: string }
+export type Connected = { accounts: Account[]; notices: Notice[]; connections: Connection[]; connectable: Connectable[]; personal: Record<PersonalPart, boolean> }
 export type Started = { flow: "code" | "device"; url: string; pending_id: string; user_code: string; interval: number; source: string; expires_at: string | null }

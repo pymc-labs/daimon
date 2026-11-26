@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 247 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 258 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -294,6 +294,33 @@ The `data_*` tools: search and read the workspace's data sources, behind `data_r
 | `data_sources` | all callers | The data sources you can read here, with their ids and how many records each holds, and the datasets `data_sql` can query. |
 | `data_sql` | all callers | Read-only SQL over the data views and datasets (`data_sources` lists them), by plain names. |
 
+## `data_admin`
+
+Chat tools for the data pages: sources, access, links and redaction rule sets.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `approve_data_rule_set` | admin only | Approve a redaction rule set's waiting version (sha, as listed). |
+| `change_data_access` | admin only | Change who may read what in the data sources. |
+| `change_data_links` | admin only | Link an account the data sources know to a person (link: provider, workspace, subject as listed, person), turn down a suggestion (reject: the same), unlink an account (unlink: provider, workspace, subject), or hide or show a person's name in what agents read (hide_names, show_names: person). |
+| `change_data_source` | admin only | Add a data source (create: kind, name, settings by the kind's fields) or pause, resume, retire, publish, unpublish or sync one (source_id). |
+| `list_data_access` | admin only | List who may read what in the data sources: each scope with its holders, the data admins and the workspace's people (names and account ids). |
+| `list_data_links` | admin only | List the accounts the data sources know, each linked to a person or not, and the open suggestions (an account whose verified email matches a person). |
+| `list_data_rule_sets` | admin only | List the redaction rule sets, or show one (name) with its approved and waiting rules. |
+| `list_data_sources` | admin only | List the workspace's data sources with their state, or one source's latest sync runs (source_id). |
+
+## `data_connect`
+
+A person's own data-source accounts, from chat: what they are known as, their sign-ins,
+the sources open to them and the notices about links an admin changed (`list_my_data`
+lists them; `remove_my_data` disconnects one).
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `check_my_data_connection` | all callers | Whether the sign-in started by connect_my_data (pending_id) is finished. |
+| `connect_my_data` | all callers | Start your own sign-in to a data source (source_id from list_my_data's can_connect). |
+| `dismiss_data_notices` | all callers | Mark your notices about data-source links an admin changed as read. |
+
 ## `environments`
 
 Environment tools: list / get / create / update / archive.
@@ -441,8 +468,8 @@ The caller's own data: what Daimon holds for them, and letting it go.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `list_my_data` | all callers | List what is held for you: connected accounts and sign-ins, and personal memory per agent. |
-| `remove_my_data` | all callers | Remove your own, by ids from list_my_data or list_coding_keys: memory (agent_id), a connected account (its kind, as listed), an mcp sign-in (agent_id, key) or a coding_key (key; an admin adds agent_id for another person's). |
+| `list_my_data` | all callers | List what is held for you: connected accounts and sign-ins, personal memory per agent, and your accounts in the data sources. |
+| `remove_my_data` | all callers | Remove your own, by ids from list_my_data or list_coding_keys: memory (agent_id), a connected account (its kind, as listed), an mcp sign-in (agent_id, key), a data source sign-in (data_source; key is its source_id) or a coding_key (key; an admin adds agent_id for another person's). |
 
 ## `never_tag`
 

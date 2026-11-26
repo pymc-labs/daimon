@@ -380,3 +380,6 @@ started is never rerun. A message sent to a 1:1 chat during the gap is lost.
 Channel history needs the consents `ChannelMessage.Read.Group` and
 `TeamMember.Read.Group`, which a team owner grants when adding the app. Without
 them the bot answers without history.
+Data answers in a channel or group chat need `ChannelMember.Read.Group` or
+`ChatMember.Read.Chat` (app version 0.6.3), granted the same way when the app is
+added or updated. Without them they hold only what everyone may read.

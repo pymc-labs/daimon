@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 
 import psycopg
 import pytest
-from daimon.data import acl
+from daimon.data import acl, reads
 from daimon.data.access import ACL_SCOPE, READER_CAP, ReadContext, person, scoped, subject
 from daimon.data.schema import Schemas
 from daimon.testing.data_db import DataDb
@@ -589,3 +589,22 @@ async def test_the_set_helpers_sort_dedupe_and_intersect(store: Store) -> None:
         f" {store.d}.arr_and('{{1}}', '{{}}') as e, {store.d}.arr_sort('{{}}') as z"
     )
     assert got == [{"s": [1, 3, 5], "a": [3, 4], "e": [], "z": []}]
+
+
+async def test_a_memorys_data_is_readable_only_if_every_item_is(store: Store) -> None:
+    """A memory recorded these items (`daimon.core.stores.data_memory`); fail closed."""
+    me, you = someone(), someone()
+    src = await store.source()
+    mine = await store.put(src, "doc:me", await store.intern(src, acl.ref(me)))
+    both = await store.put(src, "doc:both", await store.intern(src, acl.ref(me), acl.ref(you)))
+    refs = [f"record:{mine}", f"record:{both}"]
+
+    async def readable(ctx: ReadContext, items: list[str]) -> bool:
+        return await reads.readable(store.conn, store.schemas, ctx, items)
+
+    assert await readable(store.who(me), refs), "every item is readable"
+    assert not await readable(store.who(me, you), refs), "one item is hidden from someone"
+    for unknown in ("live:" + str(src), "sql", "record:nope"):
+        assert not await readable(store.who(me), [unknown]), f"{unknown} cannot be told"
+    await store.conn.execute(f"delete from {store.d}.records where id = %s".encode(), (mine,))
+    assert not await readable(store.who(me), refs), "a deleted item hides the memory"

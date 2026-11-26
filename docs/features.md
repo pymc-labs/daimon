@@ -23,7 +23,7 @@ Where each feature can be set, and its default.
 
 | Feature | Key | Kind | Default | Deployment | Workspace | Agent | Channel | Thread | Routine | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Data sources | `data_sources` | Model input | Off | ✓ | ✓ |  |  |  |  |  |
+| Data sources | `data_sources` | Model input | On | ✓ | ✓ |  |  |  |  |  |
 | Chat history | `history_depth` | Model input | 100 messages | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Direct message memory | `dm_history_depth` | Model input | 12 messages | ✓ | ✓ | ✓ |  |  |  | Only Discord, Slack, Teams, Web; 100 messages by default on Teams |
 | Channel background | `channel_history` | Model input | 25 messages | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
@@ -192,13 +192,13 @@ Each message starts with the notes in the agent's repository memory, and the age
 
 ## Data sources
 
-The data store, with its connected sources and search. The operator turns it on; a team can turn it off.
+The data store, with its connected sources and search. Nothing runs until an admin adds a source and turns data reads on for an agent. The operator or a team can turn it off.
 
 | | |
 | --- | --- |
 | Key | `data_sources` |
 | Values | `on` (On), `off` (Off) |
-| Default | `off` |
+| Default | `on` |
 | Levels | Deployment, Workspace |
 | Combines | Off above is a ceiling |
 
@@ -1100,7 +1100,7 @@ The agent can take in sales leads and look them up. Off removes the lead tools h
 
 ## Data source reads
 
-The agent can search the team's data sources, showing only what everyone who will see the answer may read. It then starts fresh for each message in a channel, keeps no memory, and other agents cannot ask it. Not in rooms people outside the team can read.
+The agent can search the team's data sources, showing only what everyone who will see the answer may read. Other agents cannot ask it, writes out ask first, and a memory it saves shows only to people who could read that data. Not in rooms people outside the team can read.
 
 | | |
 | --- | --- |

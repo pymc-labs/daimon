@@ -14,7 +14,7 @@ from typing import Annotated, Literal
 import httpx
 from daimon.adapters.web.data_common import Viewer, refused, schemas_of, store
 from daimon.adapters.web.runtime import WebRuntime
-from daimon.data import manage, personal
+from daimon.data import identity, manage, personal
 from daimon.data.connect import (
     PROVIDERS,
     Connector,
@@ -56,8 +56,17 @@ class ConnectableOut(BaseModel):
     provider: str
 
 
+class NoticeOut(BaseModel):
+    kind: Literal["linked", "unlinked"]
+    identity: str
+    provider: str
+    name: str
+
+
 class Connected(BaseModel):
     accounts: list[AccountOut]
+    notices: list[NoticeOut]
+    """Links an admin changed since the last view; seeing them marks them read."""
     connections: list[ConnectionOut]
     connectable: list[ConnectableOut]
     personal: dict[personal.Part, bool]
@@ -102,9 +111,11 @@ def profile_data_router(runtime: WebRuntime) -> APIRouter:
             accounts = await manage.identities(conn, schemas, p.tenant_id, account_id=p.account_id)
             made = await manage.person_connections(conn, schemas, p.tenant_id, p.account_id)
             open_ = await manage.connectable(conn, schemas, p.tenant_id, list(PROVIDERS))
+            notices = await identity.take_notices(conn, schemas, p.tenant_id, p.account_id)
             parts = await personal.parts(conn, schemas, p.tenant_id, p.account_id)
         return Connected(
             accounts=[AccountOut.model_validate(a, from_attributes=True) for a in accounts],
+            notices=[NoticeOut.model_validate(n, from_attributes=True) for n in notices],
             connections=[ConnectionOut.model_validate(c, from_attributes=True) for c in made],
             connectable=[ConnectableOut(source_id=i, name=n, provider=pr) for i, n, pr in open_],
             personal=parts,

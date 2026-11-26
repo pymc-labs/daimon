@@ -74,7 +74,7 @@ from daimon.core.channel_backend import log_backend_unsupported as _log_backend_
 from daimon.core.channel_budget_notice import spawn_budget_notice
 from daimon.core.channel_skills import turn_channel_skills, turn_platform_skills
 from daimon.core.config import env_admits
-from daimon.core.data_seal import AGENT_REQUEST_REFUSAL, reads_data
+from daimon.core.data_reading import AGENT_REQUEST_REFUSAL, reads_data
 from daimon.core.data_tools import DATA_READS
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
@@ -390,7 +390,7 @@ class HelperCall:
     # The asking turn is a relay agent's: its helper inherits the held, sealed,
     # memory-free turn whatever servers the helper itself has (`daimon.core.relay_scope`).
     relay_scoped: bool = False
-    # The asking turn's agent reads data sources here (`daimon.core.data_seal`).
+    # The asking turn's agent reads data sources here (`daimon.core.data_reading`).
     data_reading: bool = False
 
 
@@ -465,7 +465,8 @@ class Admission:
     private_dm_id: str | None = None
     # A relay agent's turn (`daimon.core.relay_scope`): held, sealed, no memory, a fresh session.
     relay_scoped: bool = False
-    # The turn's agent reads data sources here (`daimon.core.data_seal`); it is also relay_scoped.
+    # The turn's agent reads data sources here (`daimon.core.data_reading`): its provider
+    # memory mounts read-only (`stores_read_only`) and writes out ask first.
     data_reading: bool = False
     # The channel and thread the turn runs in, and every sealed id that seals
     # them (the channel and a thread sealed on its own): stamped on the session
@@ -534,6 +535,12 @@ class Admission:
     # The turn-bound, session-tool and session-identity features at this place; None only
     # for hand-built admissions, which render every turn control and keep every tool.
     features: FeatureSnapshot | None = field(default=None, compare=False, repr=False)
+
+    @property
+    def stores_read_only(self) -> bool:
+        """Provider memory stores mount read-only: as `memory_read_only` says, or the agent
+        reads data, whose memories only Daimon's own memory tags (`daimon.core.data_reading`)."""
+        return self.memory_read_only or self.data_reading
 
     @property
     def toolset(self) -> SessionToolset:
@@ -1619,12 +1626,11 @@ async def _admit_gates(
             channel_id=channel_id,
             agent_name=config.agent_name,
         )
-    # An agent that reads data sources is sealed as a relay agent is. It is offered no data
-    # tool where outsiders may read (a hold before the relay's own), nor in a Teams room,
-    # whose readers are unknown; and a helper ask into it from an agent that does not read
-    # data here is refused, or its answers would land in that agent's memory.
-    # A failed read is unknown: the turn runs with no data tool, and sealed if the session
-    # read data or that cannot be told either.
+    # An agent that reads data sources is offered no data tool where outsiders may read (a
+    # hold); and a helper ask into it from an agent that does not read data here is refused,
+    # or its answers would land in that agent's memory. A failed read is unknown: the turn
+    # runs with no data tool, and counts as data-reading if the session read data or that
+    # cannot be told either.
     data_unknown = False
     try:
         data_reading = await reads_data(
@@ -1636,7 +1642,7 @@ async def _admit_gates(
         _log.warning("turn.data_reads_lookup_failed", tenant_id=str(tenant_id), exc_info=True)
         data_reading, data_unknown = False, True
     if not data_reading and (deps.settings is None or data_sources_on(deps.settings)):
-        # A session that read data keeps the whole data seal until `/new`, whatever
+        # A session that read data counts as data-reading until `/new`, whatever
         # `data_reads` says now: its context holds what it read.
         try:
             async with deps.sessionmaker() as session:
@@ -1661,15 +1667,11 @@ async def _admit_gates(
         )
     if helper is not None and data_reading and not helper.data_reading:
         raise UserFacingError(AGENT_REQUEST_REFUSAL)
-    data_blocked = data_unknown or hold is not None or (platform == "teams" and not is_dm)
-    relay_agent = (
-        (helper is not None and helper.relay_scoped)
-        or data_reading
-        or agent_has_identity_relay(
-            (server.url for server in agent.mcp_servers),
-            public_url=deps.public_url,
-            unscoped=deps.relay_unscoped,
-        )
+    data_blocked = data_unknown or hold is not None
+    relay_agent = (helper is not None and helper.relay_scoped) or agent_has_identity_relay(
+        (server.url for server in agent.mcp_servers),
+        public_url=deps.public_url,
+        unscoped=deps.relay_unscoped,
     )
     if relay_agent and not is_dm:
         hold = (
@@ -3129,9 +3131,8 @@ async def _capture_backend_source(
             ids = (context.tenant_id, read_on, context.channel_id, context.thread_id)
             here = FeaturePlace.of(*ids, agent_id=actual.id)
             features = await place_features(deps, here, actual, HIDING_KEYS)
-            # A data-reading agent is sealed as a relay agent is, as its turn will be.
             data_reading = features.on(DATA_READS)
-            relay = data_reading or agent_has_identity_relay(
+            relay = agent_has_identity_relay(
                 (server.url for server in actual.mcp_servers),
                 public_url=deps.public_url,
                 unscoped=deps.relay_unscoped,

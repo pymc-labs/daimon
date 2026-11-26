@@ -1,7 +1,7 @@
 """Every entry point of a data read, and the guard each one goes through.
 
 One row per path of the data read rule (`daimon.core.data_audience`): who a call answers
-for, where data tools are offered, and how a data-reading agent is sealed. A row names a
+for, where data tools are offered, and what guards a data-reading agent. A row names a
 guard found in the code, or a test of it; a path that is missing fails here.
 """
 
@@ -19,7 +19,7 @@ import pytest
 from daimon.adapters.mcp import data_access, server
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools import agent_chat, data, sessions, task_continuity
+from daimon.adapters.mcp.tools import agent_chat, data, repo_memory, sessions, task_continuity
 from daimon.core.capability_tools import CAPABILITY_TOOLS
 from daimon.core.data_audience import user_subject
 from daimon.core.data_tools import (
@@ -32,6 +32,7 @@ from daimon.core.data_tools import (
 from daimon.core.features import toolset
 from daimon.core.features.registry import FEATURES
 from daimon.core.stores.domain import Role
+from daimon.core.stores.repo_memory import MemoryEntry
 from daimon.core.turn import admission
 from daimon.core.turn_hold import TurnHold
 from daimon.data.identity import IdentityKey
@@ -51,9 +52,9 @@ def _calls(function: Callable[..., Any]) -> set[str]:
 # (path, function, guard it must call). Each is an entry point into a data-reading agent
 # or a place its results could leave the conversation they were for.
 _GUARDS: list[tuple[str, Callable[..., Any], str]] = [
-    ("channel, DM and helper turns are sealed", admission._admit_gates, "reads_data"),  # pyright: ignore[reportPrivateUsage]
-    ("contained, held and Teams rooms offer no data tool", admission._admit_gates, "without_data_reads"),  # pyright: ignore[reportPrivateUsage]
-    ("routine, agent chat and CLI sessions keep no memory", toolset.place_session, "without_long_term_memory"),
+    ("helper asks into a data-reading agent are refused", admission._admit_gates, "reads_data"),  # pyright: ignore[reportPrivateUsage]
+    ("contained and held rooms offer no data tool", admission._admit_gates, "without_data_reads"),  # pyright: ignore[reportPrivateUsage]
+    ("routine, agent chat and CLI sessions card writes out", toolset.place_session, "replace"),
     ("handoff into a data-reading agent", task_continuity._hand_off_task_impl, "reads_data"),  # pyright: ignore[reportPrivateUsage]
     ("agent chat start", agent_chat._start_turn_impl, "_refuse_data_agent"),  # pyright: ignore[reportPrivateUsage]
     ("agent chat follow-up", agent_chat._continue_turn_impl, "_refuse_data_agent"),  # pyright: ignore[reportPrivateUsage]
@@ -64,8 +65,11 @@ _GUARDS: list[tuple[str, Callable[..., Any], str]] = [
     ("rooms: outsiders close them", data_access._room, "channel_has_outsiders"),  # pyright: ignore[reportPrivateUsage]
     ("Discord rooms: stored viewers", data_access._room, "read_viewers"),  # pyright: ignore[reportPrivateUsage]
     ("Slack rooms: members read per call", data_access._room, "_slack_viewers"),  # pyright: ignore[reportPrivateUsage]
+    ("Teams rooms: members read per call", data_access._room, "_teams_viewers"),  # pyright: ignore[reportPrivateUsage]
     ("helper turns: the asking agent reads data here", data_access._turn_origin, "reads_data"),  # pyright: ignore[reportPrivateUsage]
     ("the data tools register in one place", server.create_mcp_app, "register_data_tools"),  # pyright: ignore[reportUnknownMemberType]
+    ("a memory saved after a data read records it", repo_memory.repo_memory_impl, "reads_of"),
+    ("a memory that recorded data shows to its audience only", repo_memory.repo_memory_impl, "_shown"),
 ]  # fmt: skip
 
 
@@ -94,6 +98,8 @@ def test_every_data_tool_reads_as_its_audience_and_marks_its_result() -> None:
     assert set(defs) >= DATA_TOOLS, "every data tool registers in register_data_tools"
     for name in DATA_TOOLS:
         assert {"reading", "_text"} <= _names(defs[name]), f"{name} skips the audience or mark"
+        if name != "data_sources":
+            assert "noted" in _names(defs[name]), f"{name} leaves its reads out of memory"
     assert {"data_audience_for", "open_read"} <= _names(defs["reading"])
 
 
@@ -129,12 +135,12 @@ def test_every_model_spend_bills_the_asker() -> None:
             ), f"search without a {key}"
 
 
-def test_relay_rule_and_tool_safety_cover_the_rest() -> None:
-    """Paths sealed by the relay rule, not by a guard of their own: the button handoff and
-    carry-over (a relay turn hands nothing and carries nothing), Daimon's own posts (held to
-    the room), and writes after a data read (tool safety cards them)."""
-    source = inspect.getsource(admission)
-    assert "or data_reading" in source, "a data-reading agent must be a relay agent"
+def test_a_data_reading_agent_is_unsealed_and_guarded() -> None:
+    """A data-reading agent is no relay agent: it keeps its session and memory. Its provider
+    memory mounts read-only, and writes after a data read are carded."""
+    assert "or data_reading" not in inspect.getsource(admission), "no seal on data agents"
+    assert admission.Admission.stores_read_only.fget is not None
+    assert "data_reading" in inspect.getsource(admission.Admission.stores_read_only.fget)
     assert "tool_safety" in FEATURES[DATA_READS].depends_on, "writes after a data read are carded"
     assert CAPABILITY_TOOLS[DATA_READS] == DATA_TOOLS | PERSONAL_READS_TOOLS, (
         "they hide with data_reads"
@@ -183,3 +189,27 @@ def test_a_transcript_read_elsewhere_hides_data_results() -> None:
 def test_readers_take_the_form_of_mirrored_platform_identities() -> None:
     mirrored = IdentityKey("discord", "1", "7").ref()
     assert user_subject("discord", "1", "7") == mirrored == "discord/1:user:7"
+
+
+async def test_a_memory_that_recorded_data_shows_only_where_all_of_it_is_readable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Untagged memories show as before; a tagged one only where its items are readable."""
+    now = datetime.now(UTC)
+    tenant = uuid.uuid4()
+    plain, ok, hidden = (
+        MemoryEntry(tenant_id=tenant, repo_id=1, name=n, title=n, body="b", kind="reference",
+                    scope="repo", created_by_account_id=None, created_at=now, updated_at=now,
+                    data_refs=refs)
+        for n, refs in (("plain", None), ("ok", ["record:a"]), ("hidden", ["record:b"]))
+    )  # fmt: skip
+    asked: list[list[list[str]]] = []
+
+    async def readable(_runtime: object, _auth: object, ref_sets: list[list[str]]) -> list[bool]:
+        asked.append(ref_sets)
+        return [refs == ["record:a"] for refs in ref_sets]
+
+    monkeypatch.setattr(repo_memory, "readable_by_audience", readable)
+    shown = await repo_memory._shown(_NO_RUNTIME, _auth(), [plain, ok, hidden])  # pyright: ignore[reportPrivateUsage]
+    assert [e.name for e in shown] == ["plain", "ok"]
+    assert asked == [[["record:a"], ["record:b"]]], "untagged memories are not checked"

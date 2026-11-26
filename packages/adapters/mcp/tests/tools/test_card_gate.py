@@ -24,6 +24,11 @@ from fastmcp.exceptions import ToolError
 from .parity_fakes import fake_runtime, make_auth
 
 _TOOLS = {
+    "approve_data_rule_set",
+    "change_data_access",
+    "change_data_links",
+    "change_data_source",
+    "connect_my_data",
     "remove_my_data",
     "revoke_web_link",
     "delete_allowance",

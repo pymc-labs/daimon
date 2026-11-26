@@ -17,7 +17,7 @@ import { plural, shortDate } from "@/lib/format"
 import { useMe } from "@/lib/hooks"
 import { Pill } from "@/modules/agents/bits"
 import { clientName } from "@/modules/agents/setup/clients"
-import { ProfileData } from "./ProfileData"
+import { useDataAccounts } from "./ProfileData"
 import { Empty, Row, Section } from "./profile-parts"
 
 type AgentRef = { id: string; name: string }
@@ -57,6 +57,7 @@ function Body({ d }: { d: Profile }) {
     onSuccess: () => done("Disconnected"),
   })
   const me = useMe()
+  const data = useDataAccounts(!!me.data?.modules.includes("data"))
   const accounts = me.data?.accounts ?? []
   const platforms = new Set(accounts.map((a) => (a.provider === "microsoft" ? "teams" : a.provider)))
   const chatAccounts = d.chat_accounts.filter((a) => !platforms.has(a.platform))
@@ -124,10 +125,10 @@ function Body({ d }: { d: Profile }) {
             }}>Disconnect</Button>
           </Row>
         ))}
-        {!d.connections.length && <Empty>Nothing is connected</Empty>}
+        {data.rows}
+        {!d.connections.length && !data.count && <Empty>Nothing is connected</Empty>}
       </Section>
-
-      {me.data?.modules.includes("data") && <ProfileData />}
+      {data.dialog}
 
       <Section title="Access via MCP">
         {!d.keys.length ? <Empty>No keys</Empty> : d.keys.map((k) => (

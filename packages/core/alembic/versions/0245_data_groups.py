@@ -15,8 +15,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision: str = "0244_data_groups"
-down_revision: str | None = "0243_data_redaction"
+revision: str = "0245_data_groups"
+down_revision: str | None = "0244_data_memory"
 branch_labels: str | None = None
 depends_on: str | None = None
 

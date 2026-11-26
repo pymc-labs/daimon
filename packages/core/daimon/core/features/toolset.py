@@ -46,12 +46,8 @@ async def place_session(
         agent_builtins=builtins_of(agent),
         server_setup=server_setup,
     )
-    if not features.on(DATA_READS):
-        return agent_toolset(features, agent), SessionIdentity.of(features)
-    # A data-reading agent keeps no long-term memory in any session (`daimon.core.data_seal`),
-    # and what could carry data out asks first (`tool_safety.after_data_read`).
-    from daimon.core.relay_scope import without_long_term_memory
-
-    features = without_long_term_memory(features)
-    toolset = replace(agent_toolset(features, agent), data_reads=True)
+    toolset = agent_toolset(features, agent)
+    if features.on(DATA_READS):
+        # What could carry data out asks first (`tool_safety.after_data_read`).
+        toolset = replace(toolset, data_reads=True)
     return toolset, SessionIdentity.of(features)

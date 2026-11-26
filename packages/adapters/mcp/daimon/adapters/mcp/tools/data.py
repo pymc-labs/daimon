@@ -23,6 +23,7 @@ from daimon.adapters.mcp.tools._card import require_card
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.core.data_tools import mark_data_result
 from daimon.core.ports.data_metering import SessionMeter
+from daimon.core.stores.data_memory import note_reads
 from daimon.data import caller_sql, federated, my_drive, personal, pool, reads
 from daimon.data.caller_sql import SqlRefused
 from daimon.data.metering import Payer
@@ -69,6 +70,15 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         async with pool.connection(settings) as conn:
             salt = f"agent:{auth.chat_agent_id or auth.agent_id}"
             yield conn, await open_read(conn, schemas, auth.tenant_id, audience, salt=salt)
+
+    async def noted(auth: AuthIdentity, refs: list[str]) -> None:
+        """Note what the session read, so a memory it saves records it."""
+        if auth.chat_session_id is not None and refs:
+            async with runtime.session_factory.begin() as session:
+                await note_reads(
+                    session, tenant_id=auth.tenant_id, chat_session_id=auth.chat_session_id,
+                    refs=refs,
+                )  # fmt: skip
 
     @mcp.tool()
     async def data_sources(ctx: Context) -> str:  # pyright: ignore[reportUnusedFunction]
@@ -123,6 +133,8 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             for h in result.hits
         ]
         live = [dataclasses.asdict(r) for r in result.live]
+        await noted(auth, [f"record:{h.record_id}" for h in result.hits]
+                    + [f"live:{r.source_id}" for r in result.live])  # fmt: skip
         return _text(r.show({"hits": hits, "live": live, "notes": result.notes}))
 
     @mcp.tool()
@@ -134,6 +146,7 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             record = await reads.get(conn, schemas, r.ctx, _uuid(record_id), env)
         if record is None:
             raise ToolError(NOT_FOUND)
+        await noted(auth, [f"record:{record.item.id}"])
         start = max(start, 0)
         end = start + PAGE
         body = r.show(record.body)  # whole, so a name never straddles a page
@@ -157,6 +170,7 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             got = await reads.read_file(conn, schemas, r.ctx, env, _uuid(record_id), index)
         if got is None:
             raise ToolError(NOT_FOUND)
+        await noted(auth, [f"record:{_uuid(record_id)}"])
         data, content_type = got
         textual = content_type.startswith("text/") or content_type.endswith(("json", "csv", "xml"))
         text = data.decode("utf-8", "replace")[:PAGE] if textual else None
@@ -175,6 +189,7 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 result = await caller_sql.data_sql(conn, schemas, r.ctx, query)
             except SqlRefused as e:
                 raise ToolError(str(e)) from None
+        await noted(auth, ["sql"])
         return _text(dataclasses.asdict(result))
 
     @mcp.tool()

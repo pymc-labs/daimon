@@ -1,26 +1,37 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { CircleAlert, CircleCheck, ExternalLink } from "lucide-react"
-import { useEffect, useState } from "react"
+import { CircleAlert, CircleCheck } from "lucide-react"
+import { useState } from "react"
 import { toast } from "sonner"
 import { BrandIcon } from "@/components/brand"
 import { Ago } from "@/components/common"
-import { QueryState } from "@/components/QueryState"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { api } from "@/lib/api"
-import { timeOnly } from "@/lib/format"
 import { useConfirm } from "@/lib/confirm"
+import { Pill } from "@/modules/agents/bits"
 import type { Connectable, Connected, Connection, PersonalPart, Started } from "@/modules/data/types"
-import { Empty, Row, Section } from "./profile-parts"
+import { DeviceCode } from "./DeviceCode"
+import { Row } from "./profile-parts"
 
 const BASE = "/api/profile/data"
 const KEY = ["profile", "data"]
 const PARTS: Record<PersonalPart, string> = { drive: "Read my Google Drive as me", calendar: "Read my calendar as me" }
 
-/** The data sources a person's accounts are linked to, and the ones they connected themselves. */
-export function ProfileData() {
-  const q = useQuery({ queryKey: KEY, queryFn: () => api.get<Connected>(BASE) })
+/**
+ * The data sources a person's accounts are linked to, and the ones they connected themselves,
+ * as rows for the Connected accounts list. Link notices from admins show once, then are read.
+ */
+export function useDataAccounts(enabled: boolean) {
+  const q = useQuery({
+    queryKey: KEY,
+    queryFn: () => api.get<Connected>(BASE),
+    enabled,
+    // A notice is read once the server sends it, so a refetch must not drop the ones shown.
+    structuralSharing: (old, next) => {
+      const was = (old as Connected | undefined)?.notices ?? []
+      return { ...(next as Connected), notices: [...was, ...(next as Connected).notices] }
+    },
+  })
   const qc = useQueryClient()
   const confirm = useConfirm()
   const [starting, setStarting] = useState<Started | null>(null)
@@ -36,81 +47,53 @@ export function ProfileData() {
     mutationFn: ({ part, on }: { part: PersonalPart; on: boolean }) => api.put(`${BASE}/personal/${part}`, { on }),
     onSuccess: () => void qc.invalidateQueries({ queryKey: KEY }),
   })
-  return (
-    <Section title="Data accounts">
-      <QueryState query={q}>
-        {(d) => {
-          const have = new Set(d.connections.map((c) => c.source_id))
-          const open = d.connectable.filter((c) => !have.has(c.source_id))
-          return (
-            <>
-              {d.accounts.map((a) => (
-                <Row key={`${a.provider}|${a.workspace}|${a.name}`}>
-                  <BrandIcon brand={a.provider} />
-                  <span className="min-w-0 flex-1 truncate">{a.provider[0]!.toUpperCase() + a.provider.slice(1)}<span className="text-muted-foreground"> {a.name}</span></span>
-                  {a.linked_at && <span className="text-xs text-muted-foreground max-sm:hidden">Linked <Ago iso={a.linked_at} /></span>}
-                </Row>
-              ))}
-              {d.connections.map((c) => (
-                <Row key={c.source_id}>
-                  {c.status === "ok" ? <CircleCheck className="size-3.5 text-success" aria-label="Connected" /> : <CircleAlert className="size-3.5 text-destructive" aria-label="Needs attention" />}
-                  <span className="min-w-0 flex-1 truncate">{c.source}</span>
-                  {c.last_ok_at && <span className="text-xs text-muted-foreground max-sm:hidden"><Ago iso={c.last_ok_at} /></span>}
-                  <Button variant="ghost" size="sm" disabled={disconnect.isPending} aria-label={`Disconnect ${c.source}`} onClick={async () => {
-                    if (await confirm({ title: `Disconnect ${c.source}?`, action: "Disconnect", destructive: true })) disconnect.mutate(c)
-                  }}>Disconnect</Button>
-                </Row>
-              ))}
-              {open.map((c) => (
-                <Row key={c.source_id}>
-                  <span className="min-w-0 flex-1 truncate">{c.name}</span>
-                  <Button size="sm" variant="outline" disabled={start.isPending} onClick={() => start.mutate(c)}>Connect</Button>
-                </Row>
-              ))}
-              {!d.accounts.length && !d.connections.length && !open.length && <Empty>Nothing is linked</Empty>}
-              {(Object.keys(PARTS) as PersonalPart[]).map((part) => (
-                <Row key={part}>
-                  <span className="min-w-0 flex-1 truncate">{PARTS[part]}</span>
-                  <Switch checked={d.personal[part]} disabled={setPart.isPending} aria-label={PARTS[part]} onCheckedChange={(on) => setPart.mutate({ part, on })} />
-                </Row>
-              ))}
-              {start.error && <p role="alert" className="px-4 py-3 text-right text-sm text-destructive">{start.error.message}</p>}
-            </>
-          )
-        }}
-      </QueryState>
-      {starting && <DeviceCode s={starting} onClose={() => setStarting(null)} onDone={() => { setStarting(null); void qc.invalidateQueries({ queryKey: KEY }); toast("Connected") }} />}
-    </Section>
+  const d = q.data
+  const notices = d?.notices ?? []
+  const have = new Set(d?.connections.map((c) => c.source_id))
+  const open = d?.connectable.filter((c) => !have.has(c.source_id)) ?? []
+  const parts = Object.keys(PARTS) as PersonalPart[]
+  const count = notices.length + (d ? d.accounts.length + d.connections.length + open.length + parts.length : 0)
+  const rows = d && (
+    <>
+      {notices.map((n, i) => (
+        <Row key={`${n.identity}|${i}`}>
+          <BrandIcon brand={n.provider} />
+          <span className="min-w-0 flex-1 truncate">An admin {n.kind === "linked" ? "linked" : "unlinked"} {n.name || n.identity}{n.kind === "linked" ? " to" : " from"} your account</span>
+          <Pill>New</Pill>
+        </Row>
+      ))}
+      {d.accounts.map((a) => (
+        <Row key={`${a.provider}|${a.workspace}|${a.name}`}>
+          <BrandIcon brand={a.provider} />
+          <span className="min-w-0 flex-1 truncate">{a.provider[0]!.toUpperCase() + a.provider.slice(1)}<span className="text-muted-foreground"> {a.name}</span></span>
+          {a.linked_at && <span className="text-xs text-muted-foreground max-sm:hidden">Linked <Ago iso={a.linked_at} /></span>}
+        </Row>
+      ))}
+      {d.connections.map((c) => (
+        <Row key={c.source_id}>
+          {c.status === "ok" ? <CircleCheck className="size-3.5 text-success" aria-label="Connected" /> : <CircleAlert className="size-3.5 text-destructive" aria-label="Needs attention" />}
+          <span className="min-w-0 flex-1 truncate">{c.source}</span>
+          {c.last_ok_at && <span className="text-xs text-muted-foreground max-sm:hidden"><Ago iso={c.last_ok_at} /></span>}
+          <Button variant="ghost" size="sm" disabled={disconnect.isPending} aria-label={`Disconnect ${c.source}`} onClick={async () => {
+            if (await confirm({ title: `Disconnect ${c.source}?`, action: "Disconnect", destructive: true })) disconnect.mutate(c)
+          }}>Disconnect</Button>
+        </Row>
+      ))}
+      {open.map((c) => (
+        <Row key={c.source_id}>
+          <span className="min-w-0 flex-1 truncate">{c.name}</span>
+          <Button size="sm" variant="outline" disabled={start.isPending} aria-label={`Connect ${c.name}`} onClick={() => start.mutate(c)}>Connect</Button>
+        </Row>
+      ))}
+      {parts.map((part) => (
+        <Row key={part}>
+          <span className="min-w-0 flex-1 truncate">{PARTS[part]}</span>
+          <Switch checked={d.personal[part]} disabled={setPart.isPending} aria-label={PARTS[part]} onCheckedChange={(on) => setPart.mutate({ part, on })} />
+        </Row>
+      ))}
+      {start.error && <p role="alert" className="px-4 py-3 text-right text-sm text-destructive">{start.error.message}</p>}
+    </>
   )
-}
-
-function DeviceCode({ s, onClose, onDone }: { s: Started; onClose: () => void; onDone: () => void }) {
-  useEffect(() => {
-    let live = true
-    const tick = async () => {
-      try {
-        const r = await api.post<{ connected: boolean }>(`${BASE}/connect/${s.pending_id}/poll`)
-        if (live && r.connected) return onDone()
-      } catch { /* a failed poll is retried */ }
-      if (live) timer = window.setTimeout(tick, Math.max(s.interval, 2) * 1000)
-    }
-    let timer = window.setTimeout(tick, Math.max(s.interval, 2) * 1000)
-    return () => { live = false; window.clearTimeout(timer) }
-  }, [s, onDone])
-  return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="sm:max-w-sm">
-        <DialogHeader><DialogTitle>Enter this code</DialogTitle></DialogHeader>
-        <p className="rounded-lg border py-4 text-center font-mono text-2xl tracking-widest">{s.user_code}</p>
-        <dl className="divide-y rounded-lg border text-sm">
-          <div className="flex justify-between gap-3 px-4 py-2.5"><dt className="text-muted-foreground">Source</dt><dd className="truncate">{s.source}</dd></div>
-          {s.expires_at && <div className="flex justify-between gap-3 px-4 py-2.5"><dt className="text-muted-foreground">Code ends</dt><dd>{timeOnly(s.expires_at)}</dd></div>}
-        </dl>
-        <DialogFooter className="max-sm:flex-row">
-          <Button variant="outline" className="max-sm:flex-1" onClick={onClose}>Cancel</Button>
-          <Button className="max-sm:flex-1" asChild><a href={s.url} target="_blank" rel="noreferrer"><ExternalLink />Open</a></Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
+  const dialog = starting && <DeviceCode s={starting} onClose={() => setStarting(null)} onDone={() => { setStarting(null); void qc.invalidateQueries({ queryKey: KEY }); toast("Connected") }} />
+  return { rows, count, dialog }
 }

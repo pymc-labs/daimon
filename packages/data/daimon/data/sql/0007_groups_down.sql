@@ -1,4 +1,4 @@
--- Revision 0244's downgrade: drop what 0007_groups.sql made and put back 0001's same-source rule.
+-- Revision 0245's downgrade: drop what 0007_groups.sql made and put back 0001's same-source rule.
 drop table if exists {{data}}.personal_off;
 drop trigger if exists source_group_moved on {{data}}.sources;
 drop function if exists {{data}}.source_group_moved();

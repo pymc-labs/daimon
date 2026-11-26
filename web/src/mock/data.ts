@@ -64,6 +64,7 @@ const sets: RedactionSet[] = [
 ]
 const rules = { aliases: { Larkspur: "Client A" }, removals: ["internal-only"], regex: [{ pattern: "\\d{4}-\\d{4}", replace: "[number]" }], exclude_ids: [], entities: [{ name: "Larkspur", aliases: ["LKS"], scope: "client", label: "Client A" }] }
 const connected: Connected = {
+  notices: [{ kind: "linked", identity: "slack:T1:user:U1", provider: "slack", name: "maya" }],
   accounts: [{ provider: "slack", workspace: "T1", name: "maya", email: "maya@example.com", proof: "admin", linked_at: ago(400) }],
   connections: [{ source_id: "s_drive", source: "Shared drive", provider: "google", subject: "maya@example.com", status: "ok", last_ok_at: ago(3) }],
   connectable: [{ source_id: "s_drive", name: "Shared drive", provider: "google" }, { source_id: "s_mail", name: "Support inbox", provider: "google" }],
@@ -151,7 +152,7 @@ export const dataHandlers: HttpHandler[] = [
     return new HttpResponse(null, { status: 204 })
   }),
 
-  http.get("/api/profile/data", () => HttpResponse.json(connected)),
+  http.get("/api/profile/data", () => HttpResponse.json({ ...connected, notices: connected.notices.splice(0) })),
   http.post("/api/profile/data/connect", () => HttpResponse.json({ flow: "device", url: "https://example.com/device", pending_id: "p1", user_code: "WXYZ-1234", interval: 5 })),
   http.post("/api/profile/data/connect/:id/poll", () => HttpResponse.json({ connected: false })),
   http.delete("/api/profile/data/connections/:id", () => new HttpResponse(null, { status: 204 })),

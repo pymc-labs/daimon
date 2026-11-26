@@ -1,8 +1,9 @@
 # Data sources
 
 The data store keeps connected sources and their synced content in their own
-Postgres schemas, apart from Daimon's tables. It is off by default and does nothing
-until you turn it on and set it up.
+Postgres schemas, apart from Daimon's tables. It is on by default and does nothing
+until an admin adds a source and turns [`data_reads`](features.md#data-source-reads) on
+for an agent.
 
 ## Set it up
 
@@ -10,12 +11,12 @@ The data store needs PostgreSQL 16 or later.
 
 Every release migration creates the `data` and `data_views` schemas, the store's tables
 and four cluster-wide roles, `daimon_data_reader`, `daimon_data_sql`, `daimon_data_view_owner`
-and `daimon_data_parity`, whether or not the feature is on. Nothing reads them until you
-set `DAIMON_FEATURES__DATA_SOURCES=on` on every Daimon service; a workspace can then turn
-the [`data_sources` feature](features.md#data-sources) off for itself.
+and `daimon_data_parity`, whether or not the feature is on. `DAIMON_FEATURES__DATA_SOURCES=off` on every Daimon
+service turns the store off, and a workspace can turn the
+[`data_sources` feature](features.md#data-sources) off for itself.
 
 If the database user lacks CREATE on the database or CREATEROLE, the migration logs
-`data_store_skipped` and Daimon starts anyway. With the feature on, run
+`data_store_skipped` and Daimon starts anyway, with the web app's Data pages hidden. Run
 `daimon data init` as that user, or with `--admin-url` for one that can.
 
 `daimon data init` is safe to run again. Settings are
@@ -37,7 +38,9 @@ A source syncs every hour, or every `sync_minutes` of its config. A run cut off 
 time budget continues on the next pass, and a failing source backs off from 5 minutes to 6
 hours. A source makes at most 60 upstream requests a minute unless its config sets
 `rate_per_minute` (0 removes the limit). The worker needs `DAIMON_CRYPTO__KEYS` to open
-source credentials.
+source credentials. The GCP deploy workflow recreates
+a VM named `<registry>-data-sync` on each deploy, from `compose.data-sync.yml` in the assets
+bucket, when the deployment has one.
 
 ## Kinds of source
 
@@ -53,8 +56,8 @@ platform verified. That is a web app sign-in with Discord, Slack or Microsoft, a
 link, or the person signing in to the source (Bluedot and Notion). A person who only chats
 has no link until they sign in to the web app.
 
-A data admin can link someone else's account, never their own, and the audit trail records
-it. A link a data admin ends or rejects stays ended when the person signs in again.
+A data admin or workspace admin can link someone else's account, never their own, and the
+audit trail records it. A link a data admin ends or rejects stays ended when the person signs in again.
 
 Google sign-in for data sources needs a Google OAuth client in
 [`DAIMON_DATA__GOOGLE_OAUTH_CLIENT_ID`](configuration.md#daimon_data__google_oauth_client_id).
@@ -82,10 +85,29 @@ publish after a complete sync.
 
 With the feature on, the web app has a Data section for search and browsing, which shows each
 person only what they may read. Owners and admins add, pause, publish and retire sources under
-Integrations > Data sources. Data admins, named by the owner or another data admin, manage
-scopes, grants, identity links and redaction sets under Admin > Data access, but never grant
-themselves a scope. Declared sources show as bound and are read-only there. People link and
+Integrations > Data sources. Workspace admins and data admins, named by the owner or another
+data admin, manage scopes, grants, identity links and redaction sets under Admin > Data
+access. Granting oneself a scope is allowed and marked in the audit trail. Declared sources show as bound and are read-only there. People link and
 connect their own accounts on their Profile.
+
+## Who sees an answer
+
+An answer shows only what everyone who will see it may read: the asker and, in a room, its
+members. Discord rooms keep their members; Slack and Teams rooms are read on each call.
+Teams needs the app's `ChannelMember.Read.Group` and `ChatMember.Read.Chat` consents, which
+a team owner or chat member grants when adding or updating the app. Until then, and in
+rooms whose members cannot be read, answers hold only what everyone may read. A helper asked
+from a DM reads with the asker's access.
+
+A memory saved after a data read records what was read. It shows only where everyone could
+read all of it; a deleted item, a live result or SQL hides it.
+
+## Redaction sets
+
+A set's `at` says when it applies. Unset, as before, regex, aliases and removals rewrite text
+at ingest, and entity names hide at read time. `storage` applies all of them at ingest,
+entity names becoming their label for everyone. `answer` stores text as the source has it
+and rewrites answers instead, entity names hiding as when unset. `exclude_ids` always keeps records out of the store.
 
 ## Declared config
 

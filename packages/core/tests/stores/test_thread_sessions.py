@@ -23,6 +23,7 @@ from daimon.core.session_compat import (
     decide_session_compatibility,
 )
 from daimon.core.session_snapshot import SessionSnapshot, fingerprint_identity
+from daimon.core.stores.data_memory import note_reads, reads_of
 from daimon.core.stores.domain import ThreadSessionRow
 from daimon.core.stores.thread_session_lineage import (
     clear_fresh_start,
@@ -1338,3 +1339,31 @@ async def test_transfer_active_turn_never_takes_another_turns_marker(
         for m in await list_orphaned_turns(db_session, platform="discord")
     }
     assert markers == {dead.id: "43", replacement.id: "44"}
+
+
+async def test_a_replacement_keeps_what_its_predecessor_read_from_data(
+    db_session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
+    """A memory saved after a carry-over is tagged with what the earlier session read."""
+    old = await new_thread_session(
+        db_session,
+        tenant_id=tenant_id,
+        thread_id="t-1",
+        ma_session_id="ses_old",
+        effective_config=_snapshot().model_copy(update={"chat_session_id": "chat-old"}),
+    )
+    await note_reads(
+        db_session, tenant_id=tenant_id, chat_session_id="chat-old", refs=["record:1", "sql"]
+    )
+    await new_thread_session(
+        db_session,
+        tenant_id=tenant_id,
+        thread_id="t-1",
+        ma_session_id="ses_new",
+        predecessor_id=old.id,
+        effective_config=_snapshot().model_copy(update={"chat_session_id": "chat-new"}),
+    )
+    assert await reads_of(db_session, tenant_id=tenant_id, chat_session_id="chat-new") == [
+        "record:1",
+        "sql",
+    ]
