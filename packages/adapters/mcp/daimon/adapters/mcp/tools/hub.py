@@ -270,6 +270,8 @@ async def _auth_for(
         ),
         platform_user_id=hub.platform_user_id,
         is_admin=False,
+        # The hub token is the person's own platform login, verified at sign-in.
+        signed_in_person=True,
     )
 
 

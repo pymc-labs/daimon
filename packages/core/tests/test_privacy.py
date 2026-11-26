@@ -1044,6 +1044,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "support_settlers_cleared": "support_settlers_cleared",
         "daimon_admins": "daimon_admins",
         "agent_post_requesters": "agent_post_requesters",
+        "agent_chat_session_links": "agent_chat_session_links",
         "platform_user_names": "platform_user_names",
         "teams_messages": "teams_messages",
         "microsoft_user_tokens": "microsoft_user_tokens",
@@ -1132,6 +1133,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         # Text account_id / principal_id with no FK: erased by `stores.mux_erasure`,
         # except operations against a shared slot, which are counted as retained.
         "operation": "text account_id and principal_id (mux erasure)",
+        # An agent-chat session's record of where it came from: erasure clears its grant,
+        # channel and account (`erasure.ERASABLE`, `agent_chat_session_links`).
+        "usage_reconcile_progress": "agent_chat_account_id, no FK; cleared with grant and channel",
     }
     # Intentional exclusions, each justified inline.
     allowlist: frozenset[str] = frozenset(
@@ -1285,6 +1289,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         }
     )
 
+    # Account ids with no FK, which the rules below cannot see, and so name here. Each
+    # table must then be purged or allowed like any other.
+    account_columns_without_fk = {("usage_reconcile_progress", "agent_chat_account_id")}
     in_scope: dict[str, str] = {}
     for name, table in Base.metadata.tables.items():
         reasons: list[str] = []
@@ -1292,8 +1299,17 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             reasons.append("FK->accounts.id")
         if "principal_id" in table.columns:
             reasons.append("principal_id column")
+        reasons += [
+            f"{column}: an account id with no FK"
+            for listed, column in account_columns_without_fk
+            if listed == name and column in table.columns
+        ]
         if reasons:
             in_scope[name] = ", ".join(reasons)
+    assert all(
+        column in Base.metadata.tables[table].columns
+        for table, column in account_columns_without_fk
+    ), "drop a listed account column that is gone"
 
     uncovered = {
         name: why for name, why in in_scope.items() if name not in purged and name not in allowlist

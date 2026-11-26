@@ -63,6 +63,7 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_AGENT_CHAT,
     MA_METADATA_KEY_BILLING_EXEMPT,
     MA_METADATA_KEY_BUDGET_CHANNEL,
+    MA_METADATA_KEY_CHAT_SESSION,
     MA_METADATA_KEY_PRIVATE_DM,
     MA_METADATA_KEY_TENANT,
 )
@@ -1378,7 +1379,7 @@ async def create_session(
             agent_chat=agent_chat,
         )
         if chat_session_id is not None:
-            metadata["daimon_chat_session_id"] = chat_session_id
+            metadata[MA_METADATA_KEY_CHAT_SESSION] = chat_session_id
         if github_transport == "router":
             metadata[MA_METADATA_KEY_GITHUB_TRANSPORT] = github_transport
         if slack_turn_context_id is not None:

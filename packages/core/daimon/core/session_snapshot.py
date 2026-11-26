@@ -52,6 +52,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_file_resource import (
 from anthropic.types.beta.sessions.beta_managed_agents_github_repository_resource import (
     BetaManagedAgentsGitHubRepositoryResource,
 )
+from daimon.core.ma_metadata_keys import MA_METADATA_KEY_CHAT_SESSION
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
 from daimon.core.mcp_server_url import (
     GITHUB_COPILOT_MCP_URL,
@@ -550,7 +551,7 @@ def _snapshot_from_session(
         memory_read_only=memory_read_only,
         personal_memory_store_id=personal_memory_store_id,
         vault_id=vault_id if vault_id is not None else next(iter(session.vault_ids), None),
-        chat_session_id=session.metadata.get("daimon_chat_session_id"),
+        chat_session_id=session.metadata.get(MA_METADATA_KEY_CHAT_SESSION),
         tools_sha256=hash_tools(agent.tools),
         mcp_servers_sha256=hash_mcp_servers(agent.mcp_servers),
         env_sha256=env_sha256,
