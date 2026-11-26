@@ -8,13 +8,16 @@ or after a restart. The deciders, reducer and gate are the real ones.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import dataclasses
+import datetime as dt
 import json
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -28,6 +31,7 @@ from daimon.adapters.mcp.tools import sessions as general_sessions
 from daimon.adapters.mcp.tools._session_access import hub_session_access
 from daimon.adapters.mcp.tools.agent_chat import (
     _ask_impl,  # pyright: ignore[reportPrivateUsage]
+    _await_turn_impl,  # pyright: ignore[reportPrivateUsage]
     _continue_turn_impl,  # pyright: ignore[reportPrivateUsage]
     _deliver_turn_charts_impl,  # pyright: ignore[reportPrivateUsage]
     _get_session_impl,  # pyright: ignore[reportPrivateUsage]
@@ -86,7 +90,7 @@ Call = tuple[str, str, dict[str, Any]]
 
 @pytest.fixture(autouse=True)
 def _fast_polls(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(safety, "_POLL_S", 0.01)
+    monkeypatch.setattr(safety, "_REOPEN_S", 0.01)
 
 
 def _toolset(server: str, policy: str, *names: str) -> dict[str, Any]:
@@ -99,6 +103,46 @@ def _toolset(server: str, policy: str, *names: str) -> dict[str, Any]:
         ],
         "default_config": {"enabled": True, "permission_policy": {"type": policy}},
     }
+
+
+class _LiveStream(httpx.AsyncByteStream):
+    """One open SSE connection: frames arrive as the session's log grows."""
+
+    def __init__(self) -> None:
+        self.frames: asyncio.Queue[bytes | None] = asyncio.Queue()
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        while (frame := await self.frames.get()) is not None:
+            yield frame
+
+
+class _Log(list[dict[str, Any]]):
+    """The event log. Each event gets the next `processed_at` and goes to the open
+    streams, as Managed Agents does; a test may queue an event without one first."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.streams: list[_LiveStream] = []
+        self._at = dt.datetime(2026, 11, 26, tzinfo=dt.UTC)
+
+    def append(self, event: dict[str, Any]) -> None:
+        self._at += dt.timedelta(seconds=1)
+        event.setdefault("processed_at", self._at.isoformat())
+        super().append(event)
+        frame = f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode()
+        for stream in self.streams:
+            stream.frames.put_nowait(frame)
+
+    def __iadd__(self, events: Iterable[dict[str, Any]]) -> _Log:  # type: ignore[override]
+        for event in events:
+            self.append(event)
+        return self
+
+    def drop(self) -> None:
+        """Close every open stream, as a proxy or the provider may."""
+        for stream in self.streams:
+            stream.frames.put_nowait(None)
+        self.streams.clear()
 
 
 class FakeSession:
@@ -126,8 +170,15 @@ class FakeSession:
         self.tools = [_toolset("linear", frozen, "create_issue")]
         self.servers = [{"name": "linear", "type": "url", "url": _LINEAR_URL}]
         self.script = script or [[("linear", tool, {})]]
-        self.events: list[dict[str, Any]] = []
+        self.events = _Log()
         self.calls: list[tuple[str, Any]] = []
+        # Every read of the session's status or event list, to show nothing polls.
+        self.reads = 0
+        # How many times the events stream was opened.
+        self.opened = 0
+        # With `live`, the events stream stays open and delivers the log as it grows.
+        self.live = False
+        self.status = "idle"
         self.page_size = 1000
         self.fail_update = False
         self.unconstrainable: Callable[[Any], Any] | None = None
@@ -233,7 +284,7 @@ class FakeSession:
         snapshot = ma_session(
             id=_SESSION,
             agent=ma_agent(id=_MA_AGENT_ID, tools=self.tools, mcp_servers=self.servers),
-            status="idle",
+            status=self.status,
             metadata=self.metadata,
         )
         return self.unconstrainable(snapshot) if self.unconstrainable else snapshot
@@ -245,6 +296,7 @@ class FakeSession:
         router.add("GET", rf"/v1/agents/{_MA_AGENT_ID}$", self._agent)
         router.add("POST", rf"/v1/sessions/{_SESSION}$", self._update)
         router.add("GET", rf"/v1/sessions/{_SESSION}/events$", self._list)
+        router.add("GET", rf"/v1/sessions/{_SESSION}/events/stream$", self._stream)
         router.add("POST", rf"/v1/sessions/{_SESSION}/events$", self._send)
         return router
 
@@ -253,7 +305,18 @@ class FakeSession:
         return httpx.Response(200, json=agent.model_dump(mode="json"))
 
     def _retrieve(self, _r: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        self.reads += 1
         return httpx.Response(200, json=self.model.model_dump(mode="json"))
+
+    def _stream(self, _r: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        """A live connection, or (the default) one that closes at once: a stream that
+        cannot be used, after which the caller reads the state again."""
+        self.opened += 1
+        if not self.live:
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=b"")
+        stream = _LiveStream()
+        self.events.streams.append(stream)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=stream)
 
     def _update(self, request: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         if self.fail_update:
@@ -267,6 +330,7 @@ class FakeSession:
         return httpx.Response(200, json=self.model.model_dump(mode="json"))
 
     def _list(self, request: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        self.reads += 1
         params = request.url.params
         events = list(self.events)
         types = params.get_list("types[]") or params.get_list("types")
@@ -445,7 +509,7 @@ async def _entry_continue(runtime: McpRuntime, fake: FakeSession) -> None:
 
 
 async def _entry_ask_existing(runtime: McpRuntime, fake: FakeSession) -> None:
-    result = await _ask_impl(runtime, _auth(), "hi", handle=_SESSION, poll_interval_seconds=0.01)
+    result = await _ask_impl(runtime, _auth(), "hi", handle=_SESSION)
     assert result.message == "done"
 
 
@@ -500,7 +564,7 @@ async def test_ask_new_session_is_gated_before_its_message(
     creator = AsyncMock(return_value=fake.model)
     a, b, c = _creation_patches(fake, creator)
     with a, b, c:
-        result = await _ask_impl(runtime, _auth(), "hi", poll_interval_seconds=0.01)
+        result = await _ask_impl(runtime, _auth(), "hi")
     assert result.message == "done"
     assert creator.call_args.kwargs["tool_safety"] == _ENABLED
     kinds = fake.kinds()
@@ -1548,6 +1612,7 @@ async def test_the_worker_runs_to_the_unattended_run_limit_at_its_place(
     )
     assert await asyncio.wait_for(worker, timeout=5) is False, "the worker stops at its limit"
     assert read == [30 * 60.0], "the worker reads the tenant's unattended run limit"
+    assert safety.why_stopped(runtime, _SESSION) == safety.RUN_LIMIT_MSG
 
 
 async def _cloud_computers(factory: async_sessionmaker[AsyncSession], agent_chat: str) -> None:
@@ -1635,3 +1700,477 @@ async def test_a_signed_in_resume_records_where_an_older_session_came_from(
         signed_in,
         session_settle_state.AgentChatSession(managed_session_id=_SESSION, channel_id=None),
     )
+
+
+# --- Waiting on the event stream: the worker, `ask` and `await_turn` ---
+
+
+async def _eventually(check: Callable[[], bool]) -> None:
+    """Yield to the loop until `check` holds; fails the test after about two seconds."""
+    for _ in range(400):
+        if check():
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError("the awaited state never came")
+
+
+async def _reads_while_quiet(fake: FakeSession) -> int:
+    """How many session reads happen over a stretch many times the old poll gap, once
+    the read that follows the subscription is over."""
+    await _eventually(lambda: fake.opened > 0 and fake.reads > 0)
+    settled = -1
+    while settled != fake.reads:
+        settled = fake.reads
+        await asyncio.sleep(0.03)
+    await asyncio.sleep(0.1)
+    return fake.reads - settled
+
+
+def _running_turn(fake: FakeSession) -> str:
+    """A turn the agent is working on, with a live stream; returns its boundary."""
+    fake.live = True
+    fake.status = "running"
+    return fake._start_turn()  # pyright: ignore[reportPrivateUsage]
+
+
+def _say(fake: FakeSession, text: str) -> str:
+    event_id = fake._id("evt_msg")  # pyright: ignore[reportPrivateUsage]
+    fake.events.append(
+        {"id": event_id, "type": "agent.message", "content": [{"type": "text", "text": text}]}
+    )
+    return event_id
+
+
+def _finish(fake: FakeSession) -> None:
+    fake.status = "idle"
+    fake._end()  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_the_worker_sleeps_on_the_event_stream_and_reads_only_on_news(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Issue 1894: no poll. A running turn costs no reads until the stream says it stopped."""
+    fake = FakeSession(script=[[("linear", "get_issue", {})]])
+    runtime = _runtime(fake, factory, _ENABLED)
+    boundary = _running_turn(fake)
+
+    worker = safety.watch_turn(
+        runtime, _auth(), _SESSION, turn_event_id=boundary, rules_channel_id=None
+    )
+    assert await _reads_while_quiet(fake) == 0
+
+    fake.status = "idle"
+    fake._pause_on(fake._remaining.pop(0))  # pyright: ignore[reportPrivateUsage]
+    assert await asyncio.wait_for(worker, timeout=5) is True
+    assert [c["result"] for c in fake.confirmations] == ["allow"]
+    assert fake.opened == 1, "one subscription served the whole turn"
+
+
+async def test_a_dropped_stream_is_reopened_and_the_pause_still_answered(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fake = FakeSession(script=[[("linear", "get_issue", {})]])
+    runtime = _runtime(fake, factory, _ENABLED)
+    boundary = _running_turn(fake)
+
+    worker = safety.watch_turn(
+        runtime, _auth(), _SESSION, turn_event_id=boundary, rules_channel_id=None
+    )
+    await _eventually(lambda: fake.opened == 1)
+    fake.events.drop()
+    await _eventually(lambda: fake.opened == 2)
+    # Paused while no stream delivered it: the read after the reopen finds it.
+    fake.status = "idle"
+    fake._pause_on(fake._remaining.pop(0))  # pyright: ignore[reportPrivateUsage]
+    assert await asyncio.wait_for(worker, timeout=5) is True
+    assert [c["result"] for c in fake.confirmations] == ["allow"]
+
+
+async def _role_gated(factory: async_sessionmaker[AsyncSession]) -> None:
+    from daimon.core.access_policy import AgentRule
+
+    async with factory.begin() as db:
+        await make_tenant(db, id=_TENANT_ID, platform="discord", workspace_id="g1")
+        await set_access_policy(
+            db,
+            tenant_id=_TENANT_ID,
+            policy=TenantAccessPolicy(
+                agent_rules={ma_agent().name: AgentRule(invoker_role_ids=("123",))}
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("unanswered", "ends", "confirmed"),
+    [(3, True, ["allow"]), (10_000, False, [])],
+    ids=["answers-on-a-later-try", "gives-up-and-says-why"],
+)
+async def test_a_membership_check_discord_does_not_answer_is_tried_again(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    unanswered: int,
+    ends: bool,
+    confirmed: list[str],
+) -> None:
+    """Production, 2026-11-26: one unanswered check ended the worker and left a code
+    review paused three times. Unknown is not a refusal: the same pause is tried again."""
+    monkeypatch.setattr(safety, "_UNANSWERED_WAITS_S", (0.0, 0.0, 0.0))
+    await _role_gated(factory)
+    fake = FakeSession(script=[[("linear", "get_issue", {})]])
+    calls = 0
+
+    async def fetch(tenant_id: uuid.UUID, guild_id: str, user_id: str) -> Membership:
+        nonlocal calls
+        calls += 1
+        if calls <= unanswered:
+            raise httpx.ReadTimeout("discord did not answer")
+        return Membership(is_member=True, role_ids=("123",))
+
+    runtime = replace(
+        _runtime(fake, factory, _ENABLED), membership_resolver=CachedMembershipResolver(fetch)
+    )
+    auth = replace(_auth(platform="discord"), platform_user_id="u1")
+    boundary = fake.pause()
+
+    with patch.object(
+        agent_chat, "_resolve_ma_agent", AsyncMock(return_value=ma_agent(id=_MA_AGENT_ID))
+    ):
+        worker = safety.watch_turn(
+            runtime, auth, _SESSION, turn_event_id=boundary, rules_channel_id=None
+        )
+        assert await asyncio.wait_for(worker, timeout=5) is ends
+    assert [c["result"] for c in fake.confirmations] == confirmed
+    why = safety.why_stopped(runtime, _SESSION)
+    assert (why is None) is ends
+    if why is not None:
+        assert "Discord didn't answer" in why and "list of people" not in why, why
+
+
+async def test_a_pause_another_worker_answered_first_is_not_a_failure(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Two instances may hold a worker for one turn after a resume. The slower one's
+    confirmation is refused; its calls read as confirmed, so it carries on."""
+    fake = FakeSession(script=[[("linear", "get_issue", {})]])
+    runtime = _runtime(fake, factory, _ENABLED)
+    boundary = fake.pause()
+    original = safety._answer  # pyright: ignore[reportPrivateUsage]
+
+    async def answer(*args: Any, **kwargs: Any) -> None:
+        # The other worker's confirmation lands, and the turn runs on to its end.
+        pending = fake._pending()  # pyright: ignore[reportPrivateUsage]
+        for tool_use_id in pending:
+            fake.events.append(
+                {
+                    "id": fake._id("evt_confirm"),  # pyright: ignore[reportPrivateUsage]
+                    "type": "user.tool_confirmation",
+                    "tool_use_id": tool_use_id,
+                    "result": "allow",
+                }
+            )
+        fake._end()  # pyright: ignore[reportPrivateUsage]
+        fake.fail_confirm = True
+        await original(*args, **kwargs)
+
+    with patch.object(safety, "_answer", answer):
+        worker = safety.watch_turn(
+            runtime, _auth(), _SESSION, turn_event_id=boundary, rules_channel_id=None
+        )
+        assert await asyncio.wait_for(worker, timeout=5) is True
+    assert fake.confirmations == [], "this worker's own confirmation was refused"
+
+
+async def test_await_turn_returns_the_final_answer_of_a_finished_turn(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fake = FakeSession(script=[[("linear", "get_issue", {})]])
+    runtime = _runtime(fake, factory, _ENABLED)
+    await _start(runtime, fake, _auth())
+    await _settle(runtime)
+
+    news = await _await_turn_impl(runtime, _auth(), _SESSION)
+
+    assert (news.status, news.messages, news.hint) == ("idle", ("done",), None)
+    assert news.cursor == next(e["id"] for e in fake.events if e["type"] == "agent.message")
+    # Asked again with that cursor, the final answer is still the last message.
+    again = await _await_turn_impl(runtime, _auth(), _SESSION, after=news.cursor)
+    assert (again.status, again.messages) == ("idle", ("done",))
+
+
+async def test_await_turn_returns_on_what_the_agent_says_then_on_the_end(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A long poll: each call returns on news, and the cursor skips what was returned."""
+    fake = FakeSession()
+    runtime = _runtime(fake, factory, _ENABLED)
+    await _record(factory, _running_turn(fake))
+
+    waiting = asyncio.create_task(_await_turn_impl(runtime, _auth(), _SESSION))
+    assert await _reads_while_quiet(fake) == 0, "a wait reads nothing until there is news"
+    assert not waiting.done()
+    first = _say(fake, "Step 1 of 3 done")
+    news = await asyncio.wait_for(waiting, timeout=5)
+    assert (news.status, news.messages, news.cursor) == ("running", ("Step 1 of 3 done",), first)
+    assert news.hint is not None and "await_turn" in news.hint
+
+    waiting = asyncio.create_task(_await_turn_impl(runtime, _auth(), _SESSION, after=first))
+    await _eventually(lambda: fake.opened == 2)
+    assert not waiting.done(), "what the cursor already covers is not news"
+    _finish(fake)
+    news = await asyncio.wait_for(waiting, timeout=5)
+    assert (news.status, news.messages) == ("idle", ("done",))
+
+
+async def test_await_turn_returns_still_running_when_its_bound_passes(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fake = FakeSession()
+    runtime = _runtime(fake, factory, _ENABLED)
+    await _record(factory, _running_turn(fake))
+
+    news = await _await_turn_impl(runtime, _auth(), _SESSION, wait_seconds=0.05)
+
+    assert (news.status, news.messages, news.cursor) == ("running", (), None)
+    assert news.hint is not None and "await_turn" in news.hint
+    # No wait at all reads where the turn stands and returns.
+    now = await asyncio.wait_for(
+        _await_turn_impl(runtime, _auth(), _SESSION, wait_seconds=0), timeout=5
+    )
+    assert now.status == "running"
+
+
+async def test_await_turn_names_the_tool_call_running_now(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fake = FakeSession()
+    runtime = _runtime(fake, factory, _ENABLED)
+    await _record(factory, _running_turn(fake))
+    fake.events.append(
+        {
+            "id": "evt_tool_now",
+            "type": "agent.mcp_tool_use",
+            "mcp_server_name": "github",
+            "name": "get_pull_request",
+            "input": {},
+        }
+    )
+
+    news = await _await_turn_impl(runtime, _auth(), _SESSION, wait_seconds=0)
+
+    assert news.activity is not None and news.activity.startswith("github get_pull_request")
+
+
+async def test_await_turn_does_not_take_the_turn_before_for_the_one_just_sent(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Right after a send the list still ends at the earlier turn: its idle and its
+    reply are not this turn's (`_newest_turn`)."""
+    fake = FakeSession(script=[[("linear", "get_issue", {})]])
+    runtime = _runtime(fake, factory, _ENABLED)
+    await _start(runtime, fake, _auth())
+    await _settle(runtime)
+    await _record(factory, "evt_sent_but_not_listed_yet")
+
+    news = await _await_turn_impl(runtime, _auth(), _SESSION, wait_seconds=0)
+
+    assert (news.status, news.messages) == ("running", ())
+
+
+async def test_await_turn_gives_a_queued_message_none_of_the_turn_before(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A message sent while a turn runs is listed before that turn's last words. They
+    were said before it was taken up, so they are not its progress and not its end."""
+    fake = FakeSession()
+    runtime = _runtime(fake, factory, _ENABLED)
+    _running_turn(fake)
+    fake.events.append(
+        {
+            "id": "evt_queued",
+            "type": "user.message",
+            "content": [{"type": "text", "text": "and then?"}],
+            "processed_at": None,
+        }
+    )
+    _say(fake, "the answer of the turn before")
+    _finish(fake)
+    await _record(factory, "evt_queued")
+
+    news = await _await_turn_impl(runtime, _auth(), _SESSION, wait_seconds=0)
+
+    assert (news.status, news.messages, news.cursor) == ("running", (), None)
+
+
+async def test_await_turn_with_no_wait_only_reads(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """`wait_seconds=0` is a status read: no stream, no resume, no tool call answered."""
+    fake = FakeSession(script=[[("linear", "get_issue", {})]])
+    runtime = _runtime(fake, factory, _ENABLED)
+    await _record(factory, fake.pause())
+    _restart()
+    resume = AsyncMock()
+
+    news = await _await_turn_impl(runtime, _auth(), _SESSION, wait_seconds=0, resume=resume)
+
+    assert news.status == "paused" and news.hint is not None and "await_turn" in news.hint
+    resume.assert_not_awaited()
+    assert (fake.opened, fake.calls) == (0, [])
+    assert _no_workers()
+
+
+async def test_await_turn_returns_inside_its_bound_when_the_stream_will_not_open(
+    factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bound covers the whole call, the subscription and the reads included."""
+    monkeypatch.setattr(agent_chat, "_AWAIT_GRACE_S", 0.05)
+    fake = FakeSession()
+    runtime = _runtime(fake, factory, _ENABLED)
+    await _record(factory, _running_turn(fake))
+    closed = False
+
+    class StuckFeed:
+        async def open(self) -> None:
+            await asyncio.Event().wait()
+
+        async def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    news = await asyncio.wait_for(
+        _await_turn_impl(runtime, _auth(), _SESSION, wait_seconds=0.05, feed=StuckFeed()),  # type: ignore[arg-type]
+        timeout=5,
+    )
+
+    assert (news.status, news.messages) == ("running", ())
+    assert news.hint is not None and "await_turn" in news.hint
+    assert closed
+
+
+async def test_await_turn_resumes_a_turn_paused_by_a_restart_and_returns_its_answer(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The caller that waits keeps the turn going: no `get_session` loop, no `continue_turn`."""
+    fake = FakeSession(script=[[("linear", "get_issue", {})], [("linear", "get_issue", {})]])
+    runtime = _runtime(fake, factory, _ENABLED)
+    await _record(factory, fake.pause())
+    _restart()
+    resumes = 0
+
+    async def resume() -> None:
+        nonlocal resumes
+        resumes += 1
+        await _continue_turn_impl(runtime, _auth(), _SESSION, None)
+
+    news = await asyncio.wait_for(
+        _await_turn_impl(runtime, _auth(), _SESSION, resume=resume), timeout=5
+    )
+
+    assert (news.status, news.messages) == ("idle", ("done",))
+    assert [c["result"] for c in fake.confirmations] == ["allow", "allow"]
+    assert resumes == 1
+
+
+@pytest.mark.parametrize("failure", ["resume-refused", "stops-again"])
+async def test_await_turn_says_why_a_paused_turn_cannot_go_on(
+    factory: async_sessionmaker[AsyncSession], failure: str
+) -> None:
+    fake = FakeSession(script=[[("linear", "get_issue", {})]])
+    runtime = _runtime(fake, factory, _ENABLED)
+    await _record(factory, fake.pause())
+    _restart()
+
+    async def resume() -> None:
+        if failure == "resume-refused":
+            raise ToolError("this conversation's channel has used its spending budget.")
+        fake.fail_confirm = True
+        await _continue_turn_impl(runtime, _auth(), _SESSION, None)
+
+    news = await asyncio.wait_for(
+        _await_turn_impl(runtime, _auth(), _SESSION, resume=resume), timeout=5
+    )
+
+    assert news.status == "paused" and news.hint is not None
+    expected = "spending budget" if failure == "resume-refused" else "could not decide a tool call"
+    assert expected in news.hint, news.hint
+    assert fake.confirmations == []
+
+
+async def test_await_turn_leaves_a_chat_approval_card_to_the_person_it_asks(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fake = FakeSession(frozen="always_ask")
+    runtime = _runtime(fake, factory, _ENABLED)
+    fake.pause()
+    resume = AsyncMock()
+
+    news = await _await_turn_impl(runtime, _auth(), _SESSION, resume=resume)
+
+    assert (news.status, news.hint) == ("paused", safety.AWAITING_CARD_HINT)
+    resume.assert_not_awaited()
+    assert fake.calls == []
+
+
+async def test_await_turn_reports_a_terminated_session(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fake = FakeSession()
+    runtime = _runtime(fake, factory, _ENABLED)
+    fake.pause()
+    fake.status = "terminated"
+
+    news = await _await_turn_impl(runtime, _auth(), _SESSION)
+
+    assert news.status == "terminated" and news.hint is not None and "start_turn" in news.hint
+
+
+def _await_turn_tools() -> dict[str, ast.AsyncFunctionDef]:
+    """Every registered `await_turn`, by the module that registers it, found from the
+    code: any tools module that registers `start_turn` is a surface that drives turns."""
+    found: dict[str, ast.AsyncFunctionDef] = {}
+    tools = Path(agent_chat.__file__).parent
+    for path in sorted(tools.glob("*.py")):
+        defs = {
+            node.name: node
+            for node in ast.walk(ast.parse(path.read_text()))
+            if isinstance(node, ast.AsyncFunctionDef)
+        }
+        if "start_turn" in defs:
+            assert "await_turn" in defs, f"{path.name} starts turns but cannot wait for one"
+            found[path.name] = defs["await_turn"]
+    return found
+
+
+#: What the `await_turn` description promises, and the test that proves each promise.
+AWAIT_TURN_CLAIMS: dict[str, str] = {
+    "said something": "test_await_turn_returns_on_what_the_agent_says_then_on_the_end",
+    "the turn ended": "test_await_turn_returns_the_final_answer_of_a_finished_turn",
+    "stopped and cannot go on": "test_await_turn_says_why_a_paused_turn_cannot_go_on",
+    "the conversation is over": "test_await_turn_reports_a_terminated_session",
+    "``wait_seconds`` passed": "test_await_turn_returns_still_running_when_its_bound_passes",
+    "is resumed by": "test_await_turn_resumes_a_turn_paused_by_a_restart_and_returns_its_answer",
+    "``activity``": "test_await_turn_names_the_tool_call_running_now",
+    "without polling": "test_await_turn_returns_on_what_the_agent_says_then_on_the_end",
+    "resumes nothing": "test_await_turn_with_no_wait_only_reads",
+}
+
+
+def test_every_surface_that_starts_turns_waits_for_them_the_same_way() -> None:
+    """One rule, every path: agent keys and the hub register the same wait, each with a
+    resume, and each description makes only the promises a test here proves."""
+    tools = _await_turn_tools()
+    assert set(tools) == {"agent_chat.py", "hub.py"}, sorted(tools)
+    for module, tool in tools.items():
+        calls = [
+            node
+            for node in ast.walk(tool)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_await_turn_impl"
+        ]
+        assert len(calls) == 1, f"{module}: await_turn must use the one implementation"
+        assert "resume" in {kw.arg for kw in calls[0].keywords}, f"{module}: no resume"
+        doc = " ".join((ast.get_docstring(tool) or "").split())
+        for claim, test in AWAIT_TURN_CLAIMS.items():
+            assert claim in doc, f"{module}: await_turn no longer says {claim!r}"
+            assert callable(globals().get(test)), f"{claim!r} has no test named {test}"
