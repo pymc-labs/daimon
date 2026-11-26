@@ -19,7 +19,7 @@ from daimon.core.config import (
     DiscordSettings,
     Settings,
 )
-from daimon.core.data_tools import DATA_SOURCE_TOOLS, DATA_TOOLS
+from daimon.core.data_tools import DATA_SETUP_TOOLS, DATA_SOURCE_TOOLS, DATA_TOOLS
 from daimon.core.errors import StaleChannelValue
 from daimon.core.features.model_input import (
     DEFAULT_TOOLSET,
@@ -271,9 +271,10 @@ def test_a_capability_off_turns_exactly_its_tools_off(key: str) -> None:
     ), "each tool is off in the session"
 
 
-def test_a_workspace_with_no_data_source_is_offered_no_data_tool() -> None:
+def test_a_workspace_with_no_data_source_is_offered_only_what_adds_one() -> None:
     toolset = agent_toolset(without_data_sources(_snapshot()), _agent())
-    assert toolset.hidden_daimon_tools == DATA_SOURCE_TOOLS | DATA_TOOLS
+    assert toolset.hidden_daimon_tools == (DATA_SOURCE_TOOLS - DATA_SETUP_TOOLS) | DATA_TOOLS
+    assert {"list_data_sources", "change_data_source"} == DATA_SETUP_TOOLS
 
 
 def test_compute_off_keeps_the_stop_tools_and_long_jobs_off_hides_its_own() -> None:

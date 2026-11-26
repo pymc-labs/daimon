@@ -22,7 +22,7 @@ from fastmcp.exceptions import ToolError
 
 from .parity_fakes import fake_runtime, make_auth
 
-TENANT, ADMIN, MAYA = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+TENANT, ADMIN, MAYA, SOURCE = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
 # What every change tool is called with, and the `daimon.data` call it must end in.
 CHANGES: list[tuple[str, dict[str, Any], Any, str]] = [
     ("change_data_source", {"action": "pause", "source_id": str(uuid.uuid4())}, manage, "act"),
@@ -175,17 +175,37 @@ async def test_a_change_runs_only_on_the_card(
         )
 
 
-async def test_a_source_that_needs_a_credential_is_added_on_the_web(rig: Rig) -> None:
-    with pytest.raises(ToolError, match="web app"):
+async def test_a_source_credential_goes_only_through_the_askers_private_form(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A credential in the tool's arguments is refused; a source that needs one is made paused
+    and its form posted, and set_credential posts the form for an existing source."""
+    with pytest.raises(ToolError, match="Never pass a credential"):
         await rig.call(
-            "change_data_source",
-            action="create",
-            kind="postgres",
-            name="Orders",
-            settings={"dsn": "postgresql://u:p@db.example.com/app"},
-            origin_context_id="o",
-        )
+            "change_data_source", action="create", kind="postgres", name="Orders",
+            settings={"dsn": "postgresql://u:p@db.example.com/app"}, origin_context_id="o",
+        )  # fmt: skip
     assert not rig.calls, "a credential never goes through chat"
+    posted: list[str] = []
+
+    async def form(*_: object, name: str, **__: object) -> Any:
+        posted.append(name)
+        return SimpleNamespace(instruction="Point at the form.")
+
+    async def listed(*_: object) -> list[Any]:
+        return [SimpleNamespace(id=SOURCE, name="Orders", kind="postgres")]
+
+    monkeypatch.setattr(data_admin, "request_data_source_credential", form)
+    monkeypatch.setattr(manage, "sources", listed)
+    made = await rig.call(
+        "change_data_source", action="create", kind="postgres", name="Orders",
+        origin_context_id="o",
+    )  # fmt: skip
+    assert rig.calls[0][0] == "create_source" and True in rig.calls[0][1], "made credential_later"
+    again = await rig.call(
+        "change_data_source", action="set_credential", source_id=str(SOURCE), origin_context_id="o"
+    )
+    assert posted == ["Orders", "Orders"] and made["credential_form"] == again["credential_form"]
 
 
 async def test_a_refusal_of_the_store_reads_as_its_message(

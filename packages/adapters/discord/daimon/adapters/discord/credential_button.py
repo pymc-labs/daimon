@@ -71,6 +71,7 @@ import structlog
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.checks import is_platform_admin
 from daimon.adapters.discord.credential_modals import (
+    DataSourceCredentialModal,
     EnvCredentialModal,
     EnvFileModal,
     McpCredentialModal,
@@ -317,6 +318,10 @@ class CredentialRequestButton(
                 # submit re-checks before anything is spent.
                 await interaction.response.send_modal(
                     SkillRepoModal(runtime=bot.runtime, request_row=request_row)
+                )
+            elif request_row.kind == "data_source":
+                await interaction.response.send_modal(
+                    DataSourceCredentialModal(runtime=bot.runtime, request_row=request_row)
                 )
             elif request_row.kind == "watch_credential":
                 # The requester's own read key for their watches; changes no agent.

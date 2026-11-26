@@ -112,6 +112,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 _POSIX_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+_NOT_AGENT_KINDS: Final = ("watch_credential", "data_source")
+
+
 def _caller_is_admin(auth: AuthIdentity) -> bool:
     """Whether this caller may REQUEST a key outside the member allowlist.
 
@@ -419,8 +422,8 @@ async def _supersede_live_siblings(
     )
     retired: list[CredentialRequestRow] = []
     for row in live:
-        # A watch key is the person's own, not the agent's: neither kind retires the other.
-        if (row.kind == "watch_credential") != (kind == "watch_credential"):
+        # A watch key and a source credential are not the agent's: they retire their own kind.
+        if any((row.kind == own) != (kind == own) for own in _NOT_AGENT_KINDS):
             continue
         if await supersede_credential_request(session, token=row.token, now=now) is not None:
             retired.append(row)
@@ -447,7 +450,7 @@ async def _mint_and_post(
     changes_agent: bool = True,
 ) -> RequestCredentialResult:
     on_web = origin.platform == "web"
-    if on_web and kind != "env":
+    if on_web and kind not in ("env", "data_source"):
         # The web chat's card holds one named key; files and connections need a chat app.
         raise ToolError(
             "This can't be set up from the web app. Ask for one named key, "
@@ -897,6 +900,46 @@ async def _request_watch_credential_impl(
         requester_platform_user_id=requester,
         agent_name=ma_agent.name,
         purpose=f"your watch key for {host}",
+        channel_id=origin.thread_id,
+        origin=origin,
+        requested_work=None,
+        changes_agent=False,
+    )
+
+
+async def request_data_source_credential(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    source_id: uuid.UUID,
+    name: str,
+    origin_context_id: str | None,
+) -> RequestCredentialResult:
+    """Post the private form whose value goes straight onto the data source `source_id`, for
+    the asker only: the value never reaches the tool's arguments or the chat."""
+    requester = _require_requestable_platform(auth)
+    if not runtime.settings.crypto.keys:
+        raise ToolError("This Daimon cannot store credentials yet. Nothing was posted.")
+    origin = await _require_origin(runtime, auth, origin_context_id)
+    if not origin.attended:
+        raise ToolError("Ask for this in your own conversation with me.")
+    ma_agent = await retrieve_agent(
+        runtime.client,
+        origin.responder_ma_agent_id,
+        scope=resource_scope(tenant_id=str(auth.tenant_id)),
+        records=runtime.session_factory,
+    )
+    return await _mint_and_post(
+        runtime,
+        auth,
+        kind="data_source",
+        target=name,
+        mcp_server_url=str(source_id),
+        agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(ma_agent.id)),
+        ma_agent=ma_agent,
+        requester_platform_user_id=requester,
+        agent_name=ma_agent.name,
+        purpose=f"the credential for data source {name}",
         channel_id=origin.thread_id,
         origin=origin,
         requested_work=None,

@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 from daimon.adapters.slack.credential_requests import (
     CRED_CALLBACK_PREFIX,
+    evaluate_credential_submission,
     handle_credential_request_click,
 )
 from daimon.core.credential_requests import (
@@ -415,3 +416,29 @@ async def test_watch_key_click_never_opens_a_form_on_slack(
 
     assert ("POST", _VIEWS_OPEN_URL) not in fake_slack_web_client.mock.requests
     assert _ephemeral_texts(fake_slack_web_client) == [NO_LONGER_VALID_MESSAGE]
+
+
+@pytest.mark.asyncio
+async def test_a_data_source_request_opens_its_value_form(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+) -> None:
+    """The form names the source, never the agent, and its value submits as a data_source."""
+    tenant_id, fernet_key = await _seed_team(db_session)
+    token = await _seed_request(
+        db_session, tenant_id=tenant_id, kind="data_source", target="Orders"
+    )
+    await db_session.commit()
+    await handle_credential_request_click(
+        _build_runtime(fernet_key, db_session_factory), _click_payload(token)
+    )
+    view = fake_slack_web_client.mock.requests[("POST", _VIEWS_OPEN_URL)][0].kwargs["json"]["view"]
+    assert view["callback_id"] == f"{CRED_CALLBACK_PREFIX}data_source"
+    assert "Orders" in json.dumps(view["blocks"]) and "tester" not in json.dumps(view["blocks"])
+    block = next(b for b in view["blocks"] if b["type"] == "input")
+    view["state"] = {
+        "values": {block["block_id"]: {block["element"]["action_id"]: {"value": "pg://x"}}}
+    }
+    decided = evaluate_credential_submission({"view": view})
+    assert (decided.proceed, decided.kind, decided.value) == (True, "data_source", "pg://x")

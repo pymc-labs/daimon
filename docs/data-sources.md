@@ -72,7 +72,7 @@ platform verified. That is a web app sign-in with Discord, Slack or Microsoft, a
 link, or the person signing in to the source. A person who only chats has no link until
 they sign in to the web app.
 
-A workspace admin can link someone else's account, never their own, and the
+A workspace admin can link any account by hand, their own included, and the
 audit trail records it. A link an admin ends or rejects stays ended when the person signs in again.
 
 Google sign-in for data sources needs a Google OAuth client in
@@ -105,6 +105,10 @@ Integrations > Data sources. Workspace admins manage scopes, grants, identity li
 redaction sets under Admin > Data access, or from chat. Granting oneself a scope or linking an
 account to oneself is allowed and marked in the audit trail. Declared sources show as bound and are read-only there. People link and
 connect their own accounts on their Profile.
+
+Admins can also add a source or refresh its credential from chat, even before the first
+source. The credential goes through a private form only the asker can open, straight onto
+the source, never into chat.
 
 ## Who sees an answer
 

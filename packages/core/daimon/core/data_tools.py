@@ -33,7 +33,9 @@ DATA_SOURCE_TOOLS: Final[frozenset[str]] = frozenset(
     }
 )
 """The data management and sign-in tools: hidden with `data_sources`, and until a workspace has a
-source (`daimon.core.ports.data_ready`)."""
+source (`daimon.core.ports.data_ready`) but for `DATA_SETUP_TOOLS`."""
+DATA_SETUP_TOOLS: Final[frozenset[str]] = frozenset({"list_data_sources", "change_data_source"})
+"""What adds the first source: offered (to admins, by their `admin` tag) while the feature is on."""
 DATA_RESULT_MARK: Final = "[data source result]"
 REDACTED_DATA_RESULT: Final = f"{DATA_RESULT_MARK} hidden: only its own conversation sees it."
 

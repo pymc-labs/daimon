@@ -104,7 +104,7 @@ class WebTurns:
         # The live reply of each thread with a running turn, for cards raised from outside.
         self.lifecycles: dict[uuid.UUID, WebTurnLifecycle] = {}
         self.credentials = WebCredentialCards(
-            deps.sessionmaker, deps.anthropic, self.lifecycles.get
+            deps.sessionmaker, deps.anthropic, self.lifecycles.get, settings
         )
         self.controls = WebControlCards(settings, deps, self.lifecycles.get)
         self.draining = False
