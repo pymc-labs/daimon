@@ -207,6 +207,7 @@ CARDED_TOOLS: Final[Mapping[str, str]] = {
     "restore_library_skill_version": "skill_id",
     "approve_server_skill_update": "skill_id",
     "data_my_drive": "query",
+    "data_personal_reads": "part",
 }
 
 #: Daimon's own tools that wait for the card like a third-party write, keyed

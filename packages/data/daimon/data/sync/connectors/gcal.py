@@ -3,7 +3,8 @@
 Each search reads the asker's own primary calendar, acting as them through the domain's
 delegation (the same service account as Drive's), so Google shows an event only to the people it
 lists on it. When a search names several readers, an event shows only if every one of their own
-calendars has it. A reader the source cannot act as (not linked, suspended) gets nothing.
+calendars has it. A reader the source cannot act as (not linked, suspended) gets nothing, and
+nobody's calendar is read while a reader turned their `calendar` part off.
 
 The delegation needs the scope `https://www.googleapis.com/auth/calendar.readonly` besides the
 directory's. See `docs/data-connectors.md`.
@@ -17,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 from typing import ClassVar, Final
 
 import httpx
+from daimon.data.personal import Part
 from daimon.data.sync.connector import Connector, Field, Json, LiveHit, Source
 from daimon.data.sync.connectors.chat import obj, rows
 from daimon.data.sync.connectors.google import ApiError, DelegationRefused, connect, person_email
@@ -72,6 +74,7 @@ class GCalConnector(Connector):
     category: ClassVar[str] = "meetings"
     live: ClassVar[bool] = True
     live_as_reader: ClassVar[bool] = True
+    personal_part: ClassVar[Part | None] = "calendar"
     fields: ClassVar[tuple[Field, ...]] = (
         Field("service_account_key", "Service account key (JSON)", "secret", required=False),
         Field("domain", "Domain", placeholder="example.com"),

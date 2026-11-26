@@ -126,10 +126,15 @@ My Drives are never stored. A person linked to the domain can ask the agent to s
 own My Drive (`data_my_drive`); it reads as them, returning the text of Docs, Slides and
 Sheets. Every read shows a card only they can answer, saying that everyone in the
 conversation will see the result; **Allow for this conversation** stops asking for the rest
-of that conversation (kept in the running process: a restart asks again). It works in direct
-messages and rooms wherever data reads are on. `personal_drive: no` turns it off for the
-workspace's source; the `data_personal_drive` feature (on by default) turns it off for a
-workspace, agent or channel.
+of that conversation (kept in the running process: a restart asks again).
+
+It works in direct messages and rooms wherever data reads are on. `personal_drive: no` turns
+it off for the workspace's source; the `data_personal_drive` feature (on by default) turns it
+off for a workspace, agent or channel.
+
+Each person can also turn off their own Drive and calendar reads, on their profile page or
+in chat (`data_personal_reads`, on a card). Their Drive is then never read as them, and no
+calendar is searched for an answer they are part of.
 
 ## Google Calendar
 

@@ -76,6 +76,7 @@ def erasure(schemas: Schemas) -> tuple[ErasureStatement, ...]:
                 ("identity_notices", "account_id"),
                 ("person_connections", "account_id"),
                 ("connect_pending", "account_id"),
+                ("personal_off", "account_id"),
             )
         ),
         account(
@@ -102,6 +103,7 @@ def erasure(schemas: Schemas) -> tuple[ErasureStatement, ...]:
                 "data_admins",
                 "identity_notices",
                 "redaction_sets",
+                "personal_off",
             )
         ),
         tenant("audit", f"delete from {d}.audit where tenant_id = :tenant_id"),

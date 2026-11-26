@@ -1,7 +1,8 @@
 """`/api/profile/data/*`: the signed-in person's accounts in the workspace's data sources.
 
-What they are known as in each source, and the sources they signed in to themselves (through
-the provider's own OAuth page or a device code). Never a token: only who they signed in as.
+What they are known as in each source, the sources they signed in to themselves (through the
+provider's own OAuth page or a device code), and the personal parts Daimon reads as them
+(`daimon.data.personal`). Never a token: only who they signed in as.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from typing import Annotated, Literal
 import httpx
 from daimon.adapters.web.data_common import Viewer, refused, schemas_of, store
 from daimon.adapters.web.runtime import WebRuntime
-from daimon.data import manage
+from daimon.data import manage, personal
 from daimon.data.connect import (
     PROVIDERS,
     Connector,
@@ -59,6 +60,11 @@ class Connected(BaseModel):
     accounts: list[AccountOut]
     connections: list[ConnectionOut]
     connectable: list[ConnectableOut]
+    personal: dict[personal.Part, bool]
+
+
+class PartIn(BaseModel):
+    on: bool
 
 
 class Start(BaseModel):
@@ -96,11 +102,23 @@ def profile_data_router(runtime: WebRuntime) -> APIRouter:
             accounts = await manage.identities(conn, schemas, p.tenant_id, account_id=p.account_id)
             made = await manage.person_connections(conn, schemas, p.tenant_id, p.account_id)
             open_ = await manage.connectable(conn, schemas, p.tenant_id, list(PROVIDERS))
+            parts = await personal.parts(conn, schemas, p.tenant_id, p.account_id)
         return Connected(
             accounts=[AccountOut.model_validate(a, from_attributes=True) for a in accounts],
             connections=[ConnectionOut.model_validate(c, from_attributes=True) for c in made],
             connectable=[ConnectableOut(source_id=i, name=n, provider=pr) for i, n, pr in open_],
+            personal=parts,
         )
+
+    @router.put("/personal/{part}")
+    async def set_part(  # pyright: ignore[reportUnusedFunction]
+        caller: Viewer, part: personal.Part, body: PartIn
+    ) -> dict[personal.Part, bool]:
+        """Turn one personal part on or off for the signed-in person (`data_personal_reads`)."""
+        p = caller.person
+        async with store(runtime) as conn:
+            await personal.set_part(conn, schemas, p.tenant_id, p.account_id, part, body.on)
+            return await personal.parts(conn, schemas, p.tenant_id, p.account_id)
 
     @router.post("/connect")
     async def start(caller: Viewer, body: Start) -> Started:  # pyright: ignore[reportUnusedFunction]

@@ -67,6 +67,7 @@ const connected: Connected = {
   accounts: [{ provider: "slack", workspace: "T1", name: "maya", email: "maya@example.com", proof: "admin", linked_at: ago(400) }],
   connections: [{ source_id: "s_drive", source: "Shared drive", provider: "google", subject: "maya@example.com", status: "ok", last_ok_at: ago(3) }],
   connectable: [{ source_id: "s_drive", name: "Shared drive", provider: "google" }, { source_id: "s_mail", name: "Support inbox", provider: "google" }],
+  personal: { drive: true, calendar: false },
 }
 
 const sourceRow = (s: SourceState): DataSource => ({ id: s.id, name: s.name, kind: s.kind, status: s.publication === "retired" ? "retired" : s.status, records: s.records, last_sync_at: s.last_sync_at, fresh: !!s.last_sync_at && s.last_status === "ok" })
@@ -154,4 +155,5 @@ export const dataHandlers: HttpHandler[] = [
   http.post("/api/profile/data/connect", () => HttpResponse.json({ flow: "device", url: "https://example.com/device", pending_id: "p1", user_code: "WXYZ-1234", interval: 5 })),
   http.post("/api/profile/data/connect/:id/poll", () => HttpResponse.json({ connected: false })),
   http.delete("/api/profile/data/connections/:id", () => new HttpResponse(null, { status: 204 })),
+  http.put("/api/profile/data/personal/:part", () => HttpResponse.json(connected.personal)),
 ]

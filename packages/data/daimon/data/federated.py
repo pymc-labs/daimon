@@ -7,7 +7,8 @@ It is read-only and its results are never stored, but go through the source's re
 as a stored record's text does: `exclude_ids` drop a hit, and a set not approved leaves the
 source out. Each call is metered like a search arm through the caller's `meter`. It fails
 open: a source that errors or is still running when the search's time budget ends is left
-out, and the rest answer.
+out, and the rest answer. A source that reads a personal part as each reader (Calendar) is
+not asked while any reader turned that part off (`daimon.data.personal`).
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from dataclasses import dataclass, replace
 from typing import Final
 
 import structlog
-from daimon.data import audit, redaction
+from daimon.data import audit, personal, redaction
 from daimon.data.access import ReadContext
 from daimon.data.recheck import reader_subjects
 from daimon.data.schema import Schemas
@@ -91,6 +92,13 @@ async def search(
     rows = [
         r for r in await cur.fetchall() if CONNECTORS.get(r["kind"]) and CONNECTORS[r["kind"]].live
     ]
+    off = {
+        part
+        for r in rows
+        if (part := CONNECTORS[r["kind"]].personal_part)
+        and await personal.turned_off(conn, schemas, ctx.tenant_ids, ctx.readers, part)
+    }
+    rows = [r for r in rows if CONNECTORS[r["kind"]].personal_part not in off]
 
     people: dict[uuid.UUID, list[tuple[str, ...]]] = {}
     for r in rows:

@@ -22,7 +22,13 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import agent_chat, data, sessions, task_continuity
 from daimon.core.capability_tools import CAPABILITY_TOOLS
 from daimon.core.data_audience import user_subject
-from daimon.core.data_tools import DATA_READS, DATA_TOOLS, REDACTED_DATA_RESULT, mark_data_result
+from daimon.core.data_tools import (
+    DATA_READS,
+    DATA_TOOLS,
+    PERSONAL_READS_TOOLS,
+    REDACTED_DATA_RESULT,
+    mark_data_result,
+)
 from daimon.core.features import toolset
 from daimon.core.features.registry import FEATURES
 from daimon.core.stores.domain import Role
@@ -130,7 +136,9 @@ def test_relay_rule_and_tool_safety_cover_the_rest() -> None:
     source = inspect.getsource(admission)
     assert "or data_reading" in source, "a data-reading agent must be a relay agent"
     assert "tool_safety" in FEATURES[DATA_READS].depends_on, "writes after a data read are carded"
-    assert CAPABILITY_TOOLS[DATA_READS] == DATA_TOOLS, "the data tools hide with data_reads"
+    assert CAPABILITY_TOOLS[DATA_READS] == DATA_TOOLS | PERSONAL_READS_TOOLS, (
+        "they hide with data_reads"
+    )
 
 
 def _auth(**fields: Any) -> AuthIdentity:

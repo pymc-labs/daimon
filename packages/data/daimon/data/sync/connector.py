@@ -20,6 +20,7 @@ from uuid import UUID
 
 import psycopg.conninfo
 from daimon.data.identity import SourceAccount
+from daimon.data.personal import Part
 from daimon.data.sync.rate import RateBudget
 
 Json = dict[str, Any]
@@ -274,6 +275,9 @@ class Connector:
     live_as_reader: ClassVar[bool] = False
     """A live source read as each reader, with their own access (`live_search_as`); it
     answers only a caller who names readers, and a hit shows only if every reader's read has it."""
+    personal_part: ClassVar[Part | None] = None
+    """The personal part a read as the reader reads (`daimon.data.personal`); a reader who
+    turned it off is never read as."""
 
     async def live_search_as(
         self, source: Source, query: str, limit: int, subjects: Sequence[str]

@@ -1,7 +1,8 @@
 """A person's own Google Drive, read as them at their own request (the `data_my_drive` tool,
 which asks them on a card each time): through each Drive source of their workspace that
-allows it (`personal_drive`), and only as the directory person they are linked to. Nothing
-is stored; a source's redaction rules apply as for any live read."""
+allows it (`personal_drive`), only as the directory person they are linked to, and never once
+they turned their `drive` part off (`daimon.data.personal`). Nothing is stored; a source's
+redaction rules apply as for any live read."""
 
 from __future__ import annotations
 
@@ -9,7 +10,7 @@ import uuid
 from dataclasses import replace
 from typing import cast
 
-from daimon.data import redaction
+from daimon.data import personal, redaction
 from daimon.data.recheck import reader_subjects
 from daimon.data.schema import Schemas
 from daimon.data.sync.connector import CONNECTORS, LiveHit
@@ -28,6 +29,8 @@ async def search(
     query: str,
     limit: int = 10,
 ) -> list[LiveHit]:
+    if await personal.turned_off(conn, schemas, [tenant_id], [f"account:{account_id}"], "drive"):
+        return []
     cur = await conn.execute(
         "select s.id, s.tenant_id, s.kind, s.name, s.provider, s.config, s.credential,"
         " s.default_scope, s.redaction_set, null::jsonb as state, null::timestamptz as last_sync_at"

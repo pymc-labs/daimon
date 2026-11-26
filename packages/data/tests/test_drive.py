@@ -17,7 +17,7 @@ import pytest
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
-from daimon.data import federated, identity, my_drive, recheck
+from daimon.data import federated, identity, my_drive, personal, recheck
 from daimon.data.access import ReadContext, scoped, subject
 from daimon.data.identity import IdentityKey, Proof
 from daimon.data.schema import Schemas
@@ -554,6 +554,12 @@ async def test_an_event_shows_only_to_the_people_on_it(store: Store, google: Fak
     assert await titles(carol) == set(), "not on any event"
     assert await titles(alice, bob) == {"Planning standup"}, "only what every reader may see"
     assert await titles() == set(), "no reader, no answer"
+    await personal.set_part(
+        store.conn, store.schemas, store.tenant, uuid.UUID(bob.removeprefix("account:")),
+        "calendar", False,
+    )  # fmt: skip
+    assert await titles(alice, bob) == set(), "a reader who turned their calendar off"
+    assert await titles(alice) == {"Planning standup", "Planning review"}, "only theirs is off"
 
 
 async def test_a_persons_own_drive_is_searched_as_them_and_never_stored(
@@ -571,6 +577,12 @@ async def test_a_persons_own_drive_is_searched_as_them_and_never_stored(
     )
     assert [(h.ref, h.text) for h in hits] == [("file:plan", "budget plan")], "hers, as her"
     assert await store.bodies(src) == {}, "nothing of a My Drive is stored"
+    await personal.set_part(store.conn, store.schemas, store.tenant, alice, "drive", False)
+    mine = await my_drive.search(
+        store.conn, store.schemas, store.env, store.tenant, alice, "budget"
+    )
+    assert mine == [], "she turned her own Drive off"
+    await personal.set_part(store.conn, store.schemas, store.tenant, alice, "drive", True)
     await store.conn.execute(
         f'update {store.d}.sources set config = config || \'{{"personal_drive": "no"}}\''
         " where id = %s".encode(),

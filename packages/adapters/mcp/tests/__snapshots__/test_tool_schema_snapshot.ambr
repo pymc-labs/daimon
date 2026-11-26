@@ -3673,6 +3673,42 @@
         'type': 'object',
       }),
     }),
+    'data_personal_reads': dict({
+      'description': '''
+        Turn on or off Daimon reading your own `drive` (My Drive) or `calendar` as you in
+        this workspace; both stay on until you turn them off. Each call asks you on a card first.
+        Returns each part and whether it is on.
+      ''',
+      'parameters': dict({
+        '$defs': dict({
+          'Part': dict({
+            'enum': list([
+              'drive',
+              'calendar',
+            ]),
+            'type': 'string',
+          }),
+        }),
+        'additionalProperties': False,
+        'properties': dict({
+          'on': dict({
+            'type': 'boolean',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'part': dict({
+            '$ref': '#/$defs/Part',
+          }),
+        }),
+        'required': list([
+          'part',
+          'on',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'data_search': dict({
       'description': '''
         Search the data sources for `query`; only what everyone who will see the answer may

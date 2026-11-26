@@ -23,7 +23,7 @@ from daimon.adapters.mcp.tools._card import require_card
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.core.data_tools import mark_data_result
 from daimon.core.ports.data_metering import SessionMeter
-from daimon.data import caller_sql, federated, my_drive, pool, reads
+from daimon.data import caller_sql, federated, my_drive, personal, pool, reads
 from daimon.data.caller_sql import SqlRefused
 from daimon.data.metering import Payer
 from daimon.data.reading import Reading, open_read
@@ -195,3 +195,21 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 conn, schemas, env, auth.tenant_id, auth.account_id, query, min(max(limit, 1), 25)
             )
         return _text({"files": [dataclasses.asdict(h) for h in hits]})
+
+    @mcp.tool()
+    async def data_personal_reads(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, part: personal.Part, on: bool, origin_context_id: str
+    ) -> str:
+        """Turn on or off Daimon reading your own `drive` (My Drive) or `calendar` as you in
+        this workspace; both stay on until you turn them off. Each call asks you on a card first.
+        Returns each part and whether it is on."""
+        auth = await _auth(ctx)
+        if auth.is_external_agent or auth.hold is not None or auth.client:
+            raise ToolError("Only a person can change what Daimon reads as them.")
+        await require_card(
+            runtime, auth, tool_name="data_personal_reads", origin_context_id=origin_context_id
+        )
+        async with pool.connection(settings) as conn:
+            await personal.set_part(conn, schemas, auth.tenant_id, auth.account_id, part, on)
+            parts = await personal.parts(conn, schemas, auth.tenant_id, auth.account_id)
+        return json.dumps(parts)

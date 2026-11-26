@@ -528,6 +528,17 @@ def prompt_for_tool_call(
             requester_platform_user_id=requester_platform_user_id,
             expires_at=now + timeout,
         )
+    if call.tool_name == "data_personal_reads" and own_server:
+        part = "Google Drive" if data.get("part") == "drive" else "calendar"
+        verb = "Let Daimon read" if data.get("on") is True else "Stop Daimon reading"
+        return ConfirmationPrompt(
+            title=f"{verb} your {part} as you?",
+            action=verb,
+            denied_action="Nothing changed",
+            detail_lines=(),
+            requester_platform_user_id=requester_platform_user_id,
+            expires_at=now + timeout,
+        )
     if call.tool_name in {"request_provider_allowlist"} and own_server:
         reference = ConfigurationReference.model_validate(
             {

@@ -19,6 +19,8 @@ DATA_TOOLS: Final[frozenset[str]] = frozenset(
 PERSONAL_DRIVE: Final = "data_personal_drive"
 PERSONAL_DRIVE_TOOLS: Final[frozenset[str]] = frozenset({"data_my_drive"})
 """Reading a person's own Drive as them, each read on their card (`daimon.data.my_drive`)."""
+PERSONAL_READS_TOOLS: Final[frozenset[str]] = frozenset({"data_personal_reads"})
+"""A person turning their personal parts on or off (`daimon.data.personal`), behind `data_reads`."""
 DATA_RESULT_MARK: Final = "[data source result]"
 REDACTED_DATA_RESULT: Final = f"{DATA_RESULT_MARK} hidden: only its own conversation sees it."
 

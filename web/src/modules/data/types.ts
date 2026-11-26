@@ -43,5 +43,6 @@ export type RedactionDetail = { info: RedactionSet; rules: Rules | null; pending
 export type Account = { provider: string; workspace: string; name: string; email: string | null; proof: string | null; linked_at: string | null }
 export type Connection = { source_id: string; source: string; provider: string; subject: string; status: string; last_ok_at: string | null }
 export type Connectable = { source_id: string; name: string; provider: string }
-export type Connected = { accounts: Account[]; connections: Connection[]; connectable: Connectable[] }
+export type PersonalPart = "drive" | "calendar"
+export type Connected = { accounts: Account[]; connections: Connection[]; connectable: Connectable[]; personal: Record<PersonalPart, boolean> }
 export type Started = { flow: "code" | "device"; url: string; pending_id: string; user_code: string; interval: number; source: string; expires_at: string | null }

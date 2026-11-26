@@ -293,6 +293,7 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
                 "compute_launch_session",
                 "create_watch",
                 "data_my_drive",
+                "data_personal_reads",
                 "delete_allowance",
                 "remove_my_data",
                 "restore_library_skill_version",
