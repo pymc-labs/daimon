@@ -5,6 +5,7 @@ Run: uv run python scripts/generate_feature_reference.py
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
