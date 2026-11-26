@@ -364,12 +364,13 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> dict[str, JsonValue]:
         """Launch your own temporary machine from an operator image profile.
 
-        Needs the owner in the conversation; a card asks first unless an admin turned the
-        card off. Without the card, as in agent chat, leave ttl_hours out: only the default
-        time runs. List profiles first: each names its fixed CPU/RAM, image and the regions
-        you may pass. Leave `region` out to use the profile's first region. No shared
-        credentials are mounted. Sessions are deleted after their idle lease; export files
-        before stopping or expiry.
+        It runs when the owner is in the conversation, or from the owner's agent-chat
+        session. Daimon shows a card by itself when one is needed: do not tell the person
+        to expect an approval step. Leave ttl_hours out unless the owner asked for longer:
+        where no card shows, only the default time runs. List profiles first: each names
+        its fixed CPU/RAM, image and the regions you may pass. Leave `region` out to use
+        the profile's first region. No shared credentials are mounted. Sessions are deleted
+        after their idle lease; export files before stopping or expiry.
 
         Do not retry an uncertain response automatically: check compute_list_sessions first.
         In agent chat a retried launch starts a second machine.
@@ -378,6 +379,8 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         it is still starting: read compute_get_session_status until it says `running`
         before you run a command, and do not tell the owner it is ready before then.
         The result's profile_description says what the image holds and how to use it.
+        The machine's size is the result's cpus and memory_mb; nproc on the machine can
+        show more, so size parallel work from cpus.
         """
         auth, caller = await _caller(runtime, ctx, origin_context_id)
         origin = caller.origin
@@ -429,11 +432,11 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> ComputeSession:
         """Set your session's expiry to this many hours from now.
 
-        Needs the owner in the conversation; a card asks first unless an admin turned the
-        card off. Without the card, as in agent chat, hours cannot exceed the default time.
-        Use the
-        original attended conversation. Hours cannot exceed the operator TTL. This does
-        not change the idle window used by subsequent command/file writes.
+        It runs when the owner is in the conversation, or from the owner's agent-chat
+        session. Daimon shows a card by itself when one is needed: do not tell the person
+        to expect an approval step. Where no card shows, hours cannot exceed the default
+        time. Use the original attended conversation. Hours cannot exceed the operator
+        TTL. This does not change the idle window used by subsequent command/file writes.
         """
         auth, caller = await _caller(runtime, ctx, origin_context_id)
         origin = caller.origin
@@ -660,7 +663,8 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Read your session's machine state, capacity and expiry without renewing it.
 
         State `launching` means the machine is still starting and cannot run commands
-        yet. `running` means it has started.
+        yet. `running` means it has started. The machine's size is the result's cpus and
+        memory_mb; nproc on the machine can show more, so size parallel work from cpus.
         """
         auth, caller = await _caller(runtime, ctx, origin_context_id, wake_ok=True)
         try:
