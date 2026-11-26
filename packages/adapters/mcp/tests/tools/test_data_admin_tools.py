@@ -156,7 +156,7 @@ async def test_a_member_is_refused_every_admin_tool(
     rig: Rig, tool: str, args: dict[str, Any]
 ) -> None:
     rig.role = "member"
-    with pytest.raises(ToolError, match="workspace admin or owner"):
+    with pytest.raises(ToolError, match="Only an admin or owner"):
         await rig.call(tool, **args)
     assert not rig.calls and not rig.cards, "a refused caller reaches neither card nor store"
 

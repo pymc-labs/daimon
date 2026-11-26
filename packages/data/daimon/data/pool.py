@@ -10,6 +10,7 @@ from typing import Final
 import psycopg
 from daimon.core.config import Settings
 from daimon.data.dsn import libpq_dsn
+from daimon.data.migrate import STORE_FILES
 from daimon.data.schema import Schemas
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow, dict_row
@@ -19,8 +20,8 @@ type Pool = AsyncConnectionPool[AsyncConnection[DictRow]]
 
 _pools: Final[dict[str, Pool]] = {}
 #: When each database's store was last found missing; a found store is not asked again.
-_missing: Final[dict[str, float]] = {}
-_installed: Final[set[str]] = set()
+_missing: Final[dict[tuple[str, str], float]] = {}
+_installed: Final[set[tuple[str, str]]] = set()
 _RECHECK_S: Final = 60.0
 
 
@@ -54,27 +55,29 @@ async def connection(settings: Settings) -> AsyncIterator[AsyncConnection[DictRo
 
 
 async def ready(settings: Settings) -> bool:
-    """Whether the store is installed in this database. With data sources on by default, a
-    database the release migration could not set up reads as the feature unavailable; it is
-    asked again at most once a minute."""
-    dsn = libpq_dsn(str(settings.database.url))
-    if dsn in _installed:
+    """Whether the store is installed in this database, with every file this release knows
+    applied. With data sources on by default, a database the release migration could not set
+    up reads as the feature unavailable; it is asked again at most once a minute."""
+    schema = Schemas.of(settings.data).data
+    key = (libpq_dsn(str(settings.database.url)), schema)
+    if key in _installed:
         return True
-    if time.monotonic() - _missing.get(dsn, -_RECHECK_S) < _RECHECK_S:
+    if time.monotonic() - _missing.get(key, -_RECHECK_S) < _RECHECK_S:
         return False
     try:
         async with connection(settings) as conn:
             cur = await conn.execute(
-                "select to_regclass(%s) is not null as ok",
-                (f"{Schemas.of(settings.data).data}.sources",),
+                f"select count(*) = %s as ok from {schema}.schema_version"
+                f" where file = any(%s)".encode(),
+                (len(STORE_FILES), list(STORE_FILES)),
             )
             row = await cur.fetchone()
-    except psycopg.Error:
+    except psycopg.Error:  # no store, or not this far
         row = None
     if row is not None and row["ok"]:
-        _installed.add(dsn)
+        _installed.add(key)
         return True
-    _missing[dsn] = time.monotonic()
+    _missing[key] = time.monotonic()
     return False
 
 
