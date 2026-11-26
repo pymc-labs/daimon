@@ -46,17 +46,17 @@ WILDCARD_TOOL_KEY: Final = f"{DAIMON_SERVER_NAME}/*"
 SEARCH_PROXY_TOOLS: Final = frozenset({"call_tool", "search_tools"})
 
 
-def _enforced_for(identity: AuthIdentity) -> bool:
-    """A chat-vault credential for an agent: `chat_agent_id` set, `agent_id` not.
+def _agent_of(identity: AuthIdentity, *, agent_keys: bool) -> uuid.UUID | None:
+    """The agent whose rules apply: a chat-vault credential's (`chat_agent_id` set,
+    `agent_id` not), and with `agent_keys` an agent key's (`agent_id` claim).
 
-    Operator tokens, agent keys (`agent_id` claim) and credentials with no agent
-    are not subject to an agent's rules.
+    Operator tokens and credentials with no agent are not subject to an agent's rules.
     """
-    return (
-        identity.chat_agent_id is not None
-        and identity.agent_id is None
-        and not identity.is_operator
-    )
+    if identity.is_operator:
+        return None
+    if identity.agent_id is not None:
+        return identity.agent_id if agent_keys else None
+    return identity.chat_agent_id
 
 
 async def tool_rule_refusal(
@@ -66,8 +66,10 @@ async def tool_rule_refusal(
     tool_name: str,
     policy: ToolSafetyPolicy | None,
     public_url: str | None,
+    agent_keys: bool = False,
 ) -> str | None:
     """Why this agent's rules refuse `tool_name`, or None when the call may go on.
+    `agent_keys` holds an agent key to its agent's rules too (a shared tool's call).
 
     Mirrors the driver's gate: nothing is read unless `tool_safety.enabled` and
     `tool_safety.agent_rules` are both on, so a deployment that leaves rules
@@ -84,11 +86,9 @@ async def tool_rule_refusal(
         or not policy.enabled
         or not policy.agent_rules
         or not public_url
-        or not _enforced_for(identity)
+        or (chat_agent_id := _agent_of(identity, agent_keys=agent_keys)) is None
     ):
         return None
-    chat_agent_id = identity.chat_agent_id
-    assert chat_agent_id is not None  # _enforced_for
     key = f"{DAIMON_SERVER_NAME}/{tool_name}"
     # The search proxies are never refused by their own name, only by the wildcard.
     keys = [WILDCARD_TOOL_KEY] if tool_name in SEARCH_PROXY_TOOLS else [key, WILDCARD_TOOL_KEY]

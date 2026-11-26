@@ -79,6 +79,7 @@ def tool_of(
         name=served.name,
         description=shared.shown_description(served, outside=outside),
         parameters=tool.input_schema or {"type": "object"},
+        tags={shared.SERVED_TAG},
         annotations=ToolAnnotations(
             readOnlyHint=not tool.writes, destructiveHint=tool.writes, openWorldHint=True
         ),

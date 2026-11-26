@@ -61,6 +61,7 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.operator_tokens import scope_tag
 from daimon.core.security_audit import capture_decision, record_denial
 from daimon.core.session_seal import SEAL_CLAIM, parse_seal_claim
+from daimon.core.shared_connections import SERVED_TAG
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.agent_daimon_tools import get_enabled_daimon_tools
 from daimon.core.stores.domain import McpTokenKind, Role
@@ -68,6 +69,7 @@ from daimon.core.stores.monitoring import MonitoredSubject
 from daimon.core.stores.security_audit import SecurityAuditEntry, append_event
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn_hold import TurnHold
+from fastmcp import Context
 from fastmcp.exceptions import AuthorizationError, NotFoundError, ToolError
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
@@ -703,8 +705,7 @@ class IdentityMiddleware(Middleware):
             # No provider-turn backend has a page fetch of its own.
             await enable_components(fastmcp_ctx, tags={HOST_WEB_FETCH_TAG})
         if agent_id is not None:
-            await disable_components(fastmcp_ctx, match_all=True)
-            await enable_components(fastmcp_ctx, tags={"agent-chat"})
+            await narrow_to_agent_key(fastmcp_ctx)
         return await self._dispatch_for_backend(context, call_next, identity)
 
     async def _dispatch_for_backend(
@@ -755,7 +756,8 @@ class IdentityMiddleware(Middleware):
     ) -> object:
         """A third-party tool's rules: an agent's credential is asked or carded as its agent's
         rules say (and refused when it names no session); an outside client, which asks its
-        own user as the tool's description says, runs what the operator does not refuse."""
+        own user as the tool's description says, runs what the operator does not refuse, and
+        an agent key what its agent's tool rules do not deny."""
         from daimon.adapters.mcp.middleware.host_call_gate import schema_problem
         from daimon.adapters.mcp.shared_connections import refuse
         from daimon.core.shared_connections import decide_shared_call
@@ -769,6 +771,18 @@ class IdentityMiddleware(Middleware):
         args = cast("dict[str, object]", raw) if isinstance(raw, dict) else {}
         if (problem := schema_problem(served.tool.input_schema, args)) is not None:
             raise ToolError(problem)
+        if identity.agent_id is not None and (
+            denied := await tool_rule_refusal(
+                self._sessionmaker,
+                identity=identity,
+                tool_name=served.name,
+                policy=self._tool_safety,
+                public_url=self._public_url,
+                agent_keys=True,
+            )
+        ):
+            record_denial(DENIAL_REASON)
+            raise ToolError(denied)
         verdict = decide_shared_call(
             self._tool_safety or ToolSafetyPolicy(),
             served.name,
@@ -780,7 +794,9 @@ class IdentityMiddleware(Middleware):
         )
         if verdict.outcome == "allow":
             return await run(context)
-        raise refuse(f"verdict_{verdict.reason}", "This workspace's rules refuse this tool.")
+        raise refuse(
+            f"verdict_{verdict.reason}", "The tool rules here refuse this tool. Ask an admin."
+        )
 
     def attach_host_call_gate(self, gate: HostCallGate) -> None:
         """Set once the runtime exists; the middleware is built before it."""
@@ -858,6 +874,12 @@ class IdentityMiddleware(Middleware):
         if identity.scopes:
             await enable_components(fastmcp_ctx, tags={scope_tag(s) for s in identity.scopes})
         return await call_next(context)
+
+
+async def narrow_to_agent_key(fastmcp_ctx: Context) -> None:
+    """An agent or coding key's surface: agent chat and the workspace's shared tools."""
+    await disable_components(fastmcp_ctx, match_all=True)
+    await enable_components(fastmcp_ctx, tags={"agent-chat", SERVED_TAG})
 
 
 def _host_memory_visible(identity: AuthIdentity) -> bool:

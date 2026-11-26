@@ -15,23 +15,28 @@ from cryptography.fernet import Fernet
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.hub.identity import HUB_AUTH_STATE_KEY, HubIdentity
 from daimon.adapters.mcp.middleware.host_call_gate import HostCallGate
-from daimon.adapters.mcp.middleware.mcp_identity import IdentityMiddleware
+from daimon.adapters.mcp.middleware.mcp_identity import IdentityMiddleware, narrow_to_agent_key
+from daimon.adapters.mcp.search_transform import AgentChatAwareBM25SearchTransform
 from daimon.adapters.mcp.shared_connections import OPERATION, SharedConnectionProvider
 from daimon.adapters.mcp.tools.hub_shared import register_hub_shared_tools
 from daimon.core import host_calls
 from daimon.core import shared_connections as shared
+from daimon.core.authz import Subject
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.features.service import FeatureActor, change_feature
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.hub_identity import HubTenant
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.security_audit import capture_decision
+from daimon.core.stores import agent_tool_rules
 from daimon.core.stores import mcp_connections as store
 from daimon.core.stores.domain import DiscoveredTool, Role
 from daimon.core.stores.host_call_cards import list_cards
 from daimon.core.stores.security_audit import list_events
 from daimon.core.stores.turn_origins import create_origin
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolSafetyPolicy
 from daimon.testing.factories import (
     make_account,
     make_ledger_entry,
@@ -79,20 +84,36 @@ class World:
         )
         return replace(base, **changes)
 
+    def key(self) -> AuthIdentity:
+        """An agent key of the agent: an outside client held to that agent's tool rules."""
+        return replace(
+            self.chat(), agent_id=self.agent_id, chat_agent_id=None, chat_session_id=None
+        )
+
     def server(self, identity: AuthIdentity) -> FastMCP:
         server = FastMCP("test")
         server.add_provider(SharedConnectionProvider(self.runtime))  # pyright: ignore[reportArgumentType]
+
+        @server.tool(name="describe_agent", tags={"agent-chat"})
+        def describe_agent() -> str:  # pyright: ignore[reportUnusedFunction]
+            return "an agent-chat tool"
+
+        @server.tool(name="list_routines")
+        def list_routines() -> str:  # pyright: ignore[reportUnusedFunction]
+            return "found only by search"
+
+        server.add_transform(AgentChatAwareBM25SearchTransform(max_results=5))
         server.add_middleware(_Edge(self, identity))
         return server
 
     async def call(self, identity: AuthIdentity, name: str) -> str:
         async with Client(self.server(identity)) as client:
-            result = await client.call_tool(name, {"id": "1"})
+            result = await client.call_tool(name, {"id": "1"}, raise_on_error=False)
         return "".join(getattr(part, "text", "") for part in result.content)
 
     async def listed(self, identity: AuthIdentity) -> list[str]:
         async with Client(self.server(identity)) as client:
-            return [t.name for t in await client.list_tools()]
+            return sorted(t.name for t in await client.list_tools())
 
 
 class _Edge(Middleware):
@@ -105,6 +126,8 @@ class _Edge(Middleware):
     async def on_request(self, context: MiddlewareContext, call_next: CallNext) -> object:
         assert context.fastmcp_context is not None
         await context.fastmcp_context.set_state("auth", self._identity, serializable=False)
+        if self._identity.agent_id is not None:
+            await narrow_to_agent_key(context.fastmcp_context)
         with capture_decision() as decision:
             result = await self._world.middleware._dispatch_for_backend(  # pyright: ignore[reportPrivateUsage]
                 context, call_next, self._identity
@@ -205,6 +228,7 @@ async def world(
         settings=settings,
         fernet=fernet,
         membership_resolver=FixtureMembershipResolver(_USER),
+        resolver_cache=new_resolver_cache(),
     )
     middleware = IdentityMiddleware(
         subject_resolver=_none,
@@ -214,6 +238,8 @@ async def world(
         is_admin_resolver=_none,
         internal_resolver=_none,
         sessionmaker=committing_sessionmaker,
+        tool_safety=ToolSafetyPolicy(enabled=True, agent_rules=True),
+        public_url=_URL,
     )
     middleware.attach_host_call_gate(HostCallGate(runtime, public_url=_URL))  # pyright: ignore[reportArgumentType]
     made = World(
@@ -310,12 +336,38 @@ async def test_a_chat_write_runs_unasked_with_approval_skipped(world: World) -> 
 
 
 async def test_nothing_is_served_while_the_feature_is_off(world: World) -> None:
-    """The tools exist for a workspace only while the feature is on there."""
-    assert await world.listed(world.chat()) == ["crm_lookup", "crm_send"], "listed while on"
+    """The tools exist for a workspace only while the feature is on there. They are listed by
+    name, beside search, so the agent page's tool rules can name each one."""
+    assert await world.listed(world.chat()) == [
+        "call_tool", "crm_lookup", "crm_send", "search_tools",
+    ], "listed by name while on"  # fmt: skip
 
     await _feature(world, "off")
 
-    assert await world.listed(world.chat()) == [], "listed nowhere once off"
+    assert await world.listed(world.chat()) == ["call_tool", "search_tools"], "none once off"
+
+
+async def test_an_agent_key_gets_shared_tools_under_its_agents_rules(world: World) -> None:
+    """An agent key sees the shared tools beside agent chat and may write, but its agent's
+    deny rule refuses the tool."""
+    assert await world.listed(world.key()) == ["crm_lookup", "crm_send", "describe_agent"]
+    assert await world.call(world.key(), "crm_send") == "send ran", "the write runs"
+
+    async with world.sessions.begin() as session:
+        await agent_tool_rules.set_rule(
+            session,
+            tenant_id=world.tenant_id,
+            agent_id=_MA_AGENT,
+            agent_name="Researcher",
+            tool_key=f"{DAIMON_SERVER_NAME}/crm_send",
+            server_url=_URL,
+            rule="deny",
+            set_by="admin",
+            actor=Subject(is_admin=True),
+        )
+
+    assert "denies crm_send" in await world.call(world.key(), "crm_send"), "the rule refuses"
+    assert [u[0] for u in world.upstream] == ["send"], "the refused call never left"
 
 
 async def test_the_hub_audits_each_call(world: World) -> None:
