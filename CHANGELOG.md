@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MCP calls are answered from the case, its earlier writes or a checked
   simulation, and never reach real services.
 
+- **Each request to a signed-identity MCP server carries a new token with its own `jti`.**
+  A server can accept each token once, so a copied token cannot be replayed
+  ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).
+
 - **The agent no longer tells a person to expect an approval card for a cloud computer.**
   Daimon shows the card itself when one is needed. The agent also sizes parallel work from
   the machine's own CPUs, not from what `nproc` reports.
