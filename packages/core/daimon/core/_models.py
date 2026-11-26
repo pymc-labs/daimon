@@ -484,6 +484,7 @@ class ThreadSession(Base):
     __tablename__ = "thread_sessions"
     __table_args__ = (
         Index("ix_thread_sessions_tenant_last_turn", "tenant_id", "last_turn_at"),
+        Index("ix_thread_sessions_tenant_session", "tenant_id", "ma_session_id"),
         Index("thread_sessions_lookup_idx", "tenant_id", "platform", "thread_id"),
         Index("thread_sessions_tenant_idx", "tenant_id"),
         Index(
@@ -1361,6 +1362,9 @@ class TenantRetirement(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # Consecutive failed passes, and when the next may run (`stores.tenant_retirement.defer`).
+    failures: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AgentMemoryStore(Base):

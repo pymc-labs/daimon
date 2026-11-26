@@ -451,9 +451,13 @@ async def erase(
 
 
 def _idle(cutoff: datetime) -> ColumnElement[bool]:
-    """A slot with no append, no new generation and no running turn since the cutoff."""
+    """A slot with no append, no new generation and no running turn since the cutoff,
+    and no work still aimed at its thread (the same rule that keeps its mapping)."""
+    from daimon.core.stores.retention import still_targeted
+
     slot = ProviderBindingSlot
     return and_(
+        ~still_targeted(slot.tenant_id, slot.platform, slot.thread_id),
         ~exists().where(
             JournalSession.binding_id == slot.binding_id, JournalSession.last_appended_at >= cutoff
         ),

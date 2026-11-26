@@ -216,6 +216,16 @@ async def anonymize_limit_requests_for_platform_user(
     return rowcount
 
 
+async def anonymize_tenant_requests(session: AsyncSession, *, tenant_id: uuid.UUID) -> int:
+    """Erase every person from a retiring tenant's requests and keep the charges."""
+    result = await session.execute(
+        update(SupportEscalation)
+        .where(SupportEscalation.tenant_id == tenant_id)
+        .values(**_ANONYMOUS, settled_by=None, settled_by_account_id=None)
+    )
+    return cast(CursorResult[Any], result).rowcount
+
+
 def _account_or_platform_user_predicate(
     *, account_id: uuid.UUID, platform_user_keys: Sequence[tuple[uuid.UUID, str]]
 ) -> ColumnElement[bool]:

@@ -22,6 +22,7 @@ from daimon.core._models import (
     SessionSettleState,
     SlackBotToken,
     SlackUserToken,
+    SupportEscalation,
     Tenant,
     TenantLedger,
     TenantRetirement,
@@ -42,6 +43,7 @@ from daimon.testing.factories import (
     make_agent_memory_store,
     make_platform_principal,
     make_slack_user_token,
+    make_support_escalation,
     make_tenant,
     make_thread_session,
     make_usage_event,
@@ -49,7 +51,7 @@ from daimon.testing.factories import (
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.ids import ResourceRef
 from mux.contracts.usage import UsageObservation as Observation
-from mux.testing.drivers.anthropic.ma import MARouter
+from mux.testing.drivers.anthropic.ma import MARouter, list_response
 from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from pydantic import SecretStr
 from sqlalchemy import Numeric, func, select, update
@@ -66,8 +68,6 @@ PURGED_DESPITE_MONEY = {
     "web_messages": "a message's cost is shown to people; usage_events bill it",
     "long_job": "a job's cost is shown to people; usage_events bill it",
     "turn_outcomes": "turn diagnostics; usage_events bill the turn",
-    "support_limits": "support credits are an allowance the operator sets, not money",
-    "support_escalations": "support credits never touch the money ledger",
 }
 _MONEY = ("_usd", "_tokens")
 _PERSON = ("account_id", "platform_user_id", "session_id", "thread_id", "user_id")
@@ -113,6 +113,9 @@ async def test_retirement_keeps_the_balance_and_the_spent_trial(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant_id = await _seed(db_session, db_session_factory, "retired-guild")
+    account_id = await db_session.scalar(select(Account.id).where(Account.tenant_id == tenant_id))
+    await make_support_escalation(db_session, tenant_id=tenant_id, account_id=account_id)
+    await db_session.flush()
     balance = await tenant_ledger.get_balance(db_session, tenant_id=tenant_id)
     ledger_rows = await db_session.scalar(select(func.count()).select_from(TenantLedger))
 
@@ -130,12 +133,17 @@ async def test_retirement_keeps_the_balance_and_the_spent_trial(
     usage = (await db_session.scalars(select(UsageEvent))).one()
     assert usage.platform_user_id is None, "kept usage no longer names the person"
     assert usage.managed_session_id.startswith("retired:"), "nor the conversation"
+    support = (await db_session.scalars(select(SupportEscalation))).one()
+    assert (support.account_id, support.platform_user_id, support.note) == (None, "purged", ""), (
+        "the spent support credit stays without the person"
+    )
     assert await tenant_ledger.get_balance(db_session, tenant_id=tenant_id) == balance, (
         "the balance survives retirement"
     )
     work = await store.get_work(db_session, tenant_id=tenant_id)
     assert work is not None and work["sessions"] == ["sesn_a"], "the session is queued upstream"
     assert work["memory_stores"] == ["memstore_a"], "the memory store is queued upstream"
+    assert work["named_vaults"] == [str(account_id)], "the account's MCP vaults are queued"
     assert work["hosts"] == ["notebooks", "reports"], "both hosts are queued"
     assert work["agents"] == work["environments"] == [store.TAGGED], (
         "the tenant's stamped agents and environments are queued"
@@ -223,7 +231,7 @@ async def test_host_cleanup_calls_the_tenant_admin_route(status: int, settings: 
     tenant_id = uuid.uuid4()
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         delete = tenant_retirement.deleters(
-            client=None,  # type: ignore[arg-type]
+            client=anthropic.AsyncAnthropic(api_key="sk-test"),
             settings=settings,
             http=http,
             tenant_id=tenant_id,
@@ -551,7 +559,7 @@ async def test_a_permanent_client_error_is_dropped_and_a_broken_kind_is_isolated
             TenantRetirement(
                 tenant_id=tenant_id,
                 pending={
-                    "sessions": ["bad_request", "rate_limited", "unprocessable"],
+                    "sessions": ["bad_request", "unprocessable", "rate_limited"],
                     "memory_stores": ["boom"],
                     "hosts": ["reports"],
                 },
@@ -692,15 +700,36 @@ async def test_only_the_tenants_stamped_agents_and_environments_go_and_vaults_ar
     router.add_environment_list(*environments)
     router.add("POST", r"/v1/(agents|environments)/[^/]+/archive", reply)
     router.add("DELETE", r"/v1/(environments|vaults)/[^/]+", reply)
+    vaults = [
+        _vault("vlt_mcp", "daimon-mcp:acct:agent"),
+        _vault("vlt_relay", "daimon-relay:acct:agent"),
+        _vault("vlt_other", "daimon-mcp:other:acct"),
+    ]
+    router.add("GET", r"/v1/vaults", lambda _r, _m: list_response(vaults))
     async with ScriptedTransport(router=router).client() as client, httpx.AsyncClient() as http:
         delete = tenant_retirement.deleters(client, settings, http, tenant_id)
         await delete["agents"](store.TAGGED)
         await delete["environments"](store.TAGGED)
         await delete["vaults"]("vlt_a")
+        await delete["named_vaults"]("acct")
     assert calls == [
         ("POST", "/v1/agents/agent_mine/archive"),
         ("DELETE", "/v1/environments/env_mine"),
         ("DELETE", "/v1/environments/env_busy"),
         ("POST", "/v1/environments/env_busy/archive"),
         ("DELETE", "/v1/vaults/vlt_a"),
+        ("DELETE", "/v1/vaults/vlt_mcp"),
+        ("DELETE", "/v1/vaults/vlt_relay"),
     ], "only stamped resources are touched; an environment in use is archived; vaults deleted"
+
+
+def _vault(vault_id: str, name: str) -> dict[str, Any]:
+    return {
+        "id": vault_id,
+        "type": "vault",
+        "display_name": name,
+        "metadata": {},
+        "archived_at": None,
+        "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z",
+    }

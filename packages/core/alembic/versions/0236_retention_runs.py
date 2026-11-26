@@ -25,6 +25,7 @@ depends_on: str | Sequence[str] | None = None
 _CLOSED = "'delivered', 'skipped', 'cancelled'"
 INDEXES: dict[str, str] = {
     "ix_thread_sessions_tenant_last_turn": "thread_sessions (tenant_id, last_turn_at)",
+    "ix_thread_sessions_tenant_session": "thread_sessions (tenant_id, ma_session_id)",
     "ix_credential_requests_closed_at": "credential_requests (coalesce(used_at, expires_at))",
     "ix_agent_posted_messages_tenant_posted": "agent_posted_messages (tenant_id, posted_at)",
     "ix_message_feedback_created_at": "message_feedback (created_at)",

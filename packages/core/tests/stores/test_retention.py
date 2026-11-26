@@ -8,6 +8,7 @@ from decimal import Decimal
 
 from daimon.core._models import (
     CredentialRequest,
+    FileUpload,
     GitHubAccessRequest,
     LongJobCancelAuditRecord,
     LongJobRecord,
@@ -24,8 +25,8 @@ from daimon.core._models import (
 )
 from daimon.core.credential_requests import mint_request_token
 from daimon.core.stores import credential_requests as requests_store
+from daimon.core.stores import file_uploads, retention, turn_outcomes
 from daimon.core.stores import mcp_oauth_flows as flows_store
-from daimon.core.stores import retention, turn_outcomes
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import watches as watches_store
 from daimon.core.turn.termination import TerminationReason
@@ -495,3 +496,26 @@ async def test_share_records_go_once_their_expiry_is_past_the_cutoff(
     assert await retention.delete_secret_shares(db_session, before=NOW, limit=100) == 1
     left = (await db_session.scalars(select(SecretShare.expires_at))).all()
     assert left == [NOW + timedelta(days=1)]
+
+
+async def test_unowned_upload_sweep_leaves_routine_outputs_to_their_own_rule(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    for upload_id, title in (("f_tool", "tool"), ("f_routine", file_uploads.ROUTINE_OUTPUT_TITLE)):
+        db_session.add(
+            FileUpload(
+                id=upload_id,
+                tenant_id=tenant.id,
+                title=title,
+                display_filename="a.txt",
+                content_type="text/plain",
+                created_at=OLD,
+            )
+        )
+    await db_session.flush()
+    removed = await file_uploads.delete_stale_unowned_uploads(
+        db_session, created_before=NOW, limit=10
+    )
+    assert removed == 1, "only the tool upload goes"
+    assert await db_session.get(FileUpload, "f_routine") is not None, "a routine output waits"

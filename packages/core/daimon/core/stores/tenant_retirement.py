@@ -14,7 +14,7 @@ resources and hosted artifacts the deleted rows named are queued in
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from daimon.core._models import (
@@ -27,9 +27,11 @@ from daimon.core._models import (
     Base,
     GitHubAppSessionVault,
     NeutralSkillVersion,
+    ProviderBindingSlot,
     SeededSkill,
     ServerSkill,
     SessionSettleState,
+    SupportLimit,
     Tenant,
     TenantRetirement,
     UsageEvent,
@@ -39,12 +41,16 @@ from daimon.core.errors import SettlePending
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import mux_erasure
 from daimon.core.stores.security_audit import erase_tenant
+from daimon.core.stores.session_settle_state import erase_agent_chat_provenance_for_tenant
+from daimon.core.stores.slack_connect_prompts import delete_connect_prompts_for_team
 from daimon.core.stores.slack_user_tokens import delete_workspace_tokens
+from daimon.core.stores.support_escalation import anonymize_tenant_requests
 from daimon.core.stores.tenants import delete_settle_state, tenant_session_ids
 from sqlalchemy import (
     Column,
     Select,
     Table,
+    case,
     delete,
     exists,
     func,
@@ -74,17 +80,29 @@ KEEP_FOR_ACCOUNTING: dict[str, str] = {
     "accounting_outbox": "settlement records replayed when usage is reconciled",
     "accounting_binding_context": "what settling an outbox row reads once its slot is gone",
     "tenant_retirements": "the retirement's own queue of upstream cleanup",
+    "support_escalations": "support credits spent, so a reinstall does not reset them",
+    "support_limits": "the workspace's support credits those requests spend",
 }
 
 # Person identifiers in kept rows, cleared on retirement.
 PERSON_COLUMNS: dict[str, tuple[str, ...]] = {
-    "tenant_ledger": ("actor_account_id",),
+    "tenant_ledger": ("actor_account_id", "idempotency_key"),
     "usage_events": ("platform_user_id", "managed_session_id"),
     "promo_redemptions": ("redeemed_by_account_id",),
     "promo_channel_redemptions": ("redeemed_by_account_id",),
     "accounting_outbox": ("row", "platform_user_id"),
     "usage_observation": ("applied",),
+    # Anonymized by their own helpers when retirement begins, before accounts go.
+    "support_escalations": ("account_id", "platform_user_id", "ma_session_id"),
+    "support_limits": ("platform_user_id", "set_by_account_id"),
 }
+_SCRUBBED_ON_BEGIN = {"support_escalations", "support_limits"}
+# Ledger keys that name a provider session (`turn:<session>:<id>`) or a person
+# (`promo:<code>:<tenant>:<channel>:<account>`). Keys that only name the tenant stay
+# as they are, so a reinstall still finds its trial, promo and payment keys taken.
+_PERSON_LEDGER_KEY = (
+    "^(turn|media|classifier|thread-naming|owner-notice):|^promo:[^:]+:[^:]+:[^:]+:[^:]+$"
+)
 # Person paths inside a kept observation. The outbox row and the usage revision hold the
 # same observation, compared for equality on replay, so both are cleared alike.
 _OBSERVATION_PERSON_PATHS = (
@@ -103,6 +121,7 @@ PENDING_KINDS = (
     "environments",
     "memory_stores",
     "vaults",
+    "named_vaults",
     "skills",
     "hosts",
 )
@@ -113,6 +132,9 @@ TAGGED = "tagged"
 # Only provider sessions can be deleted upstream. Usage rows also name synthetic billing
 # ids (`classifier:<uuid>`, `gemini:<uuid>`) and other providers' sessions.
 SESSION_ID_PREFIX = "sesn_"
+# A failed queue waits this long, doubling per failure up to the cap.
+RETRY_FIRST = timedelta(minutes=1)
+RETRY_MAX = timedelta(hours=6)
 
 
 def is_tenant_scoped(table: Table) -> bool:
@@ -152,6 +174,9 @@ async def collect_upstream(session: AsyncSession, *, tenant_id: uuid.UUID) -> di
         "vaults": [
             _owned(GitHubAppSessionVault.vault_id, GitHubAppSessionVault.tenant_id, tenant_id)
         ],
+        # MCP vaults have no row of their own: they are named for an account or a shared
+        # thread's owner, added below.
+        "named_vaults": [select(Account.id).where(Account.tenant_id == tenant_id)],
         "skills": [
             _owned(UserSkill.anthropic_id, UserSkill.tenant_id, tenant_id),
             _owned(SeededSkill.anthropic_id, SeededSkill.tenant_id, tenant_id),
@@ -165,6 +190,17 @@ async def collect_upstream(session: AsyncSession, *, tenant_id: uuid.UUID) -> di
         for query in queries:
             values.update(str(v) for v in await session.scalars(query))
         found[kind] = sorted(values)
+    # Imported here: `shared_threads` reaches the backend service, which reaches stores.
+    from daimon.core.shared_threads import shared_owner, shared_slot
+
+    slot = ProviderBindingSlot
+    threads = await session.execute(
+        select(slot.platform, slot.channel_id, slot.thread_id).where(
+            slot.tenant_id == tenant_id, slot.account_id.is_(None)
+        )
+    )
+    owners = {str(shared_owner(shared_slot(tenant_id, *thread))) for thread in threads}
+    found["named_vaults"] = sorted(set(found["named_vaults"]) | owners)
     found["agents"] = found["environments"] = [TAGGED]
     found["hosts"] = list(HOSTS)
     return found
@@ -189,6 +225,8 @@ async def _queue(session: AsyncSession, tenant_id: uuid.UUID, work: dict[str, li
 async def _scrub(session: AsyncSession, tenant_id: uuid.UUID) -> None:
     md = Base.metadata.tables
     for name, columns in PERSON_COLUMNS.items():
+        if name in _SCRUBBED_ON_BEGIN:
+            continue
         table = md[name]
         values: dict[str, Any] = {}
         for column in columns:
@@ -196,6 +234,10 @@ async def _scrub(session: AsyncSession, tenant_id: uuid.UUID) -> None:
                 # NOT NULL and part of a unique key: a stable pseudonym replaces it.
                 col = cast(Column[str], table.c[column])
                 values[column] = literal("retired:") + func.md5(col)
+            elif column == "idempotency_key":
+                col = cast(Column[str], table.c[column])
+                person = col.regexp_match(_PERSON_LEDGER_KEY)
+                values[column] = case((person, literal("retired:") + func.md5(col)), else_=col)
             elif column in ("row", "applied"):
                 value: Any = table.c[column]
                 for path in _OBSERVATION_PERSON_PATHS:
@@ -250,9 +292,19 @@ async def begin_retirement(
     if tenant.platform == "slack":
         # Keyed by Slack team, not tenant, so no tenant delete reaches them.
         await delete_workspace_tokens(session, tenant_id=tenant_id, team_id=tenant.external_id)
+        await delete_connect_prompts_for_team(session, team_id=tenant.external_id)
+    # Kept support credits lose the person before their accounts' cascade can reach them.
+    await anonymize_tenant_requests(session, tenant_id=tenant_id)
+    await session.execute(
+        delete(SupportLimit).where(
+            SupportLimit.tenant_id == tenant_id, SupportLimit.platform_user_id.is_not(None)
+        )
+    )
     await mux_erasure.detach_tenant_accounting(session, tenant_id=tenant_id)
     await delete_settle_state(session, tenant_id=tenant_id)
     await erase_tenant(session, tenant_id=tenant_id)
+    # Its accounts' ids in agent-chat session records have no FK to cascade with.
+    await erase_agent_chat_provenance_for_tenant(session, tenant_id=tenant_id)
     await session.execute(
         delete(AccountGitHubLink).where(
             AccountGitHubLink.account_id.in_(
@@ -333,9 +385,25 @@ async def has_pending_settle(session: AsyncSession, *, tenant_id: uuid.UUID) -> 
     return bool(await session.scalar(select(or_(settling, unapplied))))
 
 
-async def list_work(session: AsyncSession) -> list[tuple[uuid.UUID, dict[str, list[str]]]]:
-    rows = await session.execute(select(TenantRetirement.tenant_id, TenantRetirement.pending))
+async def list_work(
+    session: AsyncSession, *, now: datetime
+) -> list[tuple[uuid.UUID, dict[str, list[str]]]]:
+    """Queues due a try: never failed, or past their backoff."""
+    due = or_(TenantRetirement.next_attempt_at.is_(None), TenantRetirement.next_attempt_at <= now)
+    rows = await session.execute(
+        select(TenantRetirement.tenant_id, TenantRetirement.pending).where(due)
+    )
     return [(tenant_id, pending) for tenant_id, pending in rows.tuples()]
+
+
+async def defer(session: AsyncSession, *, tenant_id: uuid.UUID, now: datetime) -> None:
+    """Back a queue off after a failed delete, so a revoked key is not retried every tick."""
+    row = await session.scalar(
+        select(TenantRetirement).where(TenantRetirement.tenant_id == tenant_id).with_for_update()
+    )
+    if row is not None:
+        row.next_attempt_at = now + min(RETRY_FIRST * 2 ** min(row.failures, 16), RETRY_MAX)
+        row.failures += 1
 
 
 async def get_work(session: AsyncSession, *, tenant_id: uuid.UUID) -> dict[str, list[str]] | None:
@@ -378,4 +446,5 @@ async def remove_done(
         await session.delete(row)
         return True
     row.pending = pending
+    row.failures, row.next_attempt_at = 0, None
     return False

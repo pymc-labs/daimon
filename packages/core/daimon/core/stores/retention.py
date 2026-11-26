@@ -123,8 +123,9 @@ async def claim_rule(
 ) -> bool:
     """Take a rule's turn if it last succeeded over `every` ago and last started over `retry` ago.
 
-    The claim is one statement, so two sweeps never both run a rule, and a rule that
-    keeps failing is retried every `retry`, not on every pass.
+    The claim is one statement, so two sweeps never claim a rule at once; a run that
+    outlasts `retry` can be claimed again, which only repeats idempotent deletes. A rule
+    that keeps failing is retried every `retry`, not on every pass.
     """
     _check(now)
     due = and_(
@@ -395,11 +396,32 @@ async def delete_channel_names(
     )
 
 
-def _same_thread(model: type[TaskContinuation] | type[Watch]) -> ColumnElement[bool]:
-    return and_(
-        model.tenant_id == ThreadSession.tenant_id,
-        model.platform == ThreadSession.platform,
-        model.thread_id == ThreadSession.thread_id,
+def still_targeted(
+    tenant_id: ColumnElement[uuid.UUID] | InstrumentedAttribute[uuid.UUID],
+    platform: ColumnElement[str] | InstrumentedAttribute[str],
+    thread_id: ColumnElement[str] | InstrumentedAttribute[str],
+) -> ColumnElement[bool]:
+    """Work still aims at the thread: a pending continuation, a live watch, or an
+    enabled routine that posts into it would otherwise wake with none of its context."""
+
+    def same(model: type[TaskContinuation] | type[Watch]) -> ColumnElement[bool]:
+        return and_(
+            model.tenant_id == tenant_id, model.platform == platform, model.thread_id == thread_id
+        )
+
+    return or_(
+        exists().where(same(TaskContinuation), TaskContinuation.status.in_(_OPEN_CONTINUATIONS)),
+        exists().where(same(Watch), Watch.status.in_(_LIVE_WATCHES)),
+        exists().where(
+            Routine.tenant_id == tenant_id,
+            Routine.enabled.is_(True),
+            Routine.destination_kind == "thread",
+            or_(
+                Routine.destination_id == thread_id,
+                # Slack names a routine's thread `channel:ts`.
+                Routine.destination_id.endswith(func.concat(":", thread_id)),
+            ),
+        ),
     )
 
 
@@ -413,33 +435,14 @@ async def delete_idle_thread_sessions(
 ) -> int:
     """A tenant's thread mappings with no turn since the cutoff and none running.
 
-    A thread that still has work aimed at it stays: a pending continuation, a
-    live watch, or an enabled routine that posts into it would otherwise wake
-    in a fresh session with none of its context. The thread's next message
-    starts a fresh session.
+    A thread `still_targeted` stays. The thread's next message starts a fresh session.
     """
     _check(before)
-    continuation = exists().where(
-        _same_thread(TaskContinuation), TaskContinuation.status.in_(_OPEN_CONTINUATIONS)
-    )
-    watch = exists().where(_same_thread(Watch), Watch.status.in_(_LIVE_WATCHES))
-    routine = exists().where(
-        Routine.tenant_id == ThreadSession.tenant_id,
-        Routine.enabled.is_(True),
-        Routine.destination_kind == "thread",
-        or_(
-            Routine.destination_id == ThreadSession.thread_id,
-            # Slack names a routine's thread `channel:ts`.
-            Routine.destination_id.endswith(func.concat(":", ThreadSession.thread_id)),
-        ),
-    )
     condition = and_(
         ThreadSession.tenant_id == tenant_id,
         ThreadSession.last_turn_at < before,
         ThreadSession.active_turn_message_id.is_(None),
-        ~continuation,
-        ~watch,
-        ~routine,
+        ~still_targeted(ThreadSession.tenant_id, ThreadSession.platform, ThreadSession.thread_id),
     )
     return await _delete_batch(
         session, ThreadSession, condition, limit, order=ThreadSession.last_turn_at, cursor=cursor

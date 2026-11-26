@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Literal
 
 import anthropic as anthropic_errors
 import httpx
@@ -22,7 +23,8 @@ from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import list_agents_by_tenant, list_environments_by_tenant
 from daimon.core.errors import SettlePending
 from daimon.core.ma import core_admin_port, delete_skill_and_versions
-from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
+from daimon.core.mcp_vault import RELAY_VAULT_PREFIX, SHARED_VAULT_PREFIX
+from daimon.core.mux_backend import managed_agents, platform_scope, resource_ref, resource_scope
 from daimon.core.mux_compat import (
     archive_agent,
     archive_environment,
@@ -30,6 +32,7 @@ from daimon.core.mux_compat import (
     delete_memory_store,
     delete_vault,
     legacy_call,
+    list_vaults,
 )
 from daimon.core.stores import tenant_retirement as store
 from mux.contracts.ids import Scope
@@ -39,7 +42,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 
-_HOST_TIMEOUT_SECONDS = 30.0
+# Each upstream call runs under the tenant lock a reinstall waits on, so it is kept short.
+_UPSTREAM_TIMEOUT_SECONDS = 10.0
+# Removing finished items rewrites the whole queue, so it is done this many at a time.
+_REMOVE_BATCH = 50
+_NAMED_VAULT_PREFIXES = ("daimon-mcp:", RELAY_VAULT_PREFIX, SHARED_VAULT_PREFIX)
 
 Deleter = Callable[[str], Awaitable[None]]
 
@@ -117,7 +124,7 @@ def _host_deleter(settings: Settings, http: httpx.AsyncClient, tenant_id: uuid.U
         response = await http.delete(
             f"{str(url).rstrip('/')}/admin/tenants/{tenant_id}/{host}",
             headers={"Authorization": f"Bearer {secret.get_secret_value()}"},
-            timeout=_HOST_TIMEOUT_SECONDS,
+            timeout=_UPSTREAM_TIMEOUT_SECONDS,
         )
         if response.status_code != 404:
             response.raise_for_status()
@@ -125,17 +132,36 @@ def _host_deleter(settings: Settings, http: httpx.AsyncClient, tenant_id: uuid.U
     return delete
 
 
+def names_owner(display_name: str, owner: str) -> bool:
+    """Whether an MCP vault (`<prefix><account or shared owner>[:<agent>...]`) is `owner`'s.
+    Agents can serve many tenants, so a vault is never matched by its agent."""
+    return display_name.startswith(_NAMED_VAULT_PREFIXES) and display_name.split(":")[1] == owner
+
+
 def deleters(
     client: AsyncAnthropic, settings: Settings, http: httpx.AsyncClient, tenant_id: uuid.UUID
 ) -> dict[str, Deleter]:
     """One delete per queued kind; each treats an already missing resource as done."""
+    client = client.with_options(timeout=_UPSTREAM_TIMEOUT_SECONDS)
     scope = resource_scope(tenant_id=str(tenant_id), authorization_id="tenant-retirement")
+    vault_scope = platform_scope("tenant_retirement.named_vaults")
+    listed: list[tuple[str, str]] = []
 
     async def memory_store(store_id: str) -> None:
         await delete_memory_store(client, store_id, scope=scope)
 
     async def vault(vault_id: str) -> None:
         await delete_vault(client, vault_id, scope=scope)
+
+    async def named_vaults(owner: str) -> None:
+        # Listed once per pass: every owner's vaults come from the same listing.
+        if not listed:
+            listed.extend(
+                [(v.id, v.display_name) async for v in list_vaults(client, scope=vault_scope)]
+            )
+        for vault_id, name in listed:
+            if names_owner(name, owner):
+                await delete_vault(client, vault_id, scope=vault_scope)
 
     async def skill(skill_id: str) -> None:
         await delete_skill_and_versions(client, skill_id, scope=scope)
@@ -159,6 +185,7 @@ def deleters(
         "environments": environments,
         "memory_stores": memory_store,
         "vaults": vault,
+        "named_vaults": named_vaults,
         "skills": skill,
         "hosts": _host_deleter(settings, http, tenant_id),
     }
@@ -182,17 +209,21 @@ def _permanent(error: Exception) -> bool:
     return 400 <= status < 500 and status not in _RETRYABLE_CLIENT_ERRORS
 
 
+Cleaned = Literal["done", "retry", "stopped"]
+
+
 async def _clean_item(
     sm: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
     kind: str,
     item: str,
     delete: Deleter,
-) -> bool:
-    """Delete one queued item under the tenant lock. False when the tenant came back."""
+) -> Cleaned:
+    """Delete one queued item under the tenant lock: done (or dropped as permanent),
+    retry later, or stopped because the tenant came back or the item is gone."""
     async with sm() as session, session.begin():
         if not await store.lock_item(session, tenant_id=tenant_id, kind=kind, item=item):
-            return False
+            return "stopped"
         try:
             await delete(item)
         except anthropic_errors.NotFoundError:
@@ -206,30 +237,54 @@ async def _clean_item(
             }
             if not _permanent(error):
                 log.warning("tenant_retirement.upstream_failed", **fields)
-                return True
+                return "retry"
             # Logged once: the item leaves the queue, so it is never retried.
             log.warning("tenant_retirement.upstream_dropped", **fields)
-        await store.remove_done(session, tenant_id=tenant_id, kind=kind, done={item})
-    return True
+    return "done"
+
+
+async def _remove(
+    sm: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, kind: str, done: set[str]
+) -> None:
+    if done:
+        async with sm() as session, session.begin():
+            await store.remove_done(session, tenant_id=tenant_id, kind=kind, done=done)
+        done.clear()
 
 
 async def clean_upstream(
     sm: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, deleters: Mapping[str, Deleter]
 ) -> bool:
     """Delete one tenant's queued upstream resources, one transaction per item, each
-    re-checking that the tenant is still retired. True when nothing is left."""
+    re-checking that the tenant is still retired. A kind stops at its first retryable
+    failure and the queue backs off. True when nothing is left."""
     async with sm() as session:
         pending = await store.get_work(session, tenant_id=tenant_id)
     if pending is None:
         return True
+    failed = False
     for kind in store.PENDING_KINDS:
+        done: set[str] = set()
         try:
             for item in pending.get(kind, []):
-                if not await _clean_item(sm, tenant_id, kind, item, deleters[kind]):
+                outcome = await _clean_item(sm, tenant_id, kind, item, deleters[kind])
+                if outcome == "stopped":
+                    await _remove(sm, tenant_id, kind, done)
                     return await _finished(sm, tenant_id)
+                if outcome == "retry":
+                    failed = True
+                    break
+                done.add(item)
+                if len(done) >= _REMOVE_BATCH:
+                    await _remove(sm, tenant_id, kind, done)
         # Boundary: one kind failing in an unforeseen way must not starve the others.
         except Exception:
+            failed = True
             log.exception("tenant_retirement.kind_failed", tenant_id=str(tenant_id), kind=kind)
+        await _remove(sm, tenant_id, kind, done)
+    if failed:
+        async with sm() as session, session.begin():
+            await store.defer(session, tenant_id=tenant_id, now=datetime.now(UTC))
     return await _finished(sm, tenant_id)
 
 
@@ -243,7 +298,7 @@ async def sweep(
 ) -> None:
     """Retry every retired tenant's upstream cleanup, isolating failures by tenant."""
     async with sm() as session:
-        work = await store.list_work(session)
+        work = await store.list_work(session, now=datetime.now(UTC))
     async with httpx.AsyncClient() as http:
         for tenant_id, _pending in work:
             try:

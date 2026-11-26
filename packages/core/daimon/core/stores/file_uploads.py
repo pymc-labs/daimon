@@ -283,7 +283,8 @@ async def delete_stale_unowned_uploads(
     cursor: Position | None = None,
 ) -> int:
     """Delete up to `limit` files with no web person (MCP and tool uploads) made
-    before the cutoff and carried by no message; returns how many.
+    before the cutoff and carried by no message; returns how many. Routine outputs
+    waiting on delivery keep their own 7-day rule.
 
     A file a message still carries stays, so with a `cursor` a batch starts after
     the last one deleted instead of reading those again.
@@ -291,6 +292,7 @@ async def delete_stale_unowned_uploads(
     stale = select(FileUpload.id).where(
         FileUpload.person_id.is_(None),
         FileUpload.created_at < created_before,
+        FileUpload.title.is_distinct_from(ROUTINE_OUTPUT_TITLE),
         ~_carrying_message().exists(),
     )
     if cursor is not None and cursor.after is not None:

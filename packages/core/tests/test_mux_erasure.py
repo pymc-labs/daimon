@@ -29,7 +29,12 @@ from daimon.core.stores import selfhosted_usage as billing_contexts
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.stores.tenants import delete_tenant, get_tenant, set_provision_status
 from daimon.core.usage_outbox_drain import drain_pending_usage
-from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+from daimon.testing.factories import (
+    make_account,
+    make_platform_principal,
+    make_routine,
+    make_tenant,
+)
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding
@@ -1135,3 +1140,27 @@ async def test_idle_slots_go_whole_and_active_or_held_ones_stay(sm: Factory) -> 
     assert later.slots == 1, "the held slot goes on the next sweep, once the writer is done"
     assert await count(sm, "journal", "session_id = 'session-held'") == 0, "its journal went too"
     assert await count(sm, "journal", "session_id = 'session-active'") == 1, "active still kept"
+
+
+async def test_an_idle_slot_a_routine_still_posts_into_stays(sm: Factory) -> None:
+    tenant_id = uuid.uuid4()
+    person = await make_person(sm, tenant_id, "routine-sweep")
+    store = PostgresStateStore(sm)
+    for label in ("idle", "routed"):
+        await converse(store, person, label, thread(tenant_id, label), release_lease=True)
+        await _age(sm, label)
+    async with sm() as session, session.begin():
+        tenant = await get_tenant(session, tenant_id)
+        routine = await make_routine(session, tenant=tenant)
+        await session.execute(
+            text(
+                "UPDATE routines SET destination_kind = 'thread', destination_id = 'routed' "
+                "WHERE id = :id"
+            ),
+            {"id": routine.id},
+        )
+        erased = await mux_erasure.delete_idle_slots(
+            session, tenant_id=tenant_id, idle_before=NOW - timedelta(days=90), limit=10
+        )
+    assert erased.slots == 1, "only the slot no routine posts into goes"
+    assert await count(sm, "journal", "session_id = 'session-routed'") == 1, "its context stays"

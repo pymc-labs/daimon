@@ -412,7 +412,13 @@ async def _warn_before_retiring(
 async def _retire_and_clean(rt: CliRuntime, tenant_id: uuid.UUID, *, force: bool) -> int:
     """Retire the tenant, then try its upstream cleanup once. Returns what is left."""
     if not await tenant_retirement.retire(rt.sessionmaker, tenant_id=tenant_id, force=force):
-        raise StoreError(f"tenant {tenant_id} not found")
+        async with rt.sessionmaker() as session:
+            found = await get_tenant(session, tenant_id) is not None
+        raise StoreError(
+            f"tenant {tenant_id} was reinstalled, so it was not retired"
+            if found
+            else f"tenant {tenant_id} not found"
+        )
     async with httpx.AsyncClient() as http:
         deleters = tenant_retirement.deleters(rt.anthropic, rt.settings, http, tenant_id)
         await tenant_retirement.clean_upstream(

@@ -74,7 +74,9 @@ like a tool result. This is on by default. An operator turns it off with
 
 Daimon deletes records past these limits. An operator changes each one with
 the setting linked in the table; `0` keeps the records, except for Gemini
-history, monitored conversations and failure records, which always expire.
+history, monitored conversations and failure records, which always expire. A
+completed MCP sign-in request stays until the person is deleted or the
+workspace retired.
 
 | Records | Kept | Setting |
 | --- | --- | --- |
@@ -88,7 +90,7 @@ history, monitored conversations and failure records, which always expire.
 | Failure records | 30 days | [`DAIMON_OPS_EVENTS__RETENTION_DAYS`](docs/configuration.md#daimon_ops_events__retention_days) |
 | Deleted web threads | 30 days | [`DAIMON_RETENTION__DELETED_THREADS_DAYS`](docs/configuration.md#daimon_retention__deleted_threads_days) |
 | Finished task requests | 30 days | [`DAIMON_RETENTION__TASK_CONTINUATIONS_DAYS`](docs/configuration.md#daimon_retention__task_continuations_days) |
-| Uploads with no owner | 24 hours | Fixed |
+| Uploads with no owner (routine files awaiting delivery: 7 days) | 24 hours | Fixed |
 | Feedback and support notes | 365 days | [`DAIMON_RETENTION__FEEDBACK_DAYS`](docs/configuration.md#daimon_retention__feedback_days) |
 | Channel names | 365 days after last seen | [`DAIMON_RETENTION__CHANNEL_NAMES_DAYS`](docs/configuration.md#daimon_retention__channel_names_days) |
 | Reports | 365 days after last update | [`DAIMON_REPORT__RETENTION_DAYS`](docs/configuration.md#daimon_report__retention_days) |
@@ -96,7 +98,7 @@ history, monitored conversations and failure records, which always expire.
 
 A workspace whose app is uninstalled (on Teams, from its last team and chat)
 is retired after that time: its data, Anthropic sessions, environments,
-memory, credentials, skills, reports and notebooks are deleted, in batches
+memory, credentials and their vaults, skills, reports and notebooks are deleted, in batches
 that an interrupted run resumes. Its Anthropic agents are archived, as
 Anthropic offers no way to delete them. Usage not yet settled delays it. Reinstalling before then keeps
 everything. Reinstalling during a retirement stops it: what was not yet
@@ -106,9 +108,10 @@ Conversation history is on by default. An operator turns it off with
 `DAIMON_FEATURES__CONVERSATION_RETENTION=0`, and a workspace admin can shorten
 it in `/settings`.
 
-When a workspace is retired, its billing and usage records are kept for
-accounting without the person, account or thread they came from, so a
-reinstalled workspace keeps its balance. Notebooks keep the expiry
+When a workspace is retired, its billing, usage and support-credit records
+are kept for accounting without the person, account or thread they came from,
+so a reinstalled workspace keeps its balance and the support credits it spent.
+Per-person support limits are deleted. Notebooks keep the expiry
 they were published with, at most 365 days.
 
 Blogs are public pages someone published on purpose, so they have no expiry.
