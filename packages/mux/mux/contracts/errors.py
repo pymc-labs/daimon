@@ -9,6 +9,8 @@ comes back as a receipt whose status is `outcome_unknown`.
 from __future__ import annotations
 
 import math
+import re
+from collections.abc import Collection
 from typing import Literal
 
 ProviderErrorCategory = Literal[
@@ -166,6 +168,50 @@ class ProviderError(MuxError):
         self.retry_after_s = retry_after_s
 
 
+_TOKENS = re.compile(
+    r"\0+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+"
+    r"|AIza[A-Za-z0-9_-]{20,}|Bearer\s+[^\s\"']+",
+    re.IGNORECASE,
+)
+# A double-quoted span in a provider's message usually echoes a request value.
+_QUOTED = re.compile(r'"[^"]*"')
+
+
+def redact_native_text(
+    value: object,
+    secrets: Collection[str] = (),
+    *,
+    identifier: bool = False,
+    values: bool = False,
+    limit: int = 512,
+) -> str | None:
+    """A provider's error text that is safe to log, or None.
+
+    Masks known secrets, any 8+ character fragment of one, tokens, API keys and
+    URLs. `values` also masks double-quoted spans, which echo request values
+    (prompt text among them). `identifier` keeps only a bare identifier. The
+    result is one line of at most `limit` characters.
+    """
+    if not isinstance(value, str):
+        return None
+    masked = [False] * len(value)
+    for secret in filter(None, secrets):
+        size = min(len(secret), 8)
+        for part in {secret[i : i + size] for i in range(len(secret) - size + 1)}:
+            start = value.find(part)
+            while start >= 0:
+                masked[start : start + size] = [True] * size
+                start = value.find(part, start + 1)
+    value = "".join("\0" if hidden else char for char, hidden in zip(value, masked, strict=True))
+    value = _TOKENS.sub("[redacted]", value)
+    value = re.sub(r"https?://[^\s\"']+", "[redacted URL]", value)
+    if values:
+        value = _QUOTED.sub('"[redacted]"', value)
+    if identifier and re.fullmatch(r"[A-Za-z0-9_.\[\]-]{1,128}", value) is None:
+        return None
+    return " ".join(value.split())[:limit]
+
+
 __all__ = [
     "DEFAULT_RETRY_AFTER_S",
     "MAX_RETRY_AFTER_S",
@@ -182,4 +228,5 @@ __all__ = [
     "ScopeViolation",
     "UnsupportedCapability",
     "bounded_retry_after",
+    "redact_native_text",
 ]

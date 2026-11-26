@@ -319,6 +319,11 @@ class GeminiTurnIO:
         self._no_tools_replies = 0
         # Consecutive stream failures without a delivered event (backoff step).
         self.stream_failures = 0
+        # Roots a stream of this turn has opened, and the last status read since
+        # the latest open: together they tell a refused re-open (see
+        # `_refused_reopen`) from a refused first open.
+        self._opened_roots: set[str] = set()
+        self.status_since_open: str | None = None
 
     async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
         inputs: list[InputEvent] = []
@@ -387,9 +392,21 @@ class GeminiTurnIO:
 
     async def status(self) -> str:
         session = await self.backend.sessions.retrieve(self.scope, self.session)
-        return {"provisioning": "rescheduling", "requires_action": "idle"}.get(
+        status = {"provisioning": "rescheduling", "requires_action": "idle"}.get(
             session.state, session.state
         )
+        self.status_since_open = status
+        return status
+
+    def stream_opened(self, root: str | None) -> None:
+        """A stream of `root` opened: later status reads count from here."""
+        if root is not None:
+            self._opened_roots.add(root)
+        self.status_since_open = None
+
+    def reopened_while_running(self) -> bool:
+        """This root's stream opened before, and a status read since said running."""
+        return self.root in self._opened_roots and self.status_since_open == "running"
 
     async def open_stream(self, *, read_timeout_s: float) -> TurnStream:
         if read_timeout_s <= 0:
@@ -852,6 +869,23 @@ class _StreamFailure(Exception):
         self.phase, self.error = phase, error
 
 
+def _refused_reopen(error: ProviderError) -> bool:
+    """A plain 4xx (not a rate limit, not one of the driver's own checks).
+
+    Gemini can refuse to re-open the event stream of an interaction that is
+    still running. The stream only notifies, so such a refusal on a re-open
+    says nothing about the interaction: the turn keeps polling its status
+    instead (`_LazyStream`). The same refusal on a first open stays fatal.
+    """
+    status = error.native_error_code or ""
+    return (
+        not error.retryable
+        and error.native_code is None
+        and status.startswith("http_4")
+        and status != "http_429"
+    )
+
+
 def _transient_stream_error(error: ProviderError) -> bool:
     """A failed SSE open/read that says nothing about the interaction itself.
 
@@ -949,6 +983,15 @@ class _LazyStream(AsyncIterator[TurnEvent]):
             await self.close()
             error = failure.error
             transient = _transient_stream_error(error)
+            # A refused re-open while the interaction runs: poll its status
+            # through the same eventless cycle until it ends or the turn's own
+            # limits stop it. A refused first open still ends the turn.
+            poll = (
+                not transient
+                and failure.phase == "open"
+                and self.io.reopened_while_running()
+                and _refused_reopen(error)
+            )
             log.warning(
                 "turn.gemini_stream_error",
                 session_id=self.io.session.id,
@@ -957,9 +1000,10 @@ class _LazyStream(AsyncIterator[TurnEvent]):
                 retryable=error.retryable,
                 native_code=error.native_code,
                 http_status=error.native_error_code,
-                action="eventless_cycle" if transient else "fail",
+                provider_message=error.native_message,
+                action="eventless_cycle" if transient else "status_poll" if poll else "fail",
             )
-            if not transient:
+            if not (transient or poll):
                 raise error from None
             # The stream only notifies; the interaction's state is read by GET.
             # Back off (bounded by the turn deadline), then let the driver check
@@ -991,6 +1035,7 @@ class _LazyStream(AsyncIterator[TurnEvent]):
             self._source = await self.io.backend.events.open_stream(self.io.scope, self.io.session)
         except ProviderError as error:
             raise _StreamFailure("open", error) from error
+        self.io.stream_opened(self._root)
         if self._closed:
             source, self._source = self._source, None
             close = getattr(source, "aclose", None)
@@ -1013,6 +1058,7 @@ class _LazyStream(AsyncIterator[TurnEvent]):
                 )
             except ProviderError as error:
                 raise _StreamFailure("open", error) from error
+            self.io.stream_opened(self._root)
             frames = await self.io.replay_turn_events(reconcile=False)
         if self._root is None and frames:
             self._root = self.io.root

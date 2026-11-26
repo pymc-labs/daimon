@@ -20,7 +20,7 @@ from google.genai import errors as genai_errors
 from google.genai._interactions import APIConnectionError, APIError, APIStatusError
 from pydantic import JsonValue
 
-from mux.contracts.errors import ProviderErrorCategory, bounded_retry_after
+from mux.contracts.errors import ProviderErrorCategory, bounded_retry_after, redact_native_text
 from mux.drivers.gemini.mcp_auth import (
     RedactedCredential,
     contains_secret,
@@ -452,6 +452,28 @@ def _error_payload(error: Exception) -> dict[str, object] | None:
     return cast(dict[str, object], nested) if isinstance(nested, dict) else None
 
 
+#: Longest provider reason kept on a 4xx `ProviderError`.
+NATIVE_MESSAGE_LIMIT = 300
+
+
+def refusal_reason(error: Exception) -> str | None:
+    """Why Google refused a request, safe to log: its status and message.
+
+    Keys, tokens, URLs and double-quoted request values are masked and the
+    text is capped at `NATIVE_MESSAGE_LIMIT`. None when the body has neither.
+    """
+    payload = _error_payload(error)
+    if payload is None:
+        message: object = getattr(error, "message", None)
+        status: object = None
+    else:
+        message, status = payload.get("message"), payload.get("status")
+    parts = [p for p in (status, message) if isinstance(p, str) and p.strip()]
+    if not parts:
+        return None
+    return redact_native_text(": ".join(parts), values=True, limit=NATIVE_MESSAGE_LIMIT)
+
+
 def _error_details(payload: dict[str, object]) -> list[dict[str, object]]:
     details = payload.get("details")
     return [
@@ -574,6 +596,10 @@ def normalize_error(error: Exception) -> ProviderError:
         category,
         retryable=status == 429 or (status is not None and status >= 500),
         native_code="503" if status == 503 else None,
+        # A refusal's reason, so the next unexpected 4xx names its cause in the logs.
+        native_message=refusal_reason(error)
+        if status is not None and 400 <= status < 500
+        else None,
         native_error_code=http,
         retry_after_s=bounded_retry_after(retry_delay(error)) if status == 429 else None,
     )

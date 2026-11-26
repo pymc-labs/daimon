@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A long Gemini reply no longer fails when Gemini refuses to reconnect to it.** After two
+  minutes with no event, Daimon reconnects to the reply's stream. Gemini can refuse that
+  reconnect with an HTTP 4xx while the reply is still running; Daimon now keeps checking the
+  reply until it ends and answers from it, within the usual time limit. A refusal on the
+  first connect still ends the turn, and the logs now say why Gemini refused.
+
 - **A finished command no longer sends a second message when the conversation already has its
   result, or when its machine was stopped from the conversation.** Reading the result there,
   or stopping the machine from the conversation it started in, withdraws a message nobody has
