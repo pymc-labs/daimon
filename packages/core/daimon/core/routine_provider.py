@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from daimon.core.channel_backend import (
     agent_native_provider,
-    channel_provider,
-    effective_thread_backend,
+    channel_ref,
+    current_backend,
+    kept_thread_backend,
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.routine_delivery import delivery_target
 from daimon.core.rule_views import routine_destination_channel
+from daimon.core.stores import mux_state
 from daimon.core.stores.domain import RoutineRow
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Provider
@@ -19,40 +21,39 @@ from sqlalchemy.ext.asyncio import AsyncSession
 async def routine_provider(session: AsyncSession, row: RoutineRow, *, platform: str) -> Provider:
     """Its thread destination's retained provider, else a channel's, else its agent's.
 
-    The scheduler routes the fire by it and a sandbox opt-in pins it, so a change of
+    Read where admission admits the fire (`provider_routine.admit_provider_routine`): the
+    destination's channel, else the one it was made in. A thread that kept Claude stays on
+    it. The scheduler routes the fire by it and a sandbox opt-in pins it, so a change of
     provider needs a new opt-in.
     """
-    target = delivery_target(row, platform=platform)
-    parent_channel = routine_destination_channel(row)
-    provider: Provider | None = None
-    if row.destination_kind == "thread" and parent_channel is not None:
-        provider = await effective_thread_backend(
+    channel = routine_destination_channel(row) or row.channel_id
+    thread_id = routine_thread_id(row, platform=platform)
+    if channel is None:
+        provider = None
+    elif thread_id is not None and (
+        kept := await kept_thread_backend(
             session,
             tenant_id=row.tenant_id,
             platform=platform,
-            channel_id=parent_channel,
-            thread_id=routine_thread_id(row, platform=platform),
+            channel_id=channel,
+            thread_id=thread_id,
             caller_id=row.created_by_user_id,
             # A revision the thread kept for another agent is not this routine's, as in admission.
             agent_id=derive_agent_uuid(tenant_id=row.tenant_id, ma_agent_id=row.agent_id)
             if row.agent_id
             else None,
         )
-    channels = {
-        channel
-        for channel in (
-            row.channel_id,
-            parent_channel,
-            target.channel_id if target is not None else None,
+    ):
+        return kept
+    else:
+        place = channel_ref(row.tenant_id, platform, channel)
+        pinned = await current_backend(session, place)
+        # A cleared pin configures nothing, as admission reads it.
+        cleared = pinned is not None and (
+            await mux_state.config_origin(session, place, pinned.local) == "channel_clear"
         )
-        if channel is not None
-    }
-    for channel in channels:
-        if provider in (None, DEFAULT_BACKEND):
-            provider = await channel_provider(
-                session, tenant_id=row.tenant_id, platform=platform, channel_id=channel
-            )
-    if provider in (None, DEFAULT_BACKEND):
+        provider = pinned.backend if pinned is not None and not cleared else None
+    if provider is None:
         provider = await agent_native_provider(
             session, tenant_id=row.tenant_id, agent_id=row.agent_id, agent_name=row.agent_name
         )

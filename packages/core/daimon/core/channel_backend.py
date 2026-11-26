@@ -182,6 +182,59 @@ async def effective_thread_backend(
     """
     channel = channel_ref(tenant_id, platform, channel_id)
     latest, ever_shared = await current_backend_and_sharing(session, channel)
+    kept = await _kept_backend(
+        session,
+        channel,
+        latest,
+        ever_shared,
+        thread_id=thread_id,
+        caller_id=caller_id,
+        agent_id=agent_id,
+    )
+    if kept is not None:
+        return kept
+    return latest.backend if latest is not None else DEFAULT_BACKEND
+
+
+async def kept_thread_backend(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    thread_id: str,
+    caller_id: str | None,
+    agent_id: uuid.UUID | None = None,
+) -> Provider | None:
+    """The provider the thread itself keeps (`effective_thread_backend`), else None."""
+    channel = channel_ref(tenant_id, platform, channel_id)
+    latest, ever_shared = await current_backend_and_sharing(session, channel)
+    return await _kept_backend(
+        session,
+        channel,
+        latest,
+        ever_shared,
+        thread_id=thread_id,
+        caller_id=caller_id,
+        agent_id=agent_id,
+    )
+
+
+async def _kept_backend(
+    session: AsyncSession,
+    channel: ChannelRef,
+    latest: ConfigRevision | None,
+    ever_shared: bool,
+    *,
+    thread_id: str | None,
+    caller_id: str | None,
+    agent_id: uuid.UUID | None,
+) -> Provider | None:
+    tenant_id, platform, channel_id = (
+        uuid.UUID(channel.tenant_id),
+        channel.platform,
+        channel.channel_id,
+    )
     if thread_id is not None:
         principal = (
             await find_platform_principal(
@@ -249,7 +302,7 @@ async def effective_thread_backend(
                         previous.ma_session_id, "session history differs from authorized channel"
                     )
                 return MANAGED_AGENTS.provider
-    return latest.backend if latest is not None else DEFAULT_BACKEND
+    return None
 
 
 async def current_backend_and_sharing(
