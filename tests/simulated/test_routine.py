@@ -14,6 +14,7 @@ from daimon.core.stores.routines import get_routine
 from daimon.testing.asgi import asgi_lifespan
 from daimon.testing.sim.discord import DiscordAPI
 from daimon.testing.sim.script import Tool, Turn
+from mux.drivers.gemini.core import BUILTIN_TOOLS
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from .discord import GUILD, PERSON, Discord
@@ -73,12 +74,12 @@ async def test_a_routine_fires_and_records_its_answer(
         w.network.assert_clean()
 
 
-async def test_a_gemini_routine_runs_on_gemini_under_the_unattended_rule(
+async def test_a_gemini_routine_runs_on_gemini_without_built_in_tools(
     db_preflight: None, db_nullpool_engine: AsyncEngine
 ) -> None:
-    """A Gemini-only install's routine is admitted on Gemini through the chat path, with
-    no Anthropic request. The seeded agent's automatic code execution cannot be switched
-    off for one turn there, so the unattended rule refuses it before any model call."""
+    """A Gemini-only install's routine runs on Gemini through the chat path, metered, with
+    no Anthropic request. Without an operator's sandbox opt-in its session leaves the
+    seeded agent's built-in tools out, as Managed Agents does."""
     sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
     async with world(sessions, keyed=("gemini",), mcp=MCP) as w:
         rest = DiscordAPI(guild=GUILD, owner=PERSON)
@@ -104,6 +105,7 @@ async def test_a_gemini_routine_runs_on_gemini_under_the_unattended_rule(
             )
             routine = await create_routine(RoutineEnv(w.sessions, w.anthropic), caller, new)
             assert routine.next_fire_at is not None, "a new routine is scheduled"
+            w.script.add(Turn("Found the launch notes.", input_tokens=1500, output_tokens=90))
             fire = await _build_fire(
                 client=w.anthropic,
                 sm=w.sessions,
@@ -123,10 +125,11 @@ async def test_a_gemini_routine_runs_on_gemini_under_the_unattended_rule(
             )
         async with w.sessions() as db:
             fired = await get_routine(db, routine.id, tenant_id=tenant_id)
-        assert fired is not None and fired.last_error == (
-            "backend_unsupported: Automatic sandbox or custom tools cannot run without "
-            "someone watching."
-        ), "refused by the unattended rule, not as Anthropic-only"
-        assert not w.gemini.reported, "nothing reached the model"
+        assert fired is not None and fired.last_error is None, f"it ran: {fired}"
+        assert "Found the launch notes." in (fired.last_result_tail or ""), fired.last_result_tail
+        sent = [t for i in w.gemini.interactions.values() for t in i.raw.get("tools") or []]
+        assert sent and not [t for t in sent if t.get("type") in BUILTIN_TOOLS], sent
+        metered, billed = await metering(w, tenant_id, "gemini")
+        assert metered == billed and w.gemini.reported, f"metered on Gemini: {metered} != {billed}"
         assert not w.api.seen, f"no Anthropic request on a keyless install: {w.api.seen}"
         w.network.assert_clean()
