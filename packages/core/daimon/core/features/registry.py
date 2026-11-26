@@ -1551,7 +1551,7 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         values=_ON_OFF,
         default="on",
         tiers=("deployment", "workspace"),
-        binds="turn",
+        binds="session_mutable",
         doc=(
             "The data store, with its sources and search, idle until an admin adds a source. "
             "The operator or a team can turn it off."
