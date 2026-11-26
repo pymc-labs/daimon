@@ -75,7 +75,7 @@ from daimon.core.channel_budget_notice import spawn_budget_notice
 from daimon.core.channel_skills import turn_channel_skills, turn_platform_skills
 from daimon.core.config import env_admits
 from daimon.core.data_reading import AFTER_DATA_REFUSAL, AGENT_REQUEST_REFUSAL, reads_data
-from daimon.core.data_tools import DATA_READS
+from daimon.core.data_tools import DATA_READS, DATA_SOURCES
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.errors import TurnError, UserFacingError
@@ -123,12 +123,14 @@ from daimon.core.permissions import (
     home_of,
     limiting_ids_at,
 )
+from daimon.core.ports.data_ready import has_sources
 from daimon.core.ports.gate import data_sources_on
 from daimon.core.relay_scope import (
     agent_has_identity_relay,
     identity_relay_server_names,
     relay_seal_ids,
     without_data_reads,
+    without_data_sources,
     without_identity_relays,
     without_long_term_memory,
 )
@@ -3231,8 +3233,9 @@ async def place_features(
     agent: BetaManagedAgentsAgent,
     keys: tuple[str, ...] = _TURN_FEATURE_KEYS,
 ) -> FeatureSnapshot:
-    """The features a turn of `agent` reads at `place`; its toolset hides tools by them."""
-    return await resolve_features(
+    """The features a turn of `agent` reads at `place`; its toolset hides tools by them. Data
+    tools hide until the workspace has a source."""
+    features = await resolve_features(
         deps.sessionmaker,
         deps.settings,
         place,
@@ -3240,6 +3243,15 @@ async def place_features(
         agent_builtins=builtins_of(agent),
         server_setup=False,
     )
+    data = features.features.get(DATA_SOURCES)
+    if (
+        data is None
+        or not data.on
+        or deps.settings is None
+        or await has_sources(deps.settings, place.tenant_id)
+    ):
+        return features
+    return without_data_sources(features)
 
 
 async def require_tool_limits_hold(deps: TurnDeps, admission: Admission) -> None:

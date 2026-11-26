@@ -80,6 +80,7 @@ _GUARDS: list[tuple[str, Callable[..., Any], str]] = [
     ("a memory saved after a data read records it", repo_memory._refs, "reads_of"),  # pyright: ignore[reportPrivateUsage]
     ("a memory that recorded data shows to its audience only", repo_memory.repo_memory_impl, "_shown"),
     ("host memory of a data-reading agent is read-only", agent_memory.open_host_memory, "reads_data"),
+    ("data tools hide until the workspace has a source", admission.place_features, "has_sources"),
 ]  # fmt: skip
 
 

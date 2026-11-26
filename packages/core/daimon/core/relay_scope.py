@@ -15,7 +15,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Final
 
-from daimon.core.data_tools import DATA_READS
+from daimon.core.data_tools import DATA_READS, DATA_SOURCES
 from daimon.core.features.session_identity import SessionIdentity
 from daimon.core.features.snapshot import FeatureSnapshot
 from daimon.core.mcp_identity import identity_relay_urls, relay_base
@@ -127,3 +127,13 @@ def without_data_reads(snapshot: FeatureSnapshot) -> FeatureSnapshot:
         return snapshot
     forced = ResolvedFeature(DATA_READS, "off", "agent", locked=True)
     return replace(snapshot, features={**snapshot.features, DATA_READS: forced})
+
+
+def without_data_sources(snapshot: FeatureSnapshot) -> FeatureSnapshot:
+    """The snapshot with `data_sources` and `data_reads` Off: a workspace with no source, or
+    no ready store, is offered no data tool."""
+    from daimon.core.features.resolver import ResolvedFeature
+
+    forced = ResolvedFeature(DATA_SOURCES, "off", "workspace", locked=True)
+    reads = without_data_reads(snapshot)
+    return replace(reads, features={**reads.features, DATA_SOURCES: forced})

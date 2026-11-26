@@ -1,18 +1,23 @@
 """What the store registers with core at startup (the `daimon.ports` entry point).
 
-Erasure statements and the `data` audit source; M5 fills `GATED_TOOLS`. Everything here is
+Erasure statements, the `data` audit source and whether a workspace has a source; M5 fills
+`GATED_TOOLS`. Everything here is
 read only where the package is installed and does nothing for a deployment that never set
 the store up: erasure skips a schema that does not exist, the audit source reads no rows.
 """
 
 from __future__ import annotations
 
+import uuid
 from typing import Final
 
-from daimon.core.config import load_data_settings
+import psycopg
+from daimon.core.config import Settings, load_data_settings
 from daimon.core.ports.audit import register_audit_source
+from daimon.core.ports.data_ready import register_has_sources
 from daimon.core.ports.erasure import ErasureStatement, register_erasure
 from daimon.core.ports.tool_gate import register_gated_tools
+from daimon.data import pool
 from daimon.data.audit import AUDIT_SOURCE
 from daimon.data.schema import Schemas
 
@@ -108,7 +113,26 @@ def erasure(schemas: Schemas) -> tuple[ErasureStatement, ...]:
     )
 
 
+async def _has_sources(settings: Settings, tenant_id: uuid.UUID) -> bool:
+    """A live source in a ready store; a store error reads as none."""
+    if not await pool.ready(settings):
+        return False
+    d = Schemas.of(settings.data).data
+    try:
+        async with pool.connection(settings) as conn:
+            cur = await conn.execute(
+                f"select exists (select 1 from {d}.sources where tenant_id = %s"
+                f" and publication <> 'retired') as found".encode(),
+                (tenant_id,),
+            )
+            row = await cur.fetchone()
+    except psycopg.Error:
+        return False
+    return row is not None and bool(row["found"])
+
+
 def register() -> None:
+    register_has_sources(_has_sources)
     register_erasure(erasure(Schemas.of(load_data_settings())))
     register_audit_source("data", AUDIT_SOURCE)
     for key, tools in GATED_TOOLS.items():
