@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import AsyncIterator, Collection, Iterator, Mapping
 from contextlib import contextmanager
 from typing import IO, Literal, Protocol, cast
@@ -21,6 +20,7 @@ from openai import (
 from pydantic import JsonValue, TypeAdapter
 
 from mux.contracts.errors import ProviderErrorCategory, bounded_retry_after
+from mux.contracts.errors import redact_native_text as _redact
 from mux.errors import ProviderError
 
 Object = dict[str, JsonValue]
@@ -134,31 +134,6 @@ def _native_error_details(error: APIStatusError) -> dict[str, str | None]:
         "native_error_code": _redact(raw.get("code"), secrets, identifier=True),
         "native_param": _redact(raw.get("param"), secrets, identifier=True),
     }
-
-
-def _redact(value: object, secrets: Collection[str], *, identifier: bool = False) -> str | None:
-    """Mask known secrets, any 8+ character fragment of one, tokens and URLs."""
-    if not isinstance(value, str):
-        return None
-    masked = [False] * len(value)
-    for secret in filter(None, secrets):
-        size = min(len(secret), 8)
-        for part in {secret[i : i + size] for i in range(len(secret) - size + 1)}:
-            start = value.find(part)
-            while start >= 0:
-                masked[start : start + size] = [True] * size
-                start = value.find(part, start + 1)
-    value = "".join("\0" if hidden else char for char, hidden in zip(value, masked, strict=True))
-    value = re.sub(
-        r"\0+|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]+|Bearer\s+[^\s\"']+",
-        "[redacted]",
-        value,
-        flags=re.IGNORECASE,
-    )
-    value = re.sub(r"https?://[^\s\"']+", "[redacted URL]", value)
-    if identifier and re.fullmatch(r"[A-Za-z0-9_.\[\]-]{1,128}", value) is None:
-        return None
-    return " ".join(value.split())[:512]
 
 
 @contextmanager

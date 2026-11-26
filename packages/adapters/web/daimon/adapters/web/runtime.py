@@ -34,6 +34,7 @@ from daimon.core.github_credentials import build_multifernet
 from daimon.core.ma_resolver import ResolverCache, new_resolver_cache
 from daimon.core.mcp_tool_listing import McpToolLister
 from daimon.core.node_exchange import node_identity_key
+from daimon.core.ops_events import drain_ops_events
 from daimon.core.scope import DeploymentDefault
 from daimon.core.specs import AgentSpec
 from daimon.core.turn.deps import build_turn_deps
@@ -167,5 +168,6 @@ async def build_runtime(settings: Settings) -> AsyncIterator[WebRuntime]:
                 await deps.provider_clients.aclose()
     finally:
         await drain_outcomes()
+        await drain_ops_events()
         await drain_budget_notices()
         await engine.dispose()

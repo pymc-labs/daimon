@@ -826,7 +826,6 @@ async def test_admission_reads_agent_rules_only_when_tool_safety_and_rules_are_o
             )
         fresh = await reauthorize(scoped, admission)
         assert fresh.daimon_rule_tools == frozenset({"hubspot_update_objects"})
-        assert fresh.daimon_rules_need_driver, "a channel deny is the driver's to apply"
         assert admission.daimon_rule_tools == frozenset(), "the old admission is not mutated"
     finally:
         event.remove(engine, "before_cursor_execute", count)
@@ -1285,13 +1284,14 @@ def _admittable_router(tenant: TenantRow) -> MARouter:
     )
 
 
-async def test_a_native_turn_is_refused_where_a_channel_switched_a_tool_off(
+async def test_a_channel_deployment_is_refused_where_a_channel_switched_a_tool_off(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Gemini and OpenAI never read a channel's tool switches, so a turn there is refused
-    rather than run with a tool the channel turned off; the same turn on Claude is not."""
+    """A channel's own Gemini or OpenAI deployment is fixed, so a turn there is refused
+    rather than run with a tool the channel turned off. An agent's own copy leaves the
+    tool out of the reply instead (`runtime_manifest`), as Claude does."""
     from daimon.core.features.model_input import TOOL_KEYS
     from daimon.core.features.snapshot import FeaturePlace
     from daimon.core.turn.admission import place_features, require_tool_limits_hold
@@ -1335,6 +1335,8 @@ async def test_a_native_turn_is_refused_where_a_channel_switched_a_tool_off(
     assert (refused.value.reason, refused.value.cause) == ("backend_unsupported", "tool_limits"), (
         "a channel's switched-off tool should refuse the native turn by name"
     )
+    own_copy = replace(await on_gemini(), backend_revision_origin="agent")
+    await require_tool_limits_hold(deps, own_copy)
 
 
 async def test_admit_without_the_mcp_servers_setup_keeps_its_tools_until_turned_off(
@@ -1383,6 +1385,8 @@ async def test_admit_without_the_mcp_servers_setup_keeps_its_tools_until_turned_
         key: CAPABILITY_TOOLS[key] - SESSION_KEPT_TOOLS
         for key in ("notebooks", "report_publish", "compute")
     }
+    # Cloud computers are Off until a server admin turns them on, as here.
+    await put(FeatureTarget("workspace"), "compute", "on")
     kept = await hidden()
     for key, gated in tools.items():
         assert gated and not gated & kept, f"{key} tools hidden: {gated & kept}"

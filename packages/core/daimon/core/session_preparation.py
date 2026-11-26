@@ -1277,6 +1277,7 @@ async def _prepare_session_for_turn_locked(
                     get_repo_memory_settings(deps).legacy_servers
                 ),
                 hold=admission.hold if admission.shared_owner is None else None,
+                slack_turn_context_id=admission.slack_turn_context_id,
             )
 
         if isinstance(decision, ReuseAsIs):

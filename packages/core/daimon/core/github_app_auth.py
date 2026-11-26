@@ -440,19 +440,45 @@ async def get_app_installation_account(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class InstallationRepository:
+    """One repository GitHub lists for an installation."""
+
+    repo_id: int | None
+    owner_id: int | None
+    full_name: str
+
+
 async def list_installation_repositories(
     http_client: httpx.AsyncClient,
     *,
     token: str,
 ) -> list[str]:
     """Fetch and validate every page of the installation repository listing."""
+    return [
+        repo.full_name for repo in await _list_installation_repository_pages(http_client, token)
+    ]
+
+
+async def list_installation_repository_details(
+    http_client: httpx.AsyncClient,
+    *,
+    token: str,
+) -> list[InstallationRepository]:
+    """Every page of the installation repository listing, with GitHub's ids when it sent them."""
+    return await _list_installation_repository_pages(http_client, token)
+
+
+async def _list_installation_repository_pages(
+    http_client: httpx.AsyncClient, token: str
+) -> list[InstallationRepository]:
     url = "https://api.github.com/installation/repositories"
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    repos: list[str] = []
+    repos: list[InstallationRepository] = []
     seen: set[str] = set()
     seen_next_links: set[str] = set()
     total_count: int | None = None
@@ -486,8 +512,21 @@ async def list_installation_repositories(
                 raise ValueError("GitHub installation-repositories page has a malformed repository")
             if not full_name or full_name.count("/") != 1:
                 raise ValueError("GitHub installation-repositories page has an invalid full_name")
+            repo_id = repository_object.get("id")
+            owner = repository_object.get("owner")
+            owner_id = cast(dict[str, object], owner).get("id") if isinstance(owner, dict) else None
             if full_name not in seen:
-                repos.append(full_name)
+                repos.append(
+                    InstallationRepository(
+                        repo_id
+                        if isinstance(repo_id, int) and not isinstance(repo_id, bool)
+                        else None,
+                        owner_id
+                        if isinstance(owner_id, int) and not isinstance(owner_id, bool)
+                        else None,
+                        full_name,
+                    )
+                )
                 seen.add(full_name)
         if len(seen) > total_count:
             raise ValueError(

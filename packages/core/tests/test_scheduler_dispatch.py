@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 
 import pytest
-from daimon.core.scheduler import RoutineDispatcher, run_one_tick
+from daimon.core.scheduler import RoutineDispatcher, _record_fire_error, run_one_tick
 from daimon.core.stores.domain import CatchUpPolicy, RoutineRow, TenantRow
 from daimon.core.stores.routines import get_routine, update_routine
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
@@ -15,6 +15,7 @@ from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import MARouter
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from structlog.testing import capture_logs
 
 from .turn_io_support import TurnIOSpy
 
@@ -431,3 +432,45 @@ async def test_dispatch_timeout_through_headless_records_ceiling(
         turn_io_used.assert_ran()
     else:
         assert turn_io_used.classes == [], "a stall in session assembly never reaches the turn I/O"
+
+
+async def test_fire_failure_logs_fixed_fields_and_never_the_exception_message(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """`routine.fire_failed` carries the reason and the class name, not the message."""
+    routine = await seed(db_session, due=NOW - timedelta(minutes=1), policy="run-once")
+
+    async def fire(row: RoutineRow) -> None:
+        raise RuntimeError("secret-detail-from-a-tool")
+
+    with capture_logs() as logs:
+        dispatcher = await _run_one_tick(
+            now=NOW,
+            sm=db_session_factory,
+            fire=fire,
+            max_concurrent_fires=1,
+            wait_for_completion=True,
+        )
+    await dispatcher.close()
+    (failed,) = [e for e in logs if e["event"] == "routine.fire_failed"]
+    assert failed["tenant_id"] == str(routine.tenant_id), "tenant is a log field"
+    assert failed["routine_id"] == str(routine.id), "routine is a log field"
+    assert failed["agent_id"] == routine.agent_id, "agent is a log field"
+    assert failed["error_class"] == "RuntimeError", "the class name identifies the failure"
+    assert "secret-detail" not in repr(failed), "the exception message must not be logged"
+    (finished,) = [e for e in logs if e["event"] == "routine.finished"]
+    assert finished["outcome"] == "failed", "the run history records the failure"
+
+
+async def test_benign_fire_skip_logs_fire_skipped_at_info(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A fire that did not run on purpose is `routine.fire_skipped`, never `fire_failed`."""
+    routine = await seed(db_session, due=NOW)
+    with capture_logs() as logs:
+        await _record_fire_error(db_session_factory, routine, "scheduler_shutdown", None)
+    assert [
+        (e["event"], e["log_level"]) for e in logs if e["event"].startswith("routine.fire")
+    ] == [("routine.fire_skipped", "info")]

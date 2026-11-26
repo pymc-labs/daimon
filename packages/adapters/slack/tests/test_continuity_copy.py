@@ -1123,6 +1123,32 @@ def test_selfhosted_tool_turn_when_outputs_then_schedules_sweep(
     assert spawned == ["_sweep_session_outputs"], spawned
 
 
+async def test_a_sweep_that_fails_outright_is_an_ops_issue(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    app = _make_app(db_session_factory, tenant_id_str=str(uuid.uuid4()))
+    with (
+        patch("daimon.adapters.slack.app.deliver_session_outputs", AsyncMock(side_effect=OSError)),
+        patch("daimon.adapters.slack.app.report_ops_event") as report,
+    ):
+        await app._sweep_session_outputs(  # pyright: ignore[reportPrivateUsage]
+            None,
+            MagicMock(),
+            outputs=MagicMock(session_id="sesn_1"),
+            channel_id="C_TEST",
+            thread_ts="1.2",
+            team_id="T_TEST",
+            requester_user_id=None,
+        )
+
+    event = report.call_args.args[1]
+    assert (event.code, event.reason, event.session_id) == (
+        "delivery.output_failed",
+        "OSError",
+        "sesn_1",
+    )
+
+
 async def test_output_sweep_when_opt_out_lookup_fails_then_files_still_go_out_unpinged(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

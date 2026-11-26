@@ -18,6 +18,287 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MCP calls are answered from the case, its earlier writes or a checked
   simulation, and never reach real services.
 
+- **The agent no longer tells a person to expect an approval card for a cloud computer.**
+  Daimon shows the card itself when one is needed. The agent also sizes parallel work from
+  the machine's own CPUs, not from what `nproc` reports.
+
+- **A Gemini reply that thinks quietly for minutes is no longer reconnected every two
+  minutes.** Google says pauses between chunks are normal, that the connection should stay
+  open, and to allow 15 to 20 minutes between chunks
+  ([long decode](https://aistudio.google.com/docs/long-decode)). Daimon now keeps a silent
+  Gemini stream open for up to 15 minutes instead of 2. Every minute while the stream is
+  silent it checks the reply's status, so a reply that has ended is still answered within
+  about a minute. The turn's time limit is unchanged. Claude turns are unchanged.
+
+- **A server admin can let an agent used through agent chat use cloud computers for the
+  person.** Turn on [Cloud computers from agent chat](docs/compute.md#use-it-from-agent-chat)
+  for the workspace or one agent; it is off by default. The agent then starts a machine with no
+  card, runs commands and reads and writes files on it, and lists and stops the person's
+  machines. Each machine stops after its idle time; commands and file writes renew it. A
+  command there gets no message when it ends: the agent checks it again later. Any key of that
+  person that drives the session can do the same.
+
+- **A feature set for one agent or channel now also applies when that agent is used through
+  agent chat.** Before, the server checked those calls against the workspace setting only, so
+  an agent's own Off was missed and its own On was refused. A session started before this
+  release reads its agent and channel from its next message on. If Daimon can't find the
+  agent, the call is refused ([Features](docs/features.md)).
+
+- **A Gemini conversation no longer gets stuck when Gemini can't read its last reply.** Each
+  new message first reads the previous reply. When Gemini kept answering that read with a
+  server error, every later message in the conversation waited over six minutes and then
+  failed. Daimon now waits at most 90 seconds, then starts a fresh Gemini session that carries
+  the conversation so far. The new session doesn't have the unreadable reply, or Gemini's own
+  memory of tool results and workspace files from before (the same as any other session
+  replacement). Gemini being busy, a network failure, or a refusal of the read still fails
+  only that message and keeps the session.
+
+- **Switching a conversation or an agent to OpenAI or Gemini now behaves like changing models
+  within one provider.** A provider is on for a workspace as soon as the operator has set its
+  key, with no per-workspace step, and choosing a model for one conversation is on by default,
+  as is the connector relay (a provider receives what a connector returns). The "Working on
+  it" card names the model the reply actually runs on (an agent copied onto
+  Gemini no longer shows its Claude model), and effort per conversation now works on OpenAI
+  (low, medium, high). Refusing to switch the server's default agent also offers switching
+  just that conversation. A copy made to switch continues from a summary, and says so.
+  Word, PowerPoint, Excel and PDF skills, which run only on Anthropic, come as short open
+  equivalents on the other providers ([Providers](docs/providers.md)).
+
+- **Agents with tool rules, and channels that switch a built-in tool off, now answer on GPT
+  and Gemini instead of refusing the reply.** An `ask` rule, or one scoped to a channel, posts
+  Daimon's Approve card there as on Claude: only the asker answers, an approved call runs once,
+  and an unattended reply runs only what its rules allow. A built-in a channel or thread
+  switches off leaves that reply; one of the six file and shell tools off removes all six,
+  since the provider has one execution tool. A channel's own fixed deployment is still refused
+  there ([Providers](docs/providers.md#what-is-not-supported-yet)).
+
+- **Routines run on Gemini and OpenAI when their agent, channel or thread uses it.** A fire
+  runs as an unattended reply on that provider, under the same rules, spend gates and
+  metering as a chat reply, and posts like any routine, quiet runs included. As on Anthropic,
+  built-in tools stay off unless an operator turns on sandbox tools, whose opt-in now also
+  records the provider. OpenAI always runs its agents with a shell, so an OpenAI routine needs
+  sandbox tools. A routine that DMs its owner runs there too, as their private turn, and a
+  routine into a thread runs on the provider that thread kept. Its generated files are
+  delivered as on Anthropic, up to 24 MB each. Timers run on Gemini the same way; watch
+  reports still need Anthropic ([Routines](docs/routines.md)).
+
+- **An agent's connectors keep working after it switches to OpenAI or Gemini.** Daimon now
+  keeps and refreshes every connector sign-in itself, and gives an agent on Claude a fresh
+  short-lived copy for each reply, so a switch no longer needs a Reconnect. A connector added
+  with a pasted token now works on OpenAI and Gemini too. A sign-in made before this release
+  for an agent on Claude needs one last Reconnect before it works off Claude. An agent
+  with GitHub repositories can switch too: its `github` connector reaches them with
+  App tokens that end with the reply. The repository checkout and `gh` in the sandbox
+  still stay on Claude
+  ([Providers](docs/providers.md#what-daimon-adds-on-openai-and-gemini)).
+
+- **An agent's keys go with it to OpenAI and Gemini.** Its saved keys are a `.env` file
+  at `/workspace/.daimon/.env` in that provider's sandbox, so that provider receives them,
+  and the agent's guidance and default skills name that path and `/workspace/outputs`, where
+  that provider collects reply files. An admin can keep them on Claude with the `provider_keys_file` feature
+  ([Providers](docs/providers.md#what-daimon-adds-on-openai-and-gemini)).
+
+- **A long Gemini reply no longer fails when Gemini refuses to reconnect to it.** After two
+  minutes with no news, Daimon reconnects to the reply. Gemini can refuse that while the reply
+  is still running; Daimon now keeps checking the reply until it ends and answers from it,
+  within the usual time limit. A refusal on a reply's first connection still ends it, also
+  after Daimon restarts mid-reply, and the logs now say why Gemini refused.
+
+- **A finished command no longer sends a second message when the conversation already has its
+  result, or when its machine was stopped from the conversation.** Reading the result there,
+  or stopping the machine from the conversation it started in, withdraws a message nobody has
+  picked up yet. A stop from another conversation, an admin's emergency stop and an expiry
+  still send one message for each command ([Compute sessions](docs/compute.md#how-sessions-work)).
+
+- **Checking a background command now waits up to 40 seconds for it to end, so an agent does
+  not call the check in a loop.** `compute_task_status` returns as soon as the command ends,
+  and a command still running says to end the reply: the conversation gets a message when it
+  ends ([Compute sessions](docs/compute.md#how-sessions-work)).
+
+- **Cloud computers are now off until a server admin turns them on.** Before, every workspace
+  and agent got the computer tools once the operator set compute up. Turn on the `compute`
+  feature for a workspace or one agent, or set `DAIMON_FEATURES__COMPUTE=on` on every Daimon
+  service to keep them on where nothing else is set. Only the default changes: a value already
+  set keeps it, so an agent its owner turned on stays on and one turned off stays off. Only a
+  server admin can change any of them now. Turning it off leaves a running machine to be
+  stopped or to end at its idle time ([Compute sessions](docs/compute.md#turn-it-on)).
+
+- **A remote MCP server reached through the identity relay can name the person behind an
+  agent-chat turn.** Set `agent_chat_requester` on a `requester_meta` server: a turn a person
+  started from an MCP client signed in to the hub then carries their user id with
+  `requester_kind` `"agent_chat"`, with no place and no wake link. Turns started with an agent,
+  coding or CLI key name nobody. It is off by default, and a conversation started earlier gains
+  it from its second message ([MCP servers](docs/mcp-servers.md#servers-that-attribute-writes-to-the-requester)).
+
+- **Routines start on time when many sessions are live.** The scheduler's check for due routines
+  shared one loop with the GitHub token refresh, which takes about a second for each live
+  session. With hundreds of sessions a check came more than 15 minutes after the one before, and
+  routines due in between were skipped. The check now has its own loop. Two new log events,
+  `scheduler.housekeeping_completed` and `scheduler.github_sessions_completed`, show how long the
+  other work takes ([Operations](docs/operations.md)).
+
+- **An operator can give each cloud computer profile a description that the agent sees when it
+  lists profiles and starts a session.** Set `description` on a profile in
+  `DAIMON_COMPUTE__PROFILES`, up to 1,000 characters: what the image holds and how to use it
+  ([Compute sessions](docs/compute.md#turn-it-on)).
+
+- **A server admin can let the agent continue on a cloud computer after a background command
+  ends.** With `compute_wake_runs` on, for the team or one agent, the message about a finished
+  command in a thread may run the next command, write files and stop that machine. It never
+  starts or extends a machine. After `DAIMON_COMPUTE__WAKE_RUN_LIMIT` such messages in a row (20
+  by default) it waits until the owner runs a command or writes a file on that machine; a chat
+  message alone does not reset it. It is off by default
+  ([Compute sessions](docs/compute.md#how-sessions-work)).
+
+- **A command on a cloud computer that needs more than 40 seconds now continues, and the
+  conversation gets a message when it ends.** Before, the machine stopped it at 40 seconds.
+  A command that ends in time still returns its result in the reply
+  ([Compute sessions](docs/compute.md#how-sessions-work)).
+
+- **A cloud computer starts from its profile name alone.** `compute_launch_session` takes
+  `region` as optional; without it the machine starts in the profile's first region
+  ([Compute sessions](docs/compute.md#turn-it-on)).
+
+- **The owner lists and stops their cloud machines from any of their conversations.**
+  `compute_list_sessions` shows every live machine of theirs, and `here` marks the ones the
+  current conversation can use. Commands, files and more time still work only in the
+  conversation the machine started in ([Compute sessions](docs/compute.md#how-sessions-work)).
+
+- **Skip for the watch and cloud computer approval cards works with tool safety on.** There,
+  `watch_approval` or `compute_approval` set to Skip still showed the card, and a launch for
+  longer than the default showed a card instead of being refused. A turn nobody watches is
+  still refused them ([Compute sessions](docs/compute.md#how-sessions-work)).
+
+- **A server admin can turn off the approval card for starting and extending a cloud
+  computer.** The `compute_approval` setting, for the team or for one agent, defaults to Ask,
+  which keeps the card. With Skip, a launch or an extend runs without the card, but only for
+  the default lifetime: a longer one is refused. A turn nobody watches still cannot start or
+  extend a machine. Only a server admin can change it. It applies to Claude agents; OpenAI and
+  Gemini agents keep their own approval card
+  ([Compute sessions](docs/compute.md#how-sessions-work)).
+
+- **In a thread, Daimon reads a finished background command before it reports.** When a long
+  command on a cloud machine ends, the message Daimon posts in the thread can use the whole
+  saved result and the machine's files, not only the last 1,500 characters. For that message
+  it can only read that one machine: it cannot run commands, write files, or launch, extend
+  or stop a machine. Outside a thread it still reports the last 1,500 characters
+  ([Compute sessions](docs/compute.md#how-sessions-work)).
+
+- **A quiet routine run posts nothing.** Each run with a destination is told to end with one
+  `NO_POST:` line when its instructions say to stay silent or it already posted everything they
+  ask for. Daimon keeps the reason in the run's record and posts no closing note; files the run
+  made still go out, and a problem the run reported goes to admins on Issues. A routine that sends
+  to its owner's DM can end quietly too: an empty ending used to send "The reply finished without
+  text." ([Routines](docs/routines.md#delivery)).
+
+- **Gemini 4 Neon is a selectable Gemini model.** It joins Argon, Carbon and Hydrogen wherever a
+  model is picked, as a single attempt with no fallback to Flash. It costs $3 per million input
+  tokens and $15 per million output tokens. The default Gemini model stays Gemini 3.8 Flash.
+
+- **Model pickers list models by provider, then strongest family, newest version first.** Every
+  picker (web, Discord, Slack, MCP and the CLI) shares one order: providers in their usual order,
+  each provider's families ranked by the current output price of their newest model (Fable, Opus,
+  Sonnet, Haiku), and within a family the latest version first. The web app also groups the models
+  under a provider heading instead of tagging each row
+
+- **The web chat runs an agent kept to Discord roles for people who hold them.** A person
+  whose linked Discord account holds the role now finds the agent in the web chat picker; the
+  roles come from the member list Daimon keeps and are checked live with Discord before each
+  step. A server's own role list now applies there the same way, where it refused every web
+  turn before; its admin bypass is a live Discord admin's, not the web role's. Anyone else, or
+  a person with no linked account, still can't run it there
+  ([Admins](docs/admins.md#limit-an-agent-to-roles)).
+- **The agent page shows where an agent really answers and what its servers offer.** Web
+  chat is not listed for a channel's own agent, and turning it on there is refused. The
+  Channels panel drops its Direct messages switch, which never saved; direct messages stay
+  under Features. A server behind the signed-identity relay lists its tools. A server nobody
+  signs in to no longer says Not signed in, and the token field reads `*****` when a token
+  is set and Not set otherwise ([MCP servers](docs/mcp-servers.md)).
+- **A routine that posts to a narrow Discord room reads that room.** On Anthropic agents the run
+  had no way to show it ran inside the room, so its own `read_thread` and `read_channel` were
+  refused. The run now reads the room or thread it posts to, as a chat there does, and no other
+  narrow room. A routine with no destination, one that reports to a DM, or one on Slack or
+  Teams is unchanged
+  ([Rooms with outside people](docs/outside-people.md)).
+- **Rooms with outside people: a room that blocks a person by name is narrow, and your own DM can read it.**
+  With the feature on, a member overwrite that denies View Channel or Read Message History to an
+  internal person who cannot read the room makes it narrow. In your own DM chat or DM routine,
+  Daimon reads a narrow room when Discord lets you view it. After such a read, that turn posts
+  only to your own DM and saves no routine or timer
+  ([Rooms with outside people](docs/outside-people.md)).
+- **Breaking: compute sessions run on Google Cloud Run only, and their tools are named
+  `compute_*`.** The Fly provider is gone. `DAIMON_COMPUTE__PROVIDER`,
+  `DAIMON_COMPUTE__API_TOKEN`, `DAIMON_COMPUTE__ORG_SLUG` and a profile's `cpu_kind` are
+  ignored, so a deployment that still passes them starts with compute not set up. To use
+  compute, set `DAIMON_COMPUTE__CLOUD_RUN_PROJECT` and
+  `DAIMON_COMPUTE__CLOUD_RUN_SERVICE_ACCOUNT` and give every profile Google Cloud regions
+  ([Compute sessions](docs/compute.md)). Stop every Fly session before upgrading: Daimon no
+  longer deletes Fly machines. Each `fly_*` tool keeps its verb (`fly_run_bash` is
+  `compute_run_bash`), and `compute_launch_session` needs a `region`.
+  - Tool rules and an agent's own tool list follow the new names with no action. A rule
+    on an old name is copied to the new name and the old one is kept, so a deny set
+    before the upgrade holds while the old and new releases run side by side. Change a
+    compute tool rule only after the upgrade finishes: a change made under one name
+    during the upgrade is not copied to the other. A later release removes the old rules.
+  - The old names are not kept as second names. No session can be in use across this
+    upgrade, because the provider it ran on is gone. A call to an old name answers with
+    the tool's new name and runs nothing.
+- **A machine is reported ready only after it has started.** A new compute session stays
+  `launching` until its machine answers, and becomes `running` then. A command sent
+  earlier gets "The machine is still starting. Try again in about 10 seconds." and starts
+  nothing. A machine that cannot start, for example from a wrong image, is removed, and
+  its owner is told to ask an admin.
+- **A background command lost to a machine restart keeps its last output.** The message
+  that reports it, and `compute_task_result`, show what Daimon last saved.
+- **`compute_read_file` reads at most 512 KiB a call.** Its old 4 MiB maximum never fitted in
+  a session's answer, so the largest reads failed. Read a larger file in several calls.
+- **Production deploys no longer pin both backend switches off.** `DAIMON_TURN__CHANNEL_BACKENDS` and `DAIMON_TURN__AGENT_BACKENDS` come from each environment's own config, like any other setting.
+- **The web app no longer turns blank after a deploy, and works on phones in desktop mode.**
+  A tab left open or restored after a deploy asked for files of the previous build and
+  got the page back as HTML, which the browser refused; it now reloads into the new
+  build, and any other crash shows Reload instead of a white page. Phones no longer get
+  a second scroll into blank space below some pages, the sidebar shows from 768px so a
+  phone's desktop mode gets the desktop layout, and inputs no longer zoom iOS on focus.
+  A message is kept when it never reached the server or its new thread failed to start.
+  Thread actions show on touch screens, a workspace switch stops the old workspace's
+  chats, and an agent edit made just before leaving is saved.
+- **The check for outside people in a room reads Discord itself.** On Discord, who can
+  see each room now comes from the server's roles, channels and members as Discord
+  lists them, read about every 5 minutes, and no longer from the bot's own member
+  list, which could miss people and roles. A role, member, channel or owner change
+  makes the server's rooms unknown until the next read, about 2 seconds later. One
+  slow server no longer keeps the others' room facts from staying current.
+- **An agent can follow its whole GitHub org.** An admin of the org ticks "Also give
+  <agent> new repos added to <org>" on the agent's GitHub connect page. The agent then holds
+  every repo of the org, new ones within an hour, except repos taken off it.
+- **Agents can hold up to 50 skills.** The per-agent skill limit was 20, left over from
+  an earlier Managed Agents limit; the provider now accepts far more. 50 fits every
+  backend, including OpenAI agents whose skills are pinned by content digest: a list
+  too long for one metadata value is now stored in a compact form that holds them
+  all, and agents already stored keep reading as before. The web inspector, chat and
+  MCP skill tools, channel skills and platform skills use the new limit; an
+  over-limit list the provider still refuses is reported as before.
+- **Saving the GitHub connect page picks a working repo only for an agent's first repos.**
+  An agent that has repos keeps its working repo, or none, unless the person chooses one.
+
+- **Admins can see what is failing in a workspace.** Failed answers, direct messages,
+  routines, deliveries, watches, follow-ups and bridged-tool calls are recorded once per
+  issue, without message content, and read on the Overview and Issues pages. An issue can
+  be resolved (it returns if it happens again) or muted. `daimon issues` reads and changes
+  them from the command line, and operator tokens with the new `issues:read` scope read
+  them over MCP. Admins and owners can also resolve, mute or reopen an issue by asking
+  in chat, from the command line (`--account` names who did it) and from the issue page,
+  which has a link to copy. `DAIMON_OPS_EVENTS__RETENTION_DAYS` sets how long they are kept (30 days).
+
+- **A routine's owner hears about a failed run, and runs can say what blocked them.**
+  On Discord, Slack and Teams, the first failure of a routine after a success reaches
+  its owner by direct message, written by the routine's own agent from fixed facts (the routine,
+  why it stopped, when, the next run and how to pause it), never the raw error. When
+  the agent cannot run, the owner gets a plain error card. The channel notice is
+  unchanged. A run that could not do its task calls `report_routine_problem` with a
+  category and one short line, which admins see on the Issues page, and failed calls
+  to an attached MCP server are recorded there per server.
+
 - **Work aimed at a Discord channel Daimon cannot reach can wait instead of failing.**
   With the new Wait for bot access setting on (off by default, set per
   workspace by a server admin), a routine, timer or watch whose channel Daimon

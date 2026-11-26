@@ -2040,8 +2040,8 @@ async def test_fire_stamps_a_sealed_destinations_seal_on_the_routine_session(
 
     assert len(calls) == 1, "the routine runs"
     assert calls[0]["origin_place"] == RoutineOrigin(
-        "room", "555000555", frozenset({"room"}), f"routine:{row.id}"
-    ), "the session carries the destination and the seal over it"
+        "room", "555000555", frozenset({"room"}), f"routine:{row.id}", reads_inside=True
+    ), "the session carries the destination and the seal over it, and the run reads inside it"
 
 
 async def test_fire_checks_the_agent_pin_before_the_channel_budget(
@@ -2815,6 +2815,8 @@ async def test_run_loops_keeps_ticking_while_a_usage_pass_is_in_flight() -> None
     async with asyncio.timeout(5):
         await _run_loops(
             tick=tick,
+            housekeeping=unittest.mock.AsyncMock(),
+            github_sessions=unittest.mock.AsyncMock(),
             usage_sweep=endless_pass,
             compute_sweep=unittest.mock.AsyncMock(),
             compute_task_poll=unittest.mock.AsyncMock(),
@@ -2846,6 +2848,8 @@ async def test_run_loops_repeats_usage_passes_while_a_tick_is_in_flight() -> Non
     async with asyncio.timeout(5):
         await _run_loops(
             tick=slow_tick,
+            housekeeping=unittest.mock.AsyncMock(),
+            github_sessions=unittest.mock.AsyncMock(),
             usage_sweep=usage_pass,
             compute_sweep=unittest.mock.AsyncMock(),
             compute_task_poll=unittest.mock.AsyncMock(),
@@ -2871,6 +2875,8 @@ async def test_run_loops_ends_when_a_usage_pass_crashes() -> None:
         with pytest.raises(ExceptionGroup) as raised:
             await _run_loops(
                 tick=tick,
+                housekeeping=unittest.mock.AsyncMock(),
+                github_sessions=unittest.mock.AsyncMock(),
                 usage_sweep=crashing_pass,
                 compute_sweep=unittest.mock.AsyncMock(),
                 compute_task_poll=unittest.mock.AsyncMock(),
@@ -2903,6 +2909,8 @@ async def test_run_loops_ends_when_a_tick_crashes() -> None:
         with pytest.raises(ExceptionGroup) as raised:
             await _run_loops(
                 tick=crashing_tick,
+                housekeeping=unittest.mock.AsyncMock(),
+                github_sessions=unittest.mock.AsyncMock(),
                 usage_sweep=endless_pass,
                 compute_sweep=unittest.mock.AsyncMock(),
                 compute_task_poll=unittest.mock.AsyncMock(),
@@ -2915,6 +2923,52 @@ async def test_run_loops_ends_when_a_tick_crashes() -> None:
         "the tick's error propagates out of the loops"
     )
     assert pass_cancelled.is_set(), "the usage pass in flight is cancelled"
+
+
+@pytest.mark.parametrize("slow", ["housekeeping", "github_sessions"])
+async def test_run_loops_keeps_ticking_while_a_background_pass_is_in_flight(slow: str) -> None:
+    """Slow housekeeping or GitHub session upkeep never holds up routine claims or the
+    other, and a stop lets the pass in flight finish."""
+    stop = asyncio.Event()
+    slow_started = asyncio.Event()
+    ticks = 0
+    other_passes = 0
+    finished = False
+
+    async def tick() -> None:
+        nonlocal ticks
+        await slow_started.wait()
+        ticks += 1
+        if ticks >= 3 and other_passes >= 3:
+            stop.set()
+
+    async def slow_pass() -> None:
+        nonlocal finished
+        slow_started.set()
+        await stop.wait()
+        await asyncio.sleep(0.02)
+        finished = True
+
+    async def other_pass() -> None:
+        nonlocal other_passes
+        other_passes += 1
+
+    async with asyncio.timeout(5):
+        await _run_loops(
+            tick=tick,
+            housekeeping=slow_pass if slow == "housekeeping" else other_pass,
+            github_sessions=slow_pass if slow == "github_sessions" else other_pass,
+            usage_sweep=unittest.mock.AsyncMock(),
+            compute_sweep=unittest.mock.AsyncMock(),
+            compute_task_poll=unittest.mock.AsyncMock(),
+            privacy_sweep=unittest.mock.AsyncMock(),
+            interval_s=0.01,
+            stop_event=stop,
+        )
+
+    assert ticks >= 3
+    assert other_passes >= 3
+    assert finished, "a pass in flight finishes before the loops end"
 
 
 async def test_run_loops_keeps_ticking_while_privacy_upstream_is_slow() -> None:
@@ -2942,6 +2996,8 @@ async def test_run_loops_keeps_ticking_while_privacy_upstream_is_slow() -> None:
     async with asyncio.timeout(5):
         await _run_loops(
             tick=tick,
+            housekeeping=unittest.mock.AsyncMock(),
+            github_sessions=unittest.mock.AsyncMock(),
             usage_sweep=unittest.mock.AsyncMock(),
             compute_sweep=unittest.mock.AsyncMock(),
             compute_task_poll=unittest.mock.AsyncMock(),
@@ -3038,6 +3094,8 @@ async def _fire_with_fake_turn(
     tenant_dms: bool = True,
     ran_agent_name: str = "daimon",
     fires: int = 1,
+    final: str = "Weekly summary: all green.",
+    reports_problem: bool = False,
 ) -> tuple[RoutineRow, dict[str, object]]:
     from daimon.core.stores.direct_messages import set_dm_enabled
     from daimon.core.turn.state import ToolUseBlock, TurnState
@@ -3087,10 +3145,22 @@ async def _fire_with_fake_turn(
                     status="complete",
                 )
             )
+        if reports_problem:
+            blocks.append(
+                ToolUseBlock(
+                    kind="tool_use",
+                    id="tu_problem",
+                    type="agent.mcp_tool_use",
+                    name="report_routine_problem",
+                    input={"category": "source_unavailable", "note": "x"},
+                    mcp_server_name="daimon-mcp",
+                    status="complete",
+                )
+            )
         on_state = kwargs["on_state"]
         assert callable(on_state)
         on_state(TurnState(content=list(blocks)))
-        return "Weekly summary: all green."
+        return final
 
     settings = _make_test_settings(monkeypatch)
     if dm_mode is not None:
@@ -3169,6 +3239,28 @@ async def test_fire_with_destination_queues_the_tail_when_the_agent_did_not_post
     assert '"schedule": "0 9 * * 1"' in trigger
     assert trigger.endswith("</turn_controls>\nsummarize the week")
     assert after.delivery_status == "pending"
+
+
+@pytest.mark.parametrize("reports_problem", [False, True], ids=["quiet", "reported_a_problem"])
+async def test_fire_with_destination_queues_no_text_for_a_quiet_run(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    reports_problem: bool,
+) -> None:
+    """Admins see a reported problem on Issues; the destination stays quiet."""
+    after, _seen = await _fire_with_fake_turn(
+        db_session,
+        db_session_factory,
+        monkeypatch,
+        destination=("channel", "111222333"),
+        agent_posts_to=None,
+        final="I checked.\n\nNO_POST: nothing new",
+        reports_problem=reports_problem,
+    )
+
+    assert not after.delivery_payload, "the outbox settles it as no_result"
+    assert after.last_result_tail == "nothing new", "the record keeps the reason"
 
 
 async def test_fire_with_destination_skips_the_fallback_when_the_agent_posted(
@@ -3532,6 +3624,8 @@ async def test_run_loops_without_a_usage_sweep_still_runs_privacy_deletes() -> N
     async with asyncio.timeout(5):
         await _run_loops(
             tick=tick,
+            housekeeping=unittest.mock.AsyncMock(),
+            github_sessions=unittest.mock.AsyncMock(),
             usage_sweep=None,
             compute_sweep=unittest.mock.AsyncMock(),
             compute_task_poll=unittest.mock.AsyncMock(),
@@ -4211,7 +4305,8 @@ async def test_selfhosted_routine_refuses_before_any_anthropic_access(
         cron_expr="* * * * *",
         timezone_="UTC",
         trigger_message="private scheduled content",
-        channel_id="origin",
+        # The saved channel is the destination's own, where admission reads the backend.
+        channel_id="dest" if at_destination else "origin",
         destination_kind="channel",
         destination_id="dest",
     )
@@ -4229,18 +4324,23 @@ async def test_selfhosted_routine_refuses_before_any_anthropic_access(
     assert after.last_error == "selfhosted_routines_unsupported"
 
 
+@pytest.mark.parametrize("quiet", [False, True])
 @pytest.mark.parametrize("pinned", ["channel", "agent"])
-async def test_routine_on_a_gemini_channel_or_agent_is_refused_not_run_on_claude(
+async def test_routine_on_a_gemini_channel_or_agent_runs_on_gemini_not_claude(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     pinned: str,
+    quiet: bool,
 ) -> None:
-    """A routine whose channel or agent is on Gemini records a plain refusal before any
-    Anthropic access, where it used to run on Claude unnoticed."""
+    """A routine whose channel or agent is on Gemini runs as an unattended provider turn,
+    with no Anthropic access, and its reply is delivered (or kept quiet) as on Claude."""
     from typing import cast
 
+    from daimon.core.anthropic_guard import without_anthropic
     from daimon.core.channel_backend import channel_ref, record_born_backend, set_channel_backend
+    from daimon.core.provider_routine import ProviderRoutineRun
+    from daimon.core.turn.state import TurnState
     from mux.contracts.config import BackendConfig
 
     class NoAnthropic:
@@ -4248,10 +4348,17 @@ async def test_routine_on_a_gemini_channel_or_agent_is_refused_not_run_on_claude
             raise AssertionError(f"native routine accessed Anthropic.{name}")
 
     tenant = await make_tenant(db_session)
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("10.00"),
+        reason="trial_credit",
+        idempotency_key=f"trial:{tenant.id}",
+    )
     if pinned == "channel":
         await set_channel_backend(
             db_session,
-            channel_ref(tenant.id, tenant.platform, "origin"),
+            channel_ref(tenant.id, tenant.platform, "4200"),
             BackendConfig(
                 backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash"
             ),
@@ -4274,24 +4381,49 @@ async def test_routine_on_a_gemini_channel_or_agent_is_refused_not_run_on_claude
         cron_expr="* * * * *",
         timezone_="UTC",
         trigger_message="scheduled content",
-        channel_id="origin",
+        channel_id="4200",
         destination_kind="channel",
-        destination_id="origin",
+        destination_id="4200",
     )
     await db_session.commit()
+    seen: dict[str, object] = {}
+
+    async def fake_admit(deps: object, routine: RoutineRow, **kwargs: object) -> object:
+        seen["admitted"] = routine.agent_name
+        return SimpleNamespace(agent=SimpleNamespace(id="agt_native", name="test", metadata={}))
+
+    async def fake_run(deps: object, admission: object, **kwargs: object) -> ProviderRoutineRun:
+        seen["prompt"] = kwargs["prompt"]
+        text = "NO_POST: nothing new" if quiet else "Weekly summary: all green."
+        return ProviderRoutineRun(text, TurnState(content=[]))
+
+    monkeypatch.setattr("daimon.adapters.scheduler.main.admit_provider_routine", fake_admit)
+    monkeypatch.setattr("daimon.adapters.scheduler.main.run_provider_routine", fake_run)
     fire = await _build_fire(
         client=cast(AsyncAnthropic, NoAnthropic()),
         sm=db_session_factory,
         settings=_make_test_settings(monkeypatch),
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
+        dm_turn_deps=cast("Any", SimpleNamespace()),
     )
-    await fire(row)
+    with without_anthropic():
+        await fire(row)
     after = await get_routine(db_session, row.id, tenant_id=tenant.id)
     assert after is not None
-    assert after.last_error is not None and "set to Google" in after.last_error, (
-        "the refusal should name the provider the routine is set to"
+    assert after.last_error is None, "a Gemini routine runs instead of being refused"
+    assert seen["admitted"] == "test", "the fire is admitted for the routine's own agent"
+    prompt = str(seen["prompt"])
+    assert "scheduled routine run" in prompt and prompt.endswith("scheduled content"), (
+        "the provider turn opens with the same routine controls as a Claude fire"
     )
+    if quiet:
+        assert after.delivery_payload == "" and after.last_result_tail == "nothing new", (
+            "a quiet run posts nothing and keeps its reason"
+        )
+    else:
+        assert after.delivery_status == "pending", "Daimon posts the reply the agent did not"
+        assert after.delivery_payload == "Weekly summary: all green."
 
 
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])

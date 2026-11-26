@@ -311,6 +311,8 @@ class WebTurns:
                 channel_id=place,
                 thread_id=key,
                 role=principal.role,
+                role_ids=principal.role_ids,
+                verified_membership=principal.verified_membership,
                 now=datetime.now(UTC),
                 requester_org=principal.org,
                 requester_home_id=principal.home_id,
@@ -551,6 +553,9 @@ class WebTurns:
                 post=post,
                 on_skip=skip,
                 max_bytes=file_uploads.MAX_UPLOAD_BYTES,
+                tenant_id=tenant_id,
+                platform="web",
+                sessions=self.sessionmaker,
             )
         except (anthropic.APIError, ProviderError, OutputPostingUnavailable) as err:
             # Files missed now stay listed; the session's next tool turn sweeps them.

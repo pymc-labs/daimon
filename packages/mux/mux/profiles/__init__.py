@@ -102,7 +102,8 @@ def represented_execution_tools(
     """Map supported filesystem capabilities through the profile's execution tool.
 
     MCP remains a separate capability. Unknown tools and permission prompts
-    cannot acquire an execution mapping by resembling a known tool name.
+    cannot acquire an execution mapping by resembling a known tool name. Web tools
+    map alone when the source has none of the filesystem tools.
     """
     if profile.profile_id not in (INLINE_REUSE.profile_id, PERSISTENT_WORKSPACE.profile_id):
         raise InvalidConfig("profile has no source execution mapping")
@@ -113,15 +114,17 @@ def represented_execution_tools(
         else {"web_search": "web_search"}
     )
     actual = {tool.name for tool in tools}
+    runs = names.issubset(actual)
     if (
-        len(tools) != len(actual)
-        or not names.issubset(actual)
+        not tools
+        or len(tools) != len(actual)
+        or not (runs or actual.isdisjoint(names))
         or not actual.issubset(names | web_tools.keys())
         or any(tool.kind != "builtin" or tool.permission != "auto" for tool in tools)
     ):
         raise InvalidConfig("source execution tools are not representable")
     return (
-        ToolSpec(name=profile.execution_tool, kind="builtin"),
+        *((ToolSpec(name=profile.execution_tool, kind="builtin"),) if runs else ()),
         *(
             ToolSpec(name=target, kind="builtin")
             for source, target in web_tools.items()

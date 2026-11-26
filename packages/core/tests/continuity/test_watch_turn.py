@@ -774,10 +774,21 @@ async def test_watch_report_turn_also_requires_explicit_unattended():
         )
 
 
-async def test_dm_watch_turn_runs_under_watch_posture_not_routine_posture(monkeypatch):
+@pytest.mark.parametrize(
+    ("final", "may_end_empty", "answer"),
+    [
+        ("report", False, "report"),
+        ("", False, "The reply finished without text."),
+        ("", True, ""),
+    ],
+)
+async def test_dm_watch_turn_runs_under_watch_posture_not_routine_posture(
+    monkeypatch, final: str, may_end_empty: bool, answer: str
+):
     """The DM report turn hands its wake row to the shared turn, unattended: that row
     selects watch capabilities and `watch_posture` there (no daimon-mcp, no sandbox, no
-    built-ins, reads only), never the DM routine's session authority."""
+    built-ins, reads only), never the DM routine's session authority. A turn with no text
+    gets a placeholder, except a DM routine's, which delivers nothing."""
     from contextlib import asynccontextmanager
 
     from daimon.core import direct_messages
@@ -803,7 +814,7 @@ async def test_dm_watch_turn_runs_under_watch_posture_not_routine_posture(monkey
     monkeypatch.setattr(direct_messages, "run_prepared_turn", run)
     monkeypatch.setattr(direct_messages, "turn_origin", origin)
     monkeypatch.setattr(direct_messages, "render_turn_origin", lambda *_a, **_k: "controls")
-    monkeypatch.setattr(direct_messages, "extract_final_response", lambda _content: "report")
+    monkeypatch.setattr(direct_messages, "extract_final_response", lambda _content: final)
     prepared = MagicMock()
     prepared.admission.hold = None
     done = await _run_admitted_dm_turn(
@@ -820,8 +831,9 @@ async def test_dm_watch_turn_runs_under_watch_posture_not_routine_posture(monkey
         on_sealed=AsyncMock(),
         origin="routine",
         watch_row=row,
+        may_end_empty=may_end_empty,
     )
-    assert (done.text, done.session_id) == ("report", "sess_dm"), (
+    assert (done.text, done.session_id) == (answer, "sess_dm"), (
         "the turn should return its reply and session"
     )
     kwargs = run.await_args.kwargs

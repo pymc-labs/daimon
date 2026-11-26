@@ -38,10 +38,13 @@ async def create_origin(
     platform_message_id: str | None = None,
     helper_of: uuid.UUID | None = None,
     helper_key: str | None = None,
+    own_dm_reach: bool = False,
+    origin_id: uuid.UUID | None = None,
 ) -> TurnOriginRow:
+    """``origin_id`` is given only for a wake's turn (`daimon.core.turn_origin.wake_turn`)."""
     await session.execute(delete(TurnOrigin).where(TurnOrigin.expires_at <= now))
     origin = TurnOrigin(
-        id=uuid.uuid4(),
+        id=origin_id or uuid.uuid4(),
         is_setup=is_setup,
         attended=attended,
         chat_session_id=chat_session_id,
@@ -63,6 +66,7 @@ async def create_origin(
         platform_message_id=platform_message_id,
         helper_of=helper_of,
         helper_key=helper_key,
+        own_dm_reach=own_dm_reach,
     )
     session.add(origin)
     await session.flush()
@@ -249,6 +253,17 @@ async def bind_origin_session(
     if human_invocation is not None:
         values["human_invocation"] = human_invocation
     await session.execute(update(TurnOrigin).where(TurnOrigin.id == origin_id).values(**values))
+
+
+async def mark_reach_read(session: AsyncSession, *, origin_id: uuid.UUID) -> bool:
+    """Record that this turn read a limited room through own-DM reach.
+
+    False when the origin is gone. The mark is never cleared while the origin lives.
+    """
+    result = await session.execute(
+        update(TurnOrigin).where(TurnOrigin.id == origin_id).values(reach_read=True)
+    )
+    return cast(CursorResult[Any], result).rowcount == 1
 
 
 async def delete_origin(

@@ -204,8 +204,8 @@ def _make_app(
             compute=ComputeSettings(
                 enabled=True,
                 deployment_id="search-test",
-                api_token=SecretStr("fly-test"),
-                org_slug="search-test",
+                cloud_run_project="search-test",
+                cloud_run_service_account="session@search-test.iam.gserviceaccount.com",
             ),
             microsoft_accounts=MicrosoftAccountsSettings(
                 client_id="app-1",

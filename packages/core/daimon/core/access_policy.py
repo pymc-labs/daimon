@@ -277,6 +277,22 @@ def attach_automatic_rules(
     )
 
 
+def with_public_thread_room(
+    policy: TenantAccessPolicy, *, channel_id: str, thread_id: str | None
+) -> TenantAccessPolicy:
+    """The policy with a public thread that has no room fact of its own judged by its parent.
+
+    Only for a thread the platform says is public: the next reconcile writes its parent's
+    rule for it. A parent with no fact leaves the thread unknown, so nothing changes then.
+    """
+    rules = policy.automatic_channel_rules
+    if thread_id is None or thread_id in rules or channel_id not in rules:
+        return policy
+    return policy.model_copy(
+        update={"automatic_channel_rules": {**rules, thread_id: rules[channel_id]}}
+    )
+
+
 def agent_invoker_roles(
     policy: TenantAccessPolicy, names: tuple[str | None, ...]
 ) -> tuple[tuple[str, ...], ...]:
@@ -324,6 +340,10 @@ def is_invoker_allowed(
 DM_SCOPE_PREFIX = "dm:"
 # An unattended channel turn's queue scope; the real channel is the origin's parent.
 CHANNEL_SCOPE_PREFIX = "ch:"
+# The conversation of a cloud computer an agent-chat session uses, after its credential's
+# grant. Only compute reads it (`compute_sessions.ComputePlace`): it is no channel, thread
+# or DM, and no origin, seal or audience check ever sees it.
+AGENT_CHAT_SCOPE_PREFIX = "agentchat:"
 
 
 def place_thread_id(thread_id: str | None) -> str | None:

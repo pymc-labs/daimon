@@ -1660,14 +1660,17 @@ async def pause_unlisted(
     lease: str,
     *,
     reason: Literal["tool_unlisted", "source_changed", "credential_missing"] = "tool_unlisted",
-) -> None:
+) -> bool:
     """The operator delisted the tool, its server changed what the owner approved, or the
-    owner's own key for it is gone: pause and tell the owner, never retry."""
+    owner's own key for it is gone: pause and tell the owner, never retry.
+
+    True when it paused the watch, False when the lease was no longer this poll's."""
     await session.execute(text("SELECT pg_advisory_xact_lock(813749201)"))
     row = await session.scalar(select(Watch).where(Watch.id == watch_id).with_for_update())
     if row is None or row.lease_owner != lease:
-        return
+        return False
     await pause_watch(session, watch_id, reason=reason)
+    return True
 
 
 async def finish_poll(
@@ -1707,6 +1710,15 @@ async def hold_to_floor(
 DailyCap = Literal["watch", "owner"]
 
 
+@dataclass(frozen=True)
+class PollFailure:
+    """What a failed poll did to its watch, for the caller to log (stores stay log-free)."""
+
+    tenant_id: uuid.UUID
+    consecutive_errors: int
+    paused_reason: Literal["access_revoked", "failed"] | None
+
+
 async def poll_failed(
     session: AsyncSession,
     watch_id: uuid.UUID,
@@ -1716,19 +1728,21 @@ async def poll_failed(
     now: datetime,
     capped: bool = False,
     daily_cap: DailyCap | None = None,
-) -> None:
-    """Back off on errors, stop a watch that kept failing, note a reached daily cap."""
+) -> PollFailure | None:
+    """Back off on errors, stop a watch that kept failing, note a reached daily cap.
+
+    None when the lease was no longer this poll's."""
     # Invalid capabilities never contend on the global firing lock.
     current = await get_watch(session, watch_id)
     if current is None or current.lease_owner != lease:
-        return
+        return None
     await session.execute(text("SELECT pg_advisory_xact_lock(813749201)"))
     row = await session.scalar(select(Watch).where(Watch.id == watch_id).with_for_update())
     if row is None or row.lease_owner != lease:
-        return
+        return None
     if revoked:
         await pause_watch(session, watch_id, reason="access_revoked")
-        return
+        return PollFailure(row.tenant_id, row.consecutive_errors, "access_revoked")
     interval = int(row.source_state.get("interval", 60))
     if capped:
         # A capped poll read its source, so it ends any run of errors.
@@ -1776,10 +1790,11 @@ async def poll_failed(
         failing_since = datetime.fromisoformat(str(row.source_state["failing_since"]))
         if is_failed(row.consecutive_errors, failing_since=failing_since, now=now):
             await pause_watch(session, watch_id, reason="failed")
-            return
+            return PollFailure(row.tenant_id, row.consecutive_errors, "failed")
     row.lease_owner = None
     row.lease_expires_at = None
     await session.flush()
+    return PollFailure(row.tenant_id, row.consecutive_errors, None)
 
 
 FAIL_AFTER_ERRORS = 5

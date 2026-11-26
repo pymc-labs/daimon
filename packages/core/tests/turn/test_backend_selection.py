@@ -1091,6 +1091,39 @@ async def test_a_held_revision_runs_only_for_the_agent_it_was_made_for(selector_
 
 
 @pytest.mark.parametrize("initial_backend", [None], indirect=True)
+async def test_routing_passes_over_a_revision_kept_for_another_agent_as_admission_does(
+    selector_host,
+):
+    """A routine of another agent posting into a thread is routed where it is admitted."""
+    if isinstance(selector_host.store, MemoryStateStore):
+        pytest.skip("routing reads the bindings Postgres holds")
+    host = selector_host
+    service, agent, actor = preference_for(host)
+    await service.set_backend(agent, "openai", 0, actor)
+    first = await host.prepare("thread")
+    assert first.session_ref is not None and first.session_ref.provider == "openai", first
+
+    async def routed(agent_id: uuid.UUID) -> str:
+        async with host.sessions() as db:
+            return await channel_backend.effective_thread_backend(
+                db,
+                tenant_id=TENANT,
+                platform="slack",
+                channel_id="channel",
+                thread_id="thread",
+                caller_id="caller",
+                agent_id=agent_id,
+            )
+
+    assert await routed(agent.agent_id) == "openai", "the agent's own thread keeps OpenAI"
+    other = await _hand_thread_to_other_agent(host)
+    handed = await host.admit("thread")
+    assert handed.backend_revision is None, "admission selects afresh for the other agent"
+    other_id = derive_agent_uuid(tenant_id=TENANT, ma_agent_id=other.id)
+    assert await routed(other_id) == "anthropic", "routing agrees: not the first agent's OpenAI"
+
+
+@pytest.mark.parametrize("initial_backend", [None], indirect=True)
 async def test_a_shared_thread_handed_to_another_agent_leaves_the_first_agents_revision(
     selector_host,
 ):

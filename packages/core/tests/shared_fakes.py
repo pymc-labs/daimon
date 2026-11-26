@@ -13,7 +13,8 @@ from typing import Self
 import httpx
 import pytest
 from daimon.core._models import TaskContinuation
-from daimon.core.stores.domain import TaskContinuationRow
+from daimon.core.stores.domain import Role, TaskContinuationRow, TurnOriginRow
+from daimon.core.turn_origin import turn_origin
 from daimon.core.wizard.state import WizardState, WizardStatus
 from mux.contracts.events import Event, NativeProvenance
 from sqlalchemy import select, text
@@ -123,6 +124,27 @@ async def pending_wakes(db, *, tenant_id, platform, thread_id):
         )
     ).scalars()
     return [TaskContinuationRow.model_validate(row) for row in rows]
+
+
+def wake_origin(
+    sessionmaker, row: TaskContinuationRow, account_id, **fields
+) -> contextlib.AbstractAsyncContextManager[TurnOriginRow]:
+    """The origin an adapter opens for the turn that wake `row` starts."""
+    return turn_origin(
+        sessionmaker,
+        tenant_id=row.tenant_id,
+        account_id=account_id,
+        platform=row.platform,
+        parent_channel_id=row.parent_channel_id,
+        thread_id=row.thread_id,
+        responder_ma_agent_id=row.target_ma_agent_id,
+        responder_name=row.target_name,
+        role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
+        attended=False,
+        **fields,
+    )
 
 
 def terminal(provider: str, outcome: str) -> Event:

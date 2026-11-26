@@ -344,6 +344,17 @@ def test_execution_mapping_requires_complete_automatic_authority():
             )
 
 
+def test_web_tools_map_without_filesystem_tools():
+    from mux.profiles import represented_execution_tools
+
+    search = (ToolSpec(name="web_search", kind="builtin"),)
+    assert represented_execution_tools(INLINE_REUSE, search) == (
+        ToolSpec(name="google_search", kind="builtin"),
+    )
+    with pytest.raises(InvalidConfig):
+        represented_execution_tools(INLINE_REUSE, ())
+
+
 @pytest.mark.parametrize("disabled", ["bash", "write", "edit"])
 def test_native_disabled_capability_cannot_acquire_general_execution(disabled):
     from mux.drivers.anthropic.schemas import AgentToolsConfig
@@ -407,7 +418,12 @@ def test_selectable_models_list_the_default_first_and_never_pro() -> None:
         "gemini-3.8-flash",
         *OPT_IN_MODELS,
     )
-    assert OPT_IN_MODELS == ("gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen")
+    assert OPT_IN_MODELS == (
+        "gemini-4-argon",
+        "gemini-4-carbon",
+        "gemini-4-hydrogen",
+        "gemini-4-neon",
+    )
     assert selectable_models("openai") == (
         "gpt-6-luna",
         "gpt-6-astra",

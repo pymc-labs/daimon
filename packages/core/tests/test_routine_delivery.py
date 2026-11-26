@@ -18,6 +18,8 @@ from daimon.core.config import Settings, WebSettings
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
     DeliveryTarget,
+    DirectPost,
+    RunText,
     agent_posted_to,
     clear_creator,
     delivery_refusal,
@@ -29,6 +31,7 @@ from daimon.core.routine_delivery import (
     render_fallback_post,
     render_routine_controls,
     resolve_routine_identity,
+    split_run_text,
     teams_thread_id,
 )
 from daimon.core.stores.access_policy import set_access_policy
@@ -209,6 +212,51 @@ def test_a_slack_thread_destination_needs_a_post_into_that_thread() -> None:
     assert not agent_posted_to(TurnState(content=[_post_block("C1")]), row), (
         "a top-level post in the channel is not the thread"
     )
+
+
+@pytest.mark.parametrize("direct_post", ["allowed", "protected", "unverified"])
+@pytest.mark.parametrize(
+    ("platform", "kind", "destination_id"),
+    [
+        ("discord", "channel", "1"),
+        ("discord", "thread", "1"),
+        ("discord", "dm", "1"),
+        ("slack", "channel", "C1"),
+        ("teams", "channel", "19:abc@thread.tacv2"),
+    ],
+)
+def test_every_destination_says_how_a_quiet_run_ends(
+    platform: str, kind: str, destination_id: str, direct_post: DirectPost
+) -> None:
+    """`test_split_run_text` proves the marker, `test_an_empty_tail_is_not_posted` no text."""
+    text = render_routine_controls(
+        _row(destination_kind=kind, destination_id=destination_id),
+        platform=platform,
+        direct_post=direct_post,
+    )
+    assert "must be one line: NO_POST: and a short reason" in text
+    assert "Whatever your instructions ask you to report" in text, "a report is never dropped"
+    assert "say what stopped you" in text, "a failed check is never silent"
+
+
+@pytest.mark.parametrize(
+    ("text", "post", "record"),
+    [
+        ("Report.\nAll green.", "Report.\nAll green.", "Report.\nAll green."),
+        ("NO_POST: no new leads", "", "no new leads"),
+        ("  **NO_POST:** no new leads", "", "no new leads"),
+        ("`NO_POST: no new leads`", "", "no new leads"),
+        ("NO_POST", "", "Nothing to post."),
+        ("I read the inbox.\n\nNO_POST: no new leads\n", "", "no new leads"),
+        ("NO_POST: no new leads\nI checked twice.", "", "no new leads"),
+        ("", "", ""),
+        ("The NO_POST: rule changed.", *("The NO_POST: rule changed.",) * 2),
+        ("NO_POST handling changed.", *("NO_POST handling changed.",) * 2),
+        ("NO_POSTERS: none", *("NO_POSTERS: none",) * 2),
+    ],
+)
+def test_split_run_text(text: str, post: str, record: str) -> None:
+    assert split_run_text(text) == RunText(post=post, record=record)
 
 
 def test_protected_controls_do_not_invite_a_post() -> None:
@@ -864,6 +912,36 @@ async def test_delivery_failure_never_logs_signed_upload_url(db_session, db_sess
     assert sentinel not in str(logs)
     failures = [entry for entry in logs if entry["event"] == "routine.delivery_failed"]
     assert failures[0]["error_type"] == "RuntimeError"
+
+
+@pytest.mark.parametrize(
+    ("note", "event"),
+    [
+        ("tenant_archived", "routine.delivery_skipped"),
+        ("post_failed", "routine.delivery_failed"),
+        ("access_policy_unreadable", "routine.delivery_failed"),
+    ],
+)
+async def test_deliberate_skip_is_not_a_delivery_failure(
+    db_session, db_session_factory, note, event
+):
+    from structlog.testing import capture_logs
+
+    row = await _routine(db_session)
+    await record_result(db_session, row.id, tail="Report", error=None, delivery="pending")
+    await db_session.commit()
+
+    async def post(claimed):
+        return DeliveryOutcome(status="skipped", note=note)
+
+    with capture_logs() as logs:
+        await poll_deliveries_once(db_session_factory, platform="discord", post=post, now=_NOW)
+    seen = {
+        e["event"]
+        for e in logs
+        if e["event"] in {"routine.delivery_failed", "routine.delivery_skipped"}
+    }
+    assert seen == {event}
 
 
 def test_lapsed_role_card_names_the_routine_and_how_to_resume() -> None:

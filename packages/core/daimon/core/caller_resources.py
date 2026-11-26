@@ -13,3 +13,5 @@ CALLER_RESOURCES_ID: Final = "caller-resources"
 CALLER_VAULT_PREFIX: Final = "caller-mcp:"
 #: A GitHub App session's repository vault: `app-session-vault:<tenant>:<agent>`.
 APP_SESSION_VAULT_PREFIX: Final = "app-session-vault:"
+#: A granted repository's App token, minted per session: `app-repo:<tenant>:<agent>:…`.
+APP_REPO_CREDENTIAL_PREFIX: Final = "app-repo:"
