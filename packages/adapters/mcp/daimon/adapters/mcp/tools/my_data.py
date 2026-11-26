@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -16,6 +16,7 @@ from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._card import require_card
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.agent_coding_keys import revoke_coding_key
+from daimon.adapters.mcp.tools.data_connect import disconnect_data_source, my_data_accounts
 from daimon.core import profile
 from daimon.core.errors import DaimonError
 from fastmcp import Context, FastMCP
@@ -42,6 +43,9 @@ class MyMemory:
 class MyData:
     connections: list[MyConnection]
     memory: list[MyMemory]
+    data_sources: dict[str, Any] | None = None
+    """Your accounts, sign-ins and unread link notices in the workspace's data sources; null
+    where they are off."""
 
 
 @dataclass(frozen=True)
@@ -85,6 +89,7 @@ async def _list_impl(runtime: McpRuntime, auth: AuthIdentity) -> MyData:
             for c in connections
         ],
         memory=[MyMemory(str(m.agent_id), list(m.paths)) for m in memory],
+        data_sources=await my_data_accounts(runtime, auth),
     )
 
 
@@ -157,22 +162,26 @@ async def _disconnect_impl(
 def register_my_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool
     async def list_my_data(ctx: Context) -> MyData:  # pyright: ignore[reportUnusedFunction]
-        """List what is held for you: connected accounts and sign-ins, and personal memory per
-        agent. Ids feed remove_my_data."""
+        """List what is held for you: connected accounts and sign-ins, personal memory per
+        agent, and your accounts in the data sources. Ids feed remove_my_data."""
         return await _list_impl(runtime, await _auth(ctx))
 
     @mcp.tool
     async def remove_my_data(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
-        kind: Literal["memory", "microsoft", "slack", "mcp", "coding_key"],
+        kind: Literal["memory", "microsoft", "slack", "mcp", "coding_key", "data_source"],
         origin_context_id: str,
         agent_id: str = "",
         key: str = "",
     ) -> MyDataChange:
         """Remove your own, by ids from list_my_data or list_coding_keys: memory (agent_id), a
-        connected account (its kind, as listed), an mcp sign-in (agent_id, key) or a
-        coding_key (key; an admin adds agent_id for another person's)."""
+        connected account (its kind, as listed), an mcp sign-in (agent_id, key), a data
+        source sign-in (data_source; key is its source_id) or a coding_key (key; an admin adds
+        agent_id for another person's)."""
         auth = await _auth(ctx)
+        if kind == "data_source":
+            await disconnect_data_source(runtime, auth, key, origin_context_id)
+            return MyDataChange("disconnected", 1)
         if kind == "memory":
             if not agent_id:
                 raise ToolError("agent_id is needed.")

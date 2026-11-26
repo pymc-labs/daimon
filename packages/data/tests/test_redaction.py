@@ -14,6 +14,7 @@ import httpx
 import pytest
 from daimon.core.data_audience import DataAudience
 from daimon.data import declared, identity, redaction
+from daimon.data.access import ReadContext
 from daimon.data.identity import IdentityKey, Proof
 from daimon.data.reading import Reading, open_read
 from daimon.data.sync.connector import CONNECTORS, Connector, ItemRecord, Record, Source, SyncState
@@ -117,6 +118,27 @@ def test_a_pattern_that_can_run_forever_is_refused(pattern: str) -> None:
     with pytest.raises(ValueError, match="can repeat|refer back"):
         redaction.parse(json.dumps({"regex": [{"pattern": pattern}]}))
     assert redaction.parse(json.dumps({"regex": [{"pattern": r"\d{3}-\w+\s?"}]})).regex
+
+
+def test_a_set_applies_every_rule_at_storage_or_at_answer_time() -> None:
+    """Unset keeps text rules at ingest and names at read; `storage` and `answer` move all of
+    them to one time. `exclude_ids` is never stored either way."""
+    text = "Acme asked Globex"
+    unset = redaction.Rules.model_validate(RULES)
+    storage, answer = (
+        unset.model_copy(update={"at": "storage"}),
+        unset.model_copy(update={"at": "answer"}),
+    )
+    assert redaction.Redactor(unset).text(text) == "client A wrote Globex", "as before"
+    assert redaction.Redactor(storage).text(text) == "client A wrote [client]", "names too"
+    assert redaction.Redactor(answer).text(text) == text, "answer sets store the source's text"
+    for rules in (unset, storage, answer):
+        assert redaction.Redactor(rules).excludes("doc:2"), "an excluded id is never stored"
+    ctx = ReadContext((uuid.uuid4(),))
+    shown = Reading(ctx, None, redaction.Redactor(answer, answer=True))
+    assert shown.show({"t": text}) == {"t": "client A wrote Globex"}, "every answer"
+    assert shown.redacted and shown.names_hidden("Acme"), "sql, files and naming queries refused"
+    assert not Reading(ctx, None).redacted, "no answer set: nothing refused"
 
 
 async def test_removed_text_is_never_stored_and_excluded_records_are_dropped(

@@ -2,6 +2,7 @@ add_channel_skill
 add_server_skill
 add_skill
 apply_server_skill_update
+approve_data_rule_set
 approve_reach
 approve_server_skill_update
 archive_agent
@@ -15,11 +16,15 @@ attach_mcp_server
 cancel_long_job
 cancel_timer
 cancel_turn
+change_data_access
+change_data_links
+change_data_source
 change_issue_state
 change_setting
 change_shared_connection
 change_shared_connection_tool
 change_workspace_settings
+check_my_data_connection
 check_server_skill
 clear_agent_default
 clear_agent_tool_rule
@@ -39,6 +44,7 @@ compute_task_result
 compute_task_status
 compute_write_file
 connect_microsoft
+connect_my_data
 continue_turn
 convert
 create_agent
@@ -70,6 +76,7 @@ delete_watch
 deliver_turn_charts
 describe_agent
 detach_mcp_server
+dismiss_data_notices
 edit_message
 explain_agent_resolution
 fetch_youtube_transcript
@@ -121,6 +128,10 @@ list_channel_skills
 list_channels
 list_coding_keys
 list_credentials
+list_data_access
+list_data_links
+list_data_rule_sets
+list_data_sources
 list_environments
 list_events
 list_helpers

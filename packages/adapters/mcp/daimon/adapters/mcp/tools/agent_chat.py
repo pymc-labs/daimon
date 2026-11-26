@@ -111,7 +111,7 @@ from daimon.core.agent_mcp_credentials import sync_agent_mcp_credentials
 from daimon.core.agent_pins import agent_pin_names as core_agent_pin_names
 from daimon.core.billing import BillingConfig
 from daimon.core.config import get_repo_memory_settings
-from daimon.core.data_seal import AGENT_REQUEST_REFUSAL, reads_data
+from daimon.core.data_reading import AGENT_REQUEST_REFUSAL, reads_data
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_BUDGET_CHANNEL,
@@ -591,7 +591,7 @@ async def _resolve_ma_agent(
 
 
 async def _refuse_data_agent(runtime: McpRuntime, auth: AuthIdentity, ma_agent_id: str) -> None:
-    """Agent chat never drives a data-reading agent (`daimon.core.data_seal`)."""
+    """Agent chat never drives a data-reading agent (`daimon.core.data_reading`)."""
     place = FeaturePlace.of(
         auth.tenant_id, auth.platform or "mcp", auth.bound_channel_id, agent_id=ma_agent_id
     )

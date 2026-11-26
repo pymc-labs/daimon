@@ -181,11 +181,13 @@ async def _notify(
     account_id: uuid.UUID,
     kind: Literal["linked", "unlinked"],
     key: IdentityKey,
+    name: str,
 ) -> None:
+    detail = {"identity": key.ref(), "provider": key.provider, "name": name}
     await conn.execute(
         f"insert into {schemas.data}.identity_notices (tenant_id, account_id, kind, detail)"
         " values (%s, %s, %s, %s)".encode(),
-        (tenant_id, account_id, kind, Jsonb({"identity": key.ref()})),
+        (tenant_id, account_id, kind, Jsonb(detail)),
     )
 
 
@@ -539,7 +541,7 @@ async def admin_link(
             target=key.ref(),
             detail={"account": str(account_id), "proof": proof},
         )
-        await _notify(conn, schemas, tenant_id, account_id, "linked", key)
+        await _notify(conn, schemas, tenant_id, account_id, "linked", key, row["name"])
     return proof
 
 
@@ -613,7 +615,7 @@ async def unlink(
             target=key.ref(),
             detail={"account": str(account)},
         )
-        await _notify(conn, schemas, tenant_id, account, "unlinked", key)
+        await _notify(conn, schemas, tenant_id, account, "unlinked", key, row["name"])
     return account
 
 
@@ -650,6 +652,31 @@ async def holders_of(
 class Notice:
     kind: Literal["linked", "unlinked"]
     identity: str
+    provider: str = ""
+    name: str = ""
+    """Who the person is known as there; empty on a notice made before names were kept."""
+
+
+def _notices(rows: list[DictRow]) -> list[Notice]:
+    return [
+        Notice(
+            r["kind"], str(r["detail"]["identity"]),
+            str(r["detail"].get("provider", "")), str(r["detail"].get("name", "")),
+        )
+        for r in sorted(rows, key=lambda r: r["created_at"])
+    ]  # fmt: skip
+
+
+async def unseen_notices(
+    conn: AsyncConnection[DictRow], schemas: Schemas, tenant_id: uuid.UUID, account_id: uuid.UUID
+) -> list[Notice]:
+    """The person's unseen notices, left unseen."""
+    cur = await conn.execute(
+        f"select kind, detail, created_at from {schemas.data}.identity_notices"
+        " where tenant_id = %s and account_id = %s and seen_at is null".encode(),
+        (tenant_id, account_id),
+    )
+    return _notices(await cur.fetchall())
 
 
 async def take_notices(
@@ -661,5 +688,4 @@ async def take_notices(
         " and account_id = %s and seen_at is null returning kind, detail, created_at".encode(),
         (tenant_id, account_id),
     )
-    rows = sorted(await cur.fetchall(), key=lambda r: r["created_at"])
-    return [Notice(r["kind"], str(r["detail"]["identity"])) for r in rows]
+    return _notices(await cur.fetchall())

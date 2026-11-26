@@ -5232,8 +5232,21 @@ class RepoMemory(Base):
     # survives with its attribution removed.
     created_by_account_id: Mapped[AccountSetNull]
     source_id: Mapped[str | None]
+    # The data items read before it was saved (`daimon.core.stores.data_memory`); None: none.
+    data_refs: Mapped[list[str] | None]
     created_at: Mapped[TsNow]
     updated_at: Mapped[TsNow]
+
+
+class SessionDataRead(Base):
+    """One data item a chat session read (`daimon.core.stores.data_memory`)."""
+
+    __tablename__ = "session_data_reads"
+
+    tenant_id: Mapped[TenantPk]
+    chat_session_id: Mapped[str] = mapped_column(primary_key=True)
+    ref: Mapped[str] = mapped_column(primary_key=True)
+    read_at: Mapped[TsNow]
 
 
 class RepoMemorySession(Base):

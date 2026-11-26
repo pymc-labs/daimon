@@ -166,9 +166,9 @@ def test_deploy_workflow_remote_scripts() -> None:
     scripts = 0
     for workflow in sorted((*_WORKFLOWS.glob("*.yml"), *_WORKFLOWS.glob("*.yaml"))):
         scripts += _check_workflow(workflow.name, workflow.read_text())
-    # deploy.yml has 4 inline payloads and 1 forwarded shell variable (the boot
+    # deploy.yml has 5 inline payloads and 1 forwarded shell variable (the boot
     # reconcile wait).
-    assert scripts == 5, f"expected exactly 5 remote scripts, found {scripts}"
+    assert scripts == 6, f"expected exactly 6 remote scripts, found {scripts}"
 
 
 def test_self_hosting_workflow_uses_placeholder_configuration() -> None:

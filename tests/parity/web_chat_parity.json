@@ -1,13 +1,13 @@
 {
  "routes": {
   "DELETE /api/admin/data/admins/{account_id}": {
-   "exempt": "data sources are a web-only feature"
+   "tool": "change_data_access"
   },
   "DELETE /api/admin/data/scopes/{scope_id}": {
-   "exempt": "data sources are a web-only feature"
+   "tool": "change_data_access"
   },
   "DELETE /api/admin/data/scopes/{scope_id}/grants": {
-   "exempt": "data sources are a web-only feature"
+   "tool": "change_data_access"
   },
   "DELETE /api/admin/dm/rules/{position}": {
    "tool": "change_workspace_settings"
@@ -66,7 +66,7 @@
    "exempt": "web sign-in and session (linked account)"
   },
   "DELETE /api/profile/data/connections/{source_id}": {
-   "exempt": "web sign-in and session (data source sign-in)"
+   "tool": "remove_my_data"
   },
   "DELETE /api/profile/keys/{key_id}": {
    "tool": "remove_my_data"
@@ -123,25 +123,25 @@
    "exempt": "serves the web app's own pages"
   },
   "POST /api/admin/data/admins": {
-   "exempt": "data sources are a web-only feature"
+   "tool": "change_data_access"
   },
   "POST /api/admin/data/links": {
-   "exempt": "data sources are a web-only feature"
+   "tool": "change_data_links"
   },
   "POST /api/admin/data/links/reject": {
-   "exempt": "data sources are a web-only feature"
+   "tool": "change_data_links"
   },
   "POST /api/admin/data/links/unlink": {
-   "exempt": "data sources are a web-only feature"
+   "tool": "change_data_links"
   },
   "POST /api/admin/data/redaction/{name}/approve": {
-   "exempt": "data sources are a web-only feature"
+   "tool": "approve_data_rule_set"
   },
   "POST /api/admin/data/scopes": {
-   "exempt": "data sources are a web-only feature"
+   "tool": "change_data_access"
   },
   "POST /api/admin/data/scopes/{scope_id}/grants": {
-   "exempt": "data sources are a web-only feature"
+   "tool": "change_data_access"
   },
   "POST /api/admin/dm/rules": {
    "tool": "change_workspace_settings"
@@ -292,10 +292,10 @@
    "tool": "change_shared_connection"
   },
   "POST /api/integrations/data/sources": {
-   "exempt": "data sources are a web-only feature"
+   "tool": "change_data_source"
   },
   "POST /api/integrations/data/sources/{source_id}/{action}": {
-   "exempt": "data sources are a web-only feature"
+   "tool": "change_data_source"
   },
   "POST /api/integrations/tokens": {
    "panel": {
@@ -311,10 +311,10 @@
    "tool": "remove_my_data"
   },
   "POST /api/profile/data/connect": {
-   "exempt": "web sign-in and session (data source sign-in)"
+   "tool": "connect_my_data"
   },
   "POST /api/profile/data/connect/{pending_id}/poll": {
-   "exempt": "web sign-in and session (data source sign-in)"
+   "tool": "check_my_data_connection"
   },
   "POST /api/profile/delete": {
    "panel": {
@@ -367,7 +367,7 @@
    "exempt": "serves the web app's own pages"
   },
   "PUT /api/admin/data/people/{account_id}/redacted": {
-   "exempt": "data sources are a web-only feature"
+   "tool": "change_data_links"
   },
   "PUT /api/agents/environments/{environment_id}": {
    "tool": "update_environment"

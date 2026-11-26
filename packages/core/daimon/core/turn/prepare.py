@@ -462,7 +462,7 @@ async def create_ma_session(
             agent_github_app=deps.agent_github_app,
             github_mcp_router=deps.github_mcp_router,
             extra_resources=extra_resources,
-            memory_read_only=admission.memory_read_only,
+            memory_read_only=admission.stores_read_only,
             # A chat session is keyed on the caller's account, so it belongs to one
             # person and may carry that person's own memory, unless it is off here.
             personal_memory=True,
@@ -948,7 +948,7 @@ async def _decide_reuse_again(
     current = await reauthorize(deps, prepared.admission)
     if current is prepared.admission:
         return prepared
-    if (current.memory_read_only and not prepared.admission.memory_read_only) or (
+    if (current.stores_read_only and not prepared.admission.stores_read_only) or (
         current.asks_before_publishing and not prepared.admission.asks_before_publishing
     ):
         raise SessionBusyError(

@@ -629,7 +629,8 @@ async def run_turn_impl(
             ),
             requester_is_headless=True,
             billing_exempt=billing_exempt,
-            memory_read_only=origin == "routine",
+            # A data-reading agent writes no provider memory (`daimon.core.data_reading`).
+            memory_read_only=origin == "routine" or toolset.data_reads,
             personal_memory=personal_memory,
             # A held fire mounts only channel-local memory.
             hold=hold,

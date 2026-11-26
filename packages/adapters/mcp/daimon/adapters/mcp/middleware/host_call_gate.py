@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, cast
 import structlog
 from daimon.adapters.mcp.confirmed_call import host_confirmed_call
 from daimon.core import host_calls
-from daimon.core.data_seal import reads_data
+from daimon.core.data_reading import reads_data
 from daimon.core.features.snapshot import FeaturePlace, deployment_on, place_guardrail
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.security_audit import record_denial

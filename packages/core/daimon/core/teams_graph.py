@@ -6,7 +6,9 @@ per team) and `GraphClient`, whose requests only ever go to `GRAPH_HOST` and
 never follow a redirect. The app's resource-specific consent
 `ChannelMessage.Read.Group`, granted by a team owner at install, covers the
 message reads here, `TeamMember.Read.Group` the owner list
-(`list_team_owner_ids`, for native admin-team owners); `ChatMessage.Read.Chat`,
+(`list_team_owner_ids`, for native admin-team owners), `ChannelMember.Read.Group` a
+channel's and `ChatMember.Read.Chat` a group chat's members (`list_channel_member_ids`,
+`list_chat_member_ids`, for who reads a data answer); `ChatMessage.Read.Chat`,
 granted when the app is added to a group chat, the chat reads
 (`list_chat_messages`, `get_chat_message`); `teams_sharepoint` sends its file
 calls through `send`. The subscription calls (`create_subscription` and its renewal and
@@ -346,10 +348,26 @@ class GraphClient:
         """
         return await self._team_member_ids(group_id, owners=False, max_pages=MAX_MEMBER_PAGES)
 
+    async def list_channel_member_ids(self, group_id: str, channel_id: str) -> frozenset[str]:
+        """Everyone in one of a team's channels, by Entra id (lower-case). Needs
+        `ChannelMember.Read.Group`; a longer roster than `MAX_MEMBER_PAGES` raises."""
+        url = f"{GRAPH_ROOT}/teams/{path_segment(group_id)}/channels/{path_segment(channel_id)}"
+        return await self._member_ids(f"{url}/members", owners=False, max_pages=MAX_MEMBER_PAGES)
+
+    async def list_chat_member_ids(self, chat_id: str) -> frozenset[str]:
+        """Everyone in a group chat, by Entra id (lower-case). Needs `ChatMember.Read.Chat`;
+        a longer roster than `MAX_MEMBER_PAGES` raises."""
+        url = f"{GRAPH_ROOT}/chats/{path_segment(chat_id)}/members"
+        return await self._member_ids(url, owners=False, max_pages=MAX_MEMBER_PAGES)
+
     async def _team_member_ids(
         self, group_id: str, *, owners: bool, max_pages: int
     ) -> frozenset[str]:
-        url: str | None = f"{GRAPH_ROOT}/teams/{path_segment(group_id)}/members"
+        url = f"{GRAPH_ROOT}/teams/{path_segment(group_id)}/members"
+        return await self._member_ids(url, owners=owners, max_pages=max_pages)
+
+    async def _member_ids(self, first: str, *, owners: bool, max_pages: int) -> frozenset[str]:
+        url: str | None = first
         params: Mapping[str, str] | None = (
             {"$filter": "roles/any(r:r eq 'owner')"} if owners else None
         )
