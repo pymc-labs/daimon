@@ -552,3 +552,59 @@ async def test_a_dm_turns_memory_is_read_only_only_in_mode_on(
     )
 
     assert dm.memory_read_only is read_only
+
+
+@pytest.mark.parametrize("held", [frozenset({"finance"}), frozenset()], ids=["holds", "lacks"])
+async def test_an_agents_scoped_skill_mounts_only_where_the_audience_holds_its_scope(
+    held: frozenset[str],
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import replace as dc_replace
+    from unittest.mock import AsyncMock
+
+    from daimon.core.stores import workspace_skills
+    from daimon.testing.shared_helpers import settings
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
+    await workspace_skills.record_version(
+        db_session,
+        tenant_id=tenant.id,
+        skill_id="skill_fin",
+        name="fin",
+        version="v1",
+        digest="d",
+        files={"SKILL.md": b"x"},
+        scope="finance",
+    )
+    await db_session.commit()
+    monkeypatch.setattr("daimon.core.turn.admission.reads_data", AsyncMock(return_value=True))
+    monkeypatch.setattr("daimon.core.skill_audience.held_scopes", AsyncMock(return_value=held))
+    skill = {"type": "custom", "skill_id": "skill_fin", "version": "v1"}
+    router = resolved_agent_env_router(
+        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id, skills=[skill]),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = _deps(
+        native_member_admin=False,
+        sessionmaker=db_session_factory,
+        defaults_root=tmp_path,
+        router=router,
+    )
+    dm = await admit_chat(
+        dc_replace(deps, settings=settings()),
+        tenant,
+        platform="discord",
+        external_user_id=USER,
+        channel_id="dm-1",
+        is_dm=True,
+        role=Role.USER,
+        verified_membership=True,
+        now=_NOW,
+    )
+
+    assert [s.skill_id for s in dm.agent.skills] == (["skill_fin"] if held else [])
+    assert dm.withheld_skills == (frozenset() if held else {"skill_fin"})

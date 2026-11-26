@@ -8,9 +8,8 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import httpx
-import pytest
 from daimon.core import agent_changes, session_snapshot
-from daimon.core.agent_editing import AgentActor, AgentEditError, PlaceEdit
+from daimon.core.agent_editing import AgentActor, PlaceEdit
 from daimon.core.agent_view import (
     AgentConfigDoc,
     AgentFacts,
@@ -501,7 +500,7 @@ def test_revert_target_carries_the_old_versions_helpers() -> None:
     )
 
 
-async def test_an_agent_edit_cannot_add_a_scoped_library_skill(
+async def test_an_agent_edit_may_add_a_scoped_library_skill(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant = await make_tenant(db_session)
@@ -534,10 +533,10 @@ async def test_an_agent_edit_cannot_add_a_scoped_library_skill(
         skills=[SkillDoc(type="custom", skill_id="sk_scoped", title="Notes", version="1")]
     )
 
-    with pytest.raises(AgentEditError, match="isn.t available"):
-        await agent_changes._check_added_skills(  # pyright: ignore[reportPrivateUsage]
-            cast(Any, deps),
-            actor=cast(AgentActor, SimpleNamespace(tenant_id=tenant.id)),
-            base=_config(skills=[]),
-            target=target,
-        )
+    # It mounts only where the turn's audience holds the scope (`daimon.core.skill_audience`).
+    await agent_changes._check_added_skills(  # pyright: ignore[reportPrivateUsage]
+        cast(Any, deps),
+        actor=cast(AgentActor, SimpleNamespace(tenant_id=tenant.id)),
+        base=_config(skills=[]),
+        target=target,
+    )

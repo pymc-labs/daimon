@@ -4,6 +4,7 @@ import { SkillLink } from "@/components/links"
 import { PanelSection } from "@/components/panel"
 import { MultiPicker } from "@/components/picker"
 import { useCatalog } from "@/modules/agents/api"
+import { scopeLabel } from "@/modules/agents/lib"
 import { useSave, type Outcome } from "./api"
 import { Notice } from "./shared"
 import type { ChannelDetail, ChannelSettings } from "./types"
@@ -17,7 +18,10 @@ export function Skills({ c, s }: { c: ChannelDetail; s: ChannelSettings }) {
   if (!edit && !s.skills.length) return null
 
   const change = async (action: "add" | "remove", skill: string) => setOut(await save.run("post", "skills", { action, skill, expected }))
-  const chip = (id: string, name: string) => <SkillLink id={id} name={name} />
+  const scope = (id: string) => data?.scopes?.[id]
+  const chip = (id: string, name: string) => (
+    <><SkillLink id={id} name={name} />{scope(id) && <span className="truncate text-faint">{scopeLabel(scope(id)!)}</span>}</>
+  )
   const attached = new Map(s.skills.map((k) => [k.skill_id, k.name]))
   const items = [
     ...(data?.skills ?? []).map((k) => ({ id: k.skill_id, label: k.title })),

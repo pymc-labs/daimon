@@ -1134,11 +1134,13 @@ async def _prepare_session_for_turn_locked(
                 or "budget_channel" in decision.reasons
                 or tightening_memory
                 or leaving_memory
+                # The old session may mount a scoped skill this audience may not read.
+                or ("skills" in decision.reasons and bool(admission.withheld_skills))
             )
             and await turn_is_active(row, now=moment, sessionmaker=deps.sessionmaker)
         ):
-            # A changed billing channel, responder or memory restriction
-            # cannot run against the old session while replacement is deferred.
+            # A changed billing channel, responder, memory restriction or withheld
+            # skill cannot run against the old session while replacement is deferred.
             log.info(
                 "session_preparation.busy",
                 mapping_id=str(row.id),

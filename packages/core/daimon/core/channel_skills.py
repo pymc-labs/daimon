@@ -23,7 +23,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Final, Literal, NoReturn, Protocol
 
@@ -309,8 +309,6 @@ async def choose_channel_skill(
     if found is None or found.id not in bodies:
         return "not_found"
     body = bodies[found.id]
-    if await workspace_skills.scoped_among(session, tenant_id=tenant_id, skill_ids=[found.id]):
-        return "not_found"  # reads as missing: it does not confirm a scoped skill exists
     policy = await load_access_policy(session, tenant_id=tenant_id)
     uploads = await list_user_skills_for_tenant(session, tenant_id=tenant_id)
     stored = next((u.agent_name for u in uploads if u.anthropic_id == found.id), None)
@@ -674,8 +672,10 @@ async def turn_channel_skills(
     rows: Sequence[ChannelSkillRow] | None = None,
     cache: ResolverCache | None = None,
     platform_skills: Sequence[MaSkill] = (),
+    held_scopes: Collection[str] = (),
 ) -> tuple[BetaManagedAgentsCustomSkill, ...]:
-    """The extra skills a turn in `channel_id` runs with, after `platform_skills`.
+    """The extra skills a turn in `channel_id` runs with, after `platform_skills`; a skill
+    limited to a data scope only when the turn's audience holds it (`held_scopes`).
 
     One DB read; the skills list is read only when the channel adds something,
     to keep a clashing mount (which would fail the session) out. With `cache`
@@ -689,12 +689,10 @@ async def turn_channel_skills(
             rows = await list_channel_skills(
                 session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
             )
-        # A scoped skill reaches people through the library tools, which check who may read
-        # it; a mount cannot, so one scoped after it was added is left out.
-        scoped = await workspace_skills.scoped_among(
+        scopes = await workspace_skills.scopes_among(
             session, tenant_id=tenant_id, skill_ids=[row.skill_id for row in rows]
         )
-    rows = [row for row in rows if row.skill_id not in scoped]
+    rows = [row for row in rows if scopes.get(row.skill_id) in (None, *held_scopes)]
     if not rows:
         return ()
     bodies: dict[str, str] | None

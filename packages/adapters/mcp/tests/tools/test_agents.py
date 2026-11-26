@@ -2443,12 +2443,12 @@ async def test_update_agent_impl_resolves_skill_names_to_skill_ids(
     monkeypatch: pytest.MonkeyPatch,
     scoped: bool,
 ) -> None:
-    """A scoped skill is refused: an agent shows it to everyone in the room, not by scope."""
+    """A scoped skill is attached too, and the answer says where it loads."""
 
-    async def scoped_among(_session: Any, *, skill_ids: list[str], **_k: Any) -> set[str]:
-        return set(skill_ids) if scoped else set()
+    async def scopes_among(_session: Any, *, skill_ids: list[str], **_k: Any) -> dict[str, str]:
+        return dict.fromkeys(skill_ids, "finance") if scoped else {}
 
-    monkeypatch.setattr(agents_mod.workspace_skills_store, "scoped_among", scoped_among)
+    monkeypatch.setattr(agents_mod.workspace_skills_store, "scopes_among", scopes_among)
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -2514,12 +2514,8 @@ async def test_update_agent_impl_resolves_skill_names_to_skill_ids(
         mcp_servers=None,
         skills=["build-models"],
     )
-    if scoped:
-        with pytest.raises(ToolError, match="isn.t available"):
-            await attach
-        assert not captured, "nothing reached the provider"
-        return
-    await attach
+    result = await attach
+    assert (result.applies is not None and "finance" in result.applies) is scoped
     assert captured.get("skills") == [{"type": "custom", "skill_id": "skill_build"}], (
         "skill names must be resolved to {type:custom, skill_id:<MA id>} before reaching MA"
     )

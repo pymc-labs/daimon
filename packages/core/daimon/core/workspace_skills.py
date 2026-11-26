@@ -21,7 +21,14 @@ from daimon.core.stores.domain import WorkspaceSkillRow
 from daimon.core.stores.tenants import get_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-__all__ = ["ScopeUnsaved", "files_digest", "may_read", "record_published", "record_zip"]
+__all__ = [
+    "ScopeUnsaved",
+    "files_digest",
+    "may_read",
+    "record_published",
+    "record_zip",
+    "scoped_skill_note",
+]
 
 
 class ScopeUnsaved(Exception):
@@ -122,3 +129,9 @@ async def record_zip(
 def may_read(row: WorkspaceSkillRow, scopes: Collection[str]) -> bool:
     """Whether a caller holding `scopes` may read the skill: unscoped, or one of `scopes`."""
     return row.scope is None or row.scope in scopes
+
+
+def scoped_skill_note(scopes: Collection[str]) -> str:
+    """Said where a skill limited to a data scope is attached."""
+    named = ", ".join(sorted(set(scopes)))
+    return f"A skill scoped to {named} loads only where everyone present holds that scope."

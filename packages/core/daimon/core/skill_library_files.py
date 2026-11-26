@@ -18,7 +18,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import anthropic
-import structlog
 from daimon.core.agent_admin import require_admin
 from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError, SkillWriter
 from daimon.core.agent_skill_files import (
@@ -29,16 +28,14 @@ from daimon.core.agent_skill_files import (
     files_doc,
 )
 from daimon.core.agent_target import ChangeRecorder
-from daimon.core.defaults.ma_index import list_agents_by_tenant, list_skills_lenient
+from daimon.core.defaults.ma_index import list_skills_lenient
 from daimon.core.defaults.metadata import tenant_scoped_display_title
 from daimon.core.ma import delete_skill_and_versions
 from daimon.core.mux_compat import create_skill, publish_skill_version
 from daimon.core.skill_library import library_skill, own_skills
 from daimon.core.skills.ingest import SkillIngestError, bundle_from_files
 from daimon.core.stores import workspace_skills as workspace_skills_store
-from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.server_skills import mirror_of_skill
-from daimon.core.stores.tenants import get_tenant
 from daimon.core.workspace_skills import ScopeUnsaved, record_zip
 from mux.contracts.errors import ProviderError, ScopeViolation
 from pydantic import BaseModel
@@ -58,8 +55,6 @@ __all__ = [
     "skill_lock",
     "skill_scope",
 ]
-
-log = structlog.get_logger(__name__)
 
 _NAME = re.compile(r"[^a-z0-9]+")
 
@@ -373,35 +368,6 @@ async def skill_scope(deps: AgentEditDeps, *, actor: AgentActor, skill_id: str) 
     return kept.scope
 
 
-async def _require_detached(deps: AgentEditDeps, tenant_id: uuid.UUID, skill_id: str) -> None:
-    """Refuse unless no agent and no channel rule of the workspace carries `skill_id`."""
-    try:
-        agents = await list_agents_by_tenant(
-            deps.client, tenant_id=tenant_id, records=deps.session_factory
-        )
-        async with deps.session_factory() as session:
-            tenant = await get_tenant(session, tenant_id)
-            if tenant is None:
-                raise LookupError("no such workspace")
-            channels = await list_channel_skills(
-                session, tenant_id=tenant_id, platform=tenant.platform
-            )
-    # Boundary: whatever stops the lookup, the scope is not set blind.
-    except Exception as err:
-        log.warning("skill_scope.attachment_unknown", skill_id=skill_id, exc_info=True)
-        raise AgentEditError(
-            "Could not check whether agents carry that skill. Nothing changed.", kind="invalid"
-        ) from err
-    if any(s.skill_id == skill_id for a in agents for s in a.skills) or any(
-        row.skill_id == skill_id for row in channels
-    ):
-        raise AgentEditError(
-            "That skill is attached to an agent or channel. Detach it first, then set its "
-            "scope. Nothing changed.",
-            kind="conflict",
-        )
-
-
 async def set_skill_scope(
     deps: AgentEditDeps,
     *,
@@ -410,14 +376,8 @@ async def set_skill_scope(
     scope: str | None,
     audited: ChangeRecorder | None = None,
 ) -> None:
-    """Set who may read a skill (None: everyone who may use the library), for an admin.
-
-    A scope is refused while an agent or channel rule carries the skill, which would show it
-    to everyone there; so it is when that cannot be told.
-    """
+    """Set who may read a skill (None: everyone who may use the library), for an admin."""
     require_admin(actor, "The skill library")
-    if scope is not None:
-        await _require_detached(deps, actor.tenant_id, skill_id)
     async with deps.session_factory() as session, session.begin():
         if not await workspace_skills_store.set_scope(
             session, tenant_id=actor.tenant_id, skill_id=skill_id, scope=scope

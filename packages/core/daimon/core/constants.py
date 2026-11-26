@@ -65,7 +65,3 @@ MAX_SECRET_VALUE_BYTES: Final[int] = 4096
 # can wait out. Every adapter runtime passes this when constructing its
 # client, so a boot-time sweep paces itself instead of failing half-applied.
 MA_MAX_RETRIES: int = 8
-
-#: Said when an agent is given a library skill limited to a data scope: it reads as a
-#: missing skill, so it does not confirm the skill exists to someone who may not read it.
-SCOPED_SKILL_REFUSAL = "That skill isn't available here."

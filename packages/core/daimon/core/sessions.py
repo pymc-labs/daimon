@@ -694,8 +694,10 @@ async def _scoped_skills(
 ) -> set[str]:
     """The agent's own skills that are limited to a scope."""
     async with session_factory() as session:
-        return await workspace_skills.scoped_among(
-            session, tenant_id=tenant_id, skill_ids={skill.skill_id for skill in agent.skills}
+        return set(
+            await workspace_skills.scopes_among(
+                session, tenant_id=tenant_id, skill_ids={skill.skill_id for skill in agent.skills}
+            )
         )
 
 
@@ -749,6 +751,7 @@ async def create_session(
     relay_owner: str | None = None,
     github_mcp_router: bool = False,
     identity: SessionIdentity = DEFAULT_IDENTITY,
+    skill_scopes_checked: bool = False,
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -793,6 +796,9 @@ async def create_session(
     ``channel_skills`` are the turn's extra skills (the platform's, then the
     channel's), added after the agent's own (`session_skills`, the shape the
     drift check hashes too).
+
+    ``skill_scopes_checked`` says the caller kept only the scoped skills the audience holds
+    (a chat turn, `daimon.core.skill_audience`); otherwise the agent's scoped skills are left out.
 
     ``identity`` is the session's identity features: a memory store whose feature
     is off is not mounted (personal memory still needs ``personal_memory``), and
@@ -1296,12 +1302,12 @@ async def create_session(
         )
         gated = list(tools) != list(visible_tools(agent, hidden))
         healed = list(servers) != list(visible_mcp_servers(agent, hidden))
-        # A library skill limited to a data scope is read through the library tools, which
-        # check who may read it; a mount cannot, so one an agent carries (a declared agent,
-        # or a scope set as it was attached) is left off the session.
         scoped = (
             set[str]()
-            if session_factory is None or tenant_id is None or not agent.skills
+            if skill_scopes_checked
+            or session_factory is None
+            or tenant_id is None
+            or not agent.skills
             else await _scoped_skills(session_factory, tenant_id, agent)
         )
         if scoped:

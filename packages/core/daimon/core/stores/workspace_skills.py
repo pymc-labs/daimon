@@ -89,20 +89,20 @@ async def list_skills(session: AsyncSession, *, tenant_id: uuid.UUID) -> list[Wo
     return [WorkspaceSkillRow.model_validate(row) for row in rows]
 
 
-async def scoped_among(
+async def scopes_among(
     session: AsyncSession, *, tenant_id: uuid.UUID, skill_ids: Collection[str]
-) -> set[str]:
-    """Which of `skill_ids` are limited to a scope."""
+) -> dict[str, str]:
+    """The scope of each of `skill_ids` that is limited to one."""
     if not skill_ids:
-        return set()
-    rows = await session.scalars(
-        select(WorkspaceSkill.skill_id).where(
+        return {}
+    rows = await session.execute(
+        select(WorkspaceSkill.skill_id, WorkspaceSkill.scope).where(
             WorkspaceSkill.tenant_id == tenant_id,
             WorkspaceSkill.skill_id.in_(skill_ids),
             WorkspaceSkill.scope.is_not(None),
         )
     )
-    return set(rows)
+    return {skill_id: scope for skill_id, scope in rows.tuples() if scope is not None}
 
 
 async def list_files(

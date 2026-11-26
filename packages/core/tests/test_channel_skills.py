@@ -132,7 +132,7 @@ async def _scoped(db_session: AsyncSession, tenant_id: uuid.UUID, skill_id: str)
     await db_session.commit()
 
 
-async def test_a_scoped_library_skill_cannot_be_added_to_a_channel(
+async def test_a_scoped_library_skill_can_be_added_to_a_channel(
     db_session: AsyncSession,
 ) -> None:
     tenant = await make_tenant(db_session)
@@ -148,11 +148,17 @@ async def test_a_scoped_library_skill_cannot_be_added_to_a_channel(
         platform_skills={},
     )
 
-    assert choice == "not_found"
+    assert not isinstance(choice, str) and choice.skill_id == "skill_lib"
 
 
-async def test_a_skill_scoped_after_it_was_added_is_not_mounted_in_the_channel(
-    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+@pytest.mark.parametrize(
+    ("held", "mounted"), [((), ["skill_b"]), (("finance",), ["skill_a", "skill_b"])]
+)
+async def test_a_scoped_channel_skill_mounts_only_where_the_audience_holds_its_scope(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    held: tuple[str, ...],
+    mounted: list[str],
 ) -> None:
     tenant = await make_tenant(db_session)
     for skill_id, name in (("skill_a", "a"), ("skill_b", "b")):
@@ -177,9 +183,10 @@ async def test_a_skill_scoped_after_it_was_added_is_not_mounted_in_the_channel(
         channel_id="C1",
         agent=ma_agent(name="shared"),
         agent_names=("shared",),
+        held_scopes=held,
     )
 
-    assert [skill.skill_id for skill in picked] == ["skill_b"]
+    assert [skill.skill_id for skill in picked] == mounted
 
 
 async def test_another_agents_upload_and_another_tenants_skill_are_refused(

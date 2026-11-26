@@ -1454,6 +1454,43 @@ async def test_a_channels_skills_are_added_at_create_and_read_as_current_on_the_
     assert transport.state.sessions[third.ma_session_id].agent.skills == []
 
 
+@pytest.mark.parametrize("active", [False, True], ids=["idle", "active"])
+async def test_a_scoped_skill_withheld_from_a_new_audience_never_reaches_its_next_turn(
+    active: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An idle session is replaced without the skill; an active one is never handed back."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    scoped = BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_fin", version="v1")
+    holding = replace(
+        _admission(account=account), channel_skills=(scoped,), withheld_skills=frozenset()
+    )
+    first = await _prepare(deps, holding, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    row = await _live_row(db_session_factory, tenant=tenant, account=account)
+    assert row is not None
+    if active:
+        async with db_session_factory.begin() as session:
+            await mark_turn_active(session, id=row.id, active_turn_message_id="in-flight", now=_NOW)
+
+    lacking = replace(_admission(account=account), withheld_skills=frozenset({"skill_fin"}))
+    second = await _prepare(deps, lacking, tenant=tenant, account=account)
+
+    if active:
+        assert isinstance(second, PreparationBusy)
+        assert "skills" in second.pending_reasons
+        assert transport.creates == 1
+    else:
+        assert isinstance(second, PreparedTurn)
+        assert second.ma_session_id != first.ma_session_id
+        assert transport.state.sessions[second.ma_session_id].agent.skills == []
+
+
 def _with_features(admission: Admission, **values: str) -> Admission:
     """`admission` whose place sets each identity feature in `values` at the channel."""
     place = FeaturePlace(uuid.uuid4(), "discord", "c1", agent_id=admission.agent.id)

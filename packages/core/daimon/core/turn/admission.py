@@ -138,6 +138,7 @@ from daimon.core.scope import HelperTarget, ResolvedConfig, ScopeContext
 from daimon.core.session_fence_retry import retry_fences
 from daimon.core.session_snapshot import MaSkill
 from daimon.core.setup_conversations import get_setup_agent, get_setup_responder
+from daimon.core.skill_audience import TurnPlace, scoped_skill_audience
 from daimon.core.spend_gate import (
     AFTER_QUEUE_CHECKS,
     SpendPerson,
@@ -490,6 +491,10 @@ class Admission:
     # Which of `channel_skills` are the platform's, so a create the provider
     # refuses for one of them can run without it (`create_ma_session`).
     platform_skill_ids: frozenset[str] = frozenset()
+    # Scoped skills the agent or channel carries that this turn's audience may not read, so
+    # the session runs without them (`daimon.core.skill_audience`); None when not checked,
+    # and the session then leaves out every scoped skill of the agent's.
+    withheld_skills: frozenset[str] | None = None
     # What admission was decided on; `reauthorize` decides it again at the
     # moment the session is built. None only for hand-built test admissions.
     grant: AdmissionGrant | None = field(default=None, compare=False, repr=False)
@@ -1642,6 +1647,7 @@ async def _admit_gates(
     except Exception:
         _log.warning("turn.data_reads_lookup_failed", tenant_id=str(tenant_id), exc_info=True)
         data_reading, data_unknown = False, True
+    data_on = data_reading
     if not data_reading:
         try:
             data_reading = await _session_read_data(
@@ -2081,6 +2087,31 @@ async def _admit_gates(
         )
     )
 
+    # A scoped library skill the agent or channel carries mounts only where everyone the
+    # turn reaches holds its scope; a change in who is here replaces the session (`skills`).
+    scopes, held_scopes = await scoped_skill_audience(
+        deps.sessionmaker,
+        deps.settings,
+        TurnPlace(
+            tenant_id=tenant_id,
+            platform=platform,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            asker_user_id=grant.subject.platform_user_id,
+            asker_account_id=principal.account_id,
+            ma_agent_id=agent.id,
+            private=is_dm or grant.surface is Surface.WEB,
+            closed=not data_on
+            or data_blocked
+            or shared
+            or grant.hold is not None
+            or grant.subject.client
+            or helper is not None,
+        ),
+        [*(s.skill_id for s in agent.skills), *(r.skill_id for r in channel_skill_rows)],
+        now=now,
+    )
+    withheld = frozenset(sid for sid, scope in scopes.items() if scope not in held_scopes)
     if daimon_record:
         # Daimon record skills are record references, resolved by the harness's
         # mount pipeline. Anthropic's platform/channel catalog is never queried.
@@ -2111,6 +2142,7 @@ async def _admit_gates(
                 rows=channel_skill_rows,
                 cache=deps.resolver_cache,
                 platform_skills=platform_skills,
+                held_scopes=held_scopes,
             )
         )
 
@@ -2148,6 +2180,10 @@ async def _admit_gates(
             thread_applied=thread_applied,
         )
     agent = thread_model.agent
+    if withheld:
+        agent = agent.model_copy(
+            update={"skills": [s for s in agent.skills if s.skill_id not in withheld]}
+        )
     mark("thread_model")
 
     result = Admission(
@@ -2187,6 +2223,7 @@ async def _admit_gates(
         budget_channel_id=budget_channel_id,
         channel_skills=channel_skills,
         platform_skill_ids=frozenset(skill.skill_id for skill in platform_skills),
+        withheld_skills=withheld,
         grant=grant,
         model_override=thread_model.model_override,
         model_effort=thread_model.model_effort,

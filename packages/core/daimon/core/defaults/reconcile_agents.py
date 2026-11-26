@@ -54,7 +54,6 @@ from daimon.core.ma import update_agent_with_version_retry
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_agent, create_agent, update_agent
 from daimon.core.specs import AgentSpec, dump_agent_spec
-from daimon.core.stores import workspace_skills
 from daimon.core.stores.agent_avatars import normalize_agent_name
 
 _log = structlog.get_logger(__name__)
@@ -143,18 +142,6 @@ async def reconcile_agent(
         tenant_id=tenant_id,
         skills_view=skills_view if dry_run else None,
     )
-    if sessions is not None:
-        # A library skill limited to a data scope is read through the library, never
-        # carried by an agent, so a declared agent drops it.
-        async with sessions() as db:
-            scoped = await workspace_skills.scoped_among(
-                db,
-                tenant_id=tenant_id,
-                skill_ids={s["skill_id"] for s in resolved_skills if s["type"] == "custom"},
-            )
-        if scoped:
-            _log.warning("reconcile.scoped_skill_dropped", agent=spec.name, skills=sorted(scoped))
-            resolved_skills = [s for s in resolved_skills if s["skill_id"] not in scoped]
     renamed = None
     seeded_name = (managed or create_only) and spec.name == LEGACY_BUILTIN_AGENT_NAME
     if agents is not None:
