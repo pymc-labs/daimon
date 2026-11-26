@@ -292,3 +292,37 @@ async def test_set_provision_status_truncates_reason_longer_than_cap(
     assert row.last_reconcile_error.endswith("[truncated]"), (
         "a truncated reason must carry a visible truncation marker"
     )
+
+
+async def test_delete_tenant_clears_where_its_agent_chat_sessions_came_from(
+    db_session: AsyncSession,
+) -> None:
+    """Its accounts cascade, and their ids in agent-chat session records have no FK: they go
+    before the tenant, with the grant and channel. Another tenant's record stays."""
+    from daimon.core.stores import session_settle_state as settle
+    from daimon.testing.factories import make_account
+
+    tenant = await make_tenant(db_session, workspace_id="guild-agent-chat-a")
+    kept = await make_tenant(db_session, workspace_id="guild-agent-chat-b")
+    mine = await make_account(db_session, tenant=tenant)
+    theirs = await make_account(db_session, tenant=kept)
+    for session_id, owner in (("sesn-a", mine.id), ("sesn-b", theirs.id)):
+        await settle.record_agent_chat_driver(
+            db_session,
+            managed_session_id=session_id,
+            signed_in=False,
+            send=True,
+            provenance=settle.SessionProvenance(
+                grant=f"grant-{session_id}", channel_id=None, account_id=owner
+            ),
+        )
+
+    await delete_tenant(db_session, tenant_id=tenant.id)
+
+    assert (
+        await settle.find_agent_chat_session(db_session, grant="grant-sesn-a", account_id=mine.id)
+        is None
+    )
+    assert await settle.find_agent_chat_session(
+        db_session, grant="grant-sesn-b", account_id=theirs.id
+    ) == settle.AgentChatSession(managed_session_id="sesn-b", channel_id=None)

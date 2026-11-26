@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
-from daimon.core._models import SessionSettleState
+from daimon.core._models import Account, SessionSettleState
 from sqlalchemy import case, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -397,3 +397,46 @@ async def find_agent_chat_session(
         )
     ).one_or_none()
     return None if row is None else AgentChatSession(managed_session_id=row[0], channel_id=row[1])
+
+
+async def count_agent_chat_provenance_for_account(
+    session: AsyncSession, *, account_id: uuid.UUID
+) -> int:
+    """How many agent-chat sessions record `account_id` as the account that created them."""
+    count = await session.scalar(
+        select(func.count())
+        .select_from(SessionSettleState)
+        .where(SessionSettleState.agent_chat_account_id == account_id)
+    )
+    return count or 0
+
+
+async def erase_agent_chat_provenance_for_account(
+    session: AsyncSession, *, account_id: uuid.UUID
+) -> int:
+    """For an account's erasure: clear where its agent-chat sessions came from, the grant,
+    channel and account. Such a session is then not found (`find_agent_chat_session`) and
+    reads as one no send recorded. The driver record and the settle cursor stay: they name
+    no one. Outside the session fence: no send decides from these columns."""
+    cleared = await session.scalars(
+        update(SessionSettleState)
+        .where(SessionSettleState.agent_chat_account_id == account_id)
+        .values(agent_chat_grant=None, agent_chat_channel=None, agent_chat_account_id=None)
+        .returning(SessionSettleState.managed_session_id)
+    )
+    return len(list(cleared))
+
+
+async def erase_agent_chat_provenance_for_tenant(
+    session: AsyncSession, *, tenant_id: uuid.UUID
+) -> int:
+    """For a tenant's deletion, before its accounts cascade: the same as
+    `erase_agent_chat_provenance_for_account` for each of its accounts."""
+    accounts = select(Account.id).where(Account.tenant_id == tenant_id)
+    cleared = await session.scalars(
+        update(SessionSettleState)
+        .where(SessionSettleState.agent_chat_account_id.in_(accounts))
+        .values(agent_chat_grant=None, agent_chat_channel=None, agent_chat_account_id=None)
+        .returning(SessionSettleState.managed_session_id)
+    )
+    return len(list(cleared))

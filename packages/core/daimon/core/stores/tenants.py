@@ -28,6 +28,7 @@ from daimon.core.errors import StoreError
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores.domain import FundingMode, Platform, TenantDependentCounts, TenantRow
 from daimon.core.stores.security_audit import erase_tenant
+from daimon.core.stores.session_settle_state import erase_agent_chat_provenance_for_tenant
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -172,6 +173,8 @@ async def delete_tenant(
         )
     )
     await erase_tenant(session, tenant_id=tenant_id)
+    # Its accounts' ids in agent-chat session records have no FK to cascade with.
+    await erase_agent_chat_provenance_for_tenant(session, tenant_id=tenant_id)
     stmt = delete(Tenant).where(Tenant.id == tenant_id)
     result = await session.execute(stmt)
     if cast(CursorResult[Any], result).rowcount == 0:

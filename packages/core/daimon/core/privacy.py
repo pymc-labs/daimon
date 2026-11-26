@@ -95,6 +95,7 @@ class PurgePreview(BaseModel):
     support_settlers_cleared: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     daimon_admins: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     agent_post_requesters: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    agent_chat_session_links: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     platform_user_names: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     teams_messages: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     microsoft_user_tokens: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
