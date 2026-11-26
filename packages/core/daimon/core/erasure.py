@@ -51,6 +51,7 @@ from daimon.core.stores import message_feedback as feedback
 from daimon.core.stores import microsoft_user_tokens as microsoft
 from daimon.core.stores import platform_names as names
 from daimon.core.stores import selfhosted_resources as selfhosted
+from daimon.core.stores import session_settle_state as settle_state
 from daimon.core.stores import support_escalation as escalations
 from daimon.core.stores import teams_message_admissions as teams_messages
 from daimon.core.stores.domain import CliPrincipalRow, PlatformPrincipalRow
@@ -445,6 +446,15 @@ ERASABLE: tuple[Erasable, ...] = (
         count=_tpu(agent_posts.count_requester),
     ),
     by_user("host_call_cards", _tpu(host_call_cards.delete_for_platform_user), total=_count_cards),
+    # An agent-chat session keeps its driver record, which names no one; where it came
+    # from names its creator's account, so that is cleared and the session is not found.
+    by_account(
+        "agent_chat_session_links",
+        (
+            settle_state.count_agent_chat_provenance_for_account,
+            settle_state.erase_agent_chat_provenance_for_account,
+        ),
+    ),
     Erasable(
         "user_skills",
         count=_count_skills,
