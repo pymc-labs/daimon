@@ -368,11 +368,13 @@ def register_compute_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
         Needs the owner in the conversation; a card asks first unless an admin turned the
         card off. Without the card, as in agent chat, leave ttl_hours out: only the default
-        time runs. List
-        profiles first: each names its fixed CPU/RAM, image and the regions you may pass.
-        Leave `region` out to use the profile's first region. No shared credentials are
-        mounted. Sessions are deleted after their idle lease; export files before
-        stopping or expiry.
+        time runs. List profiles first: each names its fixed CPU/RAM, image and the regions
+        you may pass. Leave `region` out to use the profile's first region. No shared
+        credentials are mounted. Sessions are deleted after their idle lease; export files
+        before stopping or expiry.
+
+        Do not retry an uncertain response automatically: check compute_list_sessions first.
+        In agent chat a retried launch starts a second machine.
 
         The result's state is `running` once the machine has started. `launching` means
         it is still starting: read compute_get_session_status until it says `running`

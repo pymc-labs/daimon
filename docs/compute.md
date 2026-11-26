@@ -125,9 +125,10 @@ from agent chat](features.md#cloud-computers-from-agent-chat) for a workspace or
 one agent. The `compute` feature must be on as well.
 
 No card can show in agent chat, so a machine starts and gets more time only for
-the default lifetime. The per-person limit applies. Each agent-chat session uses
-only the machines it started; the person lists and stops all their machines from
-any conversation.
+the default lifetime. The per-person limit applies. A launch retried after an
+uncertain answer starts a second machine, which ends at its idle time. Each
+agent-chat session uses only the machines it started; the person lists and stops
+all their machines from any conversation.
 
 Agent chat gets no message when a command ends and no expiry warning. The agent
 checks a command again in a later turn. A running command keeps its machine
