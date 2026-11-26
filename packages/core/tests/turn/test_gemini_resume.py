@@ -409,3 +409,65 @@ async def test_abandon_cancels_only_this_turns_interaction(harness: Harness) -> 
     io.root = "an-earlier-turn"
     await io.abandon_native()
     assert harness.transport.cancelled == []
+
+
+@pytest.mark.asyncio
+async def test_a_silent_thinking_reply_keeps_its_stream_and_ends_on_a_status_check(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Google's long-decode guidance: a silent stream is normal, keep it open.
+
+    With the driver's default timeout a Gemini stream waits `STREAM_READ_TIMEOUT_S`
+    (15 min), not 120 s, so a model that thinks quietly is never reconnected. A status
+    read on the shorter idle cadence, with the stream still open, notices the reply
+    ended even though its stream never says so.
+    """
+    monkeypatch.setattr(GeminiTurnIO, "idle_check_s", 0.05)
+    opened = script(harness, ["stall"])
+    timeouts: list[float] = []
+    open_stream = GeminiTurnIO.open_stream
+
+    async def recorded(self: GeminiTurnIO, *, read_timeout_s: float) -> object:
+        timeouts.append(read_timeout_s)
+        return await open_stream(self, read_timeout_s=read_timeout_s)
+
+    monkeypatch.setattr(GeminiTurnIO, "open_stream", recorded)
+
+    async def finish_quietly() -> None:
+        await asyncio.sleep(0.5)  # many idle checks say running first
+        harness.transport.saved["host"] = interaction("completed")
+
+    finishing = asyncio.create_task(finish_quietly())
+    revision = ConfigRevision.create(
+        CHANNEL,
+        1,
+        resolve_default(BackendConfig(backend="gemini", profile=PROFILE, model="gemini-3.8-flash")),
+    )
+    lifecycle = RecordingLifecycle()
+    async with ScriptedTransport().client() as client:
+        state = await run_turn(
+            anthropic=client,
+            session_id=harness.session.id,
+            user_message="question",
+            lifecycle=lifecycle,
+            cancel=asyncio.Event(),
+            billing=BillingExempt(reason="headless-unrecorded"),
+            scope=SCOPE,
+            backend=harness.backend,
+            session_ref=harness.session,
+            profile=PROFILE,
+            backend_request=TurnBackendRequest(
+                profile=PROFILE,
+                client=client,
+                scope=SCOPE,
+                session_id=harness.session.id,
+                session=harness.session,
+                config=revision,
+            ),
+            deadline=datetime.now(UTC) + timedelta(seconds=30),
+        )
+    await finishing
+    answered(state, lifecycle)
+    assert timeouts == [gemini_turn.STREAM_READ_TIMEOUT_S] == [900.0]
+    assert len(opened) == 1, "the silent stream was never closed and reopened"
+    assert harness.transport.cancelled == []

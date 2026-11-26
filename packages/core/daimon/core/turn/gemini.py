@@ -91,6 +91,18 @@ ABANDON_TIMEOUT_S = 10.0
 #: First backoff after a failed stream open/read; doubles per consecutive
 #: failure (jittered, capped at 32x). Any delivered event resets it.
 STREAM_RETRY_BASE_S = 1.0
+STREAM_READ_TIMEOUT_S = 900.0
+"""How long a Gemini stream may stay silent before the driver closes and reopens it.
+
+Google: "Pauses between chunks are normal. The interaction isn't stuck, so keep the
+connection open", and "Set HTTP read timeouts to 15 to 20 minutes per stream"
+(https://aistudio.google.com/docs/long-decode). A model thinking hard sends nothing
+for minutes; at 120 s every such reply was reconnected, and Gemini can refuse that.
+"""
+IDLE_CHECK_S = 60.0
+"""While the stream is silent, read the interaction's status this often, keeping the
+stream open. An ended interaction's stream may stay open without saying so, so this is
+how a finished reply is noticed well before `STREAM_READ_TIMEOUT_S`."""
 
 
 @dataclass(frozen=True)
@@ -284,6 +296,9 @@ class GeminiTurnIO:
     #: would skip the answer the failed one already claimed, so the driver
     #: retries only this backend's status read after a quiet stream.
     replay_may_send: bool = True
+    #: The driver's default read timeout and status-check cadence for this backend.
+    stream_read_timeout_s: float = STREAM_READ_TIMEOUT_S
+    idle_check_s: float | None = IDLE_CHECK_S
 
     def __init__(
         self,
