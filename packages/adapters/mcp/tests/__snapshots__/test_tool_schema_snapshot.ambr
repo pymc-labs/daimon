@@ -1283,8 +1283,9 @@
       'description': '''
         Add a shared connection (add: name, url, optional scope; its tools start off), or
         refresh, pause, resume, rescope (scope; empty clears it) or remove one (connection:
-        its id or name). Runs on the asker's Approve card. A token is added or replaced
-        under Integrations, Shared connections, never here. Admin-only.
+        its id or name). Runs on the asker's Approve card, which names the connection and its
+        address. A token is added or replaced under Integrations, Shared connections, never
+        here. Admin-only.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -1333,7 +1334,8 @@
         list_shared_connections, so it serves exactly what was shown) or off for the whole
         workspace, mark it as changing things or only reading, or rescope it (scope; empty
         clears it). To keep a tool from one agent, set that agent's tool rule instead.
-        Runs on the asker's Approve card. Admin-only.
+        Runs on the asker's Approve card, which names the tool, its server and, to turn it
+        on, the words its callers get. Admin-only.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -6998,12 +7000,25 @@
     'list_shared_connections': dict({
       'description': '''
         List the workspace's shared connections: each server's state and its tools, with
-        what each does, whether it is on and the ``seen`` fingerprint to turn it on as
-        shown. Admin-only.
+        what each does, whether it is on, whether the upstream changed it and the ``seen``
+        fingerprint to turn it on as shown (the card shows its words). Addresses and errors
+        show only in a direct message with the admin. Pass this active turn's
+        origin_context_id. Admin-only.
       ''',
       'parameters': dict({
         'additionalProperties': False,
         'properties': dict({
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
         }),
         'type': 'object',
       }),

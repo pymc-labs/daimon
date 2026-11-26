@@ -657,7 +657,7 @@ Chat tools for the shared connections page: list, and change on the asker's card
 | --- | --- | --- |
 | `change_shared_connection` | admin only | Add a shared connection (add: name, url, optional scope; its tools start off), or refresh, pause, resume, rescope (scope; empty clears it) or remove one (connection: its id or name). |
 | `change_shared_connection_tool` | admin only | Turn one tool of a shared connection on (turn_on: the ``seen`` fingerprint from list_shared_connections, so it serves exactly what was shown) or off for the whole workspace, mark it as changing things or only reading, or rescope it (scope; empty clears it). |
-| `list_shared_connections` | admin only | List the workspace's shared connections: each server's state and its tools, with what each does, whether it is on and the ``seen`` fingerprint to turn it on as shown. |
+| `list_shared_connections` | admin only | List the workspace's shared connections: each server's state and its tools, with what each does, whether it is on, whether the upstream changed it and the ``seen`` fingerprint to turn it on as shown (the card shows its words). |
 
 ## `skill_library_edits`
 

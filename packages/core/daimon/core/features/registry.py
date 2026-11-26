@@ -274,7 +274,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         doc=(
             "Instructions at the top of the agent's prompt on where its keys, repo, memory and "
             "files are and what it may share. Off leaves the agent's own prompt and the safety "
-            "rules. Applies the next time the agent is saved."
+            "rules. Applies when the agent is next saved."
         ),
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
@@ -290,9 +290,9 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent", "channel", "thread"),
         binds="turn",
         doc=(
-            "The agent knows about the web app: messages, routine runs and tool results carry "
-            "its address and the pages it may link to, its invite and access tools are offered, "
-            "and Daimon's cards show buttons into it. Off leaves it out."
+            "The agent knows the web app: messages, routine runs and tool results carry its "
+            "address and pages to link, its invite and access tools are offered, and cards show "
+            "buttons into it. Off leaves it out."
         ),
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
@@ -709,8 +709,8 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         binds="restart",
         doc=(
             "Every message in private and shared channels is read through Microsoft Graph, not "
-            "only the ones that mention the agent. Needs the public address the bot is reached "
-            "at. Whoever runs Daimon sets it, and it applies after a restart."
+            "only the ones that mention the agent. Needs the bot's public address. Whoever runs "
+            "Daimon sets it, and it applies after a restart."
         ),
         platforms=frozenset({"teams"}),
         requires=("teams_public_url",),
@@ -726,12 +726,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         default="on",
         tiers=("deployment", "workspace"),
         binds="turn",
-        doc=(
-            "Tool servers the team shares: an admin adds one once and approves its tools, and "
-            "the team's agents and connected apps use them as tools named after the "
-            "connection. A tool acts with the connection's own credential, not as the person. "
-            "Nothing shows until an admin adds one. Off hides them all."
-        ),
+        doc="Tool servers an admin shares with the team, each tool approved first.",
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,
     ),
@@ -960,11 +955,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         default="ask",
         tiers=("deployment", "workspace", "agent"),
         binds="turn",
-        doc=(
-            "Ask shows a card before an agent runs a shared connection's tool that changes "
-            "things. Skip runs it without one in chat; routines still need whoever runs "
-            "Daimon to allow it. After a data read every call still asks."
-        ),
+        doc="Skip runs a shared connection's tools that change things without a card in chat.",
         platforms=EVERY_PLATFORM,
         authority=_ADMIN_NOT_OWNER,
         # Ask is the default and the strict value: the nearer tier decides, as for watches.
@@ -980,10 +971,9 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         tiers=("workspace", "agent"),
         binds="turn",
         doc=(
-            "Ask shows a card with the destination and duration before a watch is made "
-            "or resumed. Skip makes it without the card, in the same thread for the "
-            "default duration. Editing a watch, long jobs and key rotation keep asking. "
-            "Only a server admin can change it."
+            "Ask shows a card with the destination and duration before a watch is made or resumed;"
+            " Skip makes it in the same thread for the default duration. Editing a watch, long "
+            "jobs and key rotation keep asking. Only a server admin can change it."
         ),
         platforms=EVERY_PLATFORM,
         authority=_SERVER_ADMIN,
@@ -1020,10 +1010,10 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         tiers=("workspace", "agent"),
         binds="turn",
         doc=(
-            "When a background command ends with nobody in the conversation, the agent may "
-            "run the next command on that cloud computer. After a set number in a row it waits "
-            "for the owner to run a command or write a file there; a message does not count. "
-            "Off: it only reports the result. Only a server admin can change it."
+            "When a background command ends with nobody there, the agent may run the next one on "
+            "that cloud computer. After a set number in a row it waits for the owner to run a "
+            "command or write a file there; a message does not count. Off: it only reports the "
+            "result. Only a server admin can change it."
         ),
         platforms=EVERY_PLATFORM,
         depends_on=("compute",),
@@ -1076,7 +1066,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
             (
                 "monitor_mcp",
                 "Monitor coding tools",
-                "Keeps what people ask this agent from their coding tools and what it answers, "
+                "Keeps what people ask this agent from their coding tools and its answers, "
                 "plus the name, time and outcome of their other tool calls, never what they "
                 "sent or returned. People are told in the conversation or their first "
                 "tool result. Kept from when it is turned on, for the retention period.",
@@ -1177,9 +1167,9 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "watches",
         "Watches",
         (
-            "The agent can watch a page or feed and start a conversation when it changes. Off"
-            " removes the watch tools here and stops the watches made here. Watches only run "
-            "once whoever runs Daimon allows them, whatever this says."
+            "The agent can watch a page or feed and start a conversation when it changes. Off "
+            "removes the watch tools here and stops the watches made here. Watches run only once "
+            "whoever runs Daimon allows them."
         ),
         legacy_env=("DAIMON_WATCHES__ENABLED",),
     ),
@@ -1311,9 +1301,9 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent", "channel"),
         binds="turn",
         doc=(
-            "A submitted thumbs-down form (reasons, text, person, agent and a "
-            "link to the answer) is also posted where Ask a person requests go, and the form "
-            "says so first. It spends no credits. Off keeps the form in the database only."
+            "A submitted thumbs-down form (reasons, text, person, agent and a link to the answer) "
+            "also goes where Ask a person requests go, and the form says so. It spends no credits."
+            " Off keeps the form in the database only."
         ),
         requires=("support_channel",),
         authority=_SETTINGS,
@@ -1419,10 +1409,9 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "unattended_time_limit",
         "Unattended run time limit",
         (
-            "The longest a run nobody is watching may take before it is stopped: a routine, a "
-            "watch wake-up, an agent-to-agent chat or a command-line run. The standard 45 "
-            "minutes, or shorter. The smallest setting wins. Chats use the "
-            "answer time limit."
+            "The longest a run nobody watches may take: a routine, a watch wake-up, an "
+            "agent-to-agent chat or a command-line run. The standard 45 minutes, or shorter; the "
+            "smallest setting wins. Chats use the answer time limit."
         ),
         _TIME_LIMITS,
         default="45",

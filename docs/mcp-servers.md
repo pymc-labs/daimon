@@ -43,9 +43,15 @@ members, not web guests.
 Daimon marks a tool that changes data by its name, and you can change the mark.
 In chat a change waits for the asker's card, unless
 [`shared_write_approval`](features.md) is Skip for the workspace or agent. An
-outside MCP client may call it; its description tells the client to ask its user
-first. Turn a tool off for the workspace here, or for one agent with its tool
-rules. Every call is audited. Admins can do all of this from chat too.
+outside MCP client, agent key or coding key may call it; its description tells
+the client to ask its user first. A chat call with no conversation behind it is
+refused. Turn a tool off for the workspace here, or for one agent with its tool
+rules, which agent keys follow too. Every call is audited.
+
+Admins can do all of this from chat too, except adding or replacing a token.
+Each change waits for the admin's card, which names the tool, its server and
+the words callers get. In a room, addresses and errors go to the admin by
+direct message.
 
 ## Register a client for servers without dynamic registration
 

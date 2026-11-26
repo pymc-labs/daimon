@@ -267,7 +267,7 @@ The most messages one answer may post in a thread. A longer answer is attached a
 
 ## Setup guidance
 
-Instructions at the top of the agent's prompt on where its keys, repo, memory and files are and what it may share. Off leaves the agent's own prompt and the safety rules. Applies the next time the agent is saved.
+Instructions at the top of the agent's prompt on where its keys, repo, memory and files are and what it may share. Off leaves the agent's own prompt and the safety rules. Applies when the agent is next saved.
 
 | | |
 | --- | --- |
@@ -391,7 +391,7 @@ The agent can search the web. Off removes it here; On never gives more than the 
 
 ## Web app
 
-The agent knows about the web app: messages, routine runs and tool results carry its address and the pages it may link to, its invite and access tools are offered, and Daimon's cards show buttons into it. Off leaves it out.
+The agent knows the web app: messages, routine runs and tool results carry its address and pages to link, its invite and access tools are offered, and cards show buttons into it. Off leaves it out.
 
 | | |
 | --- | --- |
@@ -750,7 +750,7 @@ Finished answers get thumbs up and down for feedback.
 
 ## Private channel messages
 
-Every message in private and shared channels is read through Microsoft Graph, not only the ones that mention the agent. Needs the public address the bot is reached at. Whoever runs Daimon sets it, and it applies after a restart.
+Every message in private and shared channels is read through Microsoft Graph, not only the ones that mention the agent. Needs the bot's public address. Whoever runs Daimon sets it, and it applies after a restart.
 
 | | |
 | --- | --- |
@@ -763,7 +763,7 @@ Every message in private and shared channels is read through Microsoft Graph, no
 
 ## Shared connections
 
-Tool servers the team shares: an admin adds one once and approves its tools, and the team's agents and connected apps use them as tools named after the connection. A tool acts with the connection's own credential, not as the person. Nothing shows until an admin adds one. Off hides them all.
+Tool servers an admin shares with the team, each tool approved first.
 
 | | |
 | --- | --- |
@@ -919,7 +919,7 @@ The integrations pages of the web app. Off hides them for everyone on the team.
 
 ## Watches
 
-The agent can watch a page or feed and start a conversation when it changes. Off removes the watch tools here and stops the watches made here. Watches only run once whoever runs Daimon allows them, whatever this says.
+The agent can watch a page or feed and start a conversation when it changes. Off removes the watch tools here and stops the watches made here. Watches run only once whoever runs Daimon allows them.
 
 | | |
 | --- | --- |
@@ -1064,7 +1064,7 @@ Answers offer a way to ask a person for help, posted in the support channel. Off
 
 ## Feedback to support
 
-A submitted thumbs-down form (reasons, text, person, agent and a link to the answer) is also posted where Ask a person requests go, and the form says so first. It spends no credits. Off keeps the form in the database only.
+A submitted thumbs-down form (reasons, text, person, agent and a link to the answer) also goes where Ask a person requests go, and the form says so. It spends no credits. Off keeps the form in the database only.
 
 | | |
 | --- | --- |
@@ -1175,7 +1175,7 @@ The longest an answer may take before it is stopped when someone is talking to t
 
 ## Unattended run time limit
 
-The longest a run nobody is watching may take before it is stopped: a routine, a watch wake-up, an agent-to-agent chat or a command-line run. The standard 45 minutes, or shorter. The smallest setting wins. Chats use the answer time limit.
+The longest a run nobody watches may take: a routine, a watch wake-up, an agent-to-agent chat or a command-line run. The standard 45 minutes, or shorter; the smallest setting wins. Chats use the answer time limit.
 
 | | |
 | --- | --- |
@@ -1337,7 +1337,7 @@ On gives an agent's or one routine's runs its built-in tools, for the agent and 
 
 ## Approval for shared connection changes
 
-Ask shows a card before an agent runs a shared connection's tool that changes things. Skip runs it without one in chat; routines still need whoever runs Daimon to allow it. After a data read every call still asks.
+Skip runs a shared connection's tools that change things without a card in chat.
 
 | | |
 | --- | --- |
@@ -1349,7 +1349,7 @@ Ask shows a card before an agent runs a shared connection's tool that changes th
 
 ## Approval for watches
 
-Ask shows a card with the destination and duration before a watch is made or resumed. Skip makes it without the card, in the same thread for the default duration. Editing a watch, long jobs and key rotation keep asking. Only a server admin can change it.
+Ask shows a card with the destination and duration before a watch is made or resumed; Skip makes it in the same thread for the default duration. Editing a watch, long jobs and key rotation keep asking. Only a server admin can change it.
 
 | | |
 | --- | --- |
@@ -1373,7 +1373,7 @@ Ask shows a card before a cloud computer starts or gets more time. Skip runs bot
 
 ## Cloud computers continue after a job
 
-When a background command ends with nobody in the conversation, the agent may run the next command on that cloud computer. After a set number in a row it waits for the owner to run a command or write a file there; a message does not count. Off: it only reports the result. Only a server admin can change it.
+When a background command ends with nobody there, the agent may run the next one on that cloud computer. After a set number in a row it waits for the owner to run a command or write a file there; a message does not count. Off: it only reports the result. Only a server admin can change it.
 
 | | |
 | --- | --- |
@@ -1410,7 +1410,7 @@ Keeps what people ask this agent in direct messages and web chat, and what it an
 
 ## Monitor coding tools
 
-Keeps what people ask this agent from their coding tools and what it answers, plus the name, time and outcome of their other tool calls, never what they sent or returned. People are told in the conversation or their first tool result. Kept from when it is turned on, for the retention period.
+Keeps what people ask this agent from their coding tools and its answers, plus the name, time and outcome of their other tool calls, never what they sent or returned. People are told in the conversation or their first tool result. Kept from when it is turned on, for the retention period.
 
 | | |
 | --- | --- |

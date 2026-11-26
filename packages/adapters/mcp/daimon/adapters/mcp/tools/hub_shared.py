@@ -35,7 +35,7 @@ from mcp.types import TextContent
 _UNKNOWN = "Not found. Call list_daimons for the workspace_id values you can reach."
 _NAME_MAX = 128
 _OFF = "Shared connections are turned off there."
-_REFUSED = "This workspace's rules refuse this tool. Nothing was done."
+_REFUSED = "The tool rules here refuse this tool. Ask an admin. Nothing was done."
 
 
 class SharedToolInfo(BaseModel):
