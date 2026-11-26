@@ -172,8 +172,9 @@ Read it from the `FeatureSnapshot` that `resolve_features` builds on every sessi
 and turn path; write it with `change_feature`.
 `packages/core/tests/features/test_feature_contracts.py` checks reads, writes and
 paths. A new feature, or a changed default, tier or platform, needs a changelog
-fragment. Add a spec, or an entry in a test's per-feature table, next to its
-closest sibling, never at the end.
+fragment. Every spec sets `page=` (`"page.md#anchor"`), the docs page that
+explains it; a test checks it exists. Add a spec, or an entry in a test's
+per-feature table, next to its closest sibling, never at the end.
 
 ## Changelog
 
@@ -183,14 +184,16 @@ Anything a user can notice gets a fragment: `changes/<topic>.md` with one
 
 ## Documentation
 
-`docs/` is the public site, written for people who scan it, not for agents.
-It grew to 120k words by every PR appending a paragraph; these rules stop that.
+`docs/` is the public site, written for people who scan it. It is also what a
+Daimon agent with "Knows Daimon" on reads to answer questions, so a fact the
+docs lack is a docs bug. It grew to 120k words by every PR appending a
+paragraph; these rules stop that.
 `scripts/check_docs.py` enforces the budgets in CI.
 
-**Generated pages.** `docs/configuration.md`, `docs/mcp-tools.md` and
-`docs/features.md` are built by the docs workflow from `scripts/generate_*.py`
-(a setting's `description=`, a tool's docstring, the feature registry); never
-commit them. `.env.example` is committed: re-run
+**Generated pages.** `docs/configuration.md`, `docs/mcp-tools.md`,
+`docs/features.md` and `docs/llms.txt` are built by the docs workflow and the
+image build from `scripts/generate_*.py` (a setting's `description=`, a tool's
+docstring, the feature registry, the nav); never commit them. `.env.example` is committed: re-run
 `scripts/generate_env_example.py`, and on a merge conflict take either side and
 re-run it. Keep descriptions to one short paragraph.
 
@@ -215,6 +218,13 @@ docstrings and comments; history goes in a changelog fragment and the PR.
   for steps, tables for comparisons, a code block for every command.
 - At most 2,000 words of prose a page (quickstart 800, home 500). Over budget
   means cut or split into a new page, never raise the limit.
+- Text about the web app goes between `<!-- knowledge: web -->` and
+  `<!-- /knowledge -->` lines (whole paragraphs, list items or sections, never
+  inside a table); a page that is all web gets front matter `knowledge: web`.
+  An agent with the web app off is not shown it, and a test fails on web-app
+  text outside markers. Names in prose (`DAIMON_*`, `daimon ...`, slash
+  commands, tools, feature keys) must exist in code. `docs/llms.txt` is
+  generated with the reference pages (`scripts/generate_llms_txt.py`).
 - The site stands alone: never send a reader to the repo README. The README's
   quickstart mirrors `docs/quickstart.md`; change both together.
 - A new page needs a nav entry in `mkdocs.yml` and a line in `docs/README.md`.

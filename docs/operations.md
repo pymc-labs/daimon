@@ -266,9 +266,15 @@ build argument. An image built without it reports the package version.
 
 Daimon records each failed answer, routine, delivery, watch, follow-up and bridged-tool call
 once per issue, with no message content, and keeps it for
-`DAIMON_OPS_EVENTS__RETENTION_DAYS` days. Admins read the issues on the Overview and Issues
-pages of the web app, and can resolve or mute them there or by asking an agent. The
-operator can use the command line:
+`DAIMON_OPS_EVENTS__RETENTION_DAYS` days. Admins can resolve or mute an issue by
+asking an agent.
+
+<!-- knowledge: web -->
+Admins read the issues on the Overview and Issues pages of the web app, and can
+resolve or mute them there.
+<!-- /knowledge -->
+
+The operator can use the command line:
 
 ```bash
 daimon issues summary <tenant-uuid> [--period 1h|24h|7d|30d] [--json]

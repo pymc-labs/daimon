@@ -5,6 +5,7 @@ Run: uv run python scripts/generate_feature_reference.py
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
@@ -13,7 +14,12 @@ from daimon.core.features.registry import EVERY_PLATFORM, FEATURES, FeatureSpec
 from daimon.core.stores.domain import CHAT_PLATFORMS
 from pydantic import PostgresDsn, SecretStr
 
-OUT = Path(__file__).resolve().parents[1] / "docs" / "features.md"
+# The siblings below import the same way run as a script or imported as `scripts.<name>`.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _knowledge import web_only
+
+DOCS = Path(__file__).resolve().parents[1] / "docs"
+OUT = DOCS / "features.md"
 _TIER = {
     "deployment": "Deployment",
     "workspace": "Workspace",
@@ -49,7 +55,10 @@ below then cannot change it. A locked Off turns the feature off below.
 Set the deployment level with `DAIMON_FEATURES__<KEY>`, for example
 `DAIMON_FEATURES__PROGRESS_PLANS=on:locked`; a dot in a key is an
 underscore (`DAIMON_FEATURES__TOOL_BASH`). Set the others with `/settings` in chat,
-the `change_setting` MCP tool, the web app or `daimon features`.
+the `change_setting` MCP tool or `daimon features`.
+<!-- knowledge: web -->
+The web app sets them too.
+<!-- /knowledge -->
 
 A chat conversation picks up a change to a feature that hides tools at its next message.
 A CLI session, or an agent chat continued with `send_message`, keeps the tools it started
@@ -94,40 +103,72 @@ def _notes(spec: FeatureSpec) -> str:
     return "; ".join(notes)
 
 
-def summary() -> str:
+def _is_web(spec: FeatureSpec) -> bool:
+    return spec.key == "web_awareness" or spec.key.startswith("web.")
+
+
+def _link(spec: FeatureSpec) -> str:
+    """The feature's page; its own section here is a link within this page."""
+    return spec.page.removeprefix("features.md")
+
+
+def _page_title(page: str) -> str:
+    heading = ("\n" + (DOCS / page.partition("#")[0]).read_text()).split("\n# ", 1)
+    return heading[1].partition("\n")[0] if len(heading) > 1 else page
+
+
+def _table(specs: list[FeatureSpec]) -> list[str]:
     head = "| Feature | Key | Kind | Default | " + " | ".join(_TIER.values()) + " | Notes |"
     rows = [head, "|" + " --- |" * (len(_TIER) + 5)]
-    for spec in sorted(FEATURES.values(), key=lambda s: list(_CATEGORY).index(s.category)):
+    for spec in sorted(specs, key=lambda s: list(_CATEGORY).index(s.category)):
         levels = " | ".join("✓" if tier in spec.tiers else "" for tier in _TIER)
         default = spec.values.get(spec.default, spec.default)
         rows.append(
-            f"| {spec.name} | `{spec.key}` | {_CATEGORY[spec.category]} | {default} | "
-            f"{levels} | {_notes(spec)} |"
+            f"| [{spec.name}]({_link(spec)}) | `{spec.key}` | {_CATEGORY[spec.category]} | "
+            f"{default} | {levels} | {_notes(spec)} |"
         )
+    return rows
+
+
+def summary() -> str:
     intro = "## All features\n\nWhere each feature can be set, and its default.\n\n"
-    return intro + "\n".join(rows) + "\n"
+    every = list(FEATURES.values())
+    web = [spec for spec in every if _is_web(spec)]
+    lines = _table([spec for spec in every if not _is_web(spec)])
+    return intro + "\n".join([*lines, "", *web_only(["", *_table(web), ""])]) + "\n"
+
+
+def _section(spec: FeatureSpec) -> str:
+    values = ", ".join(f"`{key}` ({label})" for key, label in spec.values.items())
+    if spec.max_length:
+        values += f", or any name up to {spec.max_length} characters"
+    rows = [
+        ("Key", f"`{spec.key}`"),
+        ("Values", values),
+        ("Default", f"`{spec.default}`"),
+        ("Levels", ", ".join(_TIER[tier] for tier in spec.tiers)),
+        ("Combines", _COMBINE[spec.combine]),
+    ]
+    for backend, tiers in sorted(spec.backend_tiers.items()):
+        levels = ", ".join(_TIER[tier] for tier in tiers) or "Not available"
+        rows.append((f"Levels on {_BACKEND.get(backend, backend)}", levels))
+    if spec.legacy_env:
+        rows.append(("Deprecated", ", ".join(f"`{env}`" for env in spec.legacy_env)))
+    if not spec.page.startswith("features.md#"):
+        rows.append(("Explained in", f"[{_page_title(spec.page)}]({spec.page})"))
+    table = "\n".join(f"| {name} | {value} |" for name, value in rows)
+    return f"## {spec.name}\n\n{spec.doc}\n\n| | |\n| --- | --- |\n{table}\n"
 
 
 def render() -> str:
     parts = [_INTRO, summary()]
+    web: list[str] = []
     for spec in FEATURES.values():
-        values = ", ".join(f"`{key}` ({label})" for key, label in spec.values.items())
-        if spec.max_length:
-            values += f", or any name up to {spec.max_length} characters"
-        rows = [
-            ("Key", f"`{spec.key}`"),
-            ("Values", values),
-            ("Default", f"`{spec.default}`"),
-            ("Levels", ", ".join(_TIER[tier] for tier in spec.tiers)),
-            ("Combines", _COMBINE[spec.combine]),
-        ]
-        for backend, tiers in sorted(spec.backend_tiers.items()):
-            levels = ", ".join(_TIER[tier] for tier in tiers) or "Not available"
-            rows.append((f"Levels on {_BACKEND.get(backend, backend)}", levels))
-        if spec.legacy_env:
-            rows.append(("Deprecated", ", ".join(f"`{env}`" for env in spec.legacy_env)))
-        table = "\n".join(f"| {name} | {value} |" for name, value in rows)
-        parts.append(f"## {spec.name}\n\n{spec.doc}\n\n| | |\n| --- | --- |\n{table}\n")
+        if not _is_web(spec):
+            parts.append(_section(spec))
+        else:
+            web.append(_section(spec))
+    parts.append("\n".join(web_only(["", "\n".join(web)])))
     return "\n".join(parts)
 
 

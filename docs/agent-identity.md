@@ -75,7 +75,7 @@ whose overwrites deny it, and which role or entry to change. Members do not see
 this.
 
 A webhook Daimon already holds keeps posting. If the webhook is deleted and
-recreated, messages from the old one can no longer be edited, and an edit that
+recreated, messages from the old one cannot be edited, and an edit that
 fails that way posts the update as a new message.
 
 ### Teams

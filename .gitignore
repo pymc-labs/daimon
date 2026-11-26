@@ -29,6 +29,7 @@ site/
 /docs/configuration.md
 /docs/features.md
 /docs/mcp-tools.md
+/docs/llms.txt
 
 # Local symlinks into the private companion repo. CLAUDE.md is tracked: it
 # carries the repo-wide conventions every contributor and coding agent needs.

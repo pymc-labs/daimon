@@ -29,7 +29,7 @@ FILES: dict[str, str] = {
     "docs/slack-app-manifest.yaml": "slack-manifest",
     "docs/teams-app-manifest.yaml": "teams-manifest",
     "docker-compose.yml": "docs",
-    "LICENSE": "docs",
+    "LICENSE": "prose",
     # Ruff and the wheel builds lint runs honour it.
     ".gitignore": "tooling",
     ".pre-commit-config.yaml": "tooling",
@@ -44,8 +44,9 @@ FILES: dict[str, str] = {
     # The web adapter's links parity test reads it.
     "web/src/lib/deep-links.json": "web-links",
 }
-#: Prose no test or image reads; code trees keep their own (skills, fixtures).
-_PROSE = re.compile(r"^(?!defaults/|packages/|tests/|qa/)\S*\.md$")
+#: Root and tooling prose no test or image reads (`docs/` is read: area `docs`); code trees
+#: keep their own (skills, fixtures).
+_PROSE = re.compile(r"^(?!defaults/|docs/|packages/|tests/|qa/)\S*\.md$")
 #: Prose the lint job checks (scripts/lint_designators.sh runs on every change in the changes job).
 _LINTED_PROSE = re.compile(r"^(?:apps|scripts|\.github)/\S*\.md$")
 #: First match wins, so narrower prefixes come first.
@@ -108,8 +109,10 @@ _HOSTS = (*DAIMON, "image-daimon")
 #: Suites (matrix `suite` values, or the job's own key) each area needs.
 #: tests/test_ci_plan.py checks the leaf areas against what the tests import.
 SUITES: dict[str, tuple[str, ...]] = {
-    "docs": (),
-    "generated": ("lint",),
+    # tests/test_docs_knowledge.py reads docs/, docker-compose.yml and .env.example.
+    "docs": ("core",),
+    "prose": (),
+    "generated": ("lint", "core"),
     "tooling": ("lint",),
     "repo": ("core", "lint", "shard-check"),
     "deploy-workflow": ("core", "lint", "shard-check"),
@@ -253,7 +256,7 @@ def area(path: str) -> str:
     if _LINTED_PROSE.match(path):
         return "tooling"
     if _PROSE.match(path):
-        return "docs"
+        return "prose"
     return next((name for prefix, name in RULES if path.startswith(prefix)), "all")
 
 
