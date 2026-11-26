@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 259 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 258 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
