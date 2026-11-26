@@ -74,8 +74,8 @@ from daimon.core.channel_backend import log_backend_unsupported as _log_backend_
 from daimon.core.channel_budget_notice import spawn_budget_notice
 from daimon.core.channel_skills import turn_channel_skills, turn_platform_skills
 from daimon.core.config import env_admits
-from daimon.core.data_reading import AGENT_REQUEST_REFUSAL, reads_data
-from daimon.core.data_tools import DATA_READS
+from daimon.core.data_reading import AFTER_DATA_REFUSAL, AGENT_REQUEST_REFUSAL, reads_data
+from daimon.core.data_tools import DATA_READS, DATA_SOURCES
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.errors import TurnError, UserFacingError
@@ -123,12 +123,14 @@ from daimon.core.permissions import (
     home_of,
     limiting_ids_at,
 )
+from daimon.core.ports.data_ready import has_sources
 from daimon.core.ports.gate import data_sources_on
 from daimon.core.relay_scope import (
     agent_has_identity_relay,
     identity_relay_server_names,
     relay_seal_ids,
     without_data_reads,
+    without_data_sources,
     without_identity_relays,
     without_long_term_memory,
 )
@@ -147,6 +149,7 @@ from daimon.core.stores import agent_backends, mux_state
 from daimon.core.stores.access_policy import PolicyBusyError, load_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.channel_skills import list_channel_skills
+from daimon.core.stores.data_memory import tenant_has_reads
 from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, Role
 from daimon.core.stores.identity import (
     find_platform_principal,
@@ -1627,10 +1630,8 @@ async def _admit_gates(
             agent_name=config.agent_name,
         )
     # An agent that reads data sources is offered no data tool where outsiders may read (a
-    # hold); and a helper ask into it from an agent that does not read data here is refused,
-    # or its answers would land in that agent's memory. A failed read is unknown: the turn
-    # runs with no data tool, and counts as data-reading if the session read data or that
-    # cannot be told either.
+    # hold). A failed read is unknown: the turn runs with no data tool, and counts as
+    # data-reading if the session read data or that cannot be told either.
     data_unknown = False
     try:
         data_reading = await reads_data(
@@ -1643,15 +1644,20 @@ async def _admit_gates(
         data_reading, data_unknown = False, True
     if not data_reading and (deps.settings is None or data_sources_on(deps.settings)):
         # A session that read data counts as data-reading until `/new`, whatever
-        # `data_reads` says now: its context holds what it read.
+        # `data_reads` says now: its context holds what it read. A workspace that never
+        # read data skips the lookup.
         try:
             async with deps.sessionmaker() as session:
-                live = await get_live_thread_session(
-                    session,
-                    tenant_id=tenant_id,
-                    platform=platform,
-                    thread_id=slot_thread_id or channel_id,
-                    account_id=principal.account_id,
+                live = (
+                    await get_live_thread_session(
+                        session,
+                        tenant_id=tenant_id,
+                        platform=platform,
+                        thread_id=slot_thread_id or channel_id,
+                        account_id=principal.account_id,
+                    )
+                    if await tenant_has_reads(session, tenant_id=tenant_id)
+                    else None
                 )
         except Exception:
             if not data_unknown:
@@ -1665,8 +1671,11 @@ async def _admit_gates(
             and live.effective_config.data_read
             and live.fresh_start_requested_at is None
         )
-    if helper is not None and data_reading and not helper.data_reading:
-        raise UserFacingError(AGENT_REQUEST_REFUSAL)
+    # Only data-reading agents ask each other: the helper's reads land on the asker's session
+    # too (`daimon.adapters.mcp.data_access.ledgers`); either way round otherwise, data would
+    # reach memory that does not record it.
+    if helper is not None and data_reading != helper.data_reading:
+        raise UserFacingError(AGENT_REQUEST_REFUSAL if data_reading else AFTER_DATA_REFUSAL)
     data_blocked = data_unknown or hold is not None
     relay_agent = (helper is not None and helper.relay_scoped) or agent_has_identity_relay(
         (server.url for server in agent.mcp_servers),
@@ -3230,8 +3239,9 @@ async def place_features(
     agent: BetaManagedAgentsAgent,
     keys: tuple[str, ...] = _TURN_FEATURE_KEYS,
 ) -> FeatureSnapshot:
-    """The features a turn of `agent` reads at `place`; its toolset hides tools by them."""
-    return await resolve_features(
+    """The features a turn of `agent` reads at `place`; its toolset hides tools by them. Data
+    tools hide until the workspace has a source."""
+    features = await resolve_features(
         deps.sessionmaker,
         deps.settings,
         place,
@@ -3239,6 +3249,15 @@ async def place_features(
         agent_builtins=builtins_of(agent),
         server_setup=False,
     )
+    data = features.features.get(DATA_SOURCES)
+    if (
+        data is None
+        or not data.on
+        or deps.settings is None
+        or await has_sources(deps.settings, place.tenant_id)
+    ):
+        return features
+    return without_data_sources(features)
 
 
 async def require_tool_limits_hold(deps: TurnDeps, admission: Admission) -> None:

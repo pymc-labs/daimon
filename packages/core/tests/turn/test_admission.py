@@ -22,9 +22,10 @@ from daimon.core.billing import BillingConfig
 from daimon.core.capability_tools import CAPABILITY_TOOLS
 from daimon.core.channel_budget_notice import BudgetNotice, drain_budget_notices
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
+from daimon.core.data_reading import AFTER_DATA_REFUSAL, AGENT_REQUEST_REFUSAL
 from daimon.core.data_tools import DATA_READS
 from daimon.core.direct_messages import start_dm
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.features.registry import DEFAULT
 from daimon.core.features.service import set_workspace_feature
 from daimon.core.features.snapshot import CACHE
@@ -35,6 +36,7 @@ from daimon.core.scope import ChannelScopeRef
 from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, set_access_policy
 from daimon.core.stores.accounts import set_role
+from daimon.core.stores.data_memory import note_reads
 from daimon.core.stores.domain import FeatureTarget, FundingMode, Role, TenantRow
 from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.identity import get_or_create_platform_principal
@@ -655,6 +657,7 @@ async def test_a_session_that_read_data_stays_data_reading_but_unsealed_until_a_
         db_session, tenant_id=tenant.id, platform="discord", thread_id="chan-1",
         account_id=principal.account_id, ma_session_id="ses_1", effective_config=snapshot,
     )  # fmt: skip
+    await note_reads(db_session, tenant_id=tenant.id, chat_session_id="chat-1", refs=["sql"])
     await db_session.commit()
     router = resolved_agent_env_router(
         ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
@@ -3101,3 +3104,59 @@ async def test_a_relay_agents_helper_inherits_its_hold_seal_and_no_memory(
     unchanged = await admit_helper(deps, plain, call, now=_NOW)
     assert unchanged.hold is None and not unchanged.origin_seal_ids
     assert unchanged.identity.shared_memory
+
+
+@pytest.mark.parametrize(
+    ("asker_reads", "helper_reads", "refusal"),
+    [
+        (False, False, None),
+        (True, True, None),
+        (True, False, AFTER_DATA_REFUSAL),
+        (False, True, AGENT_REQUEST_REFUSAL),
+    ],
+    ids=["neither", "both", "data-asker", "data-helper"],
+)
+async def test_only_data_reading_agents_ask_each_other(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    asker_reads: bool,
+    helper_reads: bool,
+    refusal: str | None,
+) -> None:
+    """Data reaches another agent's memory only where that memory records it."""
+    from daimon.core.scope import HelperTarget
+    from daimon.core.turn.admission import HelperCall, admit_helper
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    router = resolved_agent_env_router(
+        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    router.add_agent(ma_agent(id="ag_2", name="helper", tenant_id=tenant.id))
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+    CACHE.clear()
+    parent = await admit(
+        deps,
+        origin="chat",
+        tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
+        platform="discord",
+        external_user_id="user-1",
+        channel_id="chan-1",
+        role=Role.ADMIN,
+        now=_NOW,
+    )
+    assert parent.request is not None
+    monkeypatch.setattr(
+        "daimon.core.turn.admission.reads_data", AsyncMock(return_value=helper_reads)
+    )
+    call = HelperCall(target=HelperTarget(ma_agent_id="ag_2", name="helper"), thread_key="h-1")
+    request = replace(parent.request, data_reading=asker_reads)
+    if refusal is None:
+        assert (await admit_helper(deps, request, call, now=_NOW)).agent.id == "ag_2"
+        return
+    with pytest.raises(UserFacingError) as refused:
+        await admit_helper(deps, request, call, now=_NOW)
+    assert str(refused.value) == refusal

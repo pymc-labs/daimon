@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 import httpx
+import psycopg
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._card import require_card
@@ -49,11 +50,14 @@ async def my_data_accounts(runtime: McpRuntime, auth: AuthIdentity) -> dict[str,
     except ToolError:
         return None
     schemas, tenant = schemas_of(runtime), actor.tenant_id
-    async with store(runtime) as conn:
-        accounts = await manage.identities(conn, schemas, tenant, account_id=actor.account_id)
-        made = await manage.person_connections(conn, schemas, tenant, actor.account_id)
-        open_ = await manage.connectable(conn, schemas, tenant, list(PROVIDERS))
-        notices = await identity.unseen_notices(conn, schemas, tenant, actor.account_id)
+    try:
+        async with store(runtime) as conn:
+            accounts = await manage.identities(conn, schemas, tenant, account_id=actor.account_id)
+            made = await manage.person_connections(conn, schemas, tenant, actor.account_id)
+            open_ = await manage.connectable(conn, schemas, tenant, list(PROVIDERS))
+            notices = await identity.unseen_notices(conn, schemas, tenant, actor.account_id)
+    except psycopg.Error:
+        return None  # a store that is not (fully) there reads as not set up
     have = {c.source_id for c in made}
     return {
         "accounts": [

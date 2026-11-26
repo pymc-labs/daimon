@@ -41,6 +41,7 @@ from daimon.core.mcp_identity import matching_turn
 from daimon.core.ports.gate import data_sources_on
 from daimon.core.stores.agent_owners import owner_of
 from daimon.core.stores.direct_messages import is_dm_thread
+from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.identity import accounts_of
 from daimon.core.stores.room_viewers import read_viewers
 from daimon.core.stores.routines import get_routine
@@ -157,13 +158,25 @@ async def data_origin(runtime: McpRuntime, auth: AuthIdentity, *, now: datetime)
     return DataOrigin("private", asker)
 
 
-async def _turn_origin(runtime: McpRuntime, auth: AuthIdentity, *, now: datetime) -> DataOrigin:
-    """A chat turn's origin by its execution grant: exactly one live turn of this agent."""
+async def ledgers(runtime: McpRuntime, auth: AuthIdentity) -> list[str]:
+    """The chat sessions a data read by `auth` lands on: its own, and for a helper's turn
+    the asking turn's too, so what either saves after records it."""
+    if auth.chat_session_id is None:
+        return []
+    found = await _turn_and_parent(runtime, auth, now=datetime.now(UTC))
+    parent = None if found is None else found[1]
+    asker = None if parent is None else parent.chat_session_id
+    return [auth.chat_session_id, *([asker] if asker and asker != auth.chat_session_id else [])]
+
+
+async def _turn_and_parent(
+    runtime: McpRuntime, auth: AuthIdentity, *, now: datetime
+) -> tuple[TurnOriginRow, TurnOriginRow | None] | None:
+    """The live turn by its execution grant, and the asking turn when it is a helper's; None
+    when either cannot be found."""
     grant = auth.chat_session_id
     if grant is None or auth.chat_agent_id is None or auth.platform is None:
-        return DataOrigin("none")
-    if auth.platform_user_id is None:
-        return DataOrigin("none")
+        return None
     async with runtime.session_factory() as session:
         held = await get_session_origin(
             session,
@@ -196,7 +209,18 @@ async def _turn_origin(runtime: McpRuntime, auth: AuthIdentity, *, now: datetime
             )
         )
     if turn is None or (turn.helper_of is not None and parent is None):
+        return None
+    return turn, parent
+
+
+async def _turn_origin(runtime: McpRuntime, auth: AuthIdentity, *, now: datetime) -> DataOrigin:
+    """A chat turn's origin by its execution grant: exactly one live turn of this agent."""
+    if auth.platform_user_id is None:
         return DataOrigin("none")
+    found = await _turn_and_parent(runtime, auth, now=now)
+    if found is None:
+        return DataOrigin("none")
+    turn, parent = found
     asker = Reader(
         user_subject(turn.platform, auth.external_id or "", auth.platform_user_id),
         turn.account_id,
@@ -261,7 +285,9 @@ async def _room(
     if platform == "slack" and auth.external_id is not None:
         users = await _slack_viewers(runtime, auth.external_id, channel_id)
     if platform == "teams":
-        users = await _teams_viewers(runtime, auth, channel_id)
+        users, outside = await _teams_viewers(runtime, auth, channel_id)
+        if outside:
+            return DataOrigin("room", asker, contained=True)
     if users is None:
         return DataOrigin("room", asker, None)
     async with runtime.session_factory() as session:
@@ -303,22 +329,34 @@ async def _slack_viewers(
 
 async def _teams_viewers(
     runtime: McpRuntime, auth: AuthIdentity, conversation_id: str
-) -> frozenset[str] | None:
-    """A Teams channel's or group chat's members by Entra id, read now; None (public only)
-    while the app lacks the consent to read them, or on any failure."""
+) -> tuple[frozenset[str] | None, bool]:
+    """A Teams channel's or group chat's members by Entra id, read now, and whether anyone
+    outside the organisation may read it: a guest, another tenant's member, a shared channel,
+    or a channel that cannot be found. Members are None (public only) while the app lacks
+    the consent to read them, or on any other failure."""
     client = runtime.teams_client
     if client is None:
-        return None
+        return None, False
     graph = graph_for(client)
     channel, _ = split_thread(conversation_id)
     try:
         if is_group_chat(channel):
-            return await graph.list_chat_member_ids(channel)
-        ref = await locate_channel(runtime, auth, client, channel)
-        return await graph.list_channel_member_ids(ref.group_id, ref.channel_id)
-    except (GraphUnavailable, ToolError) as e:
-        log.info("data.teams_viewers_unknown", error=str(e))
-        return None
+            members = await graph.list_chat_members(channel)
+        else:
+            try:
+                ref = await locate_channel(runtime, auth, client, channel)
+            except ToolError:
+                return None, True  # its sharing cannot be told
+            if ref.channel_type == "shared":
+                return None, True
+            members = await graph.list_channel_members(ref.group_id, ref.channel_id)
+    except GraphUnavailable as e:
+        log.info("data.teams_viewers_unknown", reason=e.reason, status=e.status)
+        return None, False
+    home = (auth.external_id or "").lower()
+    if any("guest" in m.roles or not home or (m.tenant_id or "").lower() != home for m in members):
+        return None, True
+    return frozenset(m.user_id.lower() for m in members if m.user_id), False
 
 
 async def _slack_people(

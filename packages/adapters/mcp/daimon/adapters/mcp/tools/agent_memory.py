@@ -13,6 +13,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.anthropic_guard import anthropic_configured
+from daimon.core.data_reading import reads_data
 from daimon.core.features.snapshot import FeaturePlace, resolve_features
 from daimon.core.host_memory import (
     HOST_MEMORY_TAG,
@@ -61,7 +62,6 @@ async def open_host_memory(
         keys=("memory_shared", "memory_personal", "memory_channel", "dm_memory_read_only"),
     )
     is_dm = origin.thread_id.startswith("dm:")
-    # The origin carries a data-reading agent's read-only stamp (`Admission.stores_read_only`).
     read_only = origin.memory_read_only is not False or (
         is_dm and features.on("dm_memory_read_only")
     )
@@ -77,6 +77,10 @@ async def open_host_memory(
                 )
                 or read_only
             )
+    # A data-reading agent writes no provider memory, which cannot record what it read.
+    read_only = read_only or await reads_data(
+        runtime.session_factory, runtime.settings, feature_place
+    )
     place = HostMemoryPlace(
         tenant_id=auth.tenant_id,
         agent_id=derive_agent_uuid(

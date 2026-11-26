@@ -91,9 +91,9 @@ async def reading(
         )
 
 
-def shown[M: BaseModel](reading: Reading, model: M) -> M:
-    """`model` with its text as this reader may read it."""
-    return type(model).model_validate(reading.show(model.model_dump(mode="json")))
+def shown[M: BaseModel](reading: Reading, model: M, source_id: uuid.UUID | None = None) -> M:
+    """`model` with its text as this reader may read it (`Reading.show`)."""
+    return type(model).model_validate(reading.show(model.model_dump(mode="json"), source_id))
 
 
 def uuid_of(raw: str) -> uuid.UUID:

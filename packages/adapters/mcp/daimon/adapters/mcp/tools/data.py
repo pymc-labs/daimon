@@ -17,7 +17,7 @@ from datetime import datetime
 from typing import Final
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.adapters.mcp.data_access import data_audience_for
+from daimon.adapters.mcp.data_access import data_audience_for, ledgers
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._hub_workspace import hub_workspace_tool
@@ -74,13 +74,16 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime, *, hub: bool = False)
             yield conn, await open_read(conn, schemas, auth.tenant_id, audience, salt=salt)
 
     async def noted(auth: AuthIdentity, refs: list[str]) -> None:
-        """Note what the session read, so a memory it saves records it."""
-        if auth.chat_session_id is not None and refs:
-            async with runtime.session_factory.begin() as session:
+        """Note what the session read, and an asking agent's session for a helper, so a
+        memory either saves records it."""
+        if auth.chat_session_id is None or not refs:
+            return
+        sessions = await ledgers(runtime, auth)
+        async with runtime.session_factory.begin() as session:
+            for chat_session_id in sessions:
                 await note_reads(
-                    session, tenant_id=auth.tenant_id, chat_session_id=auth.chat_session_id,
-                    refs=refs,
-                )  # fmt: skip
+                    session, tenant_id=auth.tenant_id, chat_session_id=chat_session_id, refs=refs
+                )
 
     @add
     async def data_sources(ctx: Context) -> str:  # pyright: ignore[reportUnusedFunction]
@@ -166,7 +169,7 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime, *, hub: bool = False)
         await noted(auth, [f"record:{record.item.id}"])
         start = max(start, 0)
         end = start + PAGE
-        body = r.show(record.body)  # whole, so a name never straddles a page
+        body = r.show(record.body, record.item.source_id)  # whole: no name straddles a page
         return _text(r.show({
             **dataclasses.asdict(record.item),
             "text": body[start:end],
