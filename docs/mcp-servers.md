@@ -1,8 +1,7 @@
 # MCP servers
 
 Connect Notion, Linear and other MCP servers to an agent, and set up sign-in for
-servers that need extra configuration. Read this if you administer agents or run
-the deployment.
+servers that need extra configuration.
 
 ## Connect a server
 
@@ -28,30 +27,28 @@ Ask it to disconnect the server or connect again.
 
 ## Share a server with the workspace
 
-A server admin can share an MCP server with the workspace, so agents and
-outside clients use it without their own sign-in. Open Integrations, Shared
-connections, and add the server's name, URL and token. The token is stored
-encrypted. Turning off [`shared_connections`](features.md), on by default, turns
-them all off.
+An admin can share an MCP server with the workspace; agents and outside
+clients use it without their own sign-in. Open Integrations, Shared
+connections, and add its name, URL and token (stored encrypted).
+[`shared_connections`](features.md), on by default, turns them all off.
 
-Daimon lists each tool's description and full input schema; turn on the ones you
-want. A tool whose text changes upstream stays off until you approve it again,
-and one named like a Daimon tool is left out. Each tool appears as
+Daimon lists each tool's description and input schema; turn on the ones you
+want. A tool whose text changes upstream stays off until approved again; one
+named like a Daimon tool is left out. Each tool appears as
 `<name>_<tool>` on Daimon's MCP server, for members, not web guests. A scoped
-connection or tool is served only where data reads may answer and everyone the
-answer reaches holds its scope. The agent page lists what its viewer holds.
+connection or tool is served only where everyone the answer reaches holds its
+scope.
 
-Daimon marks a tool that changes data by its name; you can change the mark.
-In chat a change waits for the asker's card, unless
-[`shared_write_approval`](features.md) is Skip for the workspace or agent. An
-outside MCP client, agent key or coding key may call it; its description tells
-the client to ask its user first. A chat call with no conversation is refused.
-Turn a tool off for the workspace here, or for one agent with its tool rules,
-which agent keys follow too (Ask refuses them). Every call is audited.
+A tool that changes data is marked by its name; you can change the mark. In
+chat it waits for the asker's card unless
+[`shared_write_approval`](features.md) is Skip. An outside MCP client, agent key
+or coding key may call it, told to ask its user first; a chat call with no
+conversation is refused. Turn a tool off here for the workspace, or with tool
+rules for one agent (agent keys follow; Ask refuses them). Every call is
+audited.
 
-Admins can do this from chat too, except setting a token. Each change waits for
-the admin's card, naming the tool, its server, parameters and the words callers
-get. In a room, addresses and errors go to the admin by direct message.
+Admins can do this from chat too, except setting a token; each change waits for
+their card.
 
 ## Register a client for servers without dynamic registration
 
@@ -182,7 +179,14 @@ keys are removed under `_meta` of every method, not only tool calls.
   from it (fails closed); writes are unaffected.
 - `requester_kind`: `"person"` only while a person's own message or click is
   being answered. `"routine"` means any unattended run: a routine, watch,
-  timer, continuation wake or DM routine.
+  timer, continuation wake or DM routine. `"agent_chat"` is a turn a person
+  started from an MCP client signed in to the hub.
+
+It carries no `requester_conversation` or wake link, and goes only to a server
+with `"agent_chat_requester": true` (off by default). Agent, coding and CLI keys,
+the turn after a send that failed with a server error, and an older
+conversation's first turn name nobody (logged as `agent_chat.requester_withheld`).
+Turn it on only once every process runs this release.
 
 A DM that is not open yet is `{"place_type": "dm", "channel_id": null,
 "parent_channel_id": null}`; a routine can only DM its owner.

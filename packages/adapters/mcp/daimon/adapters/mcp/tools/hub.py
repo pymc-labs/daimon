@@ -271,6 +271,8 @@ async def _auth_for(
         else derive_agent_uuid(tenant_id=tenant.tenant_id, ma_agent_id=str(agent.id)),
         platform_user_id=hub.platform_user_id,
         is_admin=False,
+        # The hub token is the person's own platform login, verified at sign-in.
+        signed_in_person=True,
     )
 
 

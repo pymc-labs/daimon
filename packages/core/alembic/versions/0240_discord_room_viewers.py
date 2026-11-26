@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "0240_discord_room_viewers"
-down_revision: str | None = "0233_data_search"
+down_revision: str | None = "0236_data_search"
 branch_labels: str | None = None
 depends_on: str | None = None
 

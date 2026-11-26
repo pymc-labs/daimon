@@ -60,6 +60,8 @@ type ChangeReason = Literal[
     "mcp_servers",
     "env_file",
     "repo_token_age",
+    # A Gemini session whose last interaction the provider can no longer read.
+    "history_unreadable",
 ]
 
 

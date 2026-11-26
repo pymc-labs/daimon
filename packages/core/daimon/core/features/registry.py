@@ -726,7 +726,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         default="on",
         tiers=("deployment", "workspace"),
         binds="turn",
-        doc="Tool servers an admin shares with the team, each tool approved first.",
+        doc="Tool servers an admin shares, each tool approved first.",
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,
     ),
@@ -994,9 +994,8 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         tiers=("workspace", "agent"),
         binds="turn",
         doc=(
-            "Ask shows a card before a cloud computer starts or gets more time. Skip runs "
-            "both without it, for the default time only. OpenAI and Gemini agents still get "
-            "the card. Only a server admin can change it."
+            "Ask shows a card to start or extend a cloud computer. Skip: no card, default time "
+            "only; OpenAI and Gemini still ask. Only a server admin sets it."
         ),
         platforms=EVERY_PLATFORM,
         authority=_SERVER_ADMIN,
@@ -1013,16 +1012,34 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         tiers=("workspace", "agent"),
         binds="turn",
         doc=(
-            "When a background command ends with nobody there, the agent may run the next one on "
-            "that cloud computer. After a set number in a row it waits for the owner to run a "
-            "command or write a file there; a message does not count. Off: it only reports the "
-            "result. Only a server admin can change it."
+            "After an unwatched command ends, the agent may run the next, up to a set number "
+            "in a row; then it waits for the owner to run a command or write a file (not a "
+            "message). Off: it only reports. Only a server admin sets it."
         ),
         platforms=EVERY_PLATFORM,
         depends_on=("compute",),
         authority=_SERVER_ADMIN,
         # Off is the default and the strict value, so a stricter-wins rule could never
         # turn it on. Only a server admin sets either tier; the nearer one decides.
+        combine_override="most_specific",
+    ),
+    FeatureSpec(
+        key="compute_agent_chat",
+        name="Cloud computers from agent chat",
+        category="guardrails",
+        effect="guardrail",
+        values=_ON_OFF,
+        default="off",
+        tiers=("workspace", "agent"),
+        binds="turn",
+        doc=(
+            "Agent chat may start cloud computers without a card and use them; it lists and "
+            "stops all the person's. So may their keys driving it. Only a server admin sets it."
+        ),
+        platforms=EVERY_PLATFORM,
+        depends_on=("compute",),
+        authority=_SERVER_ADMIN,
+        # As `compute_wake_runs`: Off is the strict default, so the nearer tier decides.
         combine_override="most_specific",
     ),
     FeatureSpec(
@@ -1228,8 +1245,8 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "compute",
         "Cloud computers",
         (
-            "The agent can start a short-lived cloud computer to run code and keep files. "
-            "Only a server admin turns it on; Off removes its tools here."
+            "A short-lived cloud computer to run code. Only a server admin turns it "
+            "on; Off removes its tools."
         ),
         requires=("compute_setup",),
         default="off",

@@ -4457,7 +4457,10 @@ class SessionSettleState(Base):
     is read only on the reserved cutoff rows: `backlog-cutoff`, when this
     settle path was deployed, and `web-search-cutoff`, when search billing
     was. `unattended_turn_event_id` is the latest turn an agent-chat send
-    started (`unattended_turn`), never cleared by a settle.
+    started (`unattended_turn`), never cleared by a settle. The `agent_chat_*`
+    columns say who drives the session, which sends were recorded and where the
+    session came from (`daimon.core.agent_chat_requester`); the settle columns are
+    billing state and never decide that.
 
     The table keeps its original name; the former catch-up's cursor columns
     are no longer mapped and are dropped later. Private to
@@ -4465,6 +4468,14 @@ class SessionSettleState(Base):
     """
 
     __tablename__ = "usage_reconcile_progress"
+    __table_args__ = (
+        Index(
+            "uq_usage_reconcile_progress_agent_chat_grant",
+            "agent_chat_grant",
+            unique=True,
+            postgresql_where=text("agent_chat_grant IS NOT NULL"),
+        ),
+    )
 
     managed_session_id: Mapped[str] = mapped_column(primary_key=True)
     covered_through: Mapped[datetime | None]
@@ -4473,6 +4484,20 @@ class SessionSettleState(Base):
     # The latest turn an agent-chat send started here, and its tool-rule channel.
     unattended_turn_event_id: Mapped[str | None]
     unattended_rules_channel_id: Mapped[str | None]
+    # Whether the latest send or resume on this agent-chat session came from a person
+    # signed in to the hub, on an idle session (`daimon.core.agent_chat_requester`).
+    agent_chat_signed_in: Mapped[bool | None]
+    # Agent-chat sends begun on this session, and the number of the latest one whose turn
+    # was recorded; both written only under the session fence. A person's send names them
+    # only when the two match.
+    agent_chat_sends: Mapped[int | None]
+    agent_chat_recorded_send: Mapped[int | None]
+    # Where the agent-chat session came from, copied from its own metadata on each send:
+    # the grant its Daimon credential signs (`chat_session_id`), the channel its tools were
+    # chosen for, and the account that created it (`daimon.core.agent_chat_requester`).
+    agent_chat_grant: Mapped[str | None]
+    agent_chat_channel: Mapped[str | None]
+    agent_chat_account_id: Mapped[uuid.UUID | None]
     updated_at: Mapped[TsNow]
 
 

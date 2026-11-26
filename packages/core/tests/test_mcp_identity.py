@@ -650,3 +650,47 @@ def test_the_relay_claim_carries_a_routine_and_never_both_bindings() -> None:
         parse_relay_claim({"agent_name": "daimon", "session": str(uuid.uuid4()), "routine": "x"})
     with pytest.raises(ValueError):
         parse_relay_claim({"agent_name": "daimon", "routine": 7})
+
+
+def test_agent_chat_requester_is_off_by_default_and_needs_requester_meta() -> None:
+    (plain,) = _settings([_BEARER], bearers=json.dumps({"internal": "k-1"})).servers
+    assert plain.agent_chat_requester is False, "a configured server sends no agent-chat person"
+    on = _settings(
+        [{**_BEARER, "agent_chat_requester": True}], bearers=json.dumps({"internal": "k-1"})
+    )
+    assert on.names_agent_chat_requester, "an operator turns it on per server"
+    with pytest.raises(ValidationError):
+        _settings(
+            [{**_BEARER, "requester_meta": False, "agent_chat_requester": True}],
+            bearers=json.dumps({"internal": "k-1"}),
+        )
+
+
+def test_an_agent_chat_binding_reads_back_and_stands_alone() -> None:
+    bound = RelayBinding("Helper", agent_chat="sesn_1")
+    assert parse_relay_claim(bound.claim()) == bound, "the agent-chat session reads back"
+    for bad in (
+        {"agent_name": "Helper", "agent_chat": ""},
+        {"agent_name": "Helper", "agent_chat": 1},
+        {"agent_name": "Helper", "agent_chat": "sesn_1", "session": str(uuid.uuid4())},
+        {"agent_name": "Helper", "agent_chat": "sesn_1", "routine": str(uuid.uuid4())},
+        {"agent_name": "Helper", "agent_chat": "sesn_1", "watch": str(uuid.uuid4())},
+    ):
+        with pytest.raises(ValueError):
+            parse_relay_claim(bad)
+
+
+def test_an_agent_chat_stamp_names_the_person_with_no_place_and_no_wake_link() -> None:
+    forged = _call(
+        requester_platform_user_id="666",
+        requester_conversation={"place_type": "dm", "channel_id": "1"},
+        requester_kind="person",
+        wake_url="https://evil.example.com",
+    )
+    out = stamp_requester(
+        json.dumps(forged).encode(), person="42", conversation=_CONVERSATION, kind="agent_chat"
+    )
+    assert json.loads(out)["params"]["_meta"] == {
+        "requester_platform_user_id": "42",
+        "requester_kind": "agent_chat",
+    }, "forged fields are replaced; no place is sent even if one is passed"

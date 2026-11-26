@@ -1261,3 +1261,33 @@ async def test_stored_compute_and_job_output_is_refused_to_a_relay_hold_only(
         assert access.read is readable
     finally:
         await runtime.client.close()
+
+
+async def test_an_agent_chat_machines_source_reads_as_its_own_session_does(world: _World) -> None:
+    """What a launch from agent chat records (`compute._agent_chat_source`) reads for its own
+    session's credential, which names no origin. A session in a sealed channel stamps that
+    channel and seal, so only a credential inside the seal reads it."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from daimon.adapters.mcp.tools.compute import (  # pyright: ignore[reportPrivateUsage]
+        _agent_chat_source,
+        _readable,
+    )
+    from daimon.core.compute_sessions import ComputePlace
+
+    await world.seal(_SEALED)
+    auth = world.auth(is_chat_execution=True)
+    place = ComputePlace(world.platform, "agentchat:test-session", _AGENT, "acme-project", None)
+    in_seal = replace(auth, seal_ids=frozenset({_SEALED}))
+    sealed = replace(place, feature_channel_id=_SEALED)
+    runtime = world.runtime()
+    try:
+        own = SimpleNamespace(source_metadata=_agent_chat_source(auth, place))
+        await _readable(runtime, auth, None, own)  # pyright: ignore[reportArgumentType]
+        kept = SimpleNamespace(source_metadata=_agent_chat_source(in_seal, sealed))
+        await _readable(runtime, in_seal, None, kept)  # pyright: ignore[reportArgumentType]
+        with pytest.raises(ToolError, match="can no longer read the source conversation"):
+            await _readable(runtime, auth, None, kept)  # pyright: ignore[reportArgumentType]
+    finally:
+        await runtime.client.close()
