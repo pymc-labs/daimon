@@ -3183,9 +3183,10 @@ class RetentionSettings(BaseModel):
         default=90,
         ge=0,
         description=(
-            "Days to keep security audit events and the record of messages the agent posted. "
+            "Days to keep security audit events, secret share records past their expiry and "
+            "the record of messages the agent posted. "
             "The scheduler deletes older ones; `daimon audit prune` does the same for one "
-            "tenant. Privacy erasure and tenant deletion still apply when this is 0."
+            "tenant's audit events. Privacy erasure and tenant deletion still apply when this is 0."
         ),
     )
     admin_history_days: int = Field(
@@ -3215,7 +3216,7 @@ class RetentionSettings(BaseModel):
         description="Days before a web thread the user deleted is removed for good.",
     )
     feedback_days: int = Field(
-        default=365, ge=0, description="Days to keep message feedback and support escalations."
+        default=365, ge=0, description="Days to keep message feedback and support request notes."
     )
     channel_names_days: int = Field(
         default=365,

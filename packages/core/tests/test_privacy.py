@@ -1132,6 +1132,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "web_people": "account_id FK -> accounts.id",
         "monitored_events": "account_id FK -> accounts.id; monitoring.delete_for_account",
         "ops_events": "account_id FK -> accounts.id; ops_events.delete_for_account",
+        "gemini_records": "account_id with no FK; gemini.delete_records_for_account",
         "workspace_admins": "account_id FK -> accounts.id",
         # The person's user id leaves every grant; updated_by is SET NULL.
         "daimon_admins": "subject_id and granted_by are erased by platform principal",

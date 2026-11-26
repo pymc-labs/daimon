@@ -266,7 +266,7 @@ async def test_conversation_clock_covers_private_chats_web_threads_and_cli_outco
         await db_session.execute(
             update(DirectMessageConversation)
             .where(DirectMessageConversation.route_key == route)
-            .values(updated_at=stamp, active_until=active)
+            .values(updated_at=stamp, claimed_at=active)
         )
     db_session.add_all(
         WebThread(

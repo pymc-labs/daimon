@@ -82,7 +82,7 @@ PERSON_COLUMNS: dict[str, tuple[str, ...]] = {
     "usage_events": ("platform_user_id", "managed_session_id"),
     "promo_redemptions": ("redeemed_by_account_id",),
     "promo_channel_redemptions": ("redeemed_by_account_id",),
-    "accounting_outbox": ("row",),
+    "accounting_outbox": ("row", "platform_user_id"),
     "usage_observation": ("applied",),
 }
 # Person paths inside a kept observation. The outbox row and the usage revision hold the

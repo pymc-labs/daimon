@@ -47,7 +47,8 @@ organisation a Teams deployment serves), Daimon stores:
   them, not an agent's owner. People are told in the conversation or their
   first tool result, and the privacy panel says so.
 - **Credentials.** Bound external credentials, such as a GitHub token,
-  encrypted at rest.
+  encrypted at rest. A secret one person shares with another is kept
+  encrypted until it is revealed or expires; a record of the share stays.
 - **Feedback and support notes**, and **uploads** you attach to a chat.
 - **Hosted artifacts.** Reports and notebooks an agent publishes. Blogs are
   public pages that stay until someone deletes them. Charts in an
@@ -77,7 +78,7 @@ history, monitored conversations and failure records, which always expire.
 
 | Records | Kept | Setting |
 | --- | --- | --- |
-| Security audit and agent posts | 90 days | [`DAIMON_RETENTION__SECURITY_AUDIT_DAYS`](docs/configuration.md#daimon_retention__security_audit_days) |
+| Security audit, secret share records and agent posts | 90 days | [`DAIMON_RETENTION__SECURITY_AUDIT_DAYS`](docs/configuration.md#daimon_retention__security_audit_days) |
 | Web audit and channel changes | 90 days | [`DAIMON_RETENTION__ADMIN_HISTORY_DAYS`](docs/configuration.md#daimon_retention__admin_history_days) |
 | Finished jobs, compute and routine output | 90 days | [`DAIMON_RETENTION__JOB_OUTPUT_DAYS`](docs/configuration.md#daimon_retention__job_output_days) |
 | Resolved credential and GitHub access requests | 90 days | [`DAIMON_RETENTION__ACCESS_REQUESTS_DAYS`](docs/configuration.md#daimon_retention__access_requests_days) |

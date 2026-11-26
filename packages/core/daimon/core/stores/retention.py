@@ -27,6 +27,7 @@ from daimon.core._models import (
     PlatformChannelName,
     RetentionRun,
     Routine,
+    SecretShare,
     SessionSettleState,
     SupportEscalation,
     TaskContinuation,
@@ -48,6 +49,7 @@ from sqlalchemy import (
     exists,
     func,
     literal_column,
+    null,
     or_,
     select,
     update,
@@ -350,17 +352,34 @@ async def delete_feedback(
     )
 
 
-async def delete_support_escalations(
+async def clear_support_notes(
     session: AsyncSession, *, before: datetime, limit: int, cursor: Position | None = None
 ) -> int:
+    """Blank what a person wrote on an old support request.
+
+    The rows are the credit ledger, and some ledgers count over all time, so
+    deleting them would refund spent credits; the row and its charge stay.
+    """
     _check(before)
-    condition = SupportEscalation.created_at < before
+    condition = and_(
+        SupportEscalation.created_at < before,
+        or_(SupportEscalation.note != "", SupportEscalation.answers.is_not(None)),
+    )
+    values = {"note": "", "answers": null()}  # SQL NULL; a bare None is JSON null
+    return await _update_batch(session, SupportEscalation, condition, values, limit)
+
+
+async def delete_secret_shares(
+    session: AsyncSession, *, before: datetime, limit: int, cursor: Position | None = None
+) -> int:
+    """Share records, kept as audit once their secret is gone, past expiry by the cutoff."""
+    _check(before)
     return await _delete_batch(
         session,
-        SupportEscalation,
-        condition,
+        SecretShare,
+        SecretShare.expires_at < before,
         limit,
-        order=SupportEscalation.created_at,
+        order=SecretShare.expires_at,
         cursor=cursor,
     )
 

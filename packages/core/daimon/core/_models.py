@@ -2005,7 +2005,8 @@ class SecretShare(Base):
     """One secret a person shared with another (`daimon.core.secret_shares`).
 
     `content` is Fernet ciphertext, cleared on reveal or expiry; the row stays as the audit
-    record. Person-scoped like `credential_requests`: erased by platform user, no account FK.
+    record until the retention sweep. Person-scoped like `credential_requests`: erased by
+    platform user, no account FK.
     `agent_id` is the provider id of the agent whose key it is, `key_name` the key;
     `awaiting_sender` holds a share until its sender confirms it.
     """
@@ -2015,6 +2016,7 @@ class SecretShare(Base):
         Index("secret_shares_sender_idx", "tenant_id", "platform", "sender_platform_user_id"),
         Index("secret_shares_recipient_idx", "tenant_id", "platform", "recipient_platform_user_id"),
         Index("secret_shares_live_idx", "expires_at", postgresql_where=text("content IS NOT NULL")),
+        Index("ix_secret_shares_expires_at", "expires_at"),
     )
 
     id: Mapped[UuidPk]

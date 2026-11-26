@@ -43,6 +43,7 @@ INDEXES: dict[str, str] = {
     "ix_web_logins_created_at": "web_logins (created_at)",
     "ix_web_threads_deleted_at": "web_threads (deleted_at) WHERE deleted_at IS NOT NULL",
     "ix_web_threads_tenant_updated": "web_threads (tenant_id, updated_at) WHERE deleted_at IS NULL",
+    "ix_secret_shares_expires_at": "secret_shares (expires_at)",
 }
 
 

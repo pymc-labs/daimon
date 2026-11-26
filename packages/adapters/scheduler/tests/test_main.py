@@ -3044,6 +3044,8 @@ async def test_run_loops_keeps_ticking_and_settling_while_retention_runs_long() 
     async with asyncio.timeout(5):
         await _run_loops(
             tick=tick,
+            housekeeping=unittest.mock.AsyncMock(),
+            github_sessions=unittest.mock.AsyncMock(),
             usage_sweep=usage,
             privacy_sweep=unittest.mock.AsyncMock(),
             retention_sweep=slow_retention,

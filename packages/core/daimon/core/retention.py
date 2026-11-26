@@ -267,6 +267,7 @@ def rules(settings: Settings) -> list[tuple[str, int, Run, timedelta]]:
             keep.security_audit_days,
             retention.delete_long_job_cancel_audit,
         ),
+        ("secret_shares", keep.security_audit_days, retention.delete_secret_shares),
         ("compute_output", keep.job_output_days, retention.clear_compute_output),
         ("routine_results", keep.job_output_days, retention.clear_routine_results),
         ("credential_requests", keep.access_requests_days, retention.delete_credential_requests),
@@ -277,7 +278,7 @@ def rules(settings: Settings) -> list[tuple[str, int, Run, timedelta]]:
         ),
         ("web_threads", keep.deleted_threads_days, retention.delete_deleted_web_threads),
         ("message_feedback", keep.feedback_days, retention.delete_feedback),
-        ("support_escalations", keep.feedback_days, retention.delete_support_escalations),
+        ("support_notes", keep.feedback_days, retention.clear_support_notes),
         ("channel_names", keep.channel_names_days, retention.delete_channel_names),
     ]
 

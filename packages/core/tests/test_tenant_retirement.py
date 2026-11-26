@@ -52,7 +52,7 @@ from mux.contracts.usage import UsageObservation as Observation
 from mux.testing.drivers.anthropic.ma import MARouter
 from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from pydantic import SecretStr
-from sqlalchemy import func, select, update
+from sqlalchemy import Numeric, func, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 # Tenant tables with a money column that are purged anyway, and why.
@@ -66,6 +66,8 @@ PURGED_DESPITE_MONEY = {
     "web_messages": "a message's cost is shown to people; usage_events bill it",
     "long_job": "a job's cost is shown to people; usage_events bill it",
     "turn_outcomes": "turn diagnostics; usage_events bill the turn",
+    "support_limits": "support credits are an allowance the operator sets, not money",
+    "support_escalations": "support credits never touch the money ledger",
 }
 _MONEY = ("_usd", "_tokens")
 _PERSON = ("account_id", "platform_user_id", "session_id", "thread_id", "user_id")
@@ -78,7 +80,7 @@ def test_every_tenant_table_is_purged_or_kept_for_accounting() -> None:
     for table in Base.metadata.sorted_tables:
         if table.name not in scoped or table.name in store.KEEP_FOR_ACCOUNTING:
             continue
-        money = [c.name for c in table.c if c.name.endswith(_MONEY)]
+        money = [c.name for c in table.c if c.name.endswith(_MONEY) or isinstance(c.type, Numeric)]
         assert not money or table.name in PURGED_DESPITE_MONEY, (
             f"{table.name} holds {money}: keep it for accounting or say why it is purged"
         )

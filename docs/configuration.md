@@ -298,9 +298,10 @@ off.
 
 `int` · optional · default `90`
 
-Days to keep security audit events and the record of messages the agent posted. The
-scheduler deletes older ones; `daimon audit prune` does the same for one tenant. Privacy
-erasure and tenant deletion still apply when this is 0.
+Days to keep security audit events, secret share records past their expiry and the
+record of messages the agent posted. The scheduler deletes older ones; `daimon audit
+prune` does the same for one tenant's audit events. Privacy erasure and tenant deletion
+still apply when this is 0.
 
 ### `DAIMON_RETENTION__ADMIN_HISTORY_DAYS`
 
@@ -337,7 +338,7 @@ Days before a web thread the user deleted is removed for good.
 
 `int` · optional · default `365`
 
-Days to keep message feedback and support escalations.
+Days to keep message feedback and support request notes.
 
 ### `DAIMON_RETENTION__CHANNEL_NAMES_DAYS`
 

@@ -13,7 +13,9 @@ from daimon.core._models import (
     LongJobRecord,
     McpOAuthFlow,
     Routine,
+    SecretShare,
     SessionSettleState,
+    SupportEscalation,
     TaskContinuation,
     ThreadSession,
     TurnOutcome,
@@ -30,6 +32,7 @@ from daimon.core.turn.termination import TerminationReason
 from daimon.testing.factories import (
     make_account,
     make_routine,
+    make_support_escalation,
     make_task_continuation,
     make_tenant,
     make_usage_event,
@@ -449,3 +452,46 @@ async def test_a_watch_keeps_its_last_firing_after_the_wake_is_swept(
     assert [a.last_fired_at for a in activity] == [NOW - timedelta(days=40)], (
         "the watch keeps its latest firing time"
     )
+
+
+async def test_old_support_requests_lose_their_notes_but_keep_their_charge(
+    db_session: AsyncSession,
+) -> None:
+    """The rows are a credit ledger: deleting one would refund the credit it spent."""
+    tenant = await make_tenant(db_session)
+    old = await make_support_escalation(db_session, tenant_id=tenant.id, note="my words")
+    new = await make_support_escalation(db_session, tenant_id=tenant.id, note="recent")
+    await db_session.execute(
+        update(SupportEscalation)
+        .where(SupportEscalation.id == old)
+        .values(created_at=OLD, answers={"q": "a"})
+    )
+
+    assert await retention.clear_support_notes(db_session, before=NOW, limit=100) == 1
+    assert await retention.clear_support_notes(db_session, before=NOW, limit=100) == 0
+
+    rows = {r.id: r for r in await db_session.scalars(select(SupportEscalation))}
+    assert (rows[old].note, rows[old].answers, rows[old].hold) == ("", None, Decimal(1))
+    assert rows[new].note == "recent"
+
+
+async def test_share_records_go_once_their_expiry_is_past_the_cutoff(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    for expires_at in (OLD, NOW + timedelta(days=1)):
+        db_session.add(
+            SecretShare(
+                tenant_id=tenant.id,
+                platform="slack",
+                sender_platform_user_id="U1",
+                recipient_platform_user_id="U2",
+                label="key",
+                expires_at=expires_at,
+            )
+        )
+    await db_session.flush()
+
+    assert await retention.delete_secret_shares(db_session, before=NOW, limit=100) == 1
+    left = (await db_session.scalars(select(SecretShare.expires_at))).all()
+    assert left == [NOW + timedelta(days=1)]
