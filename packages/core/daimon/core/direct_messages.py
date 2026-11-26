@@ -1494,11 +1494,16 @@ async def run_channel_timer(
         ):
             raise DirectMessageAccessRevoked(MANAGED_AGENTS_ONLY, message=MANAGED_AGENTS_ONLY)
         if provider:
-            from daimon.core.provider_routine import with_routine_sandbox
+            from daimon.core.provider_routine import TIMER_NEEDS_NO_SHELL, with_routine_sandbox
 
             # A timer has no sandbox opt-in: no built-ins, and OpenAI refuses.
             admission = await with_routine_sandbox(
-                deps, admission, None, tenant_id=row.tenant_id, platform="discord"
+                deps,
+                admission,
+                None,
+                tenant_id=row.tenant_id,
+                platform="discord",
+                refusal=TIMER_NEEDS_NO_SHELL,
             )
         deadline = turn_deadline(now=now, ceiling_s=admission.turn_ceiling_s)
         prepared = await bind_session(
@@ -1581,7 +1586,11 @@ async def _run_dm_fire(
             ):
                 raise DirectMessageAccessRevoked(MANAGED_AGENTS_ONLY, message=MANAGED_AGENTS_ONLY)
             if provider:
-                from daimon.core.provider_routine import with_routine_sandbox
+                from daimon.core.provider_routine import (
+                    SHELL_NEEDS_SANDBOX,
+                    TIMER_NEEDS_NO_SHELL,
+                    with_routine_sandbox,
+                )
 
                 admission = await with_routine_sandbox(
                     deps,
@@ -1589,6 +1598,7 @@ async def _run_dm_fire(
                     dm_routine_sandbox.get(),
                     tenant_id=tenant_id,
                     platform="discord",
+                    refusal=SHELL_NEEDS_SANDBOX if timer_row is None else TIMER_NEEDS_NO_SHELL,
                 )
             if admission.grant is None:
                 raise DirectMessageAccessRevoked(

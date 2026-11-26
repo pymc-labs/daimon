@@ -38,13 +38,18 @@ SHELL_NEEDS_SANDBOX = (
     "This routine's agent is on OpenAI, which always runs it with a shell. "
     "Ask a server admin to turn on sandbox tools for this routine."
 )
+TIMER_NEEDS_NO_SHELL = (
+    "This timer's agent is on OpenAI, which always runs it with a shell, "
+    "and a timer cannot run with one."
+)
 #: Refusal details written for the routine's owner; any other detail stays in the logs.
-_PERSON_FACING: frozenset[str] = frozenset({SHELL_NEEDS_SANDBOX})
+_PERSON_FACING: frozenset[str] = frozenset({SHELL_NEEDS_SANDBOX, TIMER_NEEDS_NO_SHELL})
 
 
 def refusal_text(error: AdmissionDenied) -> str | None:
     """What a refused routine shows its owner: a person-facing detail, else None (its reason)."""
     return str(error) if error.detail in _PERSON_FACING else None
+
 
 _ROUTINE_SCOPE = f"{CHANNEL_SCOPE_PREFIX}routine:"
 
@@ -165,11 +170,12 @@ async def with_routine_sandbox(
     *,
     tenant_id: uuid.UUID,
     platform: str,
+    refusal: str = SHELL_NEEDS_SANDBOX,
 ) -> Admission:
     """A provider routine's admission with built-ins on only while the opt-in covers
     this fire's provider, agent and environment and `unattended_capabilities` still
     allows them; a drifted pin is reported. OpenAI's shell cannot be left out, so
-    there a fire without the opt-in is refused."""
+    there a fire without the opt-in is refused with `refusal` (a timer has no opt-in)."""
     revision = admission.backend_revision
     assert revision is not None, "a provider turn has a revision"
     opted_in = False
@@ -183,7 +189,7 @@ async def with_routine_sandbox(
             deps.sessionmaker, deps.settings, tenant_id, platform, admission.agent.id
         )
     if not opted_in and get_profile(revision.profile).implicit_execution:
-        raise AdmissionDenied(reason="backend_unsupported", detail=SHELL_NEEDS_SANDBOX)
+        raise AdmissionDenied(reason="backend_unsupported", detail=refusal)
     return replace(admission, routine_sandbox_tools=opted_in)
 
 

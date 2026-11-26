@@ -16,6 +16,7 @@ from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.wakes import enqueue_wake
 from daimon.core.continuity.watch_imports import ImportedTimer
 from daimon.core.direct_messages import DirectMessageAccessRevoked, run_channel_timer
+from daimon.core.provider_routine import TIMER_NEEDS_NO_SHELL
 from daimon.core.scope import ResolvedConfig
 from daimon.core.stores.domain import ContinuationReason, Role
 from daimon.core.stores.held_timers import (
@@ -208,6 +209,7 @@ async def test_a_channel_timer_on_another_provider_runs_as_a_routine_with_no_opt
         with pytest.raises(AdmissionDenied) as denied:
             await run_channel_timer(deps, row, prompt="x", role=Role.USER)
         assert denied.value.reason == "backend_unsupported", denied.value
+        assert denied.value.detail == TIMER_NEEDS_NO_SHELL, "a timer has no opt-in to ask for"
         bind.assert_not_awaited()
         return
     reply = await run_channel_timer(deps, row, prompt="x", role=Role.USER)
