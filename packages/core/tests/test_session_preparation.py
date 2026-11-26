@@ -5132,6 +5132,31 @@ async def test_a_relay_agents_channel_turns_never_reuse_a_session_or_carry_work(
     assert again.ma_session_id == kept.ma_session_id and again.reused is True
 
 
+async def test_a_data_reading_agents_held_turns_never_reuse_a_session_or_carry_work(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Held, a data-reading agent's context may hold reads the new audience may not see."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    deps = _deps(db_session_factory, _Transport())
+    held = replace(
+        _admission(account=account),
+        data_reading=True,
+        hold=TurnHold(platform="discord", channel_id="c1", client=False),
+    )
+
+    async def _transfer(**_kwargs: Any) -> PreparedReplacement:
+        raise AssertionError("a held data turn carries nothing from the earlier session")
+
+    first = await _prepare(deps, held, tenant=tenant, account=account, transfer=_transfer)
+    second = await _prepare(deps, held, tenant=tenant, account=account, transfer=_transfer)
+    assert isinstance(first, PreparedTurn) and isinstance(second, PreparedTurn)
+    assert second.ma_session_id != first.ma_session_id and second.reused is False
+    assert second.continuity.transfer_kind is None
+
+
 async def test_a_relay_dm_replaces_a_session_recorded_with_memory_on(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
