@@ -27,7 +27,6 @@ from daimon.core._models import (
     Base,
     GitHubAppSessionVault,
     NeutralSkillVersion,
-    ProviderBindingSlot,
     SeededSkill,
     ServerSkill,
     SessionSettleState,
@@ -199,15 +198,9 @@ async def collect_upstream(session: AsyncSession, *, tenant_id: uuid.UUID) -> di
             values.update(str(v) for v in await session.scalars(query))
         found[kind] = sorted(values)
     # Imported here: `shared_threads` reaches the backend service, which reaches stores.
-    from daimon.core.shared_threads import shared_owner, shared_slot
+    from daimon.core.shared_threads import bound_shared_owners
 
-    slot = ProviderBindingSlot
-    threads = await session.execute(
-        select(slot.platform, slot.channel_id, slot.thread_id).where(
-            slot.tenant_id == tenant_id, slot.account_id.is_(None)
-        )
-    )
-    owners = {str(shared_owner(shared_slot(tenant_id, *thread))) for thread in threads}
+    owners = await bound_shared_owners(session, tenant_id=tenant_id)
     found["named_vaults"] = sorted(set(found["named_vaults"]) | owners)
     found["agents"] = found["environments"] = [TAGGED]
     found["hosts"] = list(HOSTS)

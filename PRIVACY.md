@@ -107,7 +107,8 @@ Anthropic resource whose deletion keeps failing is given up after 12 tries.
 
 Conversation history is on by default. An operator turns it off with
 `DAIMON_FEATURES__CONVERSATION_RETENTION=0`, and a workspace admin can shorten
-it in `/settings`.
+it in `/settings`. When a shared thread's conversation is removed, its
+Anthropic vault of shared tool tokens is deleted too.
 
 When a workspace is retired, its billing, usage and support-credit records
 are kept for accounting without the account or thread they came from. Usage

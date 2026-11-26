@@ -1452,3 +1452,16 @@ async def put_agent_config_revision(
         agent_revision=retained,
         thread_id=None if pin is None else pin[0],
     )
+
+
+async def shared_thread_keys(
+    session: AsyncSession, *, tenant_id: uuid.UUID | None = None
+) -> list[tuple[uuid.UUID, str, str, str]]:
+    """(tenant, platform, channel, thread) of every shared slot, or one tenant's."""
+    slot = ProviderBindingSlot
+    stmt = select(slot.tenant_id, slot.platform, slot.channel_id, slot.thread_id).where(
+        slot.account_id.is_(None)
+    )
+    if tenant_id is not None:
+        stmt = stmt.where(slot.tenant_id == tenant_id)
+    return list((await session.execute(stmt)).tuples())

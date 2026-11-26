@@ -1591,9 +1591,9 @@ _last_relay_vault_archive: dict[str, datetime] = {"started": datetime.now(UTC)}
 
 @scheduler_step
 async def _archive_idle_relay_vaults(
-    client: AsyncAnthropic, *, now: datetime | None = None
+    client: AsyncAnthropic, sm: async_sessionmaker[AsyncSession], *, now: datetime | None = None
 ) -> None:
-    """Archive relay vaults no live session mounts, at most once per interval.
+    """Archive idle relay vaults and delete unbound shared ones, at most once per interval.
     Boundary catch: a failure must not kill the scheduler loop; the next run retries.
     """
     current = now or datetime.now(UTC)
@@ -1602,7 +1602,7 @@ async def _archive_idle_relay_vaults(
         return
     _last_relay_vault_archive["started"] = current
     try:
-        await archive_idle_relay_vaults(client, now=current)
+        await archive_idle_relay_vaults(client, session_factory=sm, now=current)
     except (anthropic.APIError, ValueError) as error:
         log.exception("scheduler.relay_vault_archive.failed", causes=backend_refusal_causes(error))
 
@@ -2511,7 +2511,7 @@ async def run(
             await _sweep_routine_outputs(sm)
             await _sweep_github_issued_tokens(sm)
             await _sweep_retention(sm, settings)
-            await _archive_idle_relay_vaults(client)
+            await _archive_idle_relay_vaults(client, sm)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
             await _refresh_github_app_sessions(
                 client, sm, settings=settings, fernet=push_resync_fernet
@@ -2555,7 +2555,7 @@ async def run(
             await _sweep_github_connect_flows(sm)
             await _sweep_routine_outputs(sm)
             await _sweep_github_issued_tokens(sm)
-            await _archive_idle_relay_vaults(client)
+            await _archive_idle_relay_vaults(client, sm)
             await _settle_promo_credit(sm)
             await _drain_github_push_resync(
                 engine=engine,
