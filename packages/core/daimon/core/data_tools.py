@@ -32,7 +32,7 @@ DATA_SOURCE_TOOLS: Final[frozenset[str]] = frozenset(
         "dismiss_data_notices",
     }
 )
-"""The data admin and sign-in tools: hidden with `data_sources`, and until a workspace has a
+"""The data management and sign-in tools: hidden with `data_sources`, and until a workspace has a
 source (`daimon.core.ports.data_ready`)."""
 DATA_RESULT_MARK: Final = "[data source result]"
 REDACTED_DATA_RESULT: Final = f"{DATA_RESULT_MARK} hidden: only its own conversation sees it."
