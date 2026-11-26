@@ -964,9 +964,8 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         tiers=("workspace", "agent"),
         binds="turn",
         doc=(
-            "Ask shows a card before a cloud computer starts or gets more time. Skip runs "
-            "both without it, for the default time only. OpenAI and Gemini agents still get "
-            "the card. Only a server admin can change it."
+            "Ask shows a card to start or extend a cloud computer. Skip: no card, default time "
+            "only; OpenAI and Gemini still ask. Only a server admin sets it."
         ),
         platforms=EVERY_PLATFORM,
         authority=_SERVER_ADMIN,
@@ -983,10 +982,9 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         tiers=("workspace", "agent"),
         binds="turn",
         doc=(
-            "When a background command ends with nobody in the conversation, the agent may "
-            "run the next command on that cloud computer. After a set number in a row it waits "
-            "for the owner to run a command or write a file there; a message does not count. "
-            "Off: it only reports the result. Only a server admin can change it."
+            "After an unwatched command ends, the agent may run the next, a set number of times "
+            "in a row; then it waits for the owner to run a command or write a file (not a "
+            "message). Off: it only reports. Only a server admin sets it."
         ),
         platforms=EVERY_PLATFORM,
         depends_on=("compute",),
@@ -1005,9 +1003,8 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         tiers=("workspace", "agent"),
         binds="turn",
         doc=(
-            "Agent chat from an MCP client may list and stop the person's cloud computers, and "
-            "run commands and use files on those started in that session. Any key of that "
-            "person that drives it can too. Only a server admin can change it."
+            "Agent chat may list and stop the person's cloud computers and use those started "
+            "there, as may any of their keys driving it. Only a server admin sets it."
         ),
         platforms=EVERY_PLATFORM,
         depends_on=("compute",),
@@ -1218,8 +1215,8 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "compute",
         "Cloud computers",
         (
-            "The agent can start a short-lived cloud computer to run code and keep files. "
-            "Only a server admin turns it on; Off removes its tools here."
+            "A short-lived cloud computer for the agent's code. Only a server admin turns it "
+            "on; Off removes its tools."
         ),
         requires=("compute_setup",),
         default="off",
