@@ -1,4 +1,4 @@
-"""data_identity: who each source identity is, link decisions, data admins and connections.
+"""data_identity: who each source identity is, link decisions and connections.
 
 Runs `0004_identity.sql` through `daimon.data.revision`. Nothing reads or writes them until
 the `data_sources` feature is on. As with 0230, a server that lacks what the store needs, or

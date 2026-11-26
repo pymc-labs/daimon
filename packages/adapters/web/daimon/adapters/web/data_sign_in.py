@@ -15,12 +15,12 @@ import structlog
 from daimon.adapters.web.caller import workspace_data_sources_on
 from daimon.adapters.web.data_common import schemas_of, store
 from daimon.adapters.web.runtime import WebRuntime
-from daimon.core.ports.data_ready import has_sources
 from daimon.core.ports.gate import data_sources_on
 from daimon.core.stores.domain import WebPersonRow
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.web_identity import PLATFORM_OF, VerifiedIdentity
 from daimon.data import identity as data_identity
+from daimon.data import pool
 
 log = structlog.get_logger()
 #: How long one person's link may take before the sign-in goes on without it.
@@ -30,8 +30,8 @@ _SECONDS = 3
 async def prove_sign_in(
     runtime: WebRuntime, identity: VerifiedIdentity, people: Sequence[WebPersonRow]
 ) -> None:
-    """Link `identity` as each of `people`'s source identity in the workspace it proved, where
-    that workspace has a data source."""
+    """Link `identity` as each of `people`'s source identity in the workspace it proved, once
+    the store is ready, so a person who signs in before the first source is known by it."""
     if not data_sources_on(runtime.settings):
         return
     proved = {workspace for workspace, _ in identity.workspaces}
@@ -45,7 +45,7 @@ async def prove_sign_in(
                         or tenant.platform != PLATFORM_OF[identity.provider]
                         or tenant.external_id not in proved
                         or not await workspace_data_sources_on(runtime, db, tenant.id)
-                        or not await has_sources(runtime.settings, tenant.id)
+                        or not await pool.ready(runtime.settings)
                     ):
                         continue
                 async with store(runtime) as conn:

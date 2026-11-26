@@ -35,9 +35,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 SourceAction = Literal["create", "pause", "resume", "retire", "publish", "unpublish", "sync"]
-AccessAction = Literal[
-    "create_scope", "delete_scope", "grant", "revoke", "add_data_admin", "remove_data_admin"
-]
+AccessAction = Literal["create_scope", "delete_scope", "grant", "revoke"]
 LinkAction = Literal["link", "reject", "unlink", "hide_names", "show_names"]
 _DONE: dict[str, Any] = {"done": True}
 
@@ -117,17 +115,16 @@ def register_data_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 raise refused(e) from None
         return _DONE
 
-    # ---- scopes, grants and data admins ---------------------------------------------------
+    # ---- scopes and grants ----------------------------------------------------------------
 
     @mcp.tool(name="list_data_access", tags={"admin"})
     async def list_access(ctx: Context) -> dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
-        """List who may read what in the data sources: each scope with its holders, the data
-        admins and the workspace's people (names and account ids). Admin-only."""
+        """List who may read what in the data sources: each scope with its holders, and the
+        workspace's people (names and account ids). Admin-only."""
         actor = await manager(runtime, await _auth(ctx))
         names = await names_of(runtime, actor.tenant_id)
         async with store(runtime) as conn:
             scopes = await manage.scopes(conn, schemas, actor.tenant_id)
-            admins = await manage.data_admins(conn, schemas, actor.tenant_id)
 
         def holder(h: manage.GrantView) -> dict[str, Any]:
             return {"holder": h.holder, "name": _holder_name(h.holder, names), "bound": h.bound}
@@ -137,9 +134,6 @@ def register_data_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 {"id": s.id, "kind": s.kind, "name": s.name, "description": s.description,
                  "bound": s.bound, "holders": [holder(h) for h in s.holders]}
                 for s in scopes
-            ],
-            "data_admins": [
-                {"account_id": str(a.account_id), "name": names.get(a.account_id)} for a in admins
             ],
             "people": [
                 {"account_id": str(a), "name": n} for a, n in sorted(names.items(), key=_by_name)
@@ -153,15 +147,14 @@ def register_data_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         origin_context_id: str,
         scope_id: str = "",
         holder: str = "",
-        person: str = "",
         kind: str = "",
         name: str = "",
         description: str = "",
     ) -> dict[str, Any]:
         """Change who may read what in the data sources. create_scope (scope_id, kind, name,
         description), delete_scope (scope_id), grant or revoke a scope (scope_id, holder: a
-        person's name or account id, or a holder as listed), add_data_admin or
-        remove_data_admin (person). Runs on the asker's Approve card. Admin-only."""
+        person's name or account id, or a holder as listed). Runs on the asker's Approve card.
+        Admin-only."""
         auth = await _auth(ctx)
         actor = await manager(runtime, auth)
         await require_card(
@@ -190,16 +183,6 @@ def register_data_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                         await manage.revoke(
                             conn, schemas, tenant_id=t, by=by, admin=True, scope=scope_id,
                             holder=holder_of(names, holder),
-                        )  # fmt: skip
-                    case "add_data_admin":
-                        await identity.grant_data_admin(
-                            conn, schemas, tenant_id=t, by=by,
-                            account_id=account_of(names, person), admin=True,
-                        )  # fmt: skip
-                    case "remove_data_admin":
-                        await identity.revoke_data_admin(
-                            conn, schemas, tenant_id=t, by=by,
-                            account_id=account_of(names, person), admin=True,
                         )  # fmt: skip
             except IdentityError as e:
                 raise refused(e) from None

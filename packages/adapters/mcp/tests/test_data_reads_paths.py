@@ -32,19 +32,22 @@ from daimon.adapters.mcp.tools import (
     task_continuity,
 )
 from daimon.core.capability_tools import CAPABILITY_TOOLS
-from daimon.core.data_audience import user_subject
+from daimon.core.channel_audience import channel_has_outsiders
+from daimon.core.data_audience import Reader, user_subject
 from daimon.core.data_tools import DATA_READS, DATA_TOOLS, REDACTED_DATA_RESULT, mark_data_result
 from daimon.core.features import toolset
 from daimon.core.features.registry import FEATURES
 from daimon.core.stores.data_memory import UNKNOWN_READ
 from daimon.core.stores.domain import Role
 from daimon.core.stores.repo_memory import MemoryEntry
-from daimon.core.teams_graph import GraphMember
+from daimon.core.teams_graph import GraphMember, GraphUnavailable
 from daimon.core.turn import admission
 from daimon.core.turn_hold import TurnHold
 from daimon.data.identity import IdentityKey
+from daimon.testing.factories import make_tenant
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 def _calls(function: Callable[..., Any]) -> set[str]:
@@ -160,7 +163,8 @@ def test_a_data_reading_agent_is_unsealed_and_guarded() -> None:
 
 
 def _auth(**fields: Any) -> AuthIdentity:
-    return AuthIdentity(account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.USER, **fields)
+    fields.setdefault("tenant_id", uuid.uuid4())
+    return AuthIdentity(account_id=uuid.uuid4(), role=Role.USER, **fields)
 
 
 _NO_RUNTIME = cast(McpRuntime, None)
@@ -188,43 +192,75 @@ async def test_callers_without_a_turn_resolve_from_their_credential(
 
 
 _HOME = GraphMember(user_id="A", tenant_id="T")
-_ROOMS: list[tuple[str, str, GraphMember | str, tuple[frozenset[str] | None, bool]]] = [
-    ("home members", "19:c@thread.v2", _HOME, (frozenset({"a"}), False)),
-    ("a guest", "19:c@thread.v2", GraphMember(user_id="b", tenant_id="T", roles=["guest"]), (None, True)),
-    ("another tenant", "19:c@thread.v2", GraphMember(user_id="b", tenant_id="X"), (None, True)),
-    ("standard channel", "19:c@thread.tacv2", "standard", (frozenset({"a"}), False)),
-    ("shared channel", "19:c@thread.tacv2", "shared", (None, True)),
-    ("channel not found", "19:c@thread.tacv2", "missing", (None, True)),
+_DOWN = GraphUnavailable("down", status=503)
+_NO_CONSENT = GraphUnavailable("forbidden", status=403)
+_ROOMS: list[tuple[str, str, object, object]] = [
+    ("home members", "19:c@thread.v2", _HOME, frozenset({"a"})),
+    ("a guest", "19:c@thread.v2", GraphMember(user_id="b", tenant_id="T", roles=["guest"]), "outsiders"),
+    ("another tenant", "19:c@thread.v2", GraphMember(user_id="b", tenant_id="X"), "outsiders"),
+    ("standard channel", "19:c@thread.tacv2", "standard", frozenset({"a"})),
+    ("shared channel", "19:c@thread.tacv2", "shared", "outsiders"),
+    ("channel not found", "19:c@thread.tacv2", ToolError("no such channel"), "unknown"),
+    ("channel lookup fails", "19:c@thread.tacv2", _DOWN, "unknown"),
+    ("members unreadable", "19:c@thread.v2", _DOWN, "unknown"),
+    ("no consent", "19:c@thread.v2", _NO_CONSENT, "no_consent"),
 ]  # fmt: skip
+
+
+def _teams_graph(monkeypatch: pytest.MonkeyPatch, conversation: str, case: object) -> None:
+    channel = conversation.endswith("tacv2")
+    members = [_HOME] + ([case] if isinstance(case, GraphMember) and case is not _HOME else [])
+    read = AsyncMock(side_effect=case) if isinstance(case, Exception) and not channel else None
+    graph = SimpleNamespace(
+        list_chat_members=read or AsyncMock(return_value=members),
+        list_channel_members=AsyncMock(return_value=members),
+    )
+
+    async def _locate(*_: object) -> object:
+        if isinstance(case, Exception):
+            raise case
+        return SimpleNamespace(channel_type=case, group_id="g", channel_id="c")
+
+    monkeypatch.setattr(data_access, "graph_for", lambda _client: graph)  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+    monkeypatch.setattr(data_access, "locate_channel", _locate)
 
 
 @pytest.mark.parametrize(
     ("row", "conversation", "case", "want"), _ROOMS, ids=[r[0] for r in _ROOMS]
 )
-async def test_a_teams_room_with_outsiders_gets_no_data(
-    monkeypatch: pytest.MonkeyPatch,
-    row: str,
-    conversation: str,
-    case: GraphMember | str,
-    want: tuple[frozenset[str] | None, bool],
+async def test_a_teams_room_with_outsiders_or_unknown_members_gets_no_data(
+    monkeypatch: pytest.MonkeyPatch, row: str, conversation: str, case: object, want: object
 ) -> None:
-    members = [_HOME] + ([case] if isinstance(case, GraphMember) and case is not _HOME else [])
-    graph = SimpleNamespace(
-        list_chat_members=AsyncMock(return_value=members),
-        list_channel_members=AsyncMock(return_value=members),
-    )
-
-    async def _locate(*_: object) -> object:
-        if case == "missing":
-            raise ToolError("no such channel")
-        return SimpleNamespace(channel_type=case, group_id="g", channel_id="c")
-
-    monkeypatch.setattr(data_access, "graph_for", lambda _client: graph)  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
-    monkeypatch.setattr(data_access, "locate_channel", _locate)
+    _teams_graph(monkeypatch, conversation, case)
     runtime = cast(McpRuntime, SimpleNamespace(teams_client=object()))
     auth = _auth(platform="teams", external_id="t")
     got = await data_access._teams_viewers(runtime, auth, conversation)  # pyright: ignore[reportPrivateUsage]
     assert got == want, row
+
+
+async def test_a_teams_room_found_with_a_guest_holds_its_next_turns(
+    monkeypatch: pytest.MonkeyPatch, committing_sessionmaker: async_sessionmaker[AsyncSession]
+) -> None:
+    async with committing_sessionmaker.begin() as session:
+        tenant = await make_tenant(session)
+    guest = GraphMember(user_id="b", tenant_id="T", roles=["guest"])
+    _teams_graph(monkeypatch, "19:c@thread.v2", guest)
+    runtime = cast(
+        McpRuntime, SimpleNamespace(teams_client=object(), session_factory=committing_sessionmaker)
+    )
+    auth = _auth(platform="teams", external_id="t", tenant_id=tenant.id)
+    asker = Reader("teams:t:u", None)
+    now = datetime.now(UTC)
+    got = await data_access._room(runtime, auth, asker, "19:c@thread.v2", None, now=now)  # pyright: ignore[reportPrivateUsage]
+    assert got.contained
+    async with committing_sessionmaker() as session:
+        audience = await channel_has_outsiders(
+            session, tenant_id=tenant.id, platform="teams", channel_id="19:c@thread.v2"
+        )
+    assert audience.contained, "admission holds the room, so a data-reading session starts fresh"
+    _teams_graph(monkeypatch, "19:c@thread.v2", _NO_CONSENT)
+    with pytest.raises(ToolError, match="consent"):
+        await data_access._room(runtime, auth, asker, "19:d@thread.v2", None, now=now)  # pyright: ignore[reportPrivateUsage]
 
 
 def test_a_transcript_read_elsewhere_hides_data_results() -> None:
@@ -274,6 +310,9 @@ async def test_a_memory_that_recorded_data_shows_only_where_all_of_it_is_readabl
     assert [e.name for e in shown] == ["plain", "ok"]
     assert asked == [[["record:a"], ["record:b"]]], "untagged memories are not checked"
     assert noted == [("s", ["record:a"]), ("asker", ["record:a"])], "a recall joins the reads"
+    noted.clear()
+    await repo_memory._shown(runtime, _auth(), [ok], recall=False)  # pyright: ignore[reportPrivateUsage]
+    assert not noted, "a listing joins nothing"
 
 
 @asynccontextmanager

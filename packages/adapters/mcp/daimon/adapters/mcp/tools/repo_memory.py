@@ -144,7 +144,7 @@ async def repo_memory_impl(
     async with runtime.session_factory.begin() as session:
         if operation == "list":
             entries = await list_entries(session, **key, account_id=auth.account_id)
-            entries = await _shown(runtime, auth, entries)
+            entries = await _shown(runtime, auth, entries, recall=False)
             lines = [f"Repo memories for {target.repo_full_name}:"]
             lines.extend(f"{e.name}: {e.title} [{e.kind}, {e.scope}]" for e in entries)
             return "\n".join(lines) if entries else f"No repo memories for {target.repo_full_name}."
@@ -199,16 +199,16 @@ async def _refs(runtime: McpRuntime, auth: AuthIdentity) -> list[str] | None:
 
 
 async def _shown(
-    runtime: McpRuntime, auth: AuthIdentity, entries: list[MemoryEntry]
+    runtime: McpRuntime, auth: AuthIdentity, entries: list[MemoryEntry], *, recall: bool = True
 ) -> list[MemoryEntry]:
     """The entries everyone this answer is for may recall: no data recorded, or every
-    recorded item readable by them all. What is recalled joins the session's reads, so a
-    memory saved from it records them too."""
+    recorded item readable by them all. What is `recall`ed (viewed, not listed) joins the
+    session's reads, so a memory saved from it records them too."""
     tagged = [e for e in entries if e.data_refs]
     ok = await readable_by_audience(runtime, auth, [e.data_refs or [] for e in tagged])
     hidden = {e.name for e, shown in zip(tagged, ok, strict=True) if not shown}
     recalled = [ref for e in tagged if e.name not in hidden for ref in e.data_refs or []]
-    if recalled:
+    if recall and recalled:
         sessions = await ledgers(runtime, auth)
         async with runtime.session_factory.begin() as session:
             for chat_session_id in sessions:

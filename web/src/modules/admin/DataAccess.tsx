@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { CircleAlert, CircleCheck, EyeOff, Link2, Link2Off, Lock, Plus, UserPlus } from "lucide-react"
+import { CircleAlert, CircleCheck, EyeOff, Link2, Link2Off, Lock, Plus } from "lucide-react"
 import { useState } from "react"
 import { toast } from "sonner"
 import { Ago } from "@/components/common"
@@ -19,7 +19,7 @@ import { useConfirm } from "@/lib/confirm"
 import { rowProps, useParam } from "@/lib/filters"
 import { useDebounced } from "@/lib/hooks"
 import { Pill } from "../agents/bits"
-import type { Admins, Candidate, RedactionDetail, RedactionSet, Rules, Scope, SourceIdentity } from "../data/types"
+import type { Candidate, RedactionDetail, RedactionSet, Rules, Scope, SourceIdentity } from "../data/types"
 import { Cards, Section } from "./support/parts"
 
 const BASE = "/api/admin/data"
@@ -61,18 +61,12 @@ function useWrite(done?: string) {
 }
 
 export function DataAccess() {
-  const admins = useQuery({ queryKey: [...KEY, "admins"], queryFn: () => api.get<Admins>(`${BASE}/admins`) })
   return (
-    <QueryState query={admins}>
-      {(a) => (
-        <div className="mx-auto max-w-[1040px] space-y-10">
-          <Scopes />
-          <Identities admin={a.you} />
-          <DataAdmins a={a} />
-          {a.you && <Redaction />}
-        </div>
-      )}
-    </QueryState>
+    <div className="mx-auto max-w-[1040px] space-y-10">
+      <Scopes />
+      <Identities />
+      <Redaction />
+    </div>
   )
 }
 
@@ -180,7 +174,7 @@ function NewScope({ onClose }: { onClose: () => void }) {
 
 // Identity links
 
-function Identities({ admin }: { admin: boolean }) {
+function Identities() {
   const { ok } = useWrite()
   const confirm = useConfirm()
   const cands = useQuery({ queryKey: [...KEY, "candidates"], queryFn: () => api.get<Candidate[]>(`${BASE}/candidates`) })
@@ -204,7 +198,7 @@ function Identities({ admin }: { admin: boolean }) {
               {rows.map((i) => {
                 const cand = i.account_id ? undefined : cands.data?.find((c) => idOf(c) === idOf(i))
                 const person = i.account_id ? (i.account_name ?? "Unknown person") : null
-                const menu: MenuAction[] = !admin || !i.account_id ? [] : [
+                const menu: MenuAction[] = !i.account_id ? [] : [
                   { label: i.redacted ? "Stop redacting" : "Redact for this person", icon: <EyeOff />, onSelect: () => redact.mutate({ id: i.account_id!, redacted: !i.redacted }) },
                   { label: "Unlink", icon: <Link2Off />, destructive: true, onSelect: async () => {
                     if (await confirm({ title: `Unlink ${i.name}?`, action: "Unlink", destructive: true })) unlink.mutate(refOf(i))
@@ -220,7 +214,7 @@ function Identities({ admin }: { admin: boolean }) {
                     </TableCell>
                     <TableCell className="text-muted-foreground max-md:hidden">{i.linked_at ? <Ago iso={i.linked_at} /> : ""}</TableCell>
                     <TableCell className="text-right">
-                      {!admin ? null : cand ? (
+                      {cand ? (
                         <span className="inline-flex gap-1.5">
                           <Button size="sm" variant="ghost" disabled={reject.isPending} onClick={() => reject.mutate({ ...refOf(i), account_id: cand.account_id })}>Reject</Button>
                           <Button size="sm" disabled={link.isPending} onClick={() => link.mutate({ ...refOf(i), account_id: cand.account_id })}>Link</Button>
@@ -236,41 +230,6 @@ function Identities({ admin }: { admin: boolean }) {
           </Table>
         )}
       </QueryState>
-    </Section>
-  )
-}
-
-// Data admins
-
-function DataAdmins({ a }: { a: Admins }) {
-  const { ok } = useWrite()
-  const confirm = useConfirm()
-  const add = useMutation({ mutationFn: (id: string) => api.post(`${BASE}/admins`, { account_id: id }), onSuccess: () => { ok(); toast("Data admin added") } })
-  const remove = useMutation({ mutationFn: (id: string) => api.del(`${BASE}/admins/${id}`), onSuccess: () => { ok(); toast("Data admin removed") } })
-  return (
-    <Section title="Data admins" add={a.can_grant ? <PersonPick label="Add" icon={<UserPlus />} onPick={(p) => add.mutate(p.account_id)} /> : undefined}>
-      {!a.admins.length ? <div className="rounded-lg border px-4 py-6 text-center text-sm text-muted-foreground">No data admin yet</div> : (
-        <Table>
-          <TableHeader>
-            <TableRow className="hover:bg-transparent"><TableHead>Person</TableHead><TableHead className="max-sm:hidden">Added</TableHead><TableHead className="w-24" /></TableRow>
-          </TableHeader>
-          <TableBody>
-            {a.admins.map((x) => (
-              <TableRow key={x.account_id}>
-                <TableCell className="font-medium">{x.name ?? "Unknown person"}</TableCell>
-                <TableCell className="text-muted-foreground max-sm:hidden"><Ago iso={x.created_at} /></TableCell>
-                <TableCell className="text-right">
-                  {a.can_grant && (
-                    <Button variant="ghost" size="sm" disabled={remove.isPending} aria-label={`Remove ${x.name ?? "data admin"}`} onClick={async () => {
-                      if (await confirm({ title: `Remove ${x.name ?? "this person"} as a data admin?`, action: "Remove", destructive: true })) remove.mutate(x.account_id)
-                    }}>Remove</Button>
-                  )}
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      )}
     </Section>
   )
 }

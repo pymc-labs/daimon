@@ -24,6 +24,7 @@ from daimon.core.host_memory import (
     choose_store,
 )
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.stores.data_memory import has_read
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -77,10 +78,16 @@ async def open_host_memory(
                 )
                 or read_only
             )
-    # A data-reading agent writes no provider memory, which cannot record what it read.
+    # A data-reading agent, or a session that read data, writes no provider memory, which
+    # cannot record what it read.
     read_only = read_only or await reads_data(
         runtime.session_factory, runtime.settings, feature_place
     )
+    if not read_only and origin.chat_session_id:
+        async with runtime.session_factory() as session:
+            read_only = await has_read(
+                session, tenant_id=auth.tenant_id, chat_session_id=origin.chat_session_id
+            )
     place = HostMemoryPlace(
         tenant_id=auth.tenant_id,
         agent_id=derive_agent_uuid(

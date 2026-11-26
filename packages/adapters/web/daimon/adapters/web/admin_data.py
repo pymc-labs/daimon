@@ -1,8 +1,8 @@
 """`/api/admin/data/*`: who may read what, and who is who, in the workspace's data sources.
 
-Scopes, grants, source identities, data admins and redaction sets, for owners and admins,
-who manage them as data admins do (`workspace_admin`); the store refuses anyone else with a
-message. Every write leaves a row in the workspace's audit trail through the data package.
+Scopes, grants, source identities and redaction sets, for owners and admins
+(`workspace_admin`); the store refuses anyone else with a message. Every write leaves a row
+in the workspace's audit trail through the data package.
 """
 
 from __future__ import annotations
@@ -87,20 +87,6 @@ class IdentityRef(BaseModel):
 
 class Link(IdentityRef):
     account_id: uuid.UUID
-
-
-class AdminOut(BaseModel):
-    account_id: uuid.UUID
-    name: str | None
-    created_at: datetime
-
-
-class Admins(BaseModel):
-    admins: list[AdminOut]
-    you: bool
-    """Whether the caller manages data access: a workspace admin or a data admin."""
-    can_grant: bool
-    """Whether the caller may name data admins: the same people."""
 
 
 class Account(BaseModel):
@@ -366,47 +352,6 @@ def admin_data_router(runtime: WebRuntime) -> APIRouter:
                     by=p.account_id,
                     admin=workspace_admin(caller),
                 )
-            except IdentityError as e:
-                raise refused(e) from None
-
-    # ---- data admins ----------------------------------------------------------------------
-
-    @router.get("/admins")
-    async def admins(caller: Manager) -> Admins:  # pyright: ignore[reportUnusedFunction]
-        p = caller.person
-        who = await names(caller)
-        async with store(runtime) as conn:
-            found = await manage.data_admins(conn, schemas, p.tenant_id)
-        you = workspace_admin(caller) or any(a.account_id == p.account_id for a in found)
-        return Admins(
-            admins=[AdminOut(account_id=a.account_id, name=who.get(a.account_id),
-                             created_at=a.created_at) for a in found],
-            you=you,
-            can_grant=you,
-        )  # fmt: skip
-
-    @router.post("/admins", status_code=204)
-    async def add_admin(caller: Manager, body: Account) -> None:  # pyright: ignore[reportUnusedFunction]
-        p = caller.person
-        await member(caller, body.account_id)
-        async with store(runtime) as conn:
-            try:
-                await identity.grant_data_admin(
-                    conn, schemas, tenant_id=p.tenant_id, by=p.account_id,
-                    account_id=body.account_id, admin=workspace_admin(caller),
-                )  # fmt: skip
-            except IdentityError as e:
-                raise refused(e) from None
-
-    @router.delete("/admins/{account_id}", status_code=204)
-    async def remove_admin(caller: Manager, account_id: uuid.UUID) -> None:  # pyright: ignore[reportUnusedFunction]
-        p = caller.person
-        async with store(runtime) as conn:
-            try:
-                await identity.revoke_data_admin(
-                    conn, schemas, tenant_id=p.tenant_id, by=p.account_id,
-                    account_id=account_id, admin=workspace_admin(caller),
-                )  # fmt: skip
             except IdentityError as e:
                 raise refused(e) from None
 

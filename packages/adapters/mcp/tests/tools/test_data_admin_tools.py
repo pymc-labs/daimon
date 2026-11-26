@@ -34,12 +34,6 @@ CHANGES: list[tuple[str, dict[str, Any], Any, str]] = [
         "grant",
     ),
     (
-        "change_data_access",
-        {"action": "add_data_admin", "person": "Maya"},
-        identity,
-        "grant_data_admin",
-    ),
-    (
         "change_data_links",
         {"action": "unlink", "provider": "slack", "workspace": "T1", "subject": "U1"},
         identity,
@@ -198,10 +192,10 @@ async def test_a_refusal_of_the_store_reads_as_its_message(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def refuse(*_: object, **__: object) -> None:
-        raise NotAllowed("Only a data admin does that.")
+        raise NotAllowed("Only a workspace admin does that.")
 
     monkeypatch.setattr(manage, "delete_scope", refuse)
-    with pytest.raises(ToolError, match="Only a data admin does that. Nothing changed."):
+    with pytest.raises(ToolError, match="Only a workspace admin does that. Nothing changed."):
         await rig.call(
             "change_data_access", action="delete_scope", scope_id="ops", origin_context_id="o"
         )
@@ -215,14 +209,10 @@ async def test_access_lists_holders_by_name(rig: Rig, monkeypatch: pytest.Monkey
         ]
         return [manage.ScopeView("ops", "internal", "Ops", "", False, held)]
 
-    async def admins(*_: object) -> list[manage.AdminView]:
-        return [manage.AdminView(ADMIN, None, None)]  # type: ignore[arg-type]
-
     monkeypatch.setattr(manage, "scopes", scopes)
-    monkeypatch.setattr(manage, "data_admins", admins)
     out = await rig.call("list_data_access")
     assert [h["name"] for h in out["scopes"][0]["holders"]] == ["Maya", None]
-    assert out["data_admins"][0]["name"] == "Ada"
+    assert "data_admins" not in out, "workspace admins manage data access"
 
 
 @pytest.mark.parametrize(("details", "email"), [("direct_message", None), ("shown", "m@x.example")])
