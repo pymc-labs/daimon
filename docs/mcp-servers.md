@@ -125,45 +125,10 @@ the message's channel; a new public thread reads as its channel. A routine that 
 thread Daimon has not sorted yet, such as an archived one, signs `narrow`.
 
 A routine run names no person. On a server with `"routine_claims": true`, a run that posts
-to a Discord room carries `routine`, that room as `channel` and its `room`. A run that
-posts to a DM carries none of them unless the server also has `"dm_routine_claims": true`
-(below); a run that posts nowhere never does. Agent chat, the web app's tool list and
-senders from another organisation name no person either.
-
-On a server with both `"routine_claims": true` and `"dm_routine_claims": true`, a routine
-that posts to its owner's DM signs `routine`, the owner as `sub`, the owner's DM with the
-answering bot as `channel` and `room: dm`, with no `msg` and no `wake`. Daimon opens that
-DM before the run starts, sending nothing, and signs only while all of these hold: the
-call comes from that routine's own run in a fresh DM scope (not a person's message, a
-helper, a watch or a timer), that run is still going, the routine is enabled and unedited
-since the run began, it still posts to its owner's DM and runs this agent, and the owner
-is the person the run acts for. A pause or an edit stops the next call. If any check
-fails, or the DM could not be opened, every server gets what it gets without the setting.
-
-What switching it on means: a stored prompt reads for its owner with nobody watching. The
-server gives the run what a fresh DM from the owner gives that agent, without writes. No
-message proves the owner asked for this run, and the prompt may have been written by the
-model during the owner's turn or edited by an admin; the answer still goes only to the
-owner's DM.
-
-| `routine_claims` | `dm_routine_claims` | Routine runs the server can tell apart |
-| --- | --- | --- |
-| off | off | none |
-| on | off | runs posting to a channel or thread |
-| on | on | those, and runs posting to the owner's DM |
-| off | on | refused in configuration |
-
-Which routine runs sign what, by provider and destination:
-
-| Provider | Channel or thread | Owner's DM | No destination |
-| --- | --- | --- | --- |
-| Managed Agents | `routine`, `channel`, `room` | `routine`, `sub`, `channel`, `room: dm`, when the agent mounts `daimon-mcp` | nothing |
-| OpenAI, Gemini | nothing | nothing | nothing |
-
-Update the server first, then all Daimon processes together, then turn
-`dm_routine_claims` on; turn it off before rolling the server back. A Daimon process from
-before this setting refuses a run's credential that names both a DM session and a
-routine, so roll Daimon back only with the setting off and such runs finished.
+to a Discord room carries `routine`, that room as `channel` and its `room`; a run posting
+nowhere carries none. A DM run needs
+[`dm_routine_claims`](unattended.md#a-routine-in-its-owners-dm) too. Agent chat, the web
+app's tool list and senders from another organisation name no person either.
 
 On a server with `"wake_claims": true`, Daimon signs `wake` only for these turns:
 

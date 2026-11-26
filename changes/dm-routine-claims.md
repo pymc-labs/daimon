@@ -4,4 +4,4 @@
   DM signs its routine, the owner, the owner's DM and room `dm`, only while that
   run is live and the routine enabled and unedited. Daimon opens the DM before
   the run, sending nothing. It is off by default
-  ([signed identity](docs/mcp-servers.md)).
+  ([A routine in its owner's DM](docs/unattended.md#a-routine-in-its-owners-dm)).

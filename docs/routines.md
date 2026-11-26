@@ -151,12 +151,7 @@ get unattended-run framing, which an agent can override with
 Routine sessions mount the agent's shared memory read-only. A routine with no
 destination or channel also mounts its owner's personal memory read-only. An
 owner-DM routine is skipped as `owner_busy` if the owner already has a DM turn
-running. On a signed-identity server with `dm_routine_claims`, an owner-DM routine
-reads what a fresh DM from its owner to that agent reads, and writes nothing there:
-its stored prompt reads for the owner with nobody watching, even after an admin edits
-it. Daimon opens the owner's DM before the run, sending nothing; a pause or an edit
-stops those reads at the next call
-([signed identity](mcp-servers.md)). A routine in a
+running. A routine in a
 channel shared with another organisation runs held to that channel, with only
 that channel's memory and no DM fallback.
 
