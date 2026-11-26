@@ -6,8 +6,8 @@ which the batched deletes scan in order. They are built concurrently, outside th
 migration transaction, so writes continue; a run cut off mid-build leaves the table and
 an invalid index, which a retried run keeps and drops and builds again.
 
-Revision ID: 0235_retention_runs
-Revises: 0234_tenant_retirement
+Revision ID: 0236_retention_runs
+Revises: 0235_tenant_retirement
 
 downgrade: safe
 """
@@ -17,8 +17,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0235_retention_runs"
-down_revision: str | None = "0234_tenant_retirement"
+revision: str = "0236_retention_runs"
+down_revision: str | None = "0235_tenant_retirement"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

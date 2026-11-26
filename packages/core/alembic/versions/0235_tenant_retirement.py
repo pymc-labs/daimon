@@ -4,8 +4,8 @@
 records and balance stay. `tenant_retirements` queues the provider and host cleanup
 a retirement still owes; it has no tenant foreign key, so it outlives a tenant deletion.
 
-Revision ID: 0234_tenant_retirement
-Revises: 0233_retention_activity
+Revision ID: 0235_tenant_retirement
+Revises: 0234_retention_activity
 
 downgrade: safe
 """
@@ -16,8 +16,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0234_tenant_retirement"
-down_revision: str | None = "0233_retention_activity"
+revision: str = "0235_tenant_retirement"
+down_revision: str | None = "0234_retention_activity"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

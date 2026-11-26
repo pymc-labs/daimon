@@ -194,11 +194,12 @@ TAIL = (
     "0230_agent_chat_signed_in",
     "0231_agent_chat_send_count",
     "0232_agent_chat_session_grant",
-    "0233_retention_activity",
-    "0234_tenant_retirement",
-    "0235_retention_runs",
-    "0236_audit_clocks",
-    "0237_dm_activity",
+    "0233_turn_origin_public_thread",
+    "0234_retention_activity",
+    "0235_tenant_retirement",
+    "0236_retention_runs",
+    "0237_audit_clocks",
+    "0238_dm_activity",
 )
 HEAD = TAIL[-1]
 
@@ -262,7 +263,7 @@ AFTER_MERGE_COLUMNS = {
 AFTER_MERGE_OBJECTS = {"ix_usage_observation_provider_observed_at"}
 
 
-# Indexes and the run table added by 0235, absent from every earlier head.
+# Indexes and the run table added by 0236, absent from every earlier head.
 RETENTION_INDEXES = {
     "ix_thread_sessions_tenant_last_turn",
     "ix_credential_requests_closed_at",
@@ -280,9 +281,9 @@ RETENTION_INDEXES = {
     "ix_web_logins_created_at",
     "ix_web_threads_deleted_at",
     "ix_web_threads_tenant_updated",
-    # Added by 0236, with the watches.last_fired_at column.
+    # Added by 0237, with the watches.last_fired_at column.
     "ix_long_job_cancel_audit_requested_at",
-    # Added by 0237, with direct_message_conversations.updated_at.
+    # Added by 0238, with direct_message_conversations.updated_at.
     "ix_dm_conversations_tenant_updated",
 }
 
@@ -476,7 +477,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             return False
         if expected != HEAD and kind == "index" and name in RETENTION_INDEXES:
             return False
-        # 0236 drops the cancel audit's key to long_job; earlier heads still have it.
+        # 0237 drops the cancel audit's key to long_job; earlier heads still have it.
         if (
             expected != HEAD
             and kind == "foreign_key_constraint"
@@ -584,7 +585,8 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             return False
         if (
             kind == "column"
-            and name in {"self_helpers", "helper_key", "own_dm_reach", "reach_read"}
+            and name
+            in {"self_helpers", "helper_key", "own_dm_reach", "reach_read", "public_thread"}
             and getattr(getattr(obj, "table", None), "name", None) == "turn_origins"
             and expected != HEAD
         ):

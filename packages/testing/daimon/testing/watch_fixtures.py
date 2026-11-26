@@ -200,7 +200,7 @@ async def install_poll_ports(session: AsyncSession) -> None:
 
 
 async def install_firing_trigger(session: AsyncSession) -> None:
-    """Install 0236's trigger that stamps a watch with its latest firing time.
+    """Install 0237's trigger that stamps a watch with its latest firing time.
 
     ``install_poll_ports`` calls it, so every watch test keeps ``last_fired_at`` current.
     """
@@ -209,7 +209,7 @@ async def install_firing_trigger(session: AsyncSession) -> None:
         raise ValueError("Watch fixtures require an owned test schema")
     quoted = '"' + schema + '"'
     migration = runpy.run_path(
-        str(Path(__file__).resolve().parents[3] / "core/alembic/versions/0236_audit_clocks.py")
+        str(Path(__file__).resolve().parents[3] / "core/alembic/versions/0237_audit_clocks.py")
     )
     await session.execute(text(cast(str, migration["FUNCTION"]).format(schema=quoted)))
     await session.execute(

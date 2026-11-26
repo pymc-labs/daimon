@@ -7,8 +7,8 @@ firing's time onto its watch, so the watch keeps it. The existing firings are co
 the trigger is in place, in short batches outside the migration transaction, so the
 watches table is never locked for the whole backfill.
 
-Revision ID: 0236_audit_clocks
-Revises: 0235_retention_runs
+Revision ID: 0237_audit_clocks
+Revises: 0236_retention_runs
 
 downgrade: destructive
 """
@@ -19,8 +19,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0236_audit_clocks"
-down_revision: str | None = "0235_retention_runs"
+revision: str = "0237_audit_clocks"
+down_revision: str | None = "0236_retention_runs"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

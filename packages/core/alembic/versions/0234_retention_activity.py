@@ -6,7 +6,7 @@ their newest known turn; existing journal heads start their clock now, since not
 recorded their last append. `slack_turn_contexts` gains its missing tenant foreign key,
 after rows of tenants already deleted are dropped.
 
-Revision ID: 0233_retention_activity
+Revision ID: 0234_retention_activity
 Revises: 0232_agent_chat_session_grant
 
 downgrade: safe
@@ -17,8 +17,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0233_retention_activity"
-down_revision: str | None = "0232_agent_chat_session_grant"
+revision: str = "0234_retention_activity"
+down_revision: str | None = "0233_turn_origin_public_thread"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -5,8 +5,8 @@ A private (DM) conversation kept its context until the person removed it. It now
 `conversation_retention` sweep can age it with other conversations. Existing rows start
 their clock at the migration.
 
-Revision ID: 0237_dm_activity
-Revises: 0236_audit_clocks
+Revision ID: 0238_dm_activity
+Revises: 0237_audit_clocks
 
 downgrade: destructive
 """
@@ -16,8 +16,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0237_dm_activity"
-down_revision: str | None = "0236_audit_clocks"
+revision: str = "0238_dm_activity"
+down_revision: str | None = "0237_audit_clocks"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
