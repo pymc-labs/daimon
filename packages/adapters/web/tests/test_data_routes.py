@@ -61,7 +61,7 @@ class Rig:
             database={"url": self.data.url},  # pyright: ignore[reportArgumentType]
             data={"schema_name": self.data.settings.schema_name},  # pyright: ignore[reportArgumentType]
             crypto={"keys": [Fernet.generate_key().decode()]},  # pyright: ignore[reportArgumentType]
-            features={"data_sources": "on"} if feature else {},
+            features={"data_sources": "on" if feature else "off"},
         )
         token = await signed_in(self.factory, ws.person)
         async with self.web_client(

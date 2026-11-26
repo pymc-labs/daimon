@@ -1550,12 +1550,13 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         category="model_input",
         effect="capability",
         values=_ON_OFF,
-        default="off",
+        default="on",
         tiers=("deployment", "workspace"),
         binds="turn",
         doc=(
-            "The data store, with its connected sources and search. The operator turns it on; "
-            "a team can turn it off."
+            "The data store, with its connected sources and search. Nothing runs until an "
+            "admin adds a source and turns data reads on for an agent. The operator or a team "
+            "can turn it off."
         ),
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,

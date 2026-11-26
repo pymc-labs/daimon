@@ -323,7 +323,7 @@ async def link_github(
 ) -> None:
     """A personal GitHub link, as the person's GitHub identity in the data store where the
     workspace has data sources on (`identity.github_proof`). Never fails the link."""
-    if not data_sources_on(settings):
+    if not data_sources_on(settings) or not await pool.ready(settings):
         return
     try:
         async with sessionmaker() as session:

@@ -23,7 +23,7 @@ Where each feature can be set, and its default.
 
 | Feature | Key | Kind | Default | Deployment | Workspace | Agent | Channel | Thread | Routine | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Data sources | `data_sources` | Model input | Off | ✓ | ✓ |  |  |  |  |  |
+| Data sources | `data_sources` | Model input | On | ✓ | ✓ |  |  |  |  |  |
 | Chat history | `history_depth` | Model input | 100 messages | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Direct message memory | `dm_history_depth` | Model input | 12 messages | ✓ | ✓ | ✓ |  |  |  | Only Discord, Slack, Teams, Web; 100 messages by default on Teams |
 | Channel background | `channel_history` | Model input | 25 messages | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
@@ -191,13 +191,13 @@ Each message starts with the notes in the agent's repository memory, and the age
 
 ## Data sources
 
-The data store, with its connected sources and search. The operator turns it on; a team can turn it off.
+The data store, with its connected sources and search. Nothing runs until an admin adds a source and turns data reads on for an agent. The operator or a team can turn it off.
 
 | | |
 | --- | --- |
 | Key | `data_sources` |
 | Values | `on` (On), `off` (Off) |
-| Default | `off` |
+| Default | `on` |
 | Levels | Deployment, Workspace |
 | Combines | Off above is a ceiling |
 

@@ -63,6 +63,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.audience_facts import AudienceChannel, AudienceMember, compute_room_viewers
 from daimon.core.config import Settings
 from daimon.core.data_audience import CAP, user_subject
+from daimon.core.data_tools import DATA_READS
 from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.session_fence_retry import FenceUnavailable
 from daimon.core.stores import audience_facts as facts_store
@@ -72,6 +73,7 @@ from daimon.core.stores.access_policy import (
     load_access_policy,
     lock_policy_writes_shared,
 )
+from daimon.core.stores.feature_values import list_feature_values
 from daimon.core.stores.tenants import get_tenant
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -629,9 +631,13 @@ class AudienceSync:
         generation: int,
         now: datetime,
     ) -> None:
-        """Who views each room, kept only while the workspace has data sources on."""
+        """Who views each room, kept only while the workspace has data sources on and some
+        agent, room or the workspace has data reads on: otherwise nothing reads them."""
         place = FeaturePlace(tenant_id, "discord")
-        if not (await feature_in(session, self._settings, place, "data_sources")).on:
+        if not (await feature_in(session, self._settings, place, "data_sources")).on or not any(
+            row.value == "on"
+            for row in await list_feature_values(session, tenant_id=tenant_id, keys=(DATA_READS,))
+        ):
             await room_viewers.clear_viewers(session, tenant_id=tenant_id)
             return
         viewers = compute_room_viewers(
