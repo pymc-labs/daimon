@@ -2053,11 +2053,13 @@ async def run_prepared_turn_impl(
                         # An unreadable unattended session cannot be constrained.
                         raise AdmissionDenied(reason="backend_unsupported")
                     if (
-                        job_row is None
+                        managed
+                        and job_row is None
                         and watch_row is None
                         and admission.grant is not None
                         and admission.grant.is_dm
                     ):
+                        # An OpenAI or Gemini DM routine takes the native gate below.
                         if not gateable:
                             raise AdmissionDenied(reason="backend_unsupported")
                         posture, dm_gate, dm_builtins = await dm_session_authority(

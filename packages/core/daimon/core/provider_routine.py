@@ -84,8 +84,7 @@ async def admit_provider_routine(
 
     Refused unless it runs on another provider: a place that now answers on Claude
     takes its routine through Managed Agents on the next fire, never through here.
-    `sandbox` keeps built-ins on only while its pin matches this admission; OpenAI's
-    shell cannot be left out, so there a fire without it is refused.
+    `sandbox` is read by `with_routine_sandbox`.
     """
     admission = await admit(
         deps,
@@ -105,28 +104,40 @@ async def admit_provider_routine(
         # A thread destination keeps its own provider, as `routine_provider` routes it.
         routine_thread_id=routine_thread_id(row, platform=platform),
     )
-    revision = admission.backend_revision
-    if revision is None or not is_provider_turn(admission):
+    if not is_provider_turn(admission):
         raise AdmissionDenied(reason="backend_unsupported")
-    opted_in = sandbox is not None and await _sandbox_holds(deps, sandbox, admission, row, platform)
+    return await with_routine_sandbox(
+        deps, admission, sandbox, tenant_id=row.tenant_id, platform=platform
+    )
+
+
+async def with_routine_sandbox(
+    deps: TurnDeps,
+    admission: Admission,
+    sandbox: RoutineSandbox | None,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+) -> Admission:
+    """A provider routine's admission with built-ins on only while the opt-in covers
+    this fire's provider, agent and environment and `unattended_capabilities` still
+    allows them; a drifted pin is reported. OpenAI's shell cannot be left out, so
+    there a fire without the opt-in is refused."""
+    revision = admission.backend_revision
+    assert revision is not None, "a provider turn has a revision"
+    opted_in = False
+    if sandbox is not None:
+        opted_in = await provider_run_matches_pin(
+            deps.anthropic, sandbox.pin, admission, tenant_id=tenant_id, records=deps.sessionmaker
+        )
+        if not opted_in:
+            await sandbox.on_drift()
+        opted_in = opted_in and await builtins_allowed(
+            deps.sessionmaker, deps.settings, tenant_id, platform, admission.agent.id
+        )
     if not opted_in and get_profile(revision.profile).implicit_execution:
         raise AdmissionDenied(reason="backend_unsupported", detail=SHELL_NEEDS_SANDBOX)
     return replace(admission, routine_sandbox_tools=opted_in)
-
-
-async def _sandbox_holds(
-    deps: TurnDeps, sandbox: RoutineSandbox, admission: Admission, row: RoutineRow, platform: str
-) -> bool:
-    """The opt-in covers this fire's provider, agent and environment, and
-    `unattended_capabilities` still allows built-ins; a drifted pin is reported."""
-    if not await provider_run_matches_pin(
-        deps.anthropic, sandbox.pin, admission, tenant_id=row.tenant_id, records=deps.sessionmaker
-    ):
-        await sandbox.on_drift()
-        return False
-    return await builtins_allowed(
-        deps.sessionmaker, deps.settings, row.tenant_id, platform, admission.agent.id
-    )
 
 
 async def run_provider_routine(

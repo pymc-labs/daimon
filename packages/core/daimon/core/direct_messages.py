@@ -89,7 +89,7 @@ from daimon.core.turn.prepare import PreparedTurn, bind_session
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.termination import TerminationReason
-from daimon.core.turn.unattended import dm_routine_sandbox
+from daimon.core.turn.unattended import dm_routine_sandbox, is_provider_turn
 from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_origin import render_turn_origin, turn_origin
 from mux.profiles import MANAGED_AGENTS
@@ -1305,9 +1305,11 @@ class DmRoutineReply:
     text: str
     session_id: str
     producing_agent_id: str
+    #: False for an OpenAI or Gemini routine, whose session has no Anthropic files.
+    on_managed_agents: bool = True
 
 
-#: Recorded on the routine when its agent runs on another provider.
+#: Recorded on a DM watch or timer when its agent runs on another provider.
 MANAGED_AGENTS_ONLY = "DM routines need a Managed Agents agent"
 
 
@@ -1327,7 +1329,7 @@ async def run_dm_routine(
 
     Ordinary cold-DM admission and session (personal memory included), in a new
     scope with no history. Every session is gated, so a call needing Approve is
-    refused; only Managed Agents agents run (`MANAGED_AGENTS_ONLY`). `source` is
+    refused; it runs on Managed Agents, OpenAI or Gemini. `source` is
     rechecked for a seal whenever the session is built; `budget_channel_id` only
     bills. `requester_org` is the owner's standing at this fire, so an owner who lost the
     internal role starts no private turn. Nothing is posted here: the caller queues the
@@ -1557,11 +1559,24 @@ async def _run_dm_fire(
                 dm_agent_name=agent_name,
                 cold_dm=True,
             )
+            # A routine also runs on OpenAI or Gemini, gated at the host (`run_prepared_turn`).
+            provider = is_provider_turn(admission) and watch_row is None and timer_row is None
             if (
                 admission.backend_revision is not None
                 and admission.backend_revision.profile != MANAGED_AGENTS.profile_id
+                and not provider
             ):
                 raise DirectMessageAccessRevoked(MANAGED_AGENTS_ONLY, message=MANAGED_AGENTS_ONLY)
+            if provider:
+                from daimon.core.provider_routine import with_routine_sandbox
+
+                admission = await with_routine_sandbox(
+                    deps,
+                    admission,
+                    dm_routine_sandbox.get(),
+                    tenant_id=tenant_id,
+                    platform="discord",
+                )
             if admission.grant is None:
                 raise DirectMessageAccessRevoked(
                     "authorization_missing", message="Private authority unavailable."
@@ -1572,7 +1587,7 @@ async def _run_dm_fire(
                 # Re-asked by `reauthorize` right before the session is built.
                 grant=replace(admission.grant, dm_source=source, act_for_creator=True),
             )
-            if deps.backend is not None:
+            if deps.backend is not None and not provider:
                 from mux.drivers.anthropic import (
                     SESSION_READS_NAMESPACE,
                     SessionReads,
@@ -1607,7 +1622,7 @@ async def _run_dm_fire(
         except (BoundAgentUnavailable, AccessPolicyUnreadable, MAResolverMissError) as error:
             raise _revoked(error) from error
         grant = prepared.admission.grant
-        if prepared.backend is not None or grant is None:
+        if grant is None or (prepared.backend is not None) != provider:
             raise DirectMessageAccessRevoked(MANAGED_AGENTS_ONLY, message=MANAGED_AGENTS_ONLY)
         if timer_row is not None and prepared.admission.agent.id != timer_row.target_ma_agent_id:
             raise DirectMessageAccessRevoked(
@@ -1706,6 +1721,7 @@ async def _run_unattended_turn(
         text=done.text,
         session_id=done.session_id,
         producing_agent_id=prepared.admission.agent.id,
+        on_managed_agents=prepared.backend is None,
     )
 
 
