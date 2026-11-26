@@ -658,7 +658,7 @@ skill.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `add_skill_repository` | admin only | Add the skills of a GitHub repository (``owner/name``) to the library: each folder holding a SKILL.md, limited to ``paths`` when given, takes ``scope`` as who may read it. |
+| `add_library_repository` | admin only | Bring a GitHub repository's folders (``owner/name``) into the library, limited to ``paths`` when given, readable by ``scope``. |
 | `get_skill_scope` | admin only | Who may read a library skill: a data scope name, or none for everyone who may use the library. |
 | `restore_library_skill_version` | admin only | Republish an older library skill version as the next one. |
 | `save_library_skill_files` | admin only | Publish text files as a library skill's next version. |
@@ -672,7 +672,7 @@ Serve the workspace library's skills to coding keys, the hub and outside clients
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `list_library_skills` | all callers | The skills in this workspace's library you may read, each with its latest version and files. |
-| `read_library_skill` | all callers | Read one file of a library skill by its name (SKILL.md by default), as its latest version holds it. |
+| `read_library_skill` | all callers | Read one file of a library skill by its name (its main file by default), as its latest version holds it. |
 
 ## `skill_uploads`
 
@@ -905,4 +905,4 @@ reaches several workspaces here.
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `list_library_skills` | all callers | The skills in this workspace's library you may read, each with its latest version and files. |
-| `read_library_skill` | all callers | Read one file of a library skill by its name (SKILL.md by default), as its latest version holds it. |
+| `read_library_skill` | all callers | Read one file of a library skill by its name (its main file by default), as its latest version holds it. |

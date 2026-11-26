@@ -169,7 +169,7 @@ async def test_library_add_repo_when_confirmed_then_outcomes_and_unreadable_repo
         runtime, make_auth(), "acme/skills", "main", ["skills"], "team", "ctx"
     )
     assert [(o.name, o.action) for o in out.skills] == [("notes", "added")]
-    assert asked == ["add_skill_repository"], "adding reaches the whole library, so it is carded"
+    assert asked == ["add_library_repository"], "adding reaches the whole library, so it is carded"
     with pytest.raises(ToolError, match="could not be read"):
         await library._add_repo_impl(runtime, make_auth(), "acme/missing", "main", [], None, "ctx")
 

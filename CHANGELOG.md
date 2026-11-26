@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `list_library_skills` and `read_library_skill`; a scoped skill shows only to callers whose
   data reads include its scope, and in chat only when everyone who can read the room holds
   it. Admins add a repository's skills and set a skill's scope on the web or in chat
-  (`add_skill_repository`, `get_skill_scope`, `set_skill_scope`); declared `skill_repos`
+  (`add_library_repository`, `get_skill_scope`, `set_skill_scope`); declared `skill_repos`
   add skills too ([Data sources](docs/data-sources.md)).
 
 - **Data sources are on by default and inert until used.** `DAIMON_FEATURES__DATA_SOURCES=off`

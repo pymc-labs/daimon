@@ -283,9 +283,9 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
         "configs": [
             {"name": name, "enabled": True, "permission_policy": {"type": "always_ask"}}
             for name in (
+                "add_library_repository",
                 "add_server_skill",
                 "add_skill",
-                "add_skill_repository",
                 "approve_data_rule_set",
                 "approve_reach",
                 "approve_server_skill_update",

@@ -13,6 +13,7 @@ from daimon.adapters.mcp.hub.app import build_hub_app, mount_hub_apps
 from daimon.adapters.mcp.hub.claims import encode_hub_claims
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.server import create_mcp_app
+from daimon.core.capability_tools import SERVING_TOOLS
 from daimon.core.config import (
     AnthropicSettings,
     DatabaseSettings,
@@ -39,6 +40,8 @@ _HUB_TOOLS = {
     "list_events",
     "list_my_sessions",
 }
+# `library_skills` is On unless a workspace turns it off, so its two reads are on the hub.
+_HUB_TOOLS |= SERVING_TOOLS
 
 
 def _settings(

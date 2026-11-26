@@ -1112,7 +1112,7 @@ The agent can search the team's data sources, showing only what everyone who wil
 
 ## Library skills
 
-Coding keys, the hub and outside clients can read the skill library, by scope. Chat agents keep their own skill tools, which show a scoped skill only where everyone who can read the room holds its scope.
+Coding keys, the hub and outside clients can read the skill library, by scope. Chat agents see a scoped skill only where everyone who can read the room holds its scope.
 
 | | |
 | --- | --- |

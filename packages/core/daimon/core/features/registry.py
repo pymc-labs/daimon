@@ -1342,8 +1342,8 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         binds="turn",
         doc=(
             "Coding keys, the hub and outside clients can read the skill library, by scope. "
-            "Chat agents keep their own skill tools, which show a scoped skill "
-            "only where everyone who can read the room holds its scope."
+            "Chat agents see a scoped skill only where everyone who can read the room holds "
+            "its scope."
         ),
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,

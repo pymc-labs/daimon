@@ -259,8 +259,8 @@ _CARD = "needs live provider (a request card posted into a channel); the agent a
 
 #: Every other tool of `/mcp`, with why it is not swept.
 EXEMPT: dict[str, str] = {
+    "add_library_repository": _NEW,
     "add_server_skill": _NEW,
-    "add_skill_repository": _NEW,
     "approve_reach": _LIVE,
     "approve_server_skill_update": _NEW,
     "archive_my_session": _LIVE,

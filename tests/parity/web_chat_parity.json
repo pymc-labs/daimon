@@ -156,7 +156,7 @@
    "tool": "add_server_skill"
   },
   "POST /api/agents/skill-repos": {
-   "tool": "add_skill_repository"
+   "tool": "add_library_repository"
   },
   "POST /api/agents/skills": {
    "tool": "add_skill"

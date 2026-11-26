@@ -230,18 +230,14 @@ limited channel keeps that channel's rule. The hub's data tools take a `workspac
 or id, among the workspaces the caller belongs to, and are listed only where `data_reads`
 is On in one of them.
 
-`library_skills` is On unless an admin turns it off, and does nothing until the library
-holds skills. Then `list_library_skills` and `read_library_skill` serve the workspace's skill
-library to coding keys, the hub (with a `workspace`) and outside clients. A skill may carry a
-scope; a scoped skill shows only to someone whose data reads include that scope. A caller who
-may read no data sees unscoped skills only. Chat agents use `list_skills` and `get_skill`,
-which apply the same rule to the people in the conversation: in a room, a scoped skill shows
-only when everyone who can read the room holds its scope; in a direct message, the asker's
-scopes decide.
+`library_skills` is On unless an admin turns it off, and idle until the library holds
+skills. `list_library_skills` and `read_library_skill` then serve it to coding keys, the hub
+(with a `workspace`) and outside clients. A scoped skill shows only to someone whose data
+reads include its scope; a caller who may read no data sees unscoped skills only. Chat's
+`list_skills` and `get_skill` apply the rule to everyone who can read the room.
 
-Admins manage the library's repositories and scopes in the web app or in chat:
-`add_skill_repository`, `get_skill_scope` and `set_skill_scope`. Adding a repository and
-setting a scope wait for the asker's approval card; reading a scope answers directly.
+Admins add a repository's skills and set a scope on the web or in chat; chat changes wait
+for the asker's approval card.
 
 ## After a restore
 

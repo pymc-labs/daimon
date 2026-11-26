@@ -171,7 +171,7 @@ async def _add_repo_impl(
         raise ToolError("That is not a branch name.")
     # Adding reaches the whole library, so a person confirms it.
     await require_card(
-        runtime, auth, tool_name="add_skill_repository", origin_context_id=origin_context_id
+        runtime, auth, tool_name="add_library_repository", origin_context_id=origin_context_id
     )
     decl = SkillRepoDecl(
         tenant_id=auth.tenant_id, repo=repo, branch=branch, paths=tuple(paths), scope=scope
@@ -232,7 +232,7 @@ def register_skill_library_edit_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         return await _set_scope_impl(runtime, await _auth(ctx), skill_id, scope, origin_context_id)
 
     @mcp.tool(tags={"admin"})
-    async def add_skill_repository(  # pyright: ignore[reportUnusedFunction]
+    async def add_library_repository(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         repo: _Repo,
         origin_context_id: _OriginId,
@@ -240,9 +240,9 @@ def register_skill_library_edit_tools(mcp: FastMCP, runtime: McpRuntime) -> None
         paths: _Paths | None = None,
         scope: _Scope = None,
     ) -> SkillRepoAdded:
-        """Add the skills of a GitHub repository (``owner/name``) to the library: each folder
-        holding a SKILL.md, limited to ``paths`` when given, takes ``scope`` as who may read
-        it. Skills already added are kept. A person confirms on a card first. Admin-only."""
+        """Bring a GitHub repository's folders (``owner/name``) into the library, limited to
+        ``paths`` when given, readable by ``scope``. Ones already brought in are kept. A person
+        confirms on a card first. Admin-only."""
         return await _add_repo_impl(
             runtime, await _auth(ctx), repo, branch, paths or [], scope, origin_context_id
         )

@@ -454,7 +454,7 @@
       'list_library_skills': dict({
         'description': '''
           The skills in this workspace's library you may read, each with its latest version and
-          files. Read one with `read_library_skill`; start with its SKILL.md.
+          files. Read one with `read_library_skill`.
           <blank line>
           `workspace`: the chat space to use, by name or id as `list_daimons` shows them; leave it out when you reach only one.
         ''',
@@ -503,7 +503,7 @@
       }),
       'read_library_skill': dict({
         'description': '''
-          Read one file of a library skill by its name (SKILL.md by default), as its latest
+          Read one file of a library skill by its name (its main file by default), as its latest
           version holds it. `list_library_skills` names the files.
           <blank line>
           `workspace`: the chat space to use, by name or id as `list_daimons` shows them; leave it out when you reach only one.
@@ -589,6 +589,68 @@
         'required': list([
           'channel_id',
           'skill',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'add_library_repository': dict({
+      'description': '''
+        Bring a GitHub repository's folders (``owner/name``) into the library, limited to
+        ``paths`` when given, readable by ``scope``. Ones already brought in are kept. A person
+        confirms on a card first. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'branch': dict({
+            'default': 'main',
+            'maxLength': 200,
+            'minLength': 1,
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'maxLength': 200,
+            'minLength': 1,
+            'type': 'string',
+          }),
+          'paths': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'maxItems': 50,
+                'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'repo': dict({
+            'maxLength': 200,
+            'minLength': 3,
+            'pattern': '^[\\w.-]+/[\\w.-]+$',
+            'type': 'string',
+          }),
+          'scope': dict({
+            'anyOf': list([
+              dict({
+                'maxLength': 200,
+                'minLength': 1,
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'repo',
+          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -767,68 +829,6 @@
         }),
         'required': list([
           'agent_name',
-        ]),
-        'type': 'object',
-      }),
-    }),
-    'add_skill_repository': dict({
-      'description': '''
-        Add the skills of a GitHub repository (``owner/name``) to the library: each folder
-        holding a SKILL.md, limited to ``paths`` when given, takes ``scope`` as who may read
-        it. Skills already added are kept. A person confirms on a card first. Admin-only.
-      ''',
-      'parameters': dict({
-        'additionalProperties': False,
-        'properties': dict({
-          'branch': dict({
-            'default': 'main',
-            'maxLength': 200,
-            'minLength': 1,
-            'type': 'string',
-          }),
-          'origin_context_id': dict({
-            'maxLength': 200,
-            'minLength': 1,
-            'type': 'string',
-          }),
-          'paths': dict({
-            'anyOf': list([
-              dict({
-                'items': dict({
-                  'type': 'string',
-                }),
-                'maxItems': 50,
-                'type': 'array',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-          'repo': dict({
-            'maxLength': 200,
-            'minLength': 3,
-            'pattern': '^[\\w.-]+/[\\w.-]+$',
-            'type': 'string',
-          }),
-          'scope': dict({
-            'anyOf': list([
-              dict({
-                'maxLength': 200,
-                'minLength': 1,
-                'type': 'string',
-              }),
-              dict({
-                'type': 'null',
-              }),
-            ]),
-            'default': None,
-          }),
-        }),
-        'required': list([
-          'repo',
-          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -6930,7 +6930,7 @@
     'list_library_skills': dict({
       'description': '''
         The skills in this workspace's library you may read, each with its latest version and
-        files. Read one with `read_library_skill`; start with its SKILL.md.
+        files. Read one with `read_library_skill`.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -8458,7 +8458,7 @@
     }),
     'read_library_skill': dict({
       'description': '''
-        Read one file of a library skill by its name (SKILL.md by default), as its latest
+        Read one file of a library skill by its name (its main file by default), as its latest
         version holds it. `list_library_skills` names the files.
       ''',
       'parameters': dict({

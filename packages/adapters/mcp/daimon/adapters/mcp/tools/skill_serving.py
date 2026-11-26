@@ -73,7 +73,7 @@ def register_skill_serving_tools(mcp: FastMCP, runtime: McpRuntime, *, hub: bool
     @add
     async def list_library_skills(ctx: Context) -> list[LibrarySkill]:  # pyright: ignore[reportUnusedFunction]
         """The skills in this workspace's library you may read, each with its latest version and
-        files. Read one with `read_library_skill`; start with its SKILL.md."""
+        files. Read one with `read_library_skill`."""
         rows = await visible_skills(runtime, await _auth(ctx))
         async with runtime.session_factory() as session:
             return [_info(await served(session, row)) for row in rows]
@@ -82,7 +82,7 @@ def register_skill_serving_tools(mcp: FastMCP, runtime: McpRuntime, *, hub: bool
     async def read_library_skill(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, name: str, path: str = MAIN_FILE
     ) -> LibrarySkillFile:
-        """Read one file of a library skill by its name (SKILL.md by default), as its latest
+        """Read one file of a library skill by its name (its main file by default), as its latest
         version holds it. `list_library_skills` names the files."""
         rows = await visible_skills(runtime, await _auth(ctx))
         async with runtime.session_factory() as session:

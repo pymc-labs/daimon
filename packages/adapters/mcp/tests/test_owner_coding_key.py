@@ -11,6 +11,7 @@ import datetime as dt
 import uuid
 
 from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
+from daimon.core.capability_tools import SERVING_TOOLS
 from daimon.core.mcp_auth import mint_agent_mcp_token, mint_chat_mcp_token
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.agent_owners import set_owner
@@ -73,7 +74,7 @@ async def _owner_key(
     return token, tenant.id, owner.id, agent_id
 
 
-async def test_the_holder_of_an_owners_key_sees_only_the_agent_chat_tools(
+async def test_the_holder_of_an_owners_key_sees_only_the_agent_chat_and_library_skill_tools(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     token, *_ = await _owner_key(sessionmaker)
@@ -83,7 +84,9 @@ async def test_the_holder_of_an_owners_key_sees_only_the_agent_chat_tools(
     )
 
     payload = result.get("result", result)
-    assert {t["name"] for t in payload.get("tools", [])} == AGENT_CHAT_TOOLS  # type: ignore[union-attr]
+    assert {t["name"] for t in payload.get("tools", [])} == (  # type: ignore[union-attr]
+        AGENT_CHAT_TOOLS | SERVING_TOOLS  # a coding key reads the library, On by default
+    )
 
 
 async def test_an_owners_key_acts_as_the_owner_who_is_not_an_admin(

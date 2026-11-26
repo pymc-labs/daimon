@@ -70,7 +70,7 @@ _ADMIN_CARDED_TOOLS = frozenset(
         "change_workspace_settings",
         "delete_allowance",
         "restore_library_skill_version",
-        "add_skill_repository",
+        "add_library_repository",
         "set_skill_scope",
         "revoke_web_link",
         "set_agent_helpers",
