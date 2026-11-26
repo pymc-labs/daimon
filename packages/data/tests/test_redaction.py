@@ -162,6 +162,28 @@ async def test_changed_rules_apply_to_answers_until_their_source_syncs_again(
     assert await store.sync() == "ok" and not await answered()
 
 
+async def test_rules_approved_during_a_sync_apply_to_answers_until_the_next_one(
+    store: Store, feed: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await store.declare(1, redaction_sets=[{"id": "house", "rules": RULES}], sources=[SOURCE])
+    assert await store.sync() == "ok"
+    fetch = Feed.fetch
+
+    async def approved_meanwhile(self: Feed, source: Source) -> AsyncGenerator[Record]:
+        await redaction.restart_sources(store.conn, store.data.schemas, store.tenant, "house")
+        async for r in fetch(self, source):
+            yield r
+
+    monkeypatch.setattr(Feed, "fetch", approved_meanwhile)
+    assert await store.sync() == "ok"
+    assert await redaction.answer_redactors(store.conn, store.data.schemas, store.tenant), (
+        "the run stored under the old rules"
+    )
+    monkeypatch.setattr(Feed, "fetch", fetch)
+    assert await store.sync() == "ok"
+    assert not await redaction.answer_redactors(store.conn, store.data.schemas, store.tenant)
+
+
 async def test_removed_text_is_never_stored_and_excluded_records_are_dropped(
     store: Store, feed: None
 ) -> None:
@@ -191,12 +213,9 @@ async def test_names_hide_from_a_guest_and_a_marked_person_only(store: Store) ->
             account_id=account,
             proof=Proof(IdentityKey("chat", "w", subject), "oauth"),
         )
-    await store.sql(
-        f"insert into {store.d}.data_admins (tenant_id, account_id) values (%s, %s)",
-        store.tenant,
-        admin,
+    await redaction.set_redacted(
+        store.conn, schemas, store.tenant, marked, True, by=admin, admin=True
     )
-    await redaction.set_redacted(store.conn, schemas, store.tenant, marked, True, by=admin)
     assert await redaction.redacted_among(store.conn, schemas, store.tenant, [marked, other]) == {
         marked
     }, "only the marked person"
@@ -260,13 +279,12 @@ async def test_a_changed_pinned_file_stops_its_source_until_approved(
     assert "await approval" in cursor["last_error"]
 
     admin = uuid.uuid4()
-    await store.sql(
-        f"insert into {store.d}.data_admins (tenant_id, account_id) values (%s, %s)",
-        store.tenant,
-        admin,
+    detail = await redaction.show_set(
+        store.conn, schemas, store.tenant, "house", by=admin, admin=True
     )
-    detail = await redaction.show_set(store.conn, schemas, store.tenant, "house", by=admin)
     assert detail.info.pending and detail.pending_rules is not None
-    await redaction.approve(store.conn, schemas, store.tenant, "house", served["file"][0], by=admin)
+    await redaction.approve(
+        store.conn, schemas, store.tenant, "house", served["file"][0], by=admin, admin=True
+    )
     assert await store.sync() == "ok", "approved: the source syncs with the new rules"
     assert "client B" in await store.texts()

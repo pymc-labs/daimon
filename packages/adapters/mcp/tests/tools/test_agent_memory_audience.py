@@ -68,6 +68,7 @@ async def _open(
     read_only: bool = False,
     switch: bool = False,
     data_reading: bool = False,
+    had_read: bool = False,
 ) -> HostMemoryPlace:
     tenant, account = uuid.uuid4(), uuid.uuid4()
     auth: AuthIdentity = auth_identity(
@@ -90,6 +91,7 @@ async def _open(
     monkeypatch.setattr(host_memory, "audience_mode", read_mode)
     monkeypatch.setattr(tools, "anthropic_configured", lambda _client: True)
     monkeypatch.setattr(tools, "reads_data", AsyncMock(return_value=data_reading))
+    monkeypatch.setattr(tools, "has_read", AsyncMock(return_value=had_read))
     monkeypatch.setattr(
         tools,
         "require_turn_origin",
@@ -125,8 +127,11 @@ async def test_a_dm_turns_shared_memory_follows_the_mode(
     assert place.read_only is expected
 
 
-async def test_a_data_reading_agent_writes_no_host_memory(monkeypatch: pytest.MonkeyPatch) -> None:
-    place = await _open(monkeypatch, mode="off", thread=ROOM, data_reading=True)
+@pytest.mark.parametrize("reading", ["data_reading", "had_read"])
+async def test_a_data_reading_agent_or_session_writes_no_host_memory(
+    monkeypatch: pytest.MonkeyPatch, reading: str
+) -> None:
+    place = await _open(monkeypatch, mode="off", thread=ROOM, **{reading: True})
     assert place.read_only is True
 
 

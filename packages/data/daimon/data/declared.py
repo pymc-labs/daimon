@@ -129,7 +129,7 @@ class SkillRepoEntry(BaseModel):
 
 class RedactionSetEntry(BaseModel):
     """A rule set: inline `rules`, or a repo file (`repo`, `path`, `ref`) pinned by blob sha.
-    `sha` approves that sha, each time it changes; later shas wait for a data admin."""
+    `sha` approves that sha, each time it changes; later shas wait for a workspace admin."""
 
     model_config = ConfigDict(extra="forbid")
     id: str = Field(pattern=KEY)

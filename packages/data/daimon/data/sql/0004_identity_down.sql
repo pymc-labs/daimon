@@ -1,7 +1,7 @@
 -- Revision 0241's downgrade: drop what 0004_identity.sql made and put back 0001's reader
 -- functions, so a later upgrade makes it again.
 drop trigger if exists refuse_erased on {{data}}.grants;
-drop table if exists {{data}}.identities, {{data}}.link_decisions, {{data}}.data_admins,
+drop table if exists {{data}}.identities, {{data}}.link_decisions,
   {{data}}.identity_notices, {{data}}.person_connections, {{data}}.connect_pending,
   {{data}}.connect_clients, {{data}}.erased_accounts;
 drop function if exists {{data}}.refuse_erased(), {{data}}.forget_person(uuid),

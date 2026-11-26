@@ -2,7 +2,7 @@
 import { http, HttpResponse, type HttpHandler } from "msw"
 
 import type {
-  Admins, Candidate, Connected, DataRecord, DataSource, Hit, Kind, RedactionDetail, RedactionSet, Run, Scope, Search, SourceIdentity, SourceState,
+  Candidate, Connected, DataRecord, DataSource, Hit, Kind, RedactionDetail, RedactionSet, Run, Scope, Search, SourceIdentity, SourceState,
 } from "@/modules/data/types"
 import { notFound, paged, wait } from "./util"
 
@@ -57,7 +57,6 @@ const identities: SourceIdentity[] = [
   { provider: "notion", workspace: "W1", subject: "n3", name: "J. Ellis", email: null, email_verified: false, account_id: null, account_name: null, proof: null, linked_at: null, redacted: false },
 ]
 const candidates: Candidate[] = [{ provider: "notion", workspace: "W1", subject: "n3", name: "J. Ellis", email: "jordan@example.com", account_id: "a_jordan", account_name: "Jordan Ellis" }]
-const admins: Admins = { admins: [{ account_id: "a_maya", name: "Maya Lindqvist", created_at: ago(900) }], you: true, can_grant: true }
 const sets: RedactionSet[] = [
   { name: "clients", repo: "example/redaction", path: "clients.yaml", ref: "main", approved_sha: "3f9a1c0d2b", pin_sha: "3f9a1c0d2b", pending: false, usable: true, checked_at: ago(3), error: null },
   { name: "people", repo: "example/redaction", path: "people.yaml", ref: "main", approved_sha: "11aa22bb33", pin_sha: "9c8d7e6f5a", pending: true, usable: true, checked_at: ago(3), error: null },
@@ -135,9 +134,6 @@ export const dataHandlers: HttpHandler[] = [
   http.post(`${admin}/links/reject`, () => new HttpResponse(null, { status: 204 })),
   http.post(`${admin}/links/unlink`, () => new HttpResponse(null, { status: 204 })),
   http.put(`${admin}/people/:id/redacted`, () => new HttpResponse(null, { status: 204 })),
-  http.get(`${admin}/admins`, () => HttpResponse.json(admins)),
-  http.post(`${admin}/admins`, () => new HttpResponse(null, { status: 204 })),
-  http.delete(`${admin}/admins/:id`, () => new HttpResponse(null, { status: 204 })),
   http.get(`${admin}/redaction`, () => HttpResponse.json(sets)),
   http.get(`${admin}/redaction/:name`, ({ params }) => {
     const info = sets.find((s) => s.name === params.name)

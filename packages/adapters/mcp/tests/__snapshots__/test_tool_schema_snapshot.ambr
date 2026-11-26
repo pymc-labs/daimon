@@ -1349,8 +1349,8 @@
       'description': '''
         Change who may read what in the data sources. create_scope (scope_id, kind, name,
         description), delete_scope (scope_id), grant or revoke a scope (scope_id, holder: a
-        person's name or account id, or a holder as listed), add_data_admin or
-        remove_data_admin (person). Runs on the asker's Approve card. Admin-only.
+        person's name or account id, or a holder as listed). Runs on the asker's Approve card.
+        Admin-only.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -1361,8 +1361,6 @@
               'delete_scope',
               'grant',
               'revoke',
-              'add_data_admin',
-              'remove_data_admin',
             ]),
             'type': 'string',
           }),
@@ -1383,10 +1381,6 @@
             'type': 'string',
           }),
           'origin_context_id': dict({
-            'type': 'string',
-          }),
-          'person': dict({
-            'default': '',
             'type': 'string',
           }),
           'scope_id': dict({
@@ -6639,8 +6633,8 @@
     }),
     'list_data_access': dict({
       'description': '''
-        List who may read what in the data sources: each scope with its holders, the data
-        admins and the workspace's people (names and account ids). Admin-only.
+        List who may read what in the data sources: each scope with its holders, and the
+        workspace's people (names and account ids). Admin-only.
       ''',
       'parameters': dict({
         'additionalProperties': False,
