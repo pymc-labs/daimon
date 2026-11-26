@@ -792,9 +792,33 @@ jobs:
           cache-from: type=gha,scope=report-host
           cache-to: type=gha,mode=max,scope=report-host,ignore-error=true
 
+  # Debounce for staging deploys. It starts with the push, in parallel with the
+  # tests, and deploy-gcp waits for it. Once it ends, deploy.yml's superseded
+  # check skips every SHA that main moved past in the meantime, so a burst of
+  # merges deploys once, from its last commit. Never cancel-in-progress here: a
+  # cancelled job would turn the older main runs "cancelled". Repository
+  # variable STAGING_QUIET_MINUTES sets the window (default 5, 0 = none, max 30).
+  staging-quiet:
+    name: Staging quiet window
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.GCP_WIF_PROVIDER != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: wait
+        env:
+          QUIET: ${{ vars.STAGING_QUIET_MINUTES }}
+        run: |
+          minutes="${QUIET:-5}"
+          if ! [[ "$minutes" =~ ^[0-9]+$ ]] || [ "$minutes" -gt 30 ]; then
+            echo "::error::STAGING_QUIET_MINUTES must be a whole number from 0 to 30, got '$minutes'."
+            exit 1
+          fi
+          echo "Waiting $minutes minute(s) so a burst of merges deploys once."
+          sleep "$((minutes * 60))"
+
   deploy-gcp:
     name: Deploy to GCP (staging)
-    needs: [lint, conventions, shard-check, pytest-db, pytest-discord, pytest-light, mux-standalone, pytest-notebook-host, pytest-staging-config, journeys-offline, docker-publish-candidate]
+    needs: [lint, conventions, staging-quiet, shard-check, pytest-db, pytest-discord, pytest-light, mux-standalone, pytest-notebook-host, pytest-staging-config, journeys-offline, docker-publish-candidate]
     # vars.GCP_WIF_PROVIDER doubles as the deploy switch: repository variables
     # don't propagate to forks/clones, so a repo with no GCP config skips this
     # job cleanly (green CI) instead of failing at the auth step. Operators

@@ -111,6 +111,7 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
     assert set(deploy["needs"]) == {
         "lint",
         "conventions",
+        "staging-quiet",
         "shard-check",
         "pytest-db",
         "pytest-discord",
@@ -1071,3 +1072,22 @@ def test_deploy_refuses_a_migration_main_never_added(tmp_path: Path) -> None:
 
     assert guard(git("rev-parse", "main")) == 0, "main's own SHA deploys"
     assert guard(stale) != 0, "0222_mine was rechained before the merge; main never added it"
+
+
+def test_staging_deploys_wait_out_a_quiet_window() -> None:
+    """A burst of merges deploys once: deploy-gcp waits for a job that sleeps from push time."""
+    jobs = _workflow("ci.yml")["jobs"]
+    quiet, deploy = jobs["staging-quiet"], jobs["deploy-gcp"]
+    assert quiet["if"] == deploy["if"], "the window runs exactly when the deploy does"
+    assert "needs" not in quiet, "it must start with the push, in parallel with the tests"
+    assert "staging-quiet" in deploy["needs"], "the deploy must wait for the window"
+    assert quiet["timeout-minutes"] <= 35, "the wait is bounded"
+    assert "cancel-in-progress" not in quiet.get("concurrency", {}), (
+        "cancelling turns older runs cancelled"
+    )
+    script = quiet["steps"][0]["run"]
+    assert "vars.STAGING_QUIET_MINUTES" in quiet["steps"][0]["env"]["QUIET"]
+    assert "${QUIET:-5}" in script, "the default window is 5 minutes"
+    assert jobs["docker-publish-candidate"].get("needs") is None, (
+        "the candidate image is not delayed"
+    )

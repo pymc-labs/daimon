@@ -17,6 +17,10 @@ CI's `conventions` job enforces the Migrations, Changelog and Documentation
 rules below. When it fails, read its message and the section it names on
 latest main before changing anything.
 
+Staging deploys are automatic and debounced: merge freely. A burst of merges to
+`main` deploys once, from its last commit, after `STAGING_QUIET_MINUTES`
+(default 5) with no newer push. Production is still `promote.yml`.
+
 ## Make it dumb simple
 
 The people who use Daimon are members of a team in a chat app. Most are not

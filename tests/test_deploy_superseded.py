@@ -8,6 +8,8 @@ slot, and every later step is skipped on a superseded run.
 
 from __future__ import annotations
 
+import os
+import stat
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -72,15 +74,39 @@ def checkout(tmp_path: Path, bare: Path, sha: str) -> Path:
     return repo
 
 
-def decide(repo: Path, sha: str, remote: str = "origin") -> dict[str, str]:
-    out = subprocess.run(
-        ["bash", str(SCRIPT), sha, remote],
+def run_script(
+    repo: Path, sha: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", str(SCRIPT), sha, "origin"],
         cwd=repo,
         check=True,
         capture_output=True,
         text=True,
-    ).stdout
+        env={**os.environ, "GITHUB_REPOSITORY": "", **(env or {})},
+    )
+
+
+def decide(repo: Path, sha: str, env: dict[str, str] | None = None) -> dict[str, str]:
+    out = run_script(repo, sha, env).stdout
     return dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+
+
+def fake_gh(tmp_path: Path, head: str, compare: str) -> dict[str, str]:
+    """An env whose `gh api` answers commits/main with `head` and compare with `compare` (or fails)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    gh = bin_dir / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        'case "$2" in\n'
+        f"  */commits/main) echo {head} ;;\n"
+        f"  */compare/*) {compare} ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n"
+    )
+    gh.chmod(gh.stat().st_mode | stat.S_IEXEC)
+    return {"PATH": f"{bin_dir}:{os.environ['PATH']}", "GITHUB_REPOSITORY": "o/r"}
 
 
 @pytest.mark.parametrize(
@@ -107,8 +133,34 @@ def test_an_unreadable_main_deploys(tmp_path: Path, origin: tuple[Path, dict[str
     bare, commits = origin
     repo = checkout(tmp_path, bare, commits["B"])
     git(repo, "remote", "set-url", "origin", f"file://{tmp_path / 'gone.git'}")
-    result = decide(repo, commits["B"])
-    assert (result["superseded"], result["reason"]) == ("false", "fetch_failed")
+    done = run_script(repo, commits["B"])
+    assert "reason=fetch_failed" in done.stdout and "superseded=false" in done.stdout
+    assert "retrying without --filter" in done.stderr, "the second attempt must be logged"
+    assert "gone.git" in done.stderr, "git's own error text must reach the log"
+
+
+@pytest.mark.parametrize(
+    ("commit", "compare", "superseded", "reason"),
+    [
+        ("B", "printf 'ahead\\t0\\n'", "true", "api_ancestor"),
+        ("B", "printf 'diverged\\t2\\n'", "false", "api_not_ancestor"),
+        ("B", "exit 1", "false", "fetch_failed"),
+        ("C", "exit 1", "false", "head"),
+    ],
+)
+def test_the_api_answers_when_git_cannot(
+    tmp_path: Path,
+    origin: tuple[Path, dict[str, str]],
+    commit: str,
+    compare: str,
+    superseded: str,
+    reason: str,
+) -> None:
+    bare, commits = origin
+    repo = checkout(tmp_path, bare, commits[commit])
+    git(repo, "remote", "set-url", "origin", f"file://{tmp_path / 'gone.git'}")
+    result = decide(repo, commits[commit], fake_gh(tmp_path, commits["C"], compare))
+    assert (result["superseded"], result["reason"]) == (superseded, reason)
 
 
 def _steps() -> list[dict[str, Any]]:

@@ -104,12 +104,14 @@ jobs:
       # newer run deploys a superset. Checked once this job holds the environment's
       # concurrency slot: a queued older run starts only after the newer one finishes.
       # Skips only when the SHA is not main's head and is provably its ancestor; the
-      # head, a commit off main, or an unreadable history always deploy.
+      # head, a commit off main, or a history neither git nor the API can read always deploy.
       - name: Skip a deploy main has already superseded
         id: fresh
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           SHA: ${{ inputs.sha }}
+          # The API answers when git cannot (scripts/ci/deploy_superseded.sh).
+          GH_TOKEN: ${{ github.token }}
         run: |
           result="$(bash scripts/ci/deploy_superseded.sh "$SHA")"
           echo "$result" | tee -a "$GITHUB_OUTPUT"
