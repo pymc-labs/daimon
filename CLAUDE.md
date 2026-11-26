@@ -15,68 +15,72 @@ sections of the PR template, and make `pytest`, `pyright`, `ruff` and
 
 ## Make it dumb simple
 
-The people who use Daimon are members of a team in a chat app. They are not
-engineers, and they are busy. The bar for all that they meet: a tired person
-with no technical knowledge can scan it and act.
+The people who use Daimon are members of a team in a chat app. Most are not
+engineers, and all are busy. The bar: a tired person with no technical knowledge
+can start, get a useful result and continue.
 
-This is a design rule before it is a wording rule. Plain words do not rescue a
-flow that makes a person learn a concept, choose between modes or remember a
-command. Decide it when you design the feature, not when you write the card. It
-comes before speed of build.
+Design the path before the screen. A path is all that a person does between
+wanting a thing and having it: each press, choice, typed command, wait, sign-in,
+visit to another page and new word. Plain words do not rescue a path that is
+long or that a person must learn. Decide the path when you design the feature.
+It comes before speed of build.
 
-It covers all that a person can meet: cards, buttons, refusals, notices, the web
-app, the names of settings and their choices. It also covers what the model reads
-and repeats to a person: tool names, tool descriptions, tool results and notices
-to the agent. Operators who run Daimon (the CLI, environment settings, logs) are
-a different reader; exact technical words are right for them.
+1. **Make the first useful result easy.** Design so that, after Daimon is
+   installed, a new member can make a first request in their own words and get a
+   useful result. Keep shared setup with admins, who do it one time for all. Ask
+   a member only for the access or the choice that their task needs. Let Daimon
+   pick the agent, the tool and the settings, within what the admins allow.
+2. **Count the steps, then remove them.** List the path. Each press, choice,
+   command, wait, other page and new concept costs every person who takes it.
+   Remove it, give it a default that works for most people, or let Daimon do it.
+   Name each choice that stays by its effect, so a person can tell what changes.
+   Complexity does not go away: we carry it one time, or each person carries it
+   each time.
+3. **Ask late, in the place they are.** Ask for a sign-in, a permission or a
+   decision only when the task needs it, with one press in the same conversation
+   where one is possible. Say why in one line. Keep what the decision needs in
+   view: a cost, who receives it, whose account is used, what is deleted. Put
+   other detail behind a button. A person who has not met the problem does not
+   need its explanation.
+4. **Continue after a block.** When the access or the approval arrives, make
+   Daimon continue the waiting request by itself, within its current
+   permissions, so the person does not ask again. Do not restart work that was
+   cancelled, replaced or expired; say what to do next. When a different person
+   must act, give them the request and tell the requester who has it, as
+   `daimon.core.github_request_decisions` does. A new block does not get this by
+   itself: build it and test it.
+5. **End each path in view.** Deliver the result where the person asked, or in
+   the place they named. If it must go somewhere private, say so. End a problem
+   with what happened, as the person saw it, and a step that resolves it: a
+   button, a link, or who can help ("Ask an admin or an owner"). Work that ends
+   where nobody looks, and "That didn't work. Try again.", are not ends. The
+   rules below say who carries a problem to the person.
+6. **Then the words.** Use one name for one thing, the name a person would say
+   ("cloud computer"), on every platform. Keep names made for code out of what a
+   person reads: a tool name, an argument, a setting key, an id, a reason code,
+   JSON. Text that falls back to one is a bug. The model repeats our words, and
+   two names read as two things. In a card or a notice, use one line for what is
+   happening and one line for what to do, then the facts a decision needs. A
+   button over prose; never ask someone to type what a button can do. No " · "
+   separators: each fact gets its own line. A card is a piece of UI, not a
+   message from an assistant: no greeting, no filler, space between separate
+   facts. Send no card that repeats the agent's answer or reports a step nobody
+   must act on; update one progress card instead of adding more.
 
-1. **Do the hard work, so the person does not.** Daimon decides, remembers and
-   recovers where its permissions allow. Where they do not, it gives a button or
-   a link to the action and says who can take it. Complexity does not go away:
-   we carry it one time, or each person carries it each time.
-2. **Do less.** Each concept, mode, setting and step costs every person who meets
-   it. Add one only when a person needs the choice, and give it a default that
-   works for most people. Name each choice by its effect, so a person can tell
-   what changes. Send an answer with no extra card when no permission, decision
-   or error needs one, and do not fill a chat with cards. More choices make each
-   decision slower, and most people keep the default.
-3. **Ask late.** Ask for a sign-in, a permission or a decision only when a task
-   needs it, and say why in one line. Keep what the decision needs in view (a
-   cost, who receives it, whose account is used, what is deleted) and put other
-   detail behind a button. A person who has not met the problem does not need
-   its explanation.
-4. **One thing, one name, in the person's words.** Use the name a person would
-   say ("cloud computer") on cards, in tool descriptions and results, in settings
-   and in the docs. Never show a name made for code: a tool name, an argument, a
-   setting key, an id, a reason code or JSON. Text that falls back to one is a
-   bug. The model repeats our words, and two names read as two things.
-5. **Two lines and a button.** One line for what is happening, one line for what
-   to do. A button over prose; never ask someone to type what a button can do.
-   No " · " separators: each fact gets its own line. Use the same words on every
-   platform. A card is a piece of UI, not a message from an assistant: no
-   greeting, no filler, and space between things that are separate. People scan
-   a card, and few read it.
-6. **A problem ends with a next step.** Say what happened as the person saw it,
-   not what broke inside. Then give a step that resolves it, as a button or a
-   link where one exists, or name who can help ("Ask an admin or an owner").
-   "That didn't work. Try again." gives neither.
+Rule 6 covers what a person reads: cards, buttons, refusals, notices, the web
+app, the names of settings and their choices. It also covers the prose the model
+reads and repeats to a person: tool descriptions, tool results and notices to
+the agent. Tool names, arguments, and the ids and JSON the model needs stay as
+they are; put the person's word for the thing beside them. Operators who run
+Daimon (the CLI, environment settings, logs) are a different reader; exact
+technical words are right for them.
 
-Text in the code today that these rules stop:
+Before you call it done, list each path you changed, from its start to its
+result, as a new person takes it. Count what they must learn, choose, type, wait
+for and do again. Then take the path in the app; if you cannot, say so in the PR.
 
-| Daimon's text | Rule | Instead |
-| --- | --- | --- |
-| A card titled "Compute launch session" with "Ttl hours: 4" | 4 | "Start a cloud computer for 4 hours?" |
-| "Ask an admin to check the image profile it was launched from." | 4 | "The cloud computer could not start, so it is being removed. Ask an admin." |
-| "Ask a server admin to set approval for cloud computers to Ask." | 1 | offer the usual time, or give the admin a link to the setting |
-| "Ask an admin to run /dm-me enable." | 5 | a button the admin presses |
-| A setting with the choices "Off", "Report only", "On" | 2 | choices that say what each one does |
-
-Before you call it done, open the card, panel or reply as the person meets it,
-not its source. Ask: can someone who has never heard of this act on it after one
-look? Did they have to learn a word, pick a mode or type a command?
-
-These are our rules. They apply "Do the hard work to make it simple" from the
-GOV.UK Government Design Principles
+These are our rules. They apply "Start with user needs" and "Do the hard work to
+make it simple" from the GOV.UK Government Design Principles
 (<https://www.gov.uk/guidance/government-design-principles>) and Nielsen Norman
 Group's usability heuristics on familiar words, consistency, recognition over
 recall and recovery from errors
