@@ -12,7 +12,7 @@ import uuid
 from collections.abc import Iterable
 
 from daimon.core._models import SessionDataRead
-from sqlalchemy import select
+from sqlalchemy import literal, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,3 +42,27 @@ async def reads_of(
         .order_by(SessionDataRead.ref)
     )
     return list(found)
+
+
+async def carry_reads(
+    session: AsyncSession, *, tenant_id: uuid.UUID, source: str, target: str
+) -> None:
+    """Give the session that continues `source` what it read, so a memory saved after the
+    hand-over is tagged with it."""
+    if source == target:
+        return
+    await session.execute(
+        insert(SessionDataRead)
+        .from_select(
+            ["tenant_id", "chat_session_id", "ref", "read_at"],
+            select(
+                SessionDataRead.tenant_id,
+                literal(target),
+                SessionDataRead.ref,
+                SessionDataRead.read_at,
+            ).where(
+                SessionDataRead.tenant_id == tenant_id, SessionDataRead.chat_session_id == source
+            ),
+        )
+        .on_conflict_do_nothing()
+    )
