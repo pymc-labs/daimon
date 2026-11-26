@@ -18,7 +18,8 @@ from typing import Final, Literal, Protocol
 import httpx
 import structlog
 from daimon.core import ports
-from daimon.core.agent_editing import AgentEditDeps, AgentEditError
+from daimon.core.agent_admin import require_admin
+from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
 from daimon.core.config import GithubAppSettings, GithubSettings, Settings
 from daimon.core.server_skills.mirror import add_server_skill
 from daimon.core.server_skills.repo import RepoUpstream, parse_repo_server, repo_server
@@ -41,6 +42,7 @@ __all__ = [
     "SkillRepoLoader",
     "Upstreams",
     "add_repo_skills",
+    "add_skill_repo",
     "mirror_sync_deps",
     "register_skill_repo_loader",
     "repo_upstream",
@@ -217,6 +219,33 @@ async def add_repo_skills(
             continue
         outcomes.append(RepoSkillOutcome(entry.name, action))
     return outcomes
+
+
+async def add_skill_repo(
+    edit: AgentEditDeps,
+    github: GithubSettings,
+    github_app: GithubAppSettings | None,
+    *,
+    actor: AgentActor,
+    decl: SkillRepoDecl,
+    http: httpx.AsyncClient,
+    now: Callable[[], datetime],
+) -> list[RepoSkillOutcome]:
+    """An admin's request to add a repository's skills: `add_repo_skills`, read through the
+    workspace's GitHub App where it reaches the repository. Raises `UpstreamGone` for a
+    repository that can't be read and `UpstreamUnreachable` when GitHub doesn't answer."""
+    require_admin(actor, "The skill library")
+    upstream = repo_upstream(
+        github,
+        github_app,
+        edit,
+        tenant_id=decl.tenant_id,
+        repo=decl.repo,
+        branch=decl.branch,
+        http=http,
+        now=now,
+    )
+    return await add_repo_skills(edit, upstream, decl, writer=actor, now=now())
 
 
 async def _keep_scope(deps: AgentEditDeps, decl: SkillRepoDecl, skill_id: str) -> None:

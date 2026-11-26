@@ -35,6 +35,8 @@ _TOOLS = {
     "set_agent_helpers",
     "set_agent_owners",
     "restore_library_skill_version",
+    "add_skill_repository",
+    "set_skill_scope",
     "approve_server_skill_update",
 }
 

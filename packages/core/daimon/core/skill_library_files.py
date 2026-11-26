@@ -53,6 +53,7 @@ __all__ = [
     "save_library_files",
     "set_skill_scope",
     "skill_lock",
+    "skill_scope",
 ]
 
 _NAME = re.compile(r"[^a-z0-9]+")
@@ -353,6 +354,18 @@ async def fork_library_skill(
         async with deps.session_factory() as session, session.begin():
             await audited(session, _target(ref.name, ref.version))
     return ref
+
+
+async def skill_scope(deps: AgentEditDeps, *, actor: AgentActor, skill_id: str) -> str | None:
+    """Who may read a skill (None: everyone who may use the library), for an admin."""
+    require_admin(actor, "The skill library")
+    async with deps.session_factory() as session:
+        kept = await workspace_skills_store.get_skill(
+            session, tenant_id=actor.tenant_id, skill_id=skill_id
+        )
+    if kept is None:
+        raise AgentEditError("No such skill.", kind="not_found")
+    return kept.scope
 
 
 async def set_skill_scope(

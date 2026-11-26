@@ -205,6 +205,8 @@ CARDED_TOOLS: Final[Mapping[str, str]] = {
     "set_agent_owners": "agent_id",
     "set_agent_helpers": "agent_id",
     "restore_library_skill_version": "skill_id",
+    "add_skill_repository": "repo",
+    "set_skill_scope": "skill_id",
     "approve_server_skill_update": "skill_id",
 }
 

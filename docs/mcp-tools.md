@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 248 tools Daimon's MCP server registers, plus the 16 on the hub login mounts.
+The 251 tools Daimon's MCP server registers, plus the 16 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -625,13 +625,17 @@ Authenticated turn origins and identity-pinned configuration targets.
 
 ## `skill_library_edits`
 
-Chat tools for the skill library's version writes: save a skill's files as its next
-version and restore an older one.
+Chat tools for the skill library's admin pages: save a skill's files as its next
+version, restore an older one, add a repository's skills, and read or set who may read a
+skill.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
+| `add_skill_repository` | admin only | Add the skills of a GitHub repository (``owner/name``) to the library: each folder holding a SKILL.md, limited to ``paths`` when given, takes ``scope`` as who may read it. |
+| `get_skill_scope` | admin only | Who may read a library skill: a data scope name, or none for everyone who may use the library. |
 | `restore_library_skill_version` | admin only | Republish an older library skill version as the next one. |
 | `save_library_skill_files` | admin only | Publish text files as a library skill's next version. |
+| `set_skill_scope` | admin only | Set who may read a library skill: a data scope name, or null for everyone who may use the library. |
 
 ## `skill_serving`
 

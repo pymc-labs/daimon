@@ -260,6 +260,7 @@ _CARD = "needs live provider (a request card posted into a channel); the agent a
 #: Every other tool of `/mcp`, with why it is not swept.
 EXEMPT: dict[str, str] = {
     "add_server_skill": _NEW,
+    "add_skill_repository": _NEW,
     "approve_reach": _LIVE,
     "approve_server_skill_update": _NEW,
     "archive_my_session": _LIVE,
@@ -322,6 +323,7 @@ EXEMPT: dict[str, str] = {
     "forget_watch_credential": _SCHEDULED,
     "fork_agent": _NEW,
     "fork_server_skill": _NEW,
+    "get_skill_scope": _READS,
     "get_agent": _READS,
     "get_channel_budget": _READS,
     "get_cli_token": _READS,
@@ -431,6 +433,7 @@ EXEMPT: dict[str, str] = {
     "rotate_watch_key": _SCHEDULED,
     "run_routine": _SCHEDULED,
     "save_library_skill_files": _NEW,
+    "set_skill_scope": _NEW,
     "search_messages": _READS,
     "self_delete_file": _MEMORY,
     "self_list_files": _READS,

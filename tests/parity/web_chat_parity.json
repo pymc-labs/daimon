@@ -156,7 +156,7 @@
    "tool": "add_server_skill"
   },
   "POST /api/agents/skill-repos": {
-   "exempt": "skill library repositories and scopes are web-only, or declared in the config file"
+   "tool": "add_skill_repository"
   },
   "POST /api/agents/skills": {
    "tool": "add_skill"
@@ -364,7 +364,7 @@
    "tool": "save_library_skill_files"
   },
   "PUT /api/agents/skills/{skill_id}/scope": {
-   "exempt": "skill library repositories and scopes are web-only, or declared in the config file"
+   "tool": "set_skill_scope"
   },
   "PUT /api/agents/{agent_id}/github/working": {
    "tool": "set_working_repo"

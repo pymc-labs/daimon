@@ -62,12 +62,17 @@ from daimon.core.server_skills.sync import (
     follow_now,
 )
 from daimon.core.skill_library import MirrorDoc, mirror_doc
-from daimon.core.skill_library_files import SkillRef, fork_library_skill, set_skill_scope
+from daimon.core.skill_library_files import (
+    SkillRef,
+    fork_library_skill,
+    set_skill_scope,
+    skill_scope,
+)
 from daimon.core.skill_repos import (
     RepoSkillOutcome,
     SkillRepoDecl,
     Upstreams,
-    add_repo_skills,
+    add_skill_repo,
     mirror_sync_deps,
     repo_upstream,
     skill_repo_loader,
@@ -75,7 +80,6 @@ from daimon.core.skill_repos import (
 )
 from daimon.core.skills.ingest import SkillIngestError
 from daimon.core.stores import server_skills as store
-from daimon.core.stores import workspace_skills as workspace_skills_store
 from daimon.core.stores.domain import ServerSkillRow, WebPersonRow
 from daimon.core.stores.tenants import list_tenants_by_platform
 from daimon.core.workspace_skills_sync import record_library_skills
@@ -425,10 +429,6 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
     @router.post("/skill-repos", status_code=201)
     async def add_repo(caller: Editor, body: SkillReposBody) -> list[RepoSkillResult]:  # pyright: ignore[reportUnusedFunction]
         actor = actor_of(caller)
-        try:
-            require_admin(actor, "The skill library")
-        except AgentEditError as exc:
-            raise edit_refusal(exc) from exc
         decl = SkillRepoDecl(
             tenant_id=actor.tenant_id,
             repo=body.repo,
@@ -436,20 +436,18 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
             paths=tuple(body.paths),
             scope=body.scope,
         )
-        upstream = repo_upstream(
-            runtime.settings.github,
-            runtime.settings.github_app,
-            change_deps(runtime).edit,
-            tenant_id=actor.tenant_id,
-            repo=decl.repo,
-            branch=decl.branch,
-            http=runtime.http_client,
-            now=runtime.now,
-        )
         try:
-            outcomes: list[RepoSkillOutcome] = await add_repo_skills(
-                change_deps(runtime).edit, upstream, decl, writer=actor, now=runtime.now()
+            outcomes: list[RepoSkillOutcome] = await add_skill_repo(
+                change_deps(runtime).edit,
+                runtime.settings.github,
+                runtime.settings.github_app,
+                actor=actor,
+                decl=decl,
+                http=runtime.http_client,
+                now=runtime.now,
             )
+        except AgentEditError as exc:
+            raise edit_refusal(exc) from exc
         except UpstreamGone as exc:
             raise HTTPException(
                 status_code=422, detail="That repository could not be read."
@@ -465,16 +463,12 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
     @router.get("/skills/{skill_id}/scope")
     async def get_scope(caller: Editor, skill_id: str) -> SkillScopeDoc:  # pyright: ignore[reportUnusedFunction]
         try:
-            require_admin(actor_of(caller), "The skill library")
+            scope = await skill_scope(
+                change_deps(runtime).edit, actor=actor_of(caller), skill_id=skill_id
+            )
         except AgentEditError as exc:
             raise edit_refusal(exc) from exc
-        async with runtime.sessionmaker() as session:
-            kept = await workspace_skills_store.get_skill(
-                session, tenant_id=caller.person.tenant_id, skill_id=skill_id
-            )
-        if kept is None:
-            raise HTTPException(status_code=404, detail="No such skill.")
-        return SkillScopeDoc(skill_id=skill_id, scope=kept.scope)
+        return SkillScopeDoc(skill_id=skill_id, scope=scope)
 
     @router.put("/skills/{skill_id}/scope")
     async def put_scope(caller: Editor, skill_id: str, body: SkillScopeBody) -> SkillScopeDoc:  # pyright: ignore[reportUnusedFunction]

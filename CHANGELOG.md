@@ -8,9 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - **Coding keys, the hub and outside clients can read the skill library.** The workspace
-  feature `library_skills` (off by default) adds `list_library_skills` and
-  `read_library_skill`; a scoped skill shows only to callers whose data reads include its
-  scope. Declared `skill_repos` add a repository's skills ([Data sources](docs/data-sources.md)).
+  feature `library_skills` (on by default, and idle until the library holds skills) adds
+  `list_library_skills` and `read_library_skill`; a scoped skill shows only to callers whose
+  data reads include its scope, and in chat only when everyone who can read the room holds
+  it. Admins add a repository's skills and set a skill's scope on the web or in chat
+  (`add_skill_repository`, `get_skill_scope`, `set_skill_scope`); declared `skill_repos`
+  add skills too ([Data sources](docs/data-sources.md)).
 
 - **The web app gets pages for data sources, with the feature on.** A Data section searches
   and browses what the person may read and opens items with their files. Integrations lists

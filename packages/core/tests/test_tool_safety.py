@@ -285,6 +285,7 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
             for name in (
                 "add_server_skill",
                 "add_skill",
+                "add_skill_repository",
                 "approve_reach",
                 "approve_server_skill_update",
                 "change_setting",
@@ -302,6 +303,7 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
                 "set_agent_helpers",
                 "set_agent_owners",
                 "set_agent_web_access",
+                "set_skill_scope",
                 "start_long_job",
                 "update_watch",
                 "update_web_person",
