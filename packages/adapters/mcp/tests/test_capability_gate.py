@@ -471,7 +471,7 @@ async def test_self_knowledge_tools_follow_the_feature_for_every_caller(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Off by default: hidden and refused, the `call_tool` proxy too; On, they read this
+    """Off: hidden and refused, the `call_tool` proxy too; On (the default), they read this
     release's docs, web pages left out where the web app is Off. A chat credential's list,
     the catalogue a pinned provider install keeps exactly, never changes with it."""
     (tmp_path / "docs").mkdir()
@@ -481,6 +481,7 @@ async def test_self_knowledge_tools_follow_the_feature_for_every_caller(
     mcp = await _app(sessionmaker, _set_up().model_copy(update={"self_knowledge": roots}))
     tenant_id = await _tenant(sessionmaker)
     page, search = {"page": "slack.md"}, {"query": "Daimon's own documentation"}
+    await _set(sessionmaker, tenant_id, "self_knowledge", "off")
     _as(monkeypatch, tenant_id, platform="discord", chat_agent_id=str(uuid.uuid4()))
     async with Client(mcp) as client:
         chat_before = {t.name for t in await client.list_tools()}
@@ -500,7 +501,7 @@ async def test_self_knowledge_tools_follow_the_feature_for_every_caller(
     async with Client(mcp) as client:
         chat_after = {t.name for t in await client.list_tools()}
         chat_found_on = str(await client.call_tool("search_tools", search))
-    assert "read_daimon_docs" not in hidden, "Off by default: search does not find it"
+    assert "read_daimon_docs" not in hidden, "Off: search does not find it"
     assert OFF in refused and OFF in proxied, f"Off refuses, the proxy too: {proxied!r}"
     assert "read_daimon_docs" in shown, "On, search finds it"
     assert "Install the app." in str(read.content), f"On reads the page: {read.content!r}"

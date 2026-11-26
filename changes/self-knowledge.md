@@ -1,7 +1,8 @@
-- **Agents can read Daimon's own docs and source.** Turn on "Knows Daimon"
-  (`self_knowledge`, Off by default) for a workspace, agent, channel or thread,
-  and four read-only tools (`read_daimon_docs`, `search_daimon_docs`,
-  `read_daimon_source`, `search_daimon_source`) read and search the docs and
+- **Agents can read Daimon's own docs and source.** "Knows Daimon"
+  (`self_knowledge`, On by default; an admin or agent owner can turn it off per
+  agent) gives agents four read-only tools (`read_daimon_docs`,
+  `search_daimon_docs`,
+  `read_daimon_source`, `search_daimon_source`) that read and search the docs and
   `packages/` code of the release the agent runs on, naming the repository and
   commit. Where Web app is Off, the web app's pages and code are left out. New
   pages cover [how Daimon works](docs/how-daimon-works.md),

@@ -112,17 +112,15 @@ def _dicts(tools: Any) -> list[Any]:
 
 #: The capabilities Off until a server admin turns them on, which a web place offers.
 _OFF_BY_DEFAULT = ("compute", "long_jobs")
-#: Knows Daimon is Off by default too, but is no capability (`self_knowledge`).
-_OFF_IN_BASELINE = (*_OFF_BY_DEFAULT, "self_knowledge")
 
 
 def _snapshot(*, plain: bool = False, **values: str) -> FeatureSnapshot:
-    """A web place with nothing set but the default-Off capabilities and Knows Daimon turned
-    On, so the baseline hides nothing; `plain` leaves them at their default (Off)."""
+    """A web place with nothing set but the default-Off capabilities turned On, so the
+    baseline hides nothing; `plain` leaves them at their default (Off)."""
     place = FeaturePlace(uuid.uuid4(), "web", agent_id="agent_tools", backend="anthropic")
     features = {key: resolve_one(spec, None, place, []) for key, spec in FEATURES.items()}
     if not plain:
-        for key in _OFF_IN_BASELINE:
+        for key in _OFF_BY_DEFAULT:
             features[key] = ResolvedFeature(key, "on", "workspace")
     for key, value in values.items():
         name = key.replace("__", ".")
@@ -254,7 +252,8 @@ def test_capabilities_change_nothing_at_their_defaults() -> None:
     assert agent_toolset(_snapshot(), _agent()) == DEFAULT_TOOLSET, "byte-identical by default"
     assert all(FEATURES[key].default == "off" for key in _OFF_BY_DEFAULT)
     plain = agent_toolset(_snapshot(plain=True), _agent())
-    assert plain.hidden_daimon_tools == gated_tools(_OFF_IN_BASELINE), "they are Off"
+    assert plain.hidden_daimon_tools == gated_tools(_OFF_BY_DEFAULT), "they are Off"
+    assert FEATURES["self_knowledge"].default == "on", "Knows Daimon is On by default"
 
 
 @pytest.mark.parametrize("key", CAPABILITY_KEYS)

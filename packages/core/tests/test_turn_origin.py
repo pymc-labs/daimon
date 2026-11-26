@@ -727,12 +727,12 @@ def test_self_knowledge_on_points_the_agent_at_its_docs_tools() -> None:
     """The docs and source tools sit behind search, so the controls say they are there."""
     from daimon.core.self_knowledge import SELF_KNOWLEDGE_HINT
 
-    on = render_turn_origin(
-        _origin(), effective_is_admin=False, features=_features(self_knowledge="on")
+    default = render_turn_origin(_origin(), effective_is_admin=False, features=_features())
+    off = render_turn_origin(
+        _origin(), effective_is_admin=False, features=_features(self_knowledge="off")
     )
-    off = render_turn_origin(_origin(), effective_is_admin=False, features=_features())
-    assert _controls(on)["self_knowledge"] == SELF_KNOWLEDGE_HINT, "On: the hint is there"
-    assert "self_knowledge" not in _controls(off), "Off by default: no hint"
+    assert _controls(default)["self_knowledge"] == SELF_KNOWLEDGE_HINT, "On by default: the hint"
+    assert "self_knowledge" not in _controls(off), "Off: no hint"
     for held in ({"sender_foreign": True}, {"shared_channel": True}):
         rendered = render_turn_origin(
             _origin(**held), effective_is_admin=False, features=_features(self_knowledge="on")

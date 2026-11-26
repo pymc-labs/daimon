@@ -117,11 +117,11 @@ itself. It gives the agent four read-only tools, `read_daimon_docs`,
 pages and the source of the running release. The agent then answers "how does Daimon
 work" and "how do I do this" from the release it runs on, not from memory.
 
-It is off by default and can be set at any level. Turn it on in an agent's settings, with
-`/settings`, or from the CLI:
+It is on by default and can be set at any level. An agent's owner or an admin turns it off
+for that agent in its settings, with `/settings`, or from the CLI:
 
 ```bash
-daimon features set self_knowledge on --tier agent --agent NAME
+daimon features set self_knowledge off --tier agent --agent NAME
 ```
 
 <!-- knowledge: web -->
