@@ -72,8 +72,8 @@ _REFUSALS: Final[dict[RefusalReason, str]] = {
 }
 _NO_TEAMS_CONSENT: Final = (
     "Daimon may not read who is in this conversation, so answers hold only what everyone may "
-    "read. A team owner or chat member grants that consent by updating the app, or a tenant "
-    "admin for the whole organisation."
+    "read. A team owner or chat member grants that consent by updating the app, or an "
+    "admin of the whole organisation does."
 )
 #: Members a Slack room may page through before its viewers count as unknown.
 _SLACK_PAGE_LIMIT: Final = 4 * CAP

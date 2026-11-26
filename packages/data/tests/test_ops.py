@@ -58,7 +58,9 @@ class Fake(Connector):
     async def fetch_file(
         self, source: Source, payload: object, message: str, name: str, index: int = 0
     ) -> tuple[bytes, str] | None:
-        return (b"Acme wrote", "text/plain") if name.endswith(".txt") else (b"Acme", "image/png")
+        if name.endswith(".txt"):
+            return b"Acme wrote", "text/plain"
+        return (b"Acme said", "") if name.endswith(".md") else (b"Acme", "image/png")
 
 
 @pytest.fixture
@@ -310,11 +312,12 @@ async def test_a_record_the_source_now_refuses_is_not_shown(
     assert found.hits == [], "search drops it too"
 
 
-async def test_a_text_file_goes_through_its_sources_answer_rules(store: Store, fake: Fake) -> None:
-    """Answer-time rules reach file text, best effort; other bytes pass as the source sent them."""
+async def test_a_files_text_goes_through_its_sources_answer_rules(store: Store, fake: Fake) -> None:
+    """Answer-time rules reach a file's text, best effort: the text the sync extracts stands
+    in for other bytes, and a file with none has nothing to show. Unruled, bytes pass as sent."""
     src = await store.source("published")
     record = await store.record(src)
-    for ord_, name in enumerate(("notes.txt", "logo.png")):
+    for ord_, name in enumerate(("notes.txt", "notes.md", "logo.png")):
         await store.sql(
             f"insert into {store.d}.attachments (source_id, external_id, ord, name)"
             " values (%s, 'doc:1', %s, %s)",
@@ -322,12 +325,18 @@ async def test_a_text_file_goes_through_its_sources_answer_rules(store: Store, f
         )  # fmt: skip
     ctx = ReadContext((store.tenant,), scopes=("internal",))
     rules = redaction.Rules.model_validate({"aliases": {"Acme": "client A"}, "at": "answer"})
-    answer = {src: redaction.Redactor(rules, answer=True)}
+    schemas, answer = store.data.schemas, {src: redaction.Redactor(rules, answer=True)}
     read = [
-        await reads.read_file(store.conn, store.data.schemas, ctx, store.env, record, i, answer)
-        for i in (0, 1)
+        await reads.read_file(store.conn, schemas, ctx, store.env, record, i, answer)
+        for i in (0, 1, 2)
     ]
-    assert read == [(b"client A wrote", "text/plain"), (b"Acme", "image/png")]
+    assert [f and (f.data, f.text, f.best_effort) for f in read] == [
+        (b"client A wrote", "client A wrote", True),
+        (None, "client A said", True),
+        (None, None, True),
+    ]
+    plain = await reads.read_file(store.conn, schemas, ctx, store.env, record, 2, text=True)
+    assert plain and (plain.data, plain.text, plain.best_effort) == (b"Acme", None, False)
 
 
 async def test_a_source_made_for_a_private_form_waits_paused_for_its_credential(

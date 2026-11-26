@@ -12,8 +12,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import load_channel_policy
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
-from daimon.core.data_audience import saver_ref
-from daimon.core.data_reading import reads_data
+from daimon.core.data_audience import UNKNOWN_READ
 from daimon.core.features.snapshot import FeaturePlace, may_turn_on, resolve_features
 from daimon.core.github_app_session import REQUESTER_CACHE, effective_app_grant_view
 from daimon.core.github_requester_access import linked_permissions
@@ -186,12 +185,9 @@ async def repo_memory_impl(
 
 async def _refs(runtime: McpRuntime, auth: AuthIdentity) -> list[str] | None:
     """What a save records: what the session read so far, which bounds who may recall it.
-    With no session to tell, a caller that may read data here records its saver, so the
-    memory shows only where the saver is the only person (`saver_ref`)."""
+    `resolve_repo` refuses a save with no session; one would recall nowhere."""
     if auth.chat_session_id is None:
-        place = FeaturePlace.of(auth.tenant_id, auth.platform or "mcp", auth.bound_channel_id)
-        reading = await reads_data(runtime.session_factory, runtime.settings, place)
-        return [saver_ref(auth.account_id)] if reading else None
+        return [UNKNOWN_READ]
     async with runtime.session_factory() as session:
         refs = await reads_of(
             session, tenant_id=auth.tenant_id, chat_session_id=auth.chat_session_id
