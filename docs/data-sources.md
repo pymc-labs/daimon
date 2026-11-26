@@ -228,22 +228,15 @@ writes the store. The checks:
 - `health`: each source's state, last sync and embedding coverage.
 - `drift`: chunks off their record, records without chunks, sources not synced in 48 hours or failing.
 
-`data_context` lists what the caller may read: their scopes, and each source with its status
-and the date of its newest record. A coding key made from an agent's coding tools reads
-data as the person who made it, bounded by the same rule as a chat there; a key made in a
-limited channel keeps that channel's rule. The hub's data tools take a `workspace`, by name
-or id, among the workspaces the caller belongs to, and are listed only where `data_reads`
-is On in one of them.
+`data_context` lists what the caller may read. A coding key reads as its maker, like a chat there; the hub's data tools take a
+`workspace`.
 
-`library_skills` is On unless an admin turns it off. `list_library_skills` and
-`read_library_skill` serve it to coding keys, the hub (with a `workspace`) and outside
-clients. A scoped skill shows only to someone whose data reads include its scope; chat's
-`list_skills` and `get_skill` apply that to everyone who can read the room, and in a direct
-message to the agent's owner. A scoped skill cannot be attached to an agent or channel, nor
-an attached one scoped.
-
-Admins add repositories and set scopes on the web or in chat, where changes wait for an
-approval card.
+`library_skills` (On unless an admin turns it off) serves `list_library_skills` and
+`read_library_skill` to coding keys, the hub and outside clients. A scoped skill shows only to
+someone whose data reads include its scope; chat's `list_skills` and `get_skill` apply that
+to everyone who can read the room, and in a direct message to the agent's owner. A scoped
+skill cannot be attached to an agent or channel, nor an attached one scoped. Admins add
+repositories and set scopes on the web or in chat, behind an approval card.
 
 ## After a restore
 
