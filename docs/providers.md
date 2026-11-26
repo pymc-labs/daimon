@@ -39,14 +39,15 @@ pypdf) instead.
 - **Self-hosted:** memory, routines, effort and a
   spend limit, workspace export and import. An agent can pick it only with
   its own runtime file row (`daimon selfhosted init --agent`).
-- **OpenAI and Gemini:** a routine's output files, watches and timers. An OpenAI
-  routine needs [sandbox tools](unattended.md#opt-a-routine-into-sandbox-tools),
-  since its hosted shell cannot be left out. A channel's own deployment where a
-  channel or thread switches a built-in tool off. Workspace export and import.
+- **OpenAI and Gemini:** watch reports. OpenAI's hosted shell cannot be left
+  out, so its routines need
+  [sandbox tools](unattended.md#opt-a-routine-into-sandbox-tools) and its timers
+  cannot run. A channel's own deployment where a channel or thread turns a
+  built-in off. Workspace export and import.
   Switching off one of bash, read, edit, write, grep or glob removes all six,
   since the provider has one execution tool. A connector that
   OpenAI's size limit cannot hold, or whose tool names clash with Gemini's own,
-  is off there, and so is a web search that must ask first. Repository
+  is off there, as is a web search that must ask first. Repository
   checkouts and the agent's keys stay on Claude.
 - **Without an Anthropic key:** memory.
 

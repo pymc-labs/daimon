@@ -209,7 +209,7 @@ After a successful run, Daimon collects the session's output files and
 delivers up to ten with the reply. Discord and Slack attach them, and a Teams
 post says files are not supported there. A file over 200 MB or the
 destination's limit (10 MB in a Discord DM) is named in text and stays in the
-workspace. On OpenAI and Gemini a routine's files are not delivered yet.
+workspace. On OpenAI and Gemini the limit is 24 MB.
 
 Files share the result's at-most-once claim, and each send rechecks the
 destination and the owner's access. Changing the destination cancels pending

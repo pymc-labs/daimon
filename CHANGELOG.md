@@ -31,8 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   built-in tools stay off unless an operator turns on sandbox tools, whose opt-in now also
   records the provider. OpenAI always runs its agents with a shell, so an OpenAI routine needs
   sandbox tools. A routine that DMs its owner runs there too, as their private turn, and a
-  routine into a thread runs on the provider that thread kept. Its generated files are not
-  delivered there yet ([Routines](docs/routines.md)).
+  routine into a thread runs on the provider that thread kept. Its generated files are
+  delivered as on Anthropic, up to 24 MB each. Timers run on Gemini the same way; watch
+  reports still need Anthropic ([Routines](docs/routines.md)).
 
 - **An agent's connectors keep working after it switches to OpenAI or Gemini.** Daimon now
   keeps and refreshes every connector sign-in itself, and gives an agent on Claude a fresh
