@@ -25,9 +25,12 @@ from daimon.core.server_skills.repo import RepoUpstream
 from daimon.core.server_skills.source import SystemWriter
 from daimon.core.skill_repos import RepoSkillOutcome, SkillRepoDecl, add_repo_skills
 from daimon.core.stores import server_skills, web_audit, workspace_skills
+from daimon.core.stores.channel_skills import add_channel_skill, remove_channel_skill
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.workspace_skills import record_published
 from daimon.testing.builders import skill_listed
 from daimon.testing.factories import make_account, make_tenant, make_web_person
+from daimon.testing.ma_models import ma_agent_payload
 from daimon.testing.mcp_skills import SkillsServer, skill_md
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -435,3 +438,87 @@ async def test_a_declared_scope_comes_with_the_skill_stays_on_re_add_and_follows
             for s in await workspace_skills.list_skills(session, tenant_id=actor.tenant_id)
         }
     assert scopes == {"sk_new": "team", "sk_1": "docs", fork.id: "docs"}
+
+
+async def test_a_skill_carried_by_an_agent_or_channel_is_refused_a_scope_and_a_free_one_is_set(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    _library, deps, actor = await _setup(db_session, db_session_factory)
+    tenant_id = actor.tenant_id
+    held: list[dict[str, Any]] = []
+    failing = False
+
+    def agents(_r: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        if failing:
+            return httpx.Response(500, json={"type": "error", "error": {"type": "api_error"}})
+        agent = ma_agent_payload(
+            id="ag_a",
+            name="a",
+            metadata={"daimon_tenant": str(tenant_id), "daimon_name": "a"},
+            skills=held,
+        )
+        return list_response([agent])
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents$", agents)
+    deps = dataclasses.replace(deps, client=build_fake_anthropic(router.dispatch))
+    await workspace_skills.record_version(
+        db_session,
+        tenant_id=tenant_id,
+        skill_id="sk_1",
+        name="notes",
+        version="1",
+        digest="d",
+        files={"SKILL.md": b"x"},
+    )
+    await db_session.commit()
+
+    async def scope() -> str | None:
+        return await skill_library_files.skill_scope(deps, actor=actor, skill_id="sk_1")
+
+    async def attempt() -> AgentEditError | None:
+        try:
+            await skill_library_files.set_skill_scope(
+                deps, actor=actor, skill_id="sk_1", scope="team"
+            )
+        except AgentEditError as err:
+            return err
+        return None
+
+    held.append({"type": "custom", "skill_id": "sk_1", "version": "1"})
+    refused = await attempt()
+    assert refused is not None and "attached" in str(refused), "an agent carries it"
+    held.clear()
+    failing = True
+    refused = await attempt()
+    assert refused is not None and "Could not check" in str(refused), "unknown refuses"
+    failing = False
+    tenant = await get_tenant(db_session, tenant_id)
+    assert tenant is not None
+    await add_channel_skill(
+        db_session,
+        tenant_id=tenant_id,
+        platform=tenant.platform,
+        channel_id="C1",
+        skill_id="sk_1",
+        version="1",
+        name="notes",
+        owner_agent_name=None,
+        actor_account_id=None,
+    )
+    await db_session.commit()
+    refused = await attempt()
+    assert refused is not None and "attached" in str(refused), "a channel rule carries it"
+    assert await scope() is None, "a refused scope was not saved"
+    assert await remove_channel_skill(
+        db_session,
+        tenant_id=tenant_id,
+        platform=tenant.platform,
+        channel_id="C1",
+        skill_id="sk_1",
+        actor_account_id=None,
+        surface="cli",
+    )
+    await db_session.commit()
+    assert await attempt() is None
+    assert await scope() == "team"

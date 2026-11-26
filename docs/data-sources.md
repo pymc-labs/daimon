@@ -234,10 +234,11 @@ is On in one of them.
 `read_library_skill` serve it to coding keys, the hub (with a `workspace`) and outside
 clients. A scoped skill shows only to someone whose data reads include its scope; chat's
 `list_skills` and `get_skill` apply that to everyone who can read the room, and in a direct
-message to the agent's owner too. A scoped skill cannot be attached to an agent or channel.
+message to the agent's owner. A scoped skill cannot be attached to an agent or channel, nor
+an attached one scoped.
 
-Admins add a repository's skills and set a scope on the web or in chat; chat changes wait
-for the asker's approval card.
+Admins add repositories and set scopes on the web or in chat, where changes wait for an
+approval card.
 
 ## After a restore
 
