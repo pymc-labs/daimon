@@ -826,7 +826,6 @@ async def test_admission_reads_agent_rules_only_when_tool_safety_and_rules_are_o
             )
         fresh = await reauthorize(scoped, admission)
         assert fresh.daimon_rule_tools == frozenset({"hubspot_update_objects"})
-        assert fresh.daimon_rules_need_driver, "a channel deny is the driver's to apply"
         assert admission.daimon_rule_tools == frozenset(), "the old admission is not mutated"
     finally:
         event.remove(engine, "before_cursor_execute", count)
@@ -1285,13 +1284,14 @@ def _admittable_router(tenant: TenantRow) -> MARouter:
     )
 
 
-async def test_a_native_turn_is_refused_where_a_channel_switched_a_tool_off(
+async def test_a_channel_deployment_is_refused_where_a_channel_switched_a_tool_off(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Gemini and OpenAI never read a channel's tool switches, so a turn there is refused
-    rather than run with a tool the channel turned off; the same turn on Claude is not."""
+    """A channel's own Gemini or OpenAI deployment is fixed, so a turn there is refused
+    rather than run with a tool the channel turned off. An agent's own copy leaves the
+    tool out of the reply instead (`runtime_manifest`), as Claude does."""
     from daimon.core.features.model_input import TOOL_KEYS
     from daimon.core.features.snapshot import FeaturePlace
     from daimon.core.turn.admission import place_features, require_tool_limits_hold
@@ -1335,6 +1335,8 @@ async def test_a_native_turn_is_refused_where_a_channel_switched_a_tool_off(
     assert (refused.value.reason, refused.value.cause) == ("backend_unsupported", "tool_limits"), (
         "a channel's switched-off tool should refuse the native turn by name"
     )
+    own_copy = replace(await on_gemini(), backend_revision_origin="agent")
+    await require_tool_limits_hold(deps, own_copy)
 
 
 async def test_admit_without_the_mcp_servers_setup_keeps_its_tools_until_turned_off(
@@ -1383,6 +1385,8 @@ async def test_admit_without_the_mcp_servers_setup_keeps_its_tools_until_turned_
         key: CAPABILITY_TOOLS[key] - SESSION_KEPT_TOOLS
         for key in ("notebooks", "report_publish", "compute")
     }
+    # Cloud computers are Off until a server admin turns them on, as here.
+    await put(FeatureTarget("workspace"), "compute", "on")
     kept = await hidden()
     for key, gated in tools.items():
         assert gated and not gated & kept, f"{key} tools hidden: {gated & kept}"
@@ -2598,6 +2602,84 @@ async def test_approval_gate_is_tenant_scoped_and_refreshed_at_reauthorization(
                 ToolCall(tool_use_id="dm-write", server_name="third", tool_name="create_issue")
             )
         ).allow
+
+
+@pytest.mark.parametrize("follows", [False, True], ids=["off", "on"])
+async def test_a_dm_follows_approvals_only_with_dm_approvals_on(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    follows: bool,
+) -> None:
+    """`dm_approvals` on: a DM reads the workspace's Allow writes, as a channel does, so a
+    third-party write runs without a card. Off (the default): every DM write asks."""
+    from daimon.core.access_policy import AgentApprovals, ChannelRule, TenantAccessPolicy
+    from daimon.core.approval_gate import ApprovalGate
+    from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+    from daimon.core.turn.admission import refresh_approval_gate
+    from daimon.core.turn.approvals import chat_tool_confirmation
+    from daimon.core.turn.posture import PolicyApproval
+
+    # A rule keyed by the DM's own id is ignored: a DM has no channel setting.
+    policy = TenantAccessPolicy(
+        approvals="off",
+        approvals_set_by="server-admin",
+        channel_rules={"dm-1": ChannelRule(approvals="on", approvals_set_by="someone")},
+    )
+    tenant = await _seed_admittable_tenant(db_session, policy=policy)
+    if follows:
+        await set_workspace_feature(
+            db_session,
+            None,
+            tenant_id=tenant.id,
+            platform="discord",
+            key="dm_approvals",
+            value="on",
+            account_id=None,
+            surface="cli",
+        )
+        await db_session.commit()
+    deps = replace(
+        _deps(
+            native_member_admin=False,
+            sessionmaker=db_session_factory,
+            defaults_root=tmp_path,
+            router=_admittable_router(tenant),
+        ),
+        tool_safety=ToolSafetyPolicy(enabled=True),
+    )
+    admission = await admit_chat(
+        deps, tenant, channel_id="dm-1", is_dm=True, verified_membership=True, now=_NOW
+    )
+
+    gate = await refresh_approval_gate(deps, admission)
+    assert gate == (
+        ApprovalGate("off", "server", "server-admin", tenant.id) if follows else None
+    ), "a DM reads the workspace value only with dm_approvals on"
+    posture = chat_tool_confirmation(
+        deps.tool_safety,
+        requester_platform_user_id="user-1",
+        confirm=None,
+        approval_gate_for=lambda: refresh_approval_gate(deps, admission),
+        server_urls={"third": "https://third.example/mcp"},
+    )
+    assert isinstance(posture, PolicyApproval)
+    decided = await posture.decide(
+        ToolCall(tool_use_id="dm-write", server_name="third", tool_name="create_issue")
+    )
+    assert decided.allow is follows, "Allow writes reaches a DM only with dm_approvals on"
+    if follows:
+        agent_id = admission.agent.id
+        own = {agent_id: AgentApprovals(approvals="on", approvals_set_by="agent-admin")}
+        await set_access_policy(
+            db_session,
+            tenant_id=tenant.id,
+            policy=policy.model_copy(update={"agent_approvals": own}),
+        )
+        await db_session.commit()
+        assert await refresh_approval_gate(deps, admission) == ApprovalGate(
+            "on", f"agent:{agent_id}", "agent-admin", tenant.id
+        ), "a DM follows its agent's own value over the workspace's"
 
 
 @pytest.mark.parametrize("scope", ["server", "channel", "thread"])

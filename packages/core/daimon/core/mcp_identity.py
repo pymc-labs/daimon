@@ -4,9 +4,10 @@ An opted-in server is attached to an agent at Daimon's relay URL
 (`<app root>/mcp-identity/<name>`). Each session reaches it with a credential of
 its own, from a vault only that session mounts, whose signed `RELAY_CLAIM`
 names the session's `thread_sessions` row (none for a routine or any other
-session no person's turn is bound to). The relay verifies it, then forwards each
-request to the server with a compact EdDSA JWS naming the agent, the workspace
-and, when that very session is running a person's turn, who asked and where.
+session no person's turn is bound to); a watch's poll mints one naming its watch.
+The relay verifies it, then forwards each request to the server with a compact
+EdDSA JWS naming the agent, the workspace and, when that very session is running
+a person's turn, who asked and where.
 The server can then apply that person's own permissions.
 
 The Ed25519 key lives only in the process serving the relay: the model runtime
@@ -20,6 +21,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 import uuid
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
@@ -31,12 +33,12 @@ import jwt as pyjwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_server_url import canonical_mcp_url
+from daimon.core.mcp_server_url import ascii_mcp_url, canonical_mcp_url, same_ascii_mcp_url
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.turn_origin import origin_place
 
 if TYPE_CHECKING:
-    from daimon.core.stores.domain import RoutineRow
+    from daimon.core.stores.domain import RoutineRow, WatchRow
 
 #: Relay path under the app root; the server's configured name follows it.
 RELAY_PATH: Final = "/mcp-identity"
@@ -121,6 +123,18 @@ def relay_url(public_url: str, name: str) -> str:
     return relay_base(public_url) + name
 
 
+_RELAY_NAME: Final = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
+
+
+def relay_server_name(url: str, public_url: str) -> str | None:
+    """The server name when `url` is exactly `relay_url(public_url, name)` (this host, one
+    path segment, no dot segments or query), else None."""
+    name = ascii_mcp_url(url).rpartition("/")[2]
+    if _RELAY_NAME.fullmatch(name) and same_ascii_mcp_url(url, relay_url(public_url, name)):
+        return name
+    return None
+
+
 def identity_relay_urls(server_urls: Iterable[str], *, public_url: str) -> tuple[str, ...]:
     """The attached URLs that are this deployment's relay, which need its credential.
 
@@ -145,18 +159,34 @@ class RelayBinding:
     session_key: uuid.UUID | None = None
     #: The routine a scheduled run belongs to; never set together with `session_key`.
     routine_id: uuid.UUID | None = None
-    #: The routine's owner when the run started; the relay stamps the routine only
+    #: The routine's or watch's owner at minting; the relay stamps the run only
     #: while the row still names this user, so a later ownership change credits nobody.
     owner: str | None = None
+    #: The watch a poll reads for; at most one of `session_key`, `routine_id` and this.
+    watch_id: uuid.UUID | None = None
+    #: The session's execution grant (`chat_session_id`), only with `session_key`. The
+    #: turn holding it (`bind_origin_session`) is the one making the call, so the relay
+    #: names that turn even beside a queued one or after the session row was replaced.
+    grant: str | None = None
+    #: The agent-chat session (its Managed Agents id) this credential is mounted in; set
+    #: alone. The relay names a person only while that session's driver is one signed in
+    #: to the hub (`daimon.core.agent_chat_requester`).
+    agent_chat: str | None = None
 
     def claim(self) -> dict[str, str]:
         value = {"agent_name": self.agent_name}
         if self.session_key is not None:
             value["session"] = str(self.session_key)
+        if self.grant is not None:
+            value["grant"] = self.grant
         if self.routine_id is not None:
             value["routine"] = str(self.routine_id)
+        if self.watch_id is not None:
+            value["watch"] = str(self.watch_id)
         if self.owner is not None:
             value["owner"] = self.owner
+        if self.agent_chat is not None:
+            value["agent_chat"] = self.agent_chat
         return value
 
 
@@ -166,15 +196,28 @@ def parse_relay_claim(raw: object) -> RelayBinding:
         raise ValueError("relay claim is not an object")
     claim = cast("Mapping[str, object]", raw)
     name, key, routine = claim.get("agent_name"), claim.get("session"), claim.get("routine")
-    owner = claim.get("owner")
+    owner, watch, grant = claim.get("owner"), claim.get("watch"), claim.get("grant")
+    agent_chat = claim.get("agent_chat")
+    unattended = routine is not None or watch is not None
     if (
-        not set(claim) <= {"agent_name", "session", "routine", "owner"}
-        or not (owner is None or (isinstance(owner, str) and owner and routine is not None))
+        not set(claim)
+        <= {"agent_name", "session", "routine", "watch", "owner", "grant", "agent_chat"}
+        or not (owner is None or (isinstance(owner, str) and owner and unattended))
+        or not (grant is None or (isinstance(grant, str) and grant and key is not None))
         or not isinstance(name, str)
         or not name
         or not (key is None or isinstance(key, str))
         or not (routine is None or isinstance(routine, str))
-        or (key is not None and routine is not None)
+        or not (watch is None or isinstance(watch, str))
+        or sum(value is not None for value in (key, routine, watch)) > 1
+        or not (
+            agent_chat is None
+            or (
+                isinstance(agent_chat, str)
+                and agent_chat
+                and set(claim) == {"agent_name", "agent_chat"}
+            )
+        )
     ):
         raise ValueError("relay claim has the wrong shape")
     return RelayBinding(
@@ -182,6 +225,9 @@ def parse_relay_claim(raw: object) -> RelayBinding:
         session_key=None if key is None else uuid.UUID(key),
         routine_id=None if routine is None else uuid.UUID(routine),
         owner=owner,
+        watch_id=None if watch is None else uuid.UUID(watch),
+        grant=grant,
+        agent_chat=agent_chat,
     )
 
 
@@ -339,8 +385,11 @@ def origin_turn_place(origin: TurnOriginRow) -> TurnPlace:
 REQUESTER_META_KEY: Final = "requester_platform_user_id"
 CONVERSATION_META_KEY: Final = "requester_conversation"
 KIND_META_KEY: Final = "requester_kind"
-#: Who a stamped call is for: a person's live turn, or a routine run on its owner's behalf.
-RequesterKind = Literal["person", "routine"]
+#: A one-time callback watch link for a `wake_tools` call; only the relay writes it.
+WAKE_META_KEY: Final = "wake_url"
+#: Who a stamped call is for: a person's live turn, a routine run on its owner's behalf,
+#: or an agent-chat turn a person signed in to the hub started (it has no place).
+RequesterKind = Literal["person", "routine", "agent_chat"]
 #: Platforms whose user and channel ids the requester fields may carry.
 REQUESTER_PLATFORMS: Final = frozenset({"discord"})
 
@@ -414,6 +463,24 @@ def routine_conversation(row: RoutineRow) -> dict[str, str | None] | None:
     return None
 
 
+def watch_conversation(row: WatchRow) -> dict[str, str | None]:
+    """Where a watch reports, as `requester_conversation`: its thread, the channel a
+    new thread per report opens in, or the owner's DM (opened at delivery)."""
+    if row.delivery == "dm":
+        return dict(UNOPENED_DM_PLACE)
+    if row.delivery == "new_thread" or row.thread_id == row.parent_channel_id:
+        return {
+            "place_type": "channel",
+            "channel_id": row.parent_channel_id,
+            "parent_channel_id": None,
+        }
+    return {
+        "place_type": "thread",
+        "channel_id": row.thread_id,
+        "parent_channel_id": row.parent_channel_id,
+    }
+
+
 def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
     """A duplicated key is read first by some parsers and last by others."""
     found: dict[str, object] = {}
@@ -434,6 +501,7 @@ def _stamp_message(
     person: str | None,
     conversation: Mapping[str, str | None] | None,
     kind: RequesterKind | None,
+    wake_url: str | None,
 ) -> dict[str, object]:
     if not isinstance(message, dict):
         raise RequesterBodyError("a request body must be an object or an array of objects")
@@ -457,20 +525,40 @@ def _stamp_message(
     meta.pop(REQUESTER_META_KEY, None)
     meta.pop(CONVERSATION_META_KEY, None)
     meta.pop(KIND_META_KEY, None)
+    meta.pop(WAKE_META_KEY, None)
     # Only a tool call is stamped; any other method just loses what a caller put there.
-    # A live turn is named only with its place; a routine's place may be unrecorded.
+    # A live turn is named only with its place; a routine's place may be unrecorded; an
+    # agent-chat turn never has one, so none is sent that could pass it off as a DM.
     if (
         is_call
         and person is not None
-        and (kind == "routine" or (kind == "person" and conversation))
+        and (kind in ("routine", "agent_chat") or (kind == "person" and conversation))
     ):
         meta[REQUESTER_META_KEY] = person
         meta[KIND_META_KEY] = kind
-        if conversation:
+        if conversation and kind != "agent_chat":
             meta[CONVERSATION_META_KEY] = dict(conversation)
+    if is_call and wake_url is not None:
+        meta[WAKE_META_KEY] = wake_url
     if is_call or existing is not None:
         call["_meta"] = meta
     return fields
+
+
+def read_request_body(body: bytes) -> object:
+    """A relayed body parsed strictly, once, for `called_tool` and `stamp_parsed`: one
+    that is not UTF-8 JSON, repeats a key or is an empty batch raises `RequesterBodyError`."""
+    try:
+        parsed: object = json.loads(
+            body.decode("utf-8"),
+            object_pairs_hook=_no_duplicate_keys,  # pyright: ignore[reportArgumentType]
+            parse_constant=_refuse_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as err:
+        raise RequesterBodyError("request body is not valid JSON") from err
+    if parsed == []:
+        raise RequesterBodyError("a batch must not be empty")
+    return parsed
 
 
 def stamp_requester(
@@ -480,37 +568,63 @@ def stamp_requester(
     conversation: Mapping[str, str | None] | None,
     kind: RequesterKind | None = "person",
 ) -> bytes:
+    """`stamp_parsed` of the body `read_request_body` parses."""
+    return stamp_parsed(
+        read_request_body(body), person=person, conversation=conversation, kind=kind
+    )
+
+
+def stamp_parsed(
+    parsed: object,
+    *,
+    person: str | None,
+    conversation: Mapping[str, str | None] | None,
+    kind: RequesterKind | None = "person",
+    wake_url: str | None = None,
+) -> bytes:
     """The request body with each `tools/call` stamped with who asked, where and for what.
 
     Whatever the caller put under `params._meta` for any requester key is
     removed first, so a value present was set here. `kind` is `person` for a live
     turn and `routine` for a routine run, whose `person` is the routine's owner and
-    whose `conversation` is its delivery place (left out when it has none). With no
+    whose `conversation` is its delivery place (left out when it has none). `agent_chat`
+    names the hub-signed-in person driving an agent-chat session, never with a place. With no
     `person` or `kind` (a foreign sender, two live turns) the keys are only removed.
     Requester keys are removed under `params._meta` of every method, not only tool calls.
-    Strict: a body that is not UTF-8 JSON, repeats a key, or holds a tool call without
-    object params raises `RequesterBodyError`. Other methods and responses pass through, but
-    the whole body is re-serialized so what was checked is what is sent.
+    `wake_url` is set on each tool call when given; a caller's own one is always removed.
+    A tool call without object params raises `RequesterBodyError`. Other methods and
+    responses pass through, but the whole body is re-serialized so what was checked is
+    what is sent. Modifies `parsed`.
     """
-    try:
-        parsed = json.loads(
-            body.decode("utf-8"),
-            object_pairs_hook=_no_duplicate_keys,  # pyright: ignore[reportArgumentType]
-            parse_constant=_refuse_constant,
-        )
-    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as err:
-        raise RequesterBodyError("request body is not valid JSON") from err
     if isinstance(parsed, list):
-        batch = cast("list[object]", parsed)
-        if not batch:
-            raise RequesterBodyError("a batch must not be empty")
         out: object = [
-            _stamp_message(item, person=person, conversation=conversation, kind=kind)
-            for item in batch
+            _stamp_message(
+                item, person=person, conversation=conversation, kind=kind, wake_url=wake_url
+            )
+            for item in cast("list[object]", parsed)
         ]
     else:
-        out = _stamp_message(parsed, person=person, conversation=conversation, kind=kind)
+        out = _stamp_message(
+            parsed, person=person, conversation=conversation, kind=kind, wake_url=wake_url
+        )
     try:
         return json.dumps(out, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     except (UnicodeEncodeError, RecursionError, ValueError) as err:
         raise RequesterBodyError("request body cannot be re-encoded") from err
+
+
+def called_tool(parsed: object) -> str | None:
+    """The tool a parsed body that is one `tools/call` names; None for a batch or another
+    method."""
+    if not isinstance(parsed, dict):
+        return None
+    fields = cast("dict[str, object]", parsed)
+    method, params = fields.get("method"), fields.get("params")
+    if not (
+        isinstance(method, str)
+        and method.strip().casefold() == "tools/call"
+        and isinstance(params, dict)
+    ):
+        return None
+    name = cast("dict[str, object]", params).get("name")
+    return name if isinstance(name, str) else None

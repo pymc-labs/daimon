@@ -7,7 +7,11 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from daimon.core.agent_identity import identity_enabled_for, resolve_agent_identity
+from daimon.core.agent_identity import (
+    agent_display_name,
+    identity_enabled_for,
+    resolve_agent_identity,
+)
 from daimon.core.config import Settings
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -91,14 +95,24 @@ async def resolve_connect_card(
     platform: Literal["discord", "slack", "teams"],
     workspace_id: str,
     agent_name: str | None,
+    agent_id: str | None = None,
     requested_repo: str | None = None,
 ) -> ConnectCard:
-    """Resolve one face after the interaction is acknowledged."""
+    """Resolve one face after the interaction is acknowledged.
+
+    `agent_id` (the agent's Managed Agents id) lets the card name the agent by its
+    display name; without it the card shows `agent_name`.
+    """
     root = settings.mcp.app_root_url
     if root is None:
         raise ValueError("GitHub connection page is unavailable")
     enabled = bool(agent_name) and identity_enabled_for(settings, platform, workspace_id)
     avatar_url = None
+    shown = agent_name
+    if agent_name:
+        shown = await agent_display_name(
+            sessionmaker, tenant_id=tenant_id, agent_id=agent_id, fallback=agent_name
+        )
     if enabled and agent_name:
         async with sessionmaker() as session:
             identity = await resolve_agent_identity(
@@ -113,7 +127,7 @@ async def resolve_connect_card(
             )
             avatar_url = identity.avatar_url
     return build_connect_card(
-        agent_name=agent_name,
+        agent_name=shown,
         identity_enabled=enabled,
         avatar_url=avatar_url,
         public_base_url=str(root),

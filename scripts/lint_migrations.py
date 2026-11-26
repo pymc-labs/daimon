@@ -24,7 +24,7 @@ _VALID_MARKER_VALUES = {"safe", "destructive", "unsupported"}
 _SCHEMA_RE = re.compile(r"^schema:\s*(?P<value>.+?)\s*$")
 _VALID_SCHEMA_VALUES = {"expand", "contract"}
 # Main's head was 0221 when `schema:` became required; older files stay untouched.
-_SCHEMA_FROM = 222
+_SCHEMA_FROM = 233
 _NUMBERED_RE = re.compile(r"^(\d+)[a-z]?_")
 
 

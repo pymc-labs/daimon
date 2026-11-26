@@ -1035,6 +1035,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "dm_carry_overs": "dm_carry_overs",
         "held_timers": "held_timers",
         "credential_requests": "credential_requests",
+        "secret_shares": "secret_shares",
         "wizard_sessions": "wizard_sessions",
         "message_feedback": "message_feedback",
         "support_escalations": "support_escalations",
@@ -1043,12 +1044,14 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "support_settlers_cleared": "support_settlers_cleared",
         "daimon_admins": "daimon_admins",
         "agent_post_requesters": "agent_post_requesters",
+        "agent_chat_session_links": "agent_chat_session_links",
         "platform_user_names": "platform_user_names",
         "teams_messages": "teams_messages",
         "microsoft_user_tokens": "microsoft_user_tokens",
         "web_people": "web_people",
         "web_admin_grants": "web_admin_grants",
         "monitored_events": "monitored_events",
+        "ops_events": "ops_events",
         "mux_slots": "mux_slots",
         "mux_binding_generations": "mux_binding_generations",
         "mux_journal_sessions": "mux_journal_sessions",
@@ -1122,12 +1125,16 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         # the admin grants of the account.
         "web_people": "account_id FK -> accounts.id",
         "monitored_events": "account_id FK -> accounts.id; monitoring.delete_for_account",
+        "ops_events": "account_id FK -> accounts.id; ops_events.delete_for_account",
         "workspace_admins": "account_id FK -> accounts.id",
         # The person's user id leaves every grant; updated_by is SET NULL.
         "daimon_admins": "subject_id and granted_by are erased by platform principal",
         # Text account_id / principal_id with no FK: erased by `stores.mux_erasure`,
         # except operations against a shared slot, which are counted as retained.
         "operation": "text account_id and principal_id (mux erasure)",
+        # An agent-chat session's record of where it came from: erasure clears its grant,
+        # channel and account (`erasure.ERASABLE`, `agent_chat_session_links`).
+        "usage_reconcile_progress": "agent_chat_account_id, no FK; cleared with grant and channel",
     }
     # Intentional exclusions, each justified inline.
     allowlist: frozenset[str] = frozenset(
@@ -1151,7 +1158,7 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # The store tests verify this; it needs no separately reported category.
             "turn_origins",
             # Owner records cascade with account erasure, including conversation
-            # metadata. Tagged Fly apps then have no registration and are deleted
+            # metadata. Labelled machines then have no registration and are deleted
             # by the scheduler orphan sweep; Daimon calls lose their owner authority.
             "compute_sessions",
             # Background command rows (with their output tail) cascade with the
@@ -1252,6 +1259,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # the workspace keeps its record of what changed. A person or invite it is
             # about is an id that clears when they go; the text names no one.
             "web_audit",
+            # An admin's resolve or mute of an issue: the only accounts.id FK is who did
+            # it, by_account_id with ON DELETE SET NULL; the state names no one else.
+            "ops_issue_states",
             # Channel setting changes: the only accounts.id FK is the actor, ON DELETE
             # SET NULL; the values name agents and amounts, never a person.
             "channel_changes",
@@ -1278,6 +1288,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         }
     )
 
+    # Account ids with no FK, which the rules below cannot see, and so name here. Each
+    # table must then be purged or allowed like any other.
+    account_columns_without_fk = {("usage_reconcile_progress", "agent_chat_account_id")}
     in_scope: dict[str, str] = {}
     for name, table in Base.metadata.tables.items():
         reasons: list[str] = []
@@ -1285,8 +1298,17 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             reasons.append("FK->accounts.id")
         if "principal_id" in table.columns:
             reasons.append("principal_id column")
+        reasons += [
+            f"{column}: an account id with no FK"
+            for listed, column in account_columns_without_fk
+            if listed == name and column in table.columns
+        ]
         if reasons:
             in_scope[name] = ", ".join(reasons)
+    assert all(
+        column in Base.metadata.tables[table].columns
+        for table, column in account_columns_without_fk
+    ), "drop a listed account column that is gone"
 
     uncovered = {
         name: why for name, why in in_scope.items() if name not in purged and name not in allowlist

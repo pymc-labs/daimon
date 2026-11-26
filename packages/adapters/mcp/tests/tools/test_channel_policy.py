@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib.util
+import json
 import re
 import uuid
 from pathlib import Path
@@ -17,6 +18,7 @@ from typing import Any
 
 import discord
 import discord.http
+import httpx
 import pytest
 from aioresponses import aioresponses
 from cryptography.fernet import Fernet
@@ -1044,3 +1046,130 @@ async def test_lead_get_list_apply_dossier_thread_readers(
             assert "PRIVATE DOSSIER SENTINEL" not in _text(result), result
             if tool == "lead_intake_get":
                 assert result.get("isError") is True, result
+
+
+async def _held_session_credential(
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    held_channel_id: str,
+) -> tuple[str, str]:
+    """Run `create_session` for a held turn; return the token and URL of the credential the
+    provider mounts for the agent's own daimon-mcp server (the one at `?daimon_session=`)."""
+    from daimon.core.config import McpSettings as CoreMcpSettings
+    from daimon.core.mcp_server_url import is_session_mcp_url
+    from daimon.core.sessions import create_session
+    from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+    from daimon.core.turn_hold import TurnHold
+    from daimon.testing.ma_models import ma_agent, ma_environment
+    from mux.testing.drivers.anthropic.ma import (
+        NotHandled,
+        build_fake_anthropic,
+        make_fake_memory_store_handler,
+    )
+    from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
+
+    public_url = "https://x/mcp"
+    tenant = await make_tenant(db_session, platform="discord", workspace_id=_GUILD)
+    principal = await make_platform_principal(
+        db_session, platform="discord", external_id=_CALLER, tenant=tenant
+    )
+    await set_access_policy(db_session, tenant_id=tenant.id, policy=TenantAccessPolicy())
+    await db_session.commit()
+    credentials: list[dict[str, Any]] = []
+    memory = make_fake_memory_store_handler()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        try:
+            return memory(request)
+        except NotHandled:
+            pass
+        path = request.url.path
+        if request.method == "GET" and path == "/v1/vaults":
+            return httpx.Response(200, json={"data": [], "has_more": False})
+        if request.method == "POST" and path == "/v1/vaults":
+            name = json.loads(request.content)["display_name"]
+            vault = {
+                "id": f"vlt_{len(credentials)}",
+                "type": "vault",
+                "display_name": name,
+                "metadata": None,
+                "archived_at": None,
+                "created_at": "2026-04-01T00:00:00Z",
+            }
+            return httpx.Response(200, json=vault)
+        if request.method == "POST" and path.endswith("/credentials"):
+            body = json.loads(request.content)
+            credentials.append(body)
+            auth = {"type": "static_bearer", "mcp_server_url": body["auth"]["mcp_server_url"]}
+            slot = {
+                "id": "vcrd",
+                "type": "credential",
+                "vault_id": path.split("/")[3],
+                "auth": auth,
+            }
+            return httpx.Response(200, json=slot)
+        if request.method == "POST" and path.endswith("/v1/sessions"):
+            body = json.loads(request.content)
+            agent_id = body["agent"] if isinstance(body["agent"], str) else body["agent"]["id"]
+            created = ma_session(
+                id="sess_held",
+                agent=ma_session_agent(id=agent_id, name="daimon", model="claude-opus-4-7"),
+                environment_id=body["environment_id"],
+            )
+            return httpx.Response(200, json=created.model_dump(mode="json"))
+        raise AssertionError(f"unexpected call: {request.method} {path}")
+
+    agent = ma_agent(
+        id="ag_held",
+        mcp_servers=[{"type": "url", "name": "daimon-mcp", "url": public_url}],
+    )
+    await create_session(
+        build_fake_anthropic(handler),
+        agent=agent,
+        environment=ma_environment(),
+        account_id=principal.account_id,
+        mcp_settings=CoreMcpSettings(
+            jwt_secret=SecretStr(_SECRET.decode()), public_url=HttpUrl(public_url)
+        ),
+        tenant_id=tenant.id,
+        agent_uuid=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_held"),
+        session_factory=sessionmaker,
+        hold=TurnHold(platform="discord", channel_id=held_channel_id, client=True),
+        tool_safety=OPEN_TOOL_SAFETY,
+    )
+    (session_slot,) = [
+        body
+        for body in credentials
+        if is_session_mcp_url(body["auth"]["mcp_server_url"], public_url)
+    ]
+    return session_slot["auth"]["token"], session_slot["auth"]["mcp_server_url"]
+
+
+@pytest.mark.asyncio
+async def test_a_held_sessions_own_credential_reads_its_channel_and_no_other_over_mcp(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """The agent's daimon-mcp server points at `/mcp?daimon_session=<id>`; the credential
+    `create_session` mounts there carries the hold, so the server refuses another channel."""
+    token, url = await _held_session_credential(db_session, sessionmaker, held_channel_id=_OTHER)
+    path = "/mcp?" + url.split("?", 1)[1]
+    assert "daimon_session=" in path
+    history_hits: list[str] = []
+    patch_discord_http(monkeypatch, _discord_handler(history_hits))
+    app = _app(sessionmaker)
+
+    async def read(channel_id: str) -> dict[str, Any]:
+        result = await call_mcp_tool(
+            app, token=token, name="read_channel", arguments={"channel_id": channel_id}, path=path
+        )
+        return result.get("result", result)  # type: ignore[return-value]
+
+    refused = await read(_SEALED)
+    allowed = await read(_OTHER)
+
+    assert refused.get("isError"), f"a held session reads no other channel; got {refused!r}"
+    assert not allowed.get("isError"), f"it reads the channel it is held to; got {allowed!r}"
+    assert history_hits == [_OTHER], "only the held channel's history is fetched"

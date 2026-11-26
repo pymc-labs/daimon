@@ -248,6 +248,7 @@ async def test_requester_link_defers_before_mint_and_card_resolution(
         thread_id="200",
         requester_account_id=account_id,
         agent_name="ResearchBot",
+        ma_agent_id="ma_agent",
     )
     monkeypatch.setattr(module, "lookup_request", AsyncMock(return_value=request))
     monkeypatch.setattr(

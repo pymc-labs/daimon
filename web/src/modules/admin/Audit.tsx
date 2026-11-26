@@ -13,7 +13,7 @@ import { api } from "@/lib/api"
 import { absolute } from "@/lib/format"
 import { usePaged } from "@/lib/hooks"
 import { ScrollText } from "lucide-react"
-import { toast } from "sonner"
+import { copy } from "@/lib/copy"
 import { Facts, PanelHead, PanelSection } from "@/components/panel"
 import type { AdminPerson, AuditEntry, AuditKind, AuditSource, AuditTarget } from "./types"
 
@@ -103,7 +103,7 @@ function AuditTable({ data }: { data: AuditEntry[] }) {
                 ...(e.facts ?? [["Detail", e.detail] as [string, string | undefined]]),
               ]} />
               {e.reference && (
-                <Button variant="outline" size="sm" className="mt-3" onClick={() => { void navigator.clipboard?.writeText(e.reference!); toast("Reference copied") }}>Copy reference</Button>
+                <Button variant="outline" size="sm" className="mt-3" onClick={() => { void copy(e.reference!, "Reference copied") }}>Copy reference</Button>
               )}
             </PanelSection>
           </div>

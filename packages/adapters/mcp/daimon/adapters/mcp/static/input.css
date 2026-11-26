@@ -288,6 +288,15 @@
 .gh-add-button:hover:not(:disabled) { background: var(--muted); }
 .gh-add-button:disabled { border-color: var(--border); background: var(--muted); color: var(--muted-foreground); cursor: not-allowed; }
 #open-repo-picker { margin-top: 16px; }
+/* Follow the org: one tap target, the whole card, at least 56px tall. */
+.gh-follow-org { display: flex; align-items: flex-start; gap: 12px; min-height: 56px; margin-top: 16px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); cursor: pointer; }
+.gh-follow-org[hidden] { display: none; }
+.gh-follow-org:has(input:checked) { border-color: var(--accent-line); background: var(--accent); }
+.gh-follow-org input { flex: none; width: 24px; height: 24px; margin: 0; accent-color: var(--accent-strong); }
+.gh-follow-org > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.gh-follow-org strong { display: block; font-size: 15px; font-weight: 600; line-height: 24px; }
+.gh-follow-org small { display: block; color: var(--muted-foreground); font-size: 14px; line-height: 20px; }
+.gh-follow-note { margin-top: 16px; color: var(--muted-foreground); font-size: 14px; line-height: 20px; overflow-wrap: anywhere; }
 .gh-editor .gh-primary:disabled { opacity: 1; cursor: not-allowed; }
 .gh-editor .gh-primary { white-space: nowrap; }
 .gh-editor .gh-link-button { color: var(--foreground); }

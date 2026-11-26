@@ -191,7 +191,9 @@ class AgentSpec(BaseModel):
             spec = FEATURES.get(key)
             if spec is None or "agent" not in spec.tiers or key.startswith("tool.") or spec.pinned:
                 raise ValueError(f"feature {key!r} cannot be set on an agent")
-            if value not in spec.values:
+            if spec.connect_only and value == "on":
+                raise ValueError(f"feature {key!r} can only be turned on from its connect page")
+            if not spec.accepts(value, "agent"):
                 raise ValueError(f"feature {key!r} takes {', '.join(spec.values)}")
         return self
 

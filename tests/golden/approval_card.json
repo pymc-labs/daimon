@@ -255,6 +255,7 @@
             "mcp_failures": [],
             "package_install_error": null,
             "rate_limit_until": null,
+            "rate_limit_wait": false,
             "retrying_error": null,
             "seen_event_ids": [
               "<id:5>",
@@ -316,6 +317,7 @@
             "mcp_failures": [],
             "package_install_error": null,
             "rate_limit_until": null,
+            "rate_limit_wait": false,
             "retrying_error": null,
             "seen_event_ids": [
               "<id:5>",

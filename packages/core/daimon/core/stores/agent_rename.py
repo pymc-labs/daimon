@@ -101,48 +101,160 @@ def _matches(column: ColumnElement[Any], name: str) -> ColumnElement[bool]:
     return func.lower(func.normalize(column, literal_column("NFKC"))) == normalize_agent_name(name)
 
 
+def _live_filters(
+    table: Table, column_name: str, *, tenant_id: uuid.UUID, old: str
+) -> list[ColumnElement[bool]]:
+    column = table.c[column_name]
+    return [table.c.tenant_id == tenant_id, _matches(column, old), *_live_rows(table)]
+
+
+def _keyed_filters(
+    table: Table,
+    column_name: str,
+    key_columns: tuple[str, ...],
+    *,
+    tenant_id: uuid.UUID,
+    old: str,
+    new: str,
+) -> list[ColumnElement[bool]]:
+    """Rows under `old` that move: none already has a row under `new` with the same key."""
+    other = table.alias("taken")
+    taken = exists().where(
+        and_(*(other.c[key] == table.c[key] for key in key_columns)),
+        _matches(other.c[column_name], new),
+    )
+    return [table.c.tenant_id == tenant_id, _matches(table.c[column_name], old), ~taken]
+
+
+def _user_config_filters(*, tenant_id: uuid.UUID, old: str) -> list[ColumnElement[bool]]:
+    user_config, accounts = _table("user_config"), _table("accounts")
+    return [
+        user_config.c.account_id.in_(
+            select(accounts.c.id).where(accounts.c.tenant_id == tenant_id)
+        ),
+        _matches(user_config.c.agent_name, old),
+    ]
+
+
 async def rename_agent_references(
     session: AsyncSession, *, tenant_id: uuid.UUID, old: str, new: str
 ) -> None:
     """Point every live reference to `old` at `new`. Idempotent."""
     for table_name, column_name in _LIVE_NAME_COLUMNS:
         table = _table(table_name)
-        column = table.c[column_name]
-        where = [table.c.tenant_id == tenant_id, _matches(column, old), *_live_rows(table)]
+        where = _live_filters(table, column_name, tenant_id=tenant_id, old=old)
         await session.execute(update(table).where(*where).values({column_name: new}))
     for table_name, column_name, key_columns in _KEYED_NAME_COLUMNS:
         table = _table(table_name)
-        column = table.c[column_name]
-        other = table.alias("taken")
-        taken = exists().where(
-            and_(*(other.c[key] == table.c[key] for key in key_columns)),
-            _matches(other.c[column_name], new),
+        where = _keyed_filters(
+            table, column_name, key_columns, tenant_id=tenant_id, old=old, new=new
         )
-        await session.execute(
-            update(table)
-            .where(table.c.tenant_id == tenant_id, _matches(column, old), ~taken)
-            .values({column_name: new})
-        )
-    user_config, accounts = _table("user_config"), _table("accounts")
+        await session.execute(update(table).where(*where).values({column_name: new}))
     await session.execute(
-        update(user_config)
-        .where(
-            user_config.c.account_id.in_(
-                select(accounts.c.id).where(accounts.c.tenant_id == tenant_id)
-            ),
-            _matches(user_config.c.agent_name, old),
-        )
+        update(_table("user_config"))
+        .where(*_user_config_filters(tenant_id=tenant_id, old=old))
         .values(agent_name=new)
     )
 
 
+async def count_agent_references(
+    session: AsyncSession, *, tenant_id: uuid.UUID, old: str, new: str
+) -> dict[str, int]:
+    """How many rows `rename_agent_references` would move, per `table.column`; read-only."""
+    counts: dict[str, int] = {}
+
+    async def _count(label: str, table: Table, where: list[ColumnElement[bool]]) -> None:
+        counts[label] = (
+            await session.scalar(select(func.count()).select_from(table).where(*where))
+        ) or 0
+
+    for table_name, column_name in _LIVE_NAME_COLUMNS:
+        table = _table(table_name)
+        await _count(
+            f"{table_name}.{column_name}",
+            table,
+            _live_filters(table, column_name, tenant_id=tenant_id, old=old),
+        )
+    for table_name, column_name, key_columns in _KEYED_NAME_COLUMNS:
+        table = _table(table_name)
+        await _count(
+            f"{table_name}.{column_name}",
+            table,
+            _keyed_filters(table, column_name, key_columns, tenant_id=tenant_id, old=old, new=new),
+        )
+    await _count(
+        "user_config.agent_name",
+        _table("user_config"),
+        _user_config_filters(tenant_id=tenant_id, old=old),
+    )
+    return counts
+
+
+async def agent_name_collisions(
+    session: AsyncSession, *, tenant_id: uuid.UUID, old: str, new: str
+) -> dict[str, int]:
+    """Entries held under both `old` and `new`, which the rename would leave behind.
+
+    Per `table.column` (rows under `old` whose key already exists under `new`)
+    and per policy key (`agent_rules`, `agent_channel_pins`: 1 when both names
+    have an entry). Empty when nothing collides; read-only.
+    """
+    found: dict[str, int] = {}
+    for table_name, column_name, key_columns in _KEYED_NAME_COLUMNS:
+        table = _table(table_name)
+        movable = _keyed_filters(
+            table, column_name, key_columns, tenant_id=tenant_id, old=old, new=new
+        )
+        total = await session.scalar(
+            select(func.count())
+            .select_from(table)
+            .where(table.c.tenant_id == tenant_id, _matches(table.c[column_name], old))
+        )
+        moving = await session.scalar(select(func.count()).select_from(table).where(*movable))
+        if (total or 0) - (moving or 0):
+            found[f"{table_name}.{column_name}"] = (total or 0) - (moving or 0)
+    policy = await session.scalar(
+        select(TenantAccessPolicyRecord.policy).where(
+            TenantAccessPolicyRecord.tenant_id == tenant_id
+        )
+    )
+    legacy, current = normalize_agent_name(old), normalize_agent_name(new)
+    for key in _POLICY_NAME_KEYS:
+        rules = cast("dict[str, object] | None", (policy or {}).get(key)) or {}
+        names = {normalize_agent_name(name) for name in rules}
+        if legacy in names and current in names:
+            found[f"rules {key}"] = 1
+    return found
+
+
+def _moved_policy(
+    policy: dict[str, Any], *, old: str, new: str
+) -> tuple[dict[str, Any], list[str]]:
+    """`policy` with `old`'s per-agent entries under `new`, and the policy keys that changed."""
+    renamed = dict(policy)
+    changed: list[str] = []
+    legacy, current = normalize_agent_name(old), normalize_agent_name(new)
+    for key in _POLICY_NAME_KEYS:
+        rules = cast("dict[str, object] | None", renamed.get(key))
+        if not rules or any(normalize_agent_name(name) == current for name in rules):
+            continue
+        moved = {
+            (new if normalize_agent_name(name) == legacy else name): rule
+            for name, rule in rules.items()
+        }
+        if moved != rules:
+            renamed[key] = moved
+            changed.append(key)
+    return renamed, changed
+
+
 async def rename_policy_keys(
     session: AsyncSession, *, tenant_id: uuid.UUID, old: str, new: str
-) -> None:
+) -> list[str]:
     """Move the access policy's per-agent rules; an existing `new` entry wins.
 
     Called once the agent holds `new`, so an agent still named `old` keeps its
-    rules and never takes another agent's.
+    rules and never takes another agent's. Returns the policy keys that moved.
     """
     policy = await session.scalar(
         select(TenantAccessPolicyRecord.policy)
@@ -150,23 +262,27 @@ async def rename_policy_keys(
         .with_for_update()
     )
     if policy is None:
-        return
-    renamed = dict(policy)
-    legacy, current = normalize_agent_name(old), normalize_agent_name(new)
-    for key in _POLICY_NAME_KEYS:
-        rules = cast("dict[str, object] | None", renamed.get(key))
-        if not rules or any(normalize_agent_name(name) == current for name in rules):
-            continue
-        renamed[key] = {
-            (new if normalize_agent_name(name) == legacy else name): rule
-            for name, rule in rules.items()
-        }
+        return []
+    renamed, changed = _moved_policy(policy, old=old, new=new)
     if renamed != policy:
         await session.execute(
             update(TenantAccessPolicyRecord)
             .where(TenantAccessPolicyRecord.tenant_id == tenant_id)
             .values(policy=renamed)
         )
+    return changed
+
+
+async def policy_keys_to_move(
+    session: AsyncSession, *, tenant_id: uuid.UUID, old: str, new: str
+) -> list[str]:
+    """The policy keys `rename_policy_keys` would change; read-only."""
+    policy = await session.scalar(
+        select(TenantAccessPolicyRecord.policy).where(
+            TenantAccessPolicyRecord.tenant_id == tenant_id
+        )
+    )
+    return [] if policy is None else _moved_policy(policy, old=old, new=new)[1]
 
 
 def _selfhosted_rows(tenant_id: uuid.UUID) -> Select[Any]:

@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 import aiohttp
 import structlog
+from daimon.core.bot_access import BotAccessUnavailable, bot_access_wait_on, is_missing_access
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.continuity.scope_timers import DeliveryFailed, DeliveryRetry
 from daimon.core.dm_access import roles_by_membership, sender_admission
@@ -82,7 +83,7 @@ async def _deliver[A](
         for pause in (*DELIVERY_BACKOFF, None):
             try:
                 return await op()
-            except DeliveryRetry:
+            except (DeliveryRetry, BotAccessUnavailable):
                 # An unknown lookup after the turn must not put the timer back to run it again.
                 raise AdmissionDenied(reason="invoker_not_allowed") from None
             except (discord.HTTPException, aiohttp.ClientError, OSError) as error:
@@ -200,13 +201,16 @@ async def require_channel_timer_access(
 ) -> ChannelAccess:
     """Prove over REST that the owner and the bot may still use the timer's channel.
 
-    Raises `AdmissionDenied` on a proved loss. A transient Discord error propagates.
+    Raises `AdmissionDenied` on a proved loss of the owner's access. A transient Discord
+    error propagates. With `bot_access_wait` on, the bot's own missing access raises
+    `BotAccessUnavailable` instead, so the timer waits.
     """
     async with sessions() as db:
         tenant = await get_tenant(db, row.tenant_id)
     if tenant is None or tenant.archived_at is not None or client.user is None:
         raise AdmissionDenied(reason="invoker_not_allowed")
     guild_id = int(tenant.external_id)
+    wait = await bot_access_wait_on(sessions, tenant_id=row.tenant_id, platform="discord")
     try:
         state = ConnectionState(
             dispatch=_discard_event,
@@ -228,7 +232,12 @@ async def require_channel_timer_access(
         if member.bot or str(member.id) != row.requester_external_user_id:
             raise ValueError("owner is not a human member")
         me = await guild.fetch_member(client.user.id)
-        channel = await guild.fetch_channel(int(row.parent_channel_id))
+        try:
+            channel = await guild.fetch_channel(int(row.parent_channel_id))
+        except discord.Forbidden as error:
+            if wait and is_missing_access(error.status, error.code):
+                raise BotAccessUnavailable from None
+            raise
         if not isinstance(channel, discord.TextChannel) or str(channel.id) != row.parent_channel_id:
             raise ValueError("not a text channel")
         category_id = str(channel.category_id) if channel.category_id is not None else None
@@ -245,10 +254,12 @@ async def require_channel_timer_access(
         )
         theirs = channel.permissions_for(member)
         ours = channel.permissions_for(me)
-        if not (
-            protection.may_post and theirs.view_channel and ours.view_channel and ours.send_messages
-        ):
-            raise ValueError("the channel is closed to the owner or to the bot")
+        if not (protection.may_post and theirs.view_channel):
+            raise ValueError("the channel is closed to the owner")
+        if not (ours.view_channel and ours.send_messages):
+            if wait:
+                raise BotAccessUnavailable
+            raise ValueError("the channel is closed to the bot")
     except (discord.Forbidden, discord.NotFound, ValueError) as error:
         log.info("timer.access_lost", row_id=str(row.id), place="channel", error=str(error))
         raise AdmissionDenied(reason="invoker_not_allowed") from None

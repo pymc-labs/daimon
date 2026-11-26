@@ -136,6 +136,8 @@ async def real_dm(db_engine, db_clean):
     provider = _Provider(agents, environments)
     fetch = AsyncMock(return_value=Membership(is_member=True, role_ids=("123",)))
     bot = MagicMock()
+    bot.working_mark = AsyncMock(return_value="👀")
+    bot.turn_model_marks = AsyncMock(return_value=())
     bot.draining = False
     bot.runtime.sessionmaker = factory
     bot.runtime.settings = SimpleNamespace(

@@ -40,7 +40,7 @@ from daimon.adapters.mcp.watch_polling import (
 )
 from daimon.core import channel_backend
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
-from daimon.core.config import env_dm_policy, load_watches_settings
+from daimon.core.config import Settings, env_dm_policy, load_watches_settings
 from daimon.core.confirmation import watch_card_skipped
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.poll_tools import (
@@ -50,7 +50,11 @@ from daimon.core.continuity.poll_tools import (
     validate_mcp_poll,
 )
 from daimon.core.dm_access import member_roles, roles_by_membership
+from daimon.core.features.registry import FEATURES
+from daimon.core.features.snapshot import FeaturePlace, feature_in
+from daimon.core.features.surface import ask_to_turn_on
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_identity import RelayBinding
 from daimon.core.mcp_server_url import ascii_mcp_url, same_ascii_mcp_url
 from daimon.core.mcp_tool_call import McpCallError
 from daimon.core.membership_subject import resolve_subject
@@ -68,7 +72,7 @@ from mux.contracts.profile import SUPPORTED
 from mux.profiles import get_profile
 from mux.state.lease import Slot
 from pydantic import BaseModel, JsonValue, TypeAdapter
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 class WatchSummary(BaseModel):
@@ -516,6 +520,7 @@ async def create_watch_impl(
             auth,
             binding,
             instructions=instructions,
+            lifetime=await callback_watch_terms(runtime.session_factory, runtime.settings, origin),
             now=now,
             delivery=delivery,
             max_turns_per_day=daily,
@@ -566,12 +571,36 @@ async def create_watch_impl(
         raise ToolError(str(exc)) from exc
 
 
+async def callback_watch_terms(
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings | None,
+    origin: TurnOriginRow,
+) -> timedelta | None:
+    """The rules every new callback link follows, from `create_watch` and from a relay
+    wake link (`identity_relay`): never in a helper's turn, and only where the `watches`
+    feature is on for this place and agent. Returns its `callback_watch_lifetime`; None
+    is permanent."""
+    refuse_helper(origin)
+    place = FeaturePlace.of(
+        origin.tenant_id,
+        origin.platform,
+        origin.parent_channel_id,
+        origin.thread_id,
+        agent_id=origin.responder_ma_agent_id,
+    )
+    async with session_factory() as db:
+        if not (await feature_in(db, settings, place, "watches")).on:
+            raise ToolError(f"Watches are turned off here. {ask_to_turn_on(FEATURES['watches'])}")
+        return await watches.callback_lifetime(db, settings, origin.tenant_id)
+
+
 async def create_callback_watch(
     runtime: McpRuntime,
     auth: AuthIdentity,
     binding: ContinuationRequest,
     *,
     instructions: str,
+    lifetime: timedelta | None,
     now: datetime,
     delivery: WatchDelivery,
     max_turns_per_day: int,
@@ -587,7 +616,7 @@ async def create_callback_watch(
                 db,
                 binding,
                 instructions=instructions,
-                lifetime=await watches.callback_lifetime(db, runtime.settings, binding.tenant_id),
+                lifetime=lifetime,
                 now=now,
                 delivery=delivery,
                 max_turns_per_day=max_turns_per_day,
@@ -689,6 +718,8 @@ async def create_mcp_watch(
                 owner_account_id=auth.account_id,
                 server_url=server_url,
                 credential=listed.credential,
+                # No watch yet: the listing names nobody, as no tool is called.
+                relay=RelayBinding(str(agent.name)),
             )
         except CredentialMissing:
             raise ToolError(
@@ -1011,7 +1042,7 @@ async def check_edited_mcp_arguments(
 ) -> None:
     """New arguments for an MCP server poll must fit the tool the owner approved, as its
     server lists it now with the poll's own credential."""
-    _, _, server_name = await polling.authorize_source(runtime, row)
+    _, _, server_name, agent_name = await polling.authorize_source(runtime, row)
     server_url = str(row.source_state.get("server_url"))
     tool = str(row.source_state.get("tool"))
     token = await poll_credential(
@@ -1021,6 +1052,8 @@ async def check_edited_mcp_arguments(
         owner_account_id=row.owner_account_id,
         server_url=server_url,
         credential=str(row.source_state.get("credential")),
+        # Unbound, as at create: a listing names nobody and is no poll of this watch.
+        relay=RelayBinding(agent_name),
     )
     try:
         async with asyncio.timeout(25), polling.open_source(server_url, token) as source:

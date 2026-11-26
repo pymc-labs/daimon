@@ -30,3 +30,12 @@ describe("Composer files", () => {
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled()
   })
 })
+
+describe("Composer send", () => {
+  it("keeps the draft when the send fails", async () => {
+    view(false, vi.fn().mockRejectedValue(new Error("offline")))
+    const box = screen.getByRole("textbox", { name: "Message" })
+    await userEvent.type(box, "hello{Enter}")
+    expect(box).toHaveValue("hello")
+  })
+})

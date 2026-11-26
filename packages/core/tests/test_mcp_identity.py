@@ -29,13 +29,15 @@ from daimon.core.mcp_identity import (
     parse_relay_claim,
     public_jwk,
     public_pem,
+    relay_server_name,
     relay_url,
     requester_conversation,
     routine_conversation,
     sign_identity,
     stamp_requester,
+    watch_conversation,
 )
-from daimon.core.stores.domain import Role, TurnOriginRow
+from daimon.core.stores.domain import Role, TurnOriginRow, WatchRow
 from pydantic import ValidationError
 
 NOW = dt.datetime(2026, 10, 1, 12, 0, tzinfo=dt.UTC)
@@ -159,11 +161,36 @@ def test_relay_urls_are_only_this_deployments_relay() -> None:
     assert len(twice) == 1, "one URL per server, so a vault never holds two slots for it"
 
 
+@pytest.mark.parametrize(
+    ("url", "name"),
+    [
+        ("https://Daimon.Example.com/mcp-identity/tools/", "tools"),
+        ("https://other.example.com/mcp-identity/tools", None),
+        ("https://daimon.example.com/mcp-identity/a/b", None),
+        ("https://daimon.example.com/mcp-identity/../mcp", None),
+        ("https://daimon.example.com/mcp-identity/tools?next=/mcp", None),
+    ],
+)
+def test_relay_server_name_is_only_this_relays_one_segment_url(url: str, name: str | None) -> None:
+    assert relay_server_name(url, PUBLIC_URL) == name, f"{url} names {name}"
+
+
 def test_relay_claim_round_trips_and_refuses_other_shapes() -> None:
     key = uuid.uuid4()
-    for binding in (RelayBinding("Helper", key), RelayBinding("Helper")):
+    for binding in (
+        RelayBinding("Helper", key),
+        RelayBinding("Helper"),
+        RelayBinding("Helper", key, grant="grant-1"),
+    ):
         assert parse_relay_claim(binding.claim()) == binding, "a binding reads back"
-    for bad in ("x", {}, {"agent_name": "Helper", "extra": "1"}, {"agent_name": ""}):
+    for bad in (
+        "x",
+        {},
+        {"agent_name": "Helper", "extra": "1"},
+        {"agent_name": ""},
+        {"agent_name": "Helper", "grant": "grant-1"},  # a grant only with its session
+        {"agent_name": "Helper", "session": str(key), "grant": ""},
+    ):
         with pytest.raises(ValueError):
             parse_relay_claim(bad)
 
@@ -554,6 +581,67 @@ def test_a_person_without_a_kind_is_not_stamped() -> None:
     assert out["params"]["_meta"] == {}
 
 
+def test_the_relay_claim_carries_a_watch_with_its_owner_and_no_other_binding() -> None:
+    watch_id = uuid.uuid4()
+    binding = RelayBinding("daimon", watch_id=watch_id, owner="42")
+    assert parse_relay_claim(binding.claim()) == binding, "the watch and owner read back"
+    for other in ({"session": str(uuid.uuid4())}, {"routine": str(uuid.uuid4())}):
+        with pytest.raises(ValueError):
+            parse_relay_claim({"agent_name": "daimon", "watch": str(watch_id), **other})
+    with pytest.raises(ValueError):
+        parse_relay_claim({"agent_name": "daimon", "watch": 7})
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected"),
+    [
+        ({}, {"place_type": "thread", "channel_id": "9", "parent_channel_id": "5"}),
+        (
+            {"delivery": "new_thread"},
+            {"place_type": "channel", "channel_id": "5", "parent_channel_id": None},
+        ),
+        ({"delivery": "dm"}, {"place_type": "dm", "channel_id": None, "parent_channel_id": None}),
+    ],
+)
+def test_a_watch_poll_is_placed_where_the_watch_reports(
+    changes: dict[str, Any], expected: dict[str, str | None]
+) -> None:
+    row = WatchRow.model_validate(
+        {
+            "id": uuid.uuid4(),
+            "tenant_id": uuid.uuid4(),
+            "owner_account_id": uuid.uuid4(),
+            "owner_external_id": "42",
+            "platform": "discord",
+            "parent_channel_id": "5",
+            "thread_id": "9",
+            "agent_id": "agent_1",
+            "agent_name": "daimon",
+            "session_id": None,
+            "instructions": "Report changes.",
+            "producer": "poll",
+            "page_id": uuid.uuid4(),
+            "revision": 1,
+            "source": "mcp_poll",
+            "status": "active",
+            "expires_at": None,
+            "max_turns_per_day": 24,
+            "max_fires": None,
+            "fire_count": 0,
+            "baseline": {},
+            "rule": {},
+            "source_state": {},
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "next_check_at": None,
+            "backoff_until": None,
+            "consecutive_errors": 0,
+            **changes,
+        }
+    )
+    assert watch_conversation(row) == expected, "the poll's place is the watch's report place"
+
+
 def test_the_relay_claim_carries_a_routine_and_never_both_bindings() -> None:
     routine_id = uuid.uuid4()
     binding = RelayBinding(agent_name="daimon", routine_id=routine_id)
@@ -562,3 +650,47 @@ def test_the_relay_claim_carries_a_routine_and_never_both_bindings() -> None:
         parse_relay_claim({"agent_name": "daimon", "session": str(uuid.uuid4()), "routine": "x"})
     with pytest.raises(ValueError):
         parse_relay_claim({"agent_name": "daimon", "routine": 7})
+
+
+def test_agent_chat_requester_is_off_by_default_and_needs_requester_meta() -> None:
+    (plain,) = _settings([_BEARER], bearers=json.dumps({"internal": "k-1"})).servers
+    assert plain.agent_chat_requester is False, "a configured server sends no agent-chat person"
+    on = _settings(
+        [{**_BEARER, "agent_chat_requester": True}], bearers=json.dumps({"internal": "k-1"})
+    )
+    assert on.names_agent_chat_requester, "an operator turns it on per server"
+    with pytest.raises(ValidationError):
+        _settings(
+            [{**_BEARER, "requester_meta": False, "agent_chat_requester": True}],
+            bearers=json.dumps({"internal": "k-1"}),
+        )
+
+
+def test_an_agent_chat_binding_reads_back_and_stands_alone() -> None:
+    bound = RelayBinding("Helper", agent_chat="sesn_1")
+    assert parse_relay_claim(bound.claim()) == bound, "the agent-chat session reads back"
+    for bad in (
+        {"agent_name": "Helper", "agent_chat": ""},
+        {"agent_name": "Helper", "agent_chat": 1},
+        {"agent_name": "Helper", "agent_chat": "sesn_1", "session": str(uuid.uuid4())},
+        {"agent_name": "Helper", "agent_chat": "sesn_1", "routine": str(uuid.uuid4())},
+        {"agent_name": "Helper", "agent_chat": "sesn_1", "watch": str(uuid.uuid4())},
+    ):
+        with pytest.raises(ValueError):
+            parse_relay_claim(bad)
+
+
+def test_an_agent_chat_stamp_names_the_person_with_no_place_and_no_wake_link() -> None:
+    forged = _call(
+        requester_platform_user_id="666",
+        requester_conversation={"place_type": "dm", "channel_id": "1"},
+        requester_kind="person",
+        wake_url="https://evil.example.com",
+    )
+    out = stamp_requester(
+        json.dumps(forged).encode(), person="42", conversation=_CONVERSATION, kind="agent_chat"
+    )
+    assert json.loads(out)["params"]["_meta"] == {
+        "requester_platform_user_id": "42",
+        "requester_kind": "agent_chat",
+    }, "forged fields are replaced; no place is sent even if one is passed"

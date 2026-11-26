@@ -11,6 +11,7 @@ import binascii
 import ipaddress
 import json
 import os
+import re
 import ssl
 import uuid
 from collections.abc import Mapping
@@ -2351,6 +2352,21 @@ class SignedIdentityServer(BaseModel):
     # using it stays in its channel (`daimon.core.relay_scope`). False: the server checks
     # each call's asker and place itself, so the agent behaves like any other.
     channel_scoped: bool = True
+    # Tools whose call, in a person's turn, carries a wake link the server posts to
+    # when the work it started ends (`daimon.adapters.mcp.identity_relay._wake_link`).
+    wake_tools: frozenset[str] = frozenset()
+    # Also name the person on an agent-chat turn they started signed in to the hub, as
+    # requester kind `agent_chat`. Off by default: a server that does not know the kind
+    # may refuse every call that carries it.
+    agent_chat_requester: bool = False
+
+    @model_validator(mode="after")
+    def _wake_needs_requester(self) -> SignedIdentityServer:
+        if self.wake_tools and not self.requester_meta:
+            raise ValueError("wake_tools needs requester_meta")
+        if self.agent_chat_requester and not self.requester_meta:
+            raise ValueError("agent_chat_requester needs requester_meta")
+        return self
 
     @model_validator(mode="after")
     def _auth_fields(self) -> SignedIdentityServer:
@@ -2429,11 +2445,20 @@ class McpIdentitySettings(BaseModel):
             "requester fields the caller supplied and stamps each tool call with who it is "
             "for and where: the asker while their turn is live, or the person an unattended "
             "run acts for. "
+            "Set agent_chat_requester to true as well for a server that accepts "
+            'requester_kind "agent_chat": a turn a person started through the MCP hub, '
+            "signed in with their platform login, then names that person with no place. "
+            "Turns started with an agent, coding or CLI key name nobody. "
             "An agent using a server stays in its channel with no long-term memory, a fresh "
             "session per channel turn and no handoffs, because the server answers with what "
             "the channel's readers can read. Set channel_scoped to false for a server that "
             "checks each call's asker and place itself: its agents then get their normal "
             "memory and sessions, so what they learn can surface in their other channels. "
+            "A requester_meta server may list wake_tools: a person's call to one carries "
+            "params._meta.wake_url, a private callback watch link for that conversation; "
+            "each POST of the work's outcome to it wakes the conversation once. Each call "
+            "gets its own link to one watch per conversation, which lasts a day after the "
+            "latest call. Needs the watches feature and DAIMON_WATCHES__CALLBACK_BASE_URL. "
             "The MCP service requires DAIMON_MCP_IDENTITY__SIGNING_KEY when any server is "
             "signed; chat workers use the same server policy without the signing key. "
             "Default: [] (off)."
@@ -2447,8 +2472,10 @@ class McpIdentitySettings(BaseModel):
             'such as {"tools": "<key>"}. Kept apart from '
             "DAIMON_MCP_IDENTITY__SERVERS so the key is set as a secret. Daimon sends the "
             "key as the server's bearer in place of the caller's own credential, which "
-            "never reaches the server. Only the MCP service needs them, and there every bearer "
-            "server needs one; no other server may have one. Default: {} (none)."
+            "never reaches the server. The MCP service needs them, and there every bearer "
+            "server needs one; no other server may have one. A chat worker given one reads "
+            "that server's tool hints when DAIMON_TOOL_SAFETY__TRUSTED_ANNOTATIONS names it. "
+            "Default: {} (none)."
         ),
     )
 
@@ -2506,6 +2533,11 @@ class McpIdentitySettings(BaseModel):
     def names_requester(self) -> bool:
         """Whether any server is sent the requester's identity (`requester_meta`)."""
         return any(server.requester_meta for server in self.servers)
+
+    @property
+    def names_agent_chat_requester(self) -> bool:
+        """Whether any server is sent the person behind an agent-chat turn."""
+        return any(server.agent_chat_requester for server in self.servers)
 
     @property
     def needs_signing_key(self) -> bool:
@@ -2615,8 +2647,11 @@ class PollableTool(BaseModel):
         )
     )
     tool: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$", description="Exact tool name.")
-    credential: Literal["agent", "owner", "none"] = Field(
-        description='The one credential a poll may use; native readers use "none".'
+    credential: Literal["agent", "owner", "relay", "none"] = Field(
+        description=(
+            'The one credential a poll may use; native readers use "none", and "relay" '
+            "needs this Daimon's own signed-identity relay URL."
+        )
     )
     returns_chat: bool = Field(
         description=(
@@ -2660,6 +2695,14 @@ class PollableTool(BaseModel):
                 )
         elif self.returns_chat or self.tool in CHAT_TOOLS:
             raise ValueError(f"{self.tool} returns chat; MCP server tools that do cannot be polled")
+        elif self.credential == "relay":
+            from daimon.core.mcp_identity import RELAY_PATH
+
+            parts = urlsplit(self.server)
+            if parts.query or not re.fullmatch(
+                rf"(/[^/]+)*{RELAY_PATH}/[a-z0-9][a-z0-9-]{{0,62}}", parts.path
+            ):
+                raise ValueError(f'credential "relay" needs a <root>{RELAY_PATH}/<name> URL')
         return self
 
 
@@ -2711,14 +2754,17 @@ class WatchesSettings(BaseModel):
             "tool can be polled: a watch on a tool taken off the list pauses at its next "
             'poll and its owner is told. Each entry has server ("daimon-mcp" for a native '
             "reader, otherwise an https MCP server URL, never a server name), tool (exact "
-            'name), credential ("none" for native readers; "agent" or "owner" for '
-            "MCP servers), returns_chat (required: true only for native readers, which "
+            'name), credential ("none" for native readers; "agent", "owner" or "relay" '
+            "for MCP servers), returns_chat (required: true only for native readers, which "
             "drop Daimon's own messages), max_interval_floor_s (shortest interval, at "
             "least 60, default 300) and label (shown on the approval card). Native "
             "entries must be read_thread or read_channel. Daimon's chat readers and chat_tools "
             "are refused on MCP servers. Credential owner polls with each watch owner's "
             "own read-only key, which they send once through a private form: for example "
-            "a read-scoped API key the person creates on that server. A server's read-only "
+            "a read-scoped API key the person creates on that server. Credential relay "
+            "polls a signed-identity relay server (<root>/mcp-identity/<name>) as the "
+            "watch owner, marked unattended, at the place the watch reports to. "
+            "A server's read-only "
             "annotation never allows a poll; only this "
             "list does, and a server can still write when it says it only reads. A "
             "watch below a raised floor polls at the "
@@ -2844,37 +2890,93 @@ class ComputeProfile(BaseModel):
     image: str = Field(
         description="Operator-reviewed thin MCP image reference, preferably a digest."
     )
-    regions: list[str] = Field(default_factory=lambda: ["iad"], description="Allowed Fly regions.")
-    cpu_kind: Literal["shared", "performance"] = Field(
-        default="shared", description="Fly CPU class."
+    regions: list[str] = Field(
+        default_factory=lambda: list[str](),
+        description="Allowed Google Cloud regions, such as us-central1. At least one.",
     )
-    cpus: int = Field(default=2, gt=0, le=16, description="Fixed CPU count for this image profile.")
-    memory_mb: int = Field(default=4096, ge=256, le=131072, description="Fixed RAM in MB.")
+    cpus: int = Field(
+        default=2,
+        gt=0,
+        le=16,
+        description="Fixed CPU count for this image profile: 1, 2, 4, 6 or 8.",
+    )
+    memory_mb: int = Field(
+        default=4096,
+        ge=256,
+        le=131072,
+        description="Fixed RAM in MB: 512 to 32768, within the range its CPU count permits.",
+    )
+    description: str = Field(
+        default="",
+        max_length=1000,
+        description=(
+            "What this image holds and how to use it, for the agent. Shown when profiles are "
+            "listed and when a session starts. Plain text; no secrets."
+        ),
+    )
+
+
+_CLOUD_RUN_REGION = re.compile(r"[a-z]+-[a-z]+[0-9]+")
+# Cloud Run's memory range in MiB for each CPU count it accepts. The floor is 512 MiB
+# because sessions use the second generation environment and instance-based billing.
+_CLOUD_RUN_MEMORY_MB: Mapping[int, tuple[int, int]] = {
+    1: (512, 4096),
+    2: (512, 8192),
+    4: (2048, 16384),
+    6: (4096, 24576),
+    8: (4096, 32768),
+}
+
+
+def _cloud_run_profile_error(name: str, profile: ComputeProfile) -> str | None:
+    """Why Cloud Run would refuse this profile, so a launch never finds out first."""
+    bad = [region for region in profile.regions if not _CLOUD_RUN_REGION.fullmatch(region)]
+    if not profile.regions or bad:
+        return (
+            f"compute profile {name!r} needs Google Cloud regions such as us-central1; "
+            f"got {profile.regions}"
+        )
+    limits = _CLOUD_RUN_MEMORY_MB.get(profile.cpus)
+    if limits is None:
+        return (
+            f"compute profile {name!r}: Cloud Run allows 1, 2, 4, 6 or 8 CPUs, not {profile.cpus}"
+        )
+    if not limits[0] <= profile.memory_mb <= limits[1]:
+        return (
+            f"compute profile {name!r}: Cloud Run allows {limits[0]} to {limits[1]} MB "
+            f"with {profile.cpus} CPUs, not {profile.memory_mb}"
+        )
+    return None
 
 
 class ComputeSettings(BaseModel):
     enabled: bool = Field(
         default=False,
         description=(
-            "Allow attended owners to launch Fly sessions. Disabling launch does not "
+            "Allow attended owners to launch compute sessions. Disabling launch does not "
             "disable cleanup."
         ),
     )
     deployment_id: str = Field(
         default="",
         description=(
-            "Stable unique deployment identifier fencing Fly resources. Required to use compute."
+            "Stable unique deployment identifier fencing session resources. Required to "
+            "use compute."
         ),
     )
-    api_token: SecretStr | None = Field(
-        default=None,
-        repr=False,
+    cloud_run_project: str = Field(
+        default="",
         description=(
-            "Fly API token, control plane and scheduler only. Never mounted in compute machines."
+            "Google Cloud project id that holds the session services. Required to use "
+            "compute. Daimon signs in with application default credentials."
         ),
     )
-    org_slug: str = Field(
-        default="", description="Fly organization for this deployment's disposable sessions."
+    cloud_run_service_account: str = Field(
+        default="",
+        description=(
+            "Email of the service account session containers run as. Give it no roles. "
+            "Required to use compute."
+        ),
     )
     session_auth_key: SecretStr | None = Field(
         default=None,
@@ -2914,13 +3016,47 @@ class ComputeSettings(BaseModel):
             "command may run for at most max_ttl_hours."
         ),
     )
-    profiles: dict[str, ComputeProfile] = Field(
-        default_factory=dict,
+    wake_run_limit: int = Field(
+        default=20,
+        ge=1,
+        le=200,
         description=(
-            "Operator-managed image profiles. Empty means no images can be launched. "
-            "No environment or credentials are copied from template apps."
+            "How many wake turns in a row may act on one session. The count starts again "
+            "when the owner runs a command or writes a file on it; a chat message alone "
+            "does not."
         ),
     )
+    profiles: dict[str, ComputeProfile] = Field(
+        default_factory=dict,
+        description=("Operator-managed image profiles. Empty means no images can be launched."),
+    )
+
+    @property
+    def provider_configured(self) -> bool:
+        """Whether the provider has the settings its API calls need."""
+        return bool(self.cloud_run_project and self.cloud_run_service_account)
+
+    @model_validator(mode="after")
+    def _cloud_run_is_complete(self) -> ComputeSettings:
+        """Refuse a half-configured provider, or a profile Cloud Run could not run.
+
+        Nothing is checked until a Cloud Run setting is given: an installation that
+        does not use compute, or still carries settings of a removed provider, starts.
+        """
+        fields = ("cloud_run_project", "cloud_run_service_account")
+        given = [field for field in fields if getattr(self, field)]
+        missing = [field for field in fields if field not in given]
+        if not given:
+            return self
+        if missing:
+            raise ValueError(
+                f"DAIMON_COMPUTE__{given[0].upper()} also needs "
+                f"DAIMON_COMPUTE__{missing[0].upper()}"
+            )
+        for name, profile in self.profiles.items():
+            if (error := _cloud_run_profile_error(name, profile)) is not None:
+                raise ValueError(error)
+        return self
 
 
 class LongJobsSettings(BaseModel):
@@ -2957,6 +3093,17 @@ class MonitoringSettings(BaseModel):
         description=(
             "Days a monitored question, answer or tool call is kept before the scheduler "
             "deletes it, default 90."
+        ),
+    )
+
+
+class OpsEventsSettings(BaseModel):
+    retention_days: int = Field(
+        default=30,
+        ge=1,
+        description=(
+            "Days a failure or warning shown on the admin Issues page is kept before the "
+            "scheduler deletes it, default 30."
         ),
     )
 
@@ -3027,6 +3174,7 @@ class Settings(BaseSettings):
     compute: ComputeSettings = Field(default_factory=ComputeSettings)
     long_jobs: LongJobsSettings = Field(default_factory=LongJobsSettings)
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
+    ops_events: OpsEventsSettings = Field(default_factory=OpsEventsSettings)
     security_audit_retention_days: int = Field(
         default=90,
         ge=0,
@@ -3244,6 +3392,24 @@ class Settings(BaseSettings):
         if not was_set and raw is None:
             policy.__pydantic_fields_set__.discard("enabled")  # a default, not an operator value
         self.tool_safety = policy
+        return self
+
+    @model_validator(mode="after")
+    def _relay_polls_name_this_deployment(self) -> Settings:
+        """A relay poll sends Daimon's own credential, so its URL must be this relay's."""
+        from daimon.core.mcp_identity import relay_server_name
+
+        public_url = self.mcp.public_url
+        for entry in self.watches.pollable_tools:
+            if (
+                entry.credential == "relay"
+                and public_url is not None
+                and relay_server_name(entry.server, str(public_url)) is None
+            ):
+                raise ValueError(
+                    "DAIMON_WATCHES__POLLABLE_TOOLS: a relay entry's server must be "
+                    "<MCP public URL root>/mcp-identity/<name>"
+                )
         return self
 
     model_config = SettingsConfigDict(

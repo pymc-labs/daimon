@@ -10,13 +10,18 @@ import httpx
 import structlog
 from daimon.core.config import GithubAppSettings
 from daimon.core.github_app_auth import (
+    InstallationRepository,
     build_app_jwt,
     get_app_installation_account,
-    list_installation_repositories,
+    get_app_installation_details,
+    installation_supports_write,
+    list_installation_repository_details,
     mint_installation_listing_token,
 )
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.stores import github_app_installations as installation_store
 from daimon.core.stores import github_installation_reconciliation as reconciliation_store
+from daimon.core.stores.github_follow_org import follow_installation
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
@@ -25,6 +30,7 @@ _LEASE_RENEW_INTERVAL_S = 30
 _MAX_JOBS_PER_TICK = 5
 _MAX_BACKFILL_PER_TICK = 50
 _MAX_RETRY_DELAY = timedelta(minutes=5)
+FOLLOW_REFRESH_EVERY = timedelta(hours=1)
 
 
 def _retry_delay(attempts: int) -> timedelta:
@@ -51,6 +57,18 @@ async def drain_github_installation_reconciliations(
         )
     if queued:
         _log.info("github.installation_reconciliation.backfill_queued", count=queued)
+
+    # An all-repos installation sends no event for a new repo, so one an agent follows is
+    # read again now and then.
+    async with sessionmaker.begin() as session:
+        followed = await reconciliation_store.enqueue_following_refreshes(
+            session,
+            now=now or datetime.now(UTC),
+            older_than=FOLLOW_REFRESH_EVERY,
+            limit=_MAX_BACKFILL_PER_TICK,
+        )
+    if followed:
+        _log.info("github.installation_reconciliation.follow_queued", count=followed)
 
     jobs_processed = 0
     for _ in range(_MAX_JOBS_PER_TICK):
@@ -86,6 +104,7 @@ async def drain_github_installation_reconciliations(
                 jwt=app_jwt,
                 installation_id=job.installation_id,
             )
+            listed: list[InstallationRepository] = []
             if installation_state is None:
                 repositories = None
             else:
@@ -102,9 +121,10 @@ async def drain_github_installation_reconciliations(
                         jwt=app_jwt,
                         installation_id=job.installation_id,
                     )
-                    repositories = await list_installation_repositories(
+                    listed = await list_installation_repository_details(
                         http_client, token=listing_token
                     )
+                    repositories = [repo.full_name for repo in listed]
 
             finished_at = datetime.now(UTC)
             async with sessionmaker.begin() as session:
@@ -137,6 +157,14 @@ async def drain_github_installation_reconciliations(
                     and installation_state is not None
                     and installation_state.account_id is not None
                     else None
+                )
+            if completed and listed and installation_state is not None:
+                await _follow_new_repos(
+                    sessionmaker=sessionmaker,
+                    http_client=http_client,
+                    jwt=app_jwt,
+                    installation_id=job.installation_id,
+                    listed=listed,
                 )
             if owner_before is not None and installation_state is not None:
                 _log.info(
@@ -181,6 +209,62 @@ async def drain_github_installation_reconciliations(
     async with sessionmaker.begin() as session:
         await reconciliation_store.sweep_delivery_receipts(session, now=now or datetime.now(UTC))
     return jobs_processed
+
+
+async def _follow_new_repos(
+    *,
+    sessionmaker: async_sessionmaker[AsyncSession],
+    http_client: httpx.AsyncClient,
+    jwt: str,
+    installation_id: int,
+    listed: list[InstallationRepository],
+) -> None:
+    """Give agents that follow the org the repos they lack, after the snapshot is stored.
+
+    Each workspace is its own step; if any failed, the refresh is queued again soon, and the
+    step is safe to run again. An agent at its GitHub limit is reported to the workspace's admins.
+    """
+
+    async def write_access() -> bool:
+        details = await get_app_installation_details(
+            http_client, jwt=jwt, installation_id=installation_id
+        )
+        return installation_supports_write(details.permissions)
+
+    outcome = await follow_installation(
+        sessionmaker,
+        installation_id=installation_id,
+        repos=listed,
+        write_access=write_access,
+        now=datetime.now(UTC),
+    )
+    for limit in outcome.limits:
+        report_ops_event(
+            sessionmaker,
+            OpsEvent(
+                code="github.follow_limit",
+                tenant_id=limit.tenant_id,
+                agent_id=limit.ma_agent_id,
+                reason=limit.reason,
+            ),
+        )
+    if outcome.failed_tenants:
+        now = datetime.now(UTC)
+        async with sessionmaker.begin() as session:
+            await reconciliation_store.requeue_done(
+                session,
+                installation_id=installation_id,
+                available_at=now + _retry_delay(1),
+                now=now,
+            )
+    if outcome.granted or outcome.limits or outcome.failed_tenants:
+        _log.info(
+            "github.installation_reconciliation.followed",
+            installation_id=installation_id,
+            granted=outcome.granted,
+            at_limit=len(outcome.limits),
+            failed_tenants=len(outcome.failed_tenants),
+        )
 
 
 async def _renew_lease(

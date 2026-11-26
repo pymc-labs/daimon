@@ -6,9 +6,9 @@
     "``default`` to clear the level's own value. ``tier`` is the ``workspace``,",
     "``agent``, ``channel`` or ``thread`` level of this conversation; other places cannot be",
     "named. ``locked`` (an admin's, not at the thread tier) makes the value final",
-    "below. Approvals need a live admin of the chat platform; a thread's participation",
-    "or progress plans are anyone's; the rest an admin's. Read the returned ``note``",
-    "back."
+    "below. Approvals, and approvals in direct messages, need a live admin of the chat",
+    "platform; a thread's participation or progress plans are anyone's; the rest an",
+    "admin's. Read the returned ``note`` back."
   ],
   "parameters": {
     "additionalProperties": false,

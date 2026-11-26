@@ -1,0 +1,64 @@
+{
+  "description": [
+    "List the workspace's failures and warnings, grouped into issues, newest first. ``since``",
+    "is how far back to look, like 15m, 24h or 7d. ``active_only`` keeps open issues seen in",
+    "the last day; resolved and muted ones are otherwise included. Each issue has a",
+    "``fingerprint`` for get_issue. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "active_only": {
+        "default": false,
+        "type": "boolean"
+      },
+      "area": {
+        "anyOf": [
+          {
+            "enum": [
+              "turn",
+              "dm",
+              "routine",
+              "delivery",
+              "watch",
+              "wake",
+              "bridge"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "limit": {
+        "default": 50,
+        "maximum": 200,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "severity": {
+        "anyOf": [
+          {
+            "enum": [
+              "error",
+              "warning"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "since": {
+        "default": "24h",
+        "maxLength": 8,
+        "type": "string"
+      }
+    },
+    "type": "object"
+  }
+}

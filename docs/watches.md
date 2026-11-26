@@ -34,7 +34,8 @@ field paths) picks what each new item reports. Projections accept `.`,
 A firing queues a turn that may only read and report. Shell, built-in tools,
 skills, management tools and writes are unavailable. Every model call,
 approval card and report rechecks the owner's access, balance, spend allowance
-and channel budget.
+and channel budget. Reports run only on Anthropic, which enforces this on the
+session: an agent on OpenAI or Gemini has its reports refused.
 
 ## Where a watch reports
 
@@ -59,8 +60,8 @@ owner, even with tool safety off.
 A server admin can set `watch_approval` to skip for the team or one agent.
 Creating and resuming then run without the card, but only as the default
 watch: it reports in the same thread for 7 days and reads Daimon's own tools,
-and any other choice is refused, a callback watch included. Editing, rotating a key, long jobs and Fly
-launches keep asking, and a turn nobody is watching still cannot enroll a watch.
+and any other choice is refused, a callback watch included. Editing, rotating a key and long
+jobs keep asking, and a turn nobody is watching still cannot enroll a watch.
 
 An edit shows each change as old and new on its card. Queued reports from
 before it are dropped, and the next poll saves a new baseline. Admins may
@@ -97,6 +98,12 @@ is the only thing that allows a poll. Each entry names a `server`, a `tool`, a
 - `agent` polls with the agent's stored key for that URL. `owner` polls with
   the owner's own read-only key, sent once through the private
   `request_watch_credential` form.
+- `relay` polls a server attached through this Daimon's
+  [identity relay](mcp-servers.md#let-a-server-verify-who-is-calling)
+  (`<root>/mcp-identity/<name>`). The server is told the watch owner asked, as
+  an unattended run, from where the watch reports.
+  A relay poll calls this deployment's own public URL (`DAIMON_MCP__PUBLIC_URL`),
+  which must resolve to a public address.
 
 > **Warning:** A server can say a tool only reads and still write. Its
 > read-only hint can refuse a poll but never allow one, so list only tools you
@@ -219,9 +226,13 @@ DAIMON_WATCHES__CALLBACK_BASE_URL=https://hooks.example.com
 Only a SHA-256 of each token is stored and compared in constant time. Every
 refusal answers the same `403`; oversized bodies get `413` and a body with a NUL
 byte `400`. A retried post of the same body within five minutes wakes the agent
-once and still answers `202`. A callback watch cannot be made in a DM. Wakes share the
-per-watch and per-owner limits above, and a flood of bad links is rate limited
-per address and in the database. Keep the proxy from logging paths.
+once and still answers `202`. Wakes share the per-watch and per-owner limits above,
+and a flood of bad links is rate limited per address and in the database. Keep the
+proxy from logging paths.
+
+A watch made in a Discord DM, callback or poll, reports in that DM, each fire as a
+fresh private turn. The DM conversation the person carries on in is told what it said.
+Slack refuses one made in a DM.
 
 ## Import watches from another system
 

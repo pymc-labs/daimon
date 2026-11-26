@@ -73,3 +73,8 @@ def self_helper_thread_key(thread_id: str, lane: int) -> str:
     or a provider slot and a fan-out runs in parallel.
     """
     return f"{thread_id}~helper~{SELF}~{lane}"
+
+
+def is_self_helper_thread(thread_id: str) -> bool:
+    """Whether `thread_id` is a self-helper's conversation (`self_helper_thread_key`)."""
+    return f"~helper~{SELF}~" in thread_id

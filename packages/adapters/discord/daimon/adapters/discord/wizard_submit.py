@@ -86,6 +86,7 @@ from daimon.adapters.discord.errors import (
 )
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle, SendFn
 from daimon.adapters.discord.notice_card import build_notice_embed
+from daimon.adapters.discord.outsiders import is_public_thread
 from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.provider_actions import (
     discord_provider_action_hook,
@@ -132,6 +133,7 @@ from daimon.core.turn.outcomes import finish_with_error, observe_turn, record_re
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import ProtectionState
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
+from daimon.core.turn.shown_model import shown_model
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT, wait_for_ticket
 from daimon.core.turn_queue import TurnTicket
 from daimon.core.wizard.answers import format_answer_block
@@ -509,6 +511,7 @@ async def run_wizard_submit_turn_observed(
                 role=Role.ADMIN if is_admin else Role.USER,
                 category_id=category_id,
                 category_unresolved=category_unresolved,
+                public_thread=is_public_thread(channel),
             )
         except MissingTurnConfigError as err:
             _log.info(
@@ -579,6 +582,7 @@ async def run_wizard_submit_turn_observed(
                     identity_session,
                     tenant_id=row.tenant_id,
                     agent_name=agent.name,
+                    display_name=admission.display_name(agent.name),
                     is_builtin=is_builtin_agent(
                         name=agent.name,
                         metadata=agent.metadata,
@@ -651,14 +655,17 @@ async def run_wizard_submit_turn_observed(
                 budget_channel_id=admission.budget_channel_id,
                 requester_is_admin=is_admin,
                 render_tables=admission.shown("table_rendering"),
+                status_reactions=admission.shown("status_reactions"),
+                post_pre_tool_text=admission.shown("pre_tool_messages"),
+                card_timer=admission.shown("card_timer"),
                 answer_message_cap=admission.answer_message_cap,
                 send=_turn_send(turn_id),
                 edit=_edit_message,
                 delete=_delete_message,
-                agent_name=agent.name,
+                agent_name=admission.display_name(agent.name),
                 in_dm=isinstance(interaction.channel, discord.DMChannel),
                 fallback_active=lambda: transport.fallback_used,
-                model_id=agent.model.id,
+                model_id=shown_model(admission).id,
                 markup=bot.runtime.turn_deps.markup,
                 cancel_view=CancelView(
                     allowed_user_id=interaction.user.id, cancel=cancel, turn_id=turn_id
@@ -770,12 +777,15 @@ async def run_wizard_submit_turn_observed(
                 budget_channel_id=admission.budget_channel_id,
                 requester_is_admin=is_admin,
                 render_tables=admission.shown("table_rendering"),
+                status_reactions=admission.shown("status_reactions"),
+                post_pre_tool_text=admission.shown("pre_tool_messages"),
+                card_timer=admission.shown("card_timer"),
                 answer_message_cap=admission.answer_message_cap,
                 send=_turn_send(turn_card_intent.id),
                 edit=_edit_message,
-                agent_name=agent.name,
+                agent_name=admission.display_name(agent.name),
                 in_dm=isinstance(interaction.channel, discord.DMChannel),
-                model_id=agent.model.id,
+                model_id=shown_model(admission).id,
                 markup=bot.runtime.turn_deps.markup,
                 cancel_view=CancelView(
                     allowed_user_id=interaction.user.id,

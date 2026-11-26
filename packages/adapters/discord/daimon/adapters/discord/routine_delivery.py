@@ -59,9 +59,11 @@ from daimon.core.routine_delivery import (
     private_delivery_refusal,
     render_fallback_dm,
     render_fallback_post,
+    routine_agent_name,
     tenant_dm_still_open,
 )
-from daimon.core.routine_files import decode_payload, deliver_routine_files, payload_for
+from daimon.core.routine_files import deliver_routine_files, payload_for
+from daimon.core.routine_header import routine_header_shown
 from daimon.core.routine_hold import DeliveryGate, delivery_gate, result_is_held
 from daimon.core.rule_views import keeps_routine_inside
 from daimon.core.stores.direct_messages import dm_enabled
@@ -368,17 +370,16 @@ def make_discord_routine_poster(
         async def upload(file: DeliverableFile) -> None:
             await upload_output_file(destination, file)
 
-        if output_client is None and decode_payload(payload_for(row)).files:
-            raise RuntimeError("Generated file delivery is unavailable; it will not be retried.")
-        if output_client is not None:
-            await deliver_routine_files(
-                output_client,
-                payload_for(row),
-                max_bytes=upload_limit(destination),
-                post=upload,
-                notice=notice,
-                may_post=may_post,
-            )
+        await deliver_routine_files(
+            output_client,
+            payload_for(row),
+            max_bytes=upload_limit(destination),
+            post=upload,
+            notice=notice,
+            may_post=may_post,
+            sessions=sessionmaker,
+            tenant_id=row.tenant_id,
+        )
 
     async def _dm_fallback(
         row: RoutineRow,
@@ -405,7 +406,11 @@ def make_discord_routine_poster(
                 return DeliveryOutcome(status="skipped", note="Fallback DM access changed.")
             dm = await open_dm(int(guild_id), int(creator))
             for chunk in split_fenced(
-                await _untagged(sessionmaker, row, render_fallback_dm(row, reason)),
+                await _untagged(
+                    sessionmaker,
+                    row,
+                    render_fallback_dm(row, reason, await routine_agent_name(sessionmaker, row)),
+                ),
                 _DISCORD_MAX_CHARS,
                 word_boundary=True,
             ):
@@ -421,10 +426,16 @@ def make_discord_routine_poster(
                 await dm.send(content=chunk, allowed_mentions=discord.AllowedMentions.none())
             await attach(row, dm, fallback_guard=may_post)
         except (discord.HTTPException, LookupError) as err:
-            log.info(
-                "routine.delivery_dm_failed", routine_id=str(row.id), error_type=type(err).__name__
+            log.warning(
+                "routine.delivery_fallback_failed",
+                routine_id=str(row.id),
+                error_type=type(err).__name__,
             )
-            return DeliveryOutcome(status="skipped", note=reason)
+            # Closed DMs or a gone member repeat on every run: a skip, not a failure that pages.
+            closed = isinstance(err, (discord.Forbidden, discord.NotFound))
+            return DeliveryOutcome(
+                status="skipped", note=reason, failed=None if closed else type(err).__name__
+            )
         return DeliveryOutcome(status="delivered", note=f"dm_fallback:{reason}")
 
     async def _post(row: RoutineRow) -> DeliveryOutcome:
@@ -500,7 +511,15 @@ def make_discord_routine_poster(
                 text = (
                     f"Routine {row.trigger_message[:60]}\n"
                     f"Run {row.id} / {row.last_fired_at}\n\n"
-                    + await _untagged(sessionmaker, row, render_fallback_post(row))
+                    + await _untagged(
+                        sessionmaker,
+                        row,
+                        render_fallback_post(
+                            row,
+                            agent_name=await routine_agent_name(sessionmaker, row),
+                            header=await routine_header_shown(sessionmaker, row, "discord"),
+                        ),
+                    )
                 )
                 for chunk in split_fenced(text, _DISCORD_MAX_CHARS, word_boundary=True):
                     if (refused := await creator_still_cleared(row)) is not None:
@@ -633,7 +652,16 @@ def make_discord_routine_poster(
         )
         if client is None or identity is None or identity.builtin:
             for chunk in split_fenced(
-                await _untagged(sessionmaker, row, render_fallback_post(row, platform="discord")),
+                await _untagged(
+                    sessionmaker,
+                    row,
+                    render_fallback_post(
+                        row,
+                        platform="discord",
+                        agent_name=await routine_agent_name(sessionmaker, row),
+                        header=await routine_header_shown(sessionmaker, row, "discord"),
+                    ),
+                ),
                 _DISCORD_MAX_CHARS,
                 word_boundary=True,
             ):
@@ -660,7 +688,15 @@ def make_discord_routine_poster(
         for index, chunk in enumerate(
             split_fenced(
                 await _untagged(
-                    sessionmaker, row, render_fallback_post(row, as_agent=True, platform="discord")
+                    sessionmaker,
+                    row,
+                    render_fallback_post(
+                        row,
+                        as_agent=True,
+                        platform="discord",
+                        agent_name=identity.name,
+                        header=await routine_header_shown(sessionmaker, row, "discord"),
+                    ),
                 ),
                 limit,
                 word_boundary=True,

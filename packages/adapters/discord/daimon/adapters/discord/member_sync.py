@@ -4,6 +4,9 @@ A full reload per server from the gateway's member chunks, then join, leave, rol
 owner changes keep it current. Admin is the server owner, Administrator or Manage Server.
 Needs the privileged server members intent. Events during a reload are noted and written
 again after it (`member_reloads`), so the older read never undoes them.
+
+The list never decides a room fact: a reload only asks `AudienceSync` for its own REST
+reconcile of the server, and a reload that fails or stalls leaves the facts alone.
 """
 
 from __future__ import annotations
@@ -75,10 +78,11 @@ class MemberSync:
     async def reload(self, guild: discord.Guild) -> None:
         """Replace the server's list with its full member list, for a live install."""
         tenant_id = tenant_of(guild.id)
-        self._changes.start(tenant_id)
         if self._audience is not None:
-            # The cache fills while the reload runs: no room fact holds until it ends.
-            await self._audience.mark_unknown(guild)
+            # The server was joined or came back: its room facts come from a REST read,
+            # asked for now so a slow member chunk never holds it up.
+            self._audience.request_reconcile(guild)
+        self._changes.start(tenant_id)
         try:
             loaded = await self._replace(guild, tenant_id)
         finally:
@@ -88,8 +92,6 @@ class MemberSync:
                 await members_store.apply_changes(
                     session, tenant_id=tenant_id, changes=late, now=self._clock()
                 )
-        if loaded and self._audience is not None:
-            await self._audience.publish(guild, reconciled=True)
 
     async def _replace(self, guild: discord.Guild, tenant_id: uuid.UUID) -> bool:
         """Whether the server is installed, and so its list written."""
@@ -127,8 +129,6 @@ class MemberSync:
                     guild_id=str(guild.id),
                     err_type=type(err).__name__,
                 )
-                if self._audience is not None:
-                    await self._audience.mark_unknown(guild)
 
     async def joined(self, member: discord.Member) -> None:
         """A member joined, or changed roles: listed, with their admin flag and roles."""

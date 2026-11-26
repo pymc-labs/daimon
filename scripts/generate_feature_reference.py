@@ -112,6 +112,8 @@ def render() -> str:
     parts = [_INTRO, summary()]
     for spec in FEATURES.values():
         values = ", ".join(f"`{key}` ({label})" for key, label in spec.values.items())
+        if spec.max_length:
+            values += f", or any name up to {spec.max_length} characters"
         rows = [
             ("Key", f"`{spec.key}`"),
             ("Values", values),

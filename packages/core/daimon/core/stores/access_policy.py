@@ -425,6 +425,7 @@ async def set_access_policy(
         "channel_rules",
         "category_rules",
         "agent_rules",
+        "agent_approvals",
         "invoker_role_ids",
         "internal_role_ids",
         "team_role_ids",

@@ -10,6 +10,7 @@ from daimon.core._models import (
     Account,
     AgentGitHubGrant,
     AgentGitHubGrantDraft,
+    AgentGitHubGrantRemoval,
     GitHubAppInstallation,
     TenantGitHubRepo,
 )
@@ -17,7 +18,8 @@ from daimon.core.github_app_auth import PermissionProfile
 from daimon.core.stores.github_installation_coverage import installation_covers_repo
 from daimon.core.stores.security_audit import append_event
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import ColumnElement, or_, select, text
+from sqlalchemy import ColumnElement, delete, or_, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -621,6 +623,14 @@ async def stage_grant(
         for previous in working:
             previous.is_working_repo = False
             previous.version += 1
+    # Granting a repo again is a decision too: an agent that follows its org may have it.
+    await session.execute(
+        delete(AgentGitHubGrantRemoval).where(
+            AgentGitHubGrantRemoval.tenant_id == tenant_id,
+            AgentGitHubGrantRemoval.agent_id == agent_id,
+            AgentGitHubGrantRemoval.repo_id == repo_id,
+        )
+    )
     row = await session.get(AgentGitHubGrant, (tenant_id, agent_id, repo_id), with_for_update=True)
     if row is None:
         row = AgentGitHubGrant(
@@ -679,6 +689,12 @@ async def remove_grant(
     if row is None or not row.app_visible:
         return False
     await session.delete(row)
+    # Kept, so an agent that follows its org is not handed the repo back.
+    await session.execute(
+        pg_insert(AgentGitHubGrantRemoval)
+        .values(tenant_id=tenant_id, agent_id=agent_id, repo_id=repo_id)
+        .on_conflict_do_nothing()
+    )
     await session.flush()
     await append_event(
         session,

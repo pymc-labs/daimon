@@ -1847,6 +1847,32 @@ async def test_editor_mixed_owner_admission_error_rolls_back(
 
 
 @pytest.mark.asyncio
+async def test_adding_repos_keeps_an_agent_that_has_repos_on_no_working_repo(
+    editor_env: _EditorEnv,
+) -> None:
+    env = editor_env
+    env.multi_owners = True
+    _, hidden = await env.open_editor()
+    first = await env.browser.post(
+        "/oauth/github/confirm",
+        data={**hidden, "access": "write", "working": "clear", "repo": "7801"},
+    )
+    assert first.status_code == 200
+    _, hidden = await env.open_editor()
+    added = await env.browser.post(
+        "/oauth/github/confirm",
+        data={**hidden, "access": "write", "working": "keep", "repo": "7701"},
+    )
+    assert added.status_code == 200
+    async with env.sessionmaker() as session:
+        grants = await github_access.list_agent_repos(
+            session, tenant_id=env.tenant_id, agent_id=env.agent_id
+        )
+    assert sorted(grant.repo_id for grant in grants) == [7701, 7801]
+    assert not any(grant.is_working_repo for grant in grants), "Keep current keeps none"
+
+
+@pytest.mark.asyncio
 async def test_editor_mixed_owner_save_is_atomic_and_binds_each_installation(
     editor_env: _EditorEnv,
 ) -> None:

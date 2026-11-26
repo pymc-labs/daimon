@@ -39,6 +39,15 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 2
+      # Runs on every change, prose included, before anything is planned.
+      # The denylist secret holds the private name list; forks run without it.
+      # Set the repository variable DAIMON_LINT_DENYLIST_REQUIRED to 1 to make
+      # pushes to main fail when the secret is missing.
+      - name: lint private material
+        env:
+          DAIMON_LINT_DENYLIST: ${{ secrets.DAIMON_LINT_DENYLIST }}
+          DAIMON_LINT_DENYLIST_REQUIRED: ${{ github.event_name == 'push' && vars.DAIMON_LINT_DENYLIST_REQUIRED || '' }}
+        run: bash scripts/lint_designators.sh
       - id: plan
         env:
           BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || '' }}
@@ -91,9 +100,6 @@ jobs:
 
       - name: check migration chain
         run: uv run python scripts/rechain_migrations.py --check
-
-      - name: lint private material leakage
-        run: bash scripts/lint_designators.sh
 
       - name: env example check
         run: uv run python scripts/generate_env_example.py --check
@@ -295,8 +301,8 @@ jobs:
       - name: pytest (journeys, ${{ matrix.leg }} leg)
         if: contains(fromJSON(needs.changes.outputs.suites), 'journeys')
         env:
-          # mux runs the code defaults (both backends on); stop pins both off, as production
-          # does. Branch protection requires both legs by these names.
+          # mux runs the code defaults (both backends on); stop pins both off, the emergency
+          # stop. Branch protection requires both legs by these names.
           DAIMON_TURN__CHANNEL_BACKENDS: ${{ matrix.backends }}
           DAIMON_TURN__AGENT_BACKENDS: ${{ matrix.backends }}
         run: |
@@ -519,9 +525,10 @@ jobs:
       - name: shards cover each suite exactly once
         run: uv run python scripts/check_ci_shards.py
 
-  # Pull requests and self-hosted main runs without GCP config exercise all
-  # three Dockerfiles without publishing images or staging credentials. Hosted
-  # main runs build the same Dockerfiles in docker-publish-candidate instead.
+  # Pull requests and self-hosted main runs without GCP config exercise the
+  # three service Dockerfiles and the compute-session image without publishing
+  # images or staging credentials. Hosted main runs build the service
+  # Dockerfiles in docker-publish-candidate instead.
   docker-build:
     needs: changes
     if: (github.event_name != 'push' || github.ref != 'refs/heads/main' || vars.GCP_WIF_PROVIDER == '') && contains(fromJSON(needs.changes.outputs.jobs), 'docker-build')
@@ -553,6 +560,13 @@ jobs:
           context: .
           file: apps/report-host/Dockerfile
           cache-from: type=gha,scope=report-host
+      - name: compute-session
+        if: contains(fromJSON(needs.changes.outputs.suites), 'image-compute-session')
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: apps/compute-session/Dockerfile
+          cache-from: type=gha,scope=compute-session
 
   # Runs the built daimon image: its certificate roots must complete a TLS
   # handshake with each provider, and the simulated turns (tests/simulated) run

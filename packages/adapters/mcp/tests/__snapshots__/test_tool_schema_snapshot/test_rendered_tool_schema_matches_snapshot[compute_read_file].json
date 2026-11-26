@@ -1,0 +1,44 @@
+{
+  "description": [
+    "Read a file from your session in byte chunks of at most 512 KiB.",
+    "",
+    "Read a larger file with several calls, each from the next offset. This does",
+    "not extend its lease."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "limit": {
+        "default": 65536,
+        "type": "integer"
+      },
+      "offset": {
+        "default": 0,
+        "type": "integer"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "path": {
+        "type": "string"
+      },
+      "session_id": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "path"
+    ],
+    "type": "object"
+  }
+}

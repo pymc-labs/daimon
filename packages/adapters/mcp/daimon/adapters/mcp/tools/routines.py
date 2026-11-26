@@ -24,7 +24,11 @@ import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
-from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, turn_origin_place
+from daimon.adapters.mcp.tools._channel_policy import (
+    get_verified_origin,
+    require_schedulable,
+    turn_origin_place,
+)
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._rule_view import load_isolation_view
 from daimon.adapters.mcp.tools._web_url import WebUrl, tenant_links
@@ -484,8 +488,14 @@ def _env(
     *,
     origin_context_id: str | None = None,
     verified_origin: bool = False,
+    saving: bool = False,
 ) -> RoutineEnv:
-    """The service's view of this call. `verified_origin` reads the turn the call names."""
+    """The service's view of this call. `verified_origin` reads the turn the call names.
+
+    `saving` is a create or an update: its view is refused to a turn that read a limited
+    room through own-DM reach (`require_schedulable`), after the input checks that need
+    no read.
+    """
     origins: list[TurnOriginRow | None] = []
 
     async def verified() -> TurnOriginRow | None:
@@ -494,6 +504,8 @@ def _env(
         return origins[0]
 
     async def load_view() -> CallView:
+        if saving:
+            await require_schedulable(runtime, auth)
         origin = await verified() if verified_origin else None
         viewer = await load_isolation_view(
             runtime,
@@ -553,7 +565,13 @@ async def _create_routine_impl(
 ) -> RoutineRow:
     with _tool_errors():
         return await routine_service.create_routine(
-            _env(runtime, auth, origin_context_id=origin_context_id, verified_origin=True),
+            _env(
+                runtime,
+                auth,
+                origin_context_id=origin_context_id,
+                verified_origin=True,
+                saving=True,
+            ),
             _saving_caller(runtime, auth),
             NewRoutine(
                 agent_name=agent_name,
@@ -603,7 +621,7 @@ async def _update_routine_impl(
 ) -> RoutineRow:
     with _tool_errors():
         return await routine_service.update_routine(
-            _env(runtime, auth),
+            _env(runtime, auth, saving=True),
             _saving_caller(runtime, auth),
             routine_id,
             RoutineChange(

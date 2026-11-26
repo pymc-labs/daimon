@@ -44,9 +44,11 @@ from daimon.core.defaults.metadata import (
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_tool_annotations import (
+    RelayCatalogues,
     agent_mcp_token_for,
     mcp_annotation_lookup,
     no_mcp_token,
+    tenant_relay_catalogues,
 )
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
@@ -133,6 +135,13 @@ async def unattended_provider_origin(
         attended=False,
     ) as origin:
         yield origin
+
+
+def without_builtins(spec: AgentSpec) -> AgentSpec:
+    """`spec` with no built-in tool, as a routine fire without its opt-in runs."""
+    if spec.tools is None:
+        return spec
+    return spec.model_copy(update={"tools": tuple(t for t in spec.tools if t.kind != "builtin")})
 
 
 def require_native_unattended_capabilities(
@@ -324,6 +333,7 @@ def session_annotations(
     tenant_id: uuid.UUID | None,
     fernet: MultiFernet | None = None,
     agent_id: uuid.UUID | None = None,
+    relays: RelayCatalogues | None = None,
 ) -> AnnotationLookup | None:
     """Bind trusted catalogues and credentials to the session being executed."""
     if not policy.enabled or not policy.trusted_annotations:
@@ -341,6 +351,7 @@ def session_annotations(
         )
         if session_factory is not None and tenant_id is not None
         else no_mcp_token,
+        relays=relays,
     )
 
 
@@ -357,6 +368,8 @@ def unattended_posture(
     agent_id: uuid.UUID | None = None,
     entry_point: UnattendedEntryPoint | None = None,
     routine_sandbox_tools: bool = False,
+    relays: RelayCatalogues | None = None,
+    owner_tools: frozenset[str] = frozenset(),
 ) -> PolicyApproval:
     """How an unattended turn on `session` answers its pauses.
 
@@ -368,7 +381,9 @@ def unattended_posture(
     is the seam for operator-trusted MCP hints; it must answer only for
     trusted servers. A built-in or custom call is refused (`capability_posture`)
     unless `routine_sandbox_tools` opts a `routine` in; no other `entry_point`
-    can be opted in.
+    can be opted in. `owner_tools` are protected tools whose owner a verified rule counts
+    as present (`compute_sessions.agent_chat_owner`); every deny and ask still decides
+    them, and the session keeps asking on each, so this posture sees every call.
     """
     posture = PolicyApproval(
         decide=unattended_decider(
@@ -388,6 +403,7 @@ def unattended_posture(
             if session_factory is not None and tenant_id is not None
             else None,
             daimon_rules=True,
+            owner_tools=owner_tools,
             annotations_for=annotations_for
             or session_annotations(
                 policy,
@@ -396,6 +412,7 @@ def unattended_posture(
                 tenant_id=tenant_id,
                 fernet=fernet,
                 agent_id=agent_id,
+                relays=relays,
             ),
         )
     )
@@ -582,6 +599,15 @@ async def dm_session_authority(
         fernet=deps.fernet,
         entry_point=entry_point,
         routine_sandbox_tools=builtins,
+        relays=await tenant_relay_catalogues(
+            deps.settings.mcp_identity,
+            public_url=deps.public_url,
+            sessionmaker=deps.sessionmaker,
+            tenant_id=tenant_id,
+            agent_name=actual.agent.name,
+        )
+        if deps.settings is not None
+        else None,
     )
 
     async def gate() -> None:

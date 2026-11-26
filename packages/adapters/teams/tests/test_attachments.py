@@ -15,7 +15,11 @@ from daimon.adapters.teams.attachments import (
     parse_attachments,
     prepare_attachments,
 )
-from daimon.core.media.vision import MAX_VISION_IMAGE_BYTES, MAX_VISION_IMAGE_DIMENSION
+from daimon.core.media.vision import (
+    MAX_DOWNSCALE_SOURCE_BYTES,
+    MAX_VISION_IMAGE_DIMENSION,
+    UNFIT_REASON,
+)
 from microsoft_teams.api import FILE_DOWNLOAD_INFO_CONTENT_TYPE, Attachment
 from PIL import Image
 
@@ -156,7 +160,7 @@ async def test_oversize_shared_image_falls_back_to_a_link_without_the_token() ->
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return httpx.Response(200, content=b"\x89PNG\r\n\x1a\n" + b"0" * MAX_VISION_IMAGE_BYTES)
+        return httpx.Response(200, content=b"\x89PNG\r\n\x1a\n" + b"0" * MAX_DOWNSCALE_SOURCE_BYTES)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         prepared = await _prepare_attachments(
@@ -165,24 +169,32 @@ async def test_oversize_shared_image_falls_back_to_a_link_without_the_token() ->
 
     assert "authorization" not in requests[0].headers, "a download URL carries its own auth"
     assert prepared.image_blocks == []
-    assert "larger than 5 MiB" in prepared.prefix and DOWNLOAD_URL in prepared.prefix
+    assert "larger than 25 MiB" in prepared.prefix and DOWNLOAD_URL in prepared.prefix
 
 
-async def test_image_past_the_pixel_cap_and_channel_shares_are_explained() -> None:
+async def test_an_image_past_the_edge_cap_is_resized_and_one_that_cannot_be_read_is_explained() -> (
+    None
+):
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=_png(width=MAX_VISION_IMAGE_DIMENSION + 1, height=1))
+        png = _png(width=MAX_VISION_IMAGE_DIMENSION + 1, height=200)
+        return httpx.Response(200, content=png if request.url.path.endswith("wide") else png[:-30])
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        prepared = await _prepare_attachments(
+        resized = await _prepare_attachments(
+            http, [InboundFile("pasted_image", "wide", PASTED_URL + "/wide")]
+        )
+        refused = await _prepare_attachments(
             http,
-            [InboundFile("pasted_image", "image", PASTED_URL), InboundFile("unreachable", "r.pdf")],
+            [
+                InboundFile("pasted_image", "image", PASTED_URL + "/bad"),
+                InboundFile("unreachable", "r.pdf"),
+            ],
         )
 
-    assert prepared.image_blocks == [], "an image past the pixel cap would end the session"
-    assert f"`image` was not inlined (larger than {MAX_VISION_IMAGE_DIMENSION}px)" in (
-        prepared.prefix
-    )
-    assert "`r.pdf` was shared but can't be opened: daimon could not fetch it" in prepared.prefix
+    assert len(resized.image_blocks) == 1, "a panorama under 25 MiB is shrunk, not linked"
+    assert refused.image_blocks == [], "a cut-off image never becomes a block"
+    assert f"`image` was not inlined ({UNFIT_REASON})" in refused.prefix, "the reason is plain"
+    assert "`r.pdf` was shared but can't be opened: daimon could not fetch it" in refused.prefix
 
 
 async def test_graph_token_only_goes_to_graph_and_a_refused_image_is_explained() -> None:

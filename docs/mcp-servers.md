@@ -102,8 +102,8 @@ sandbox.
 
 The token carries `iss`, `aud`, `iat`, `exp`, `agent`, `agent_name`, `ws`
 (`<platform>:<workspace id>`) and, when a person asked, `sub`
-(`<platform>:<user id>`), `channel` and `msg`. Routines, agent chat and senders
-from another organisation name no person. Without `workspaces`, every
+(`<platform>:<user id>`), `channel` and `msg`. Routines, agent chat, the web
+app's tool list and senders from another organisation name no person. Without `workspaces`, every
 workspace's agents reach the server. Request bodies over 4 MiB are refused.
 
 A channel turn of an agent with a relay server runs held: it posts only in its
@@ -155,7 +155,15 @@ keys are removed under `_meta` of every method, not only tool calls.
   from it (fails closed); writes are unaffected.
 - `requester_kind`: `"person"` only while a person's own message or click is
   being answered. `"routine"` means any unattended run: a routine, watch,
-  timer, continuation wake or DM routine.
+  timer, continuation wake or DM routine. `"agent_chat"` is a turn a person
+  started from an MCP client signed in to the hub.
+
+`"agent_chat"` carries no `requester_conversation` or wake link. Daimon sends it
+only to a server with `"agent_chat_requester": true`, off by default. Agent,
+coding and CLI keys name nobody. So does the turn after a send that failed with
+a server error, and an older conversation's first turn (logged as
+`agent_chat.requester_withheld`). Turn the option on only once every process
+runs this release: older ones send without clearing the record.
 
 A DM that is not open yet is `{"place_type": "dm", "channel_id": null,
 "parent_channel_id": null}`; a routine can only DM its owner.
@@ -167,6 +175,20 @@ credential when it started. A changed owner or agent means no stamp.
 channel, or nowhere. A sender from another organisation, a replaced session and
 two turns at once carry none of the three fields, so a server must not treat a
 call with no `requester_kind` as a routine.
+
+### Wake the conversation when a server's job ends
+
+A `requester_meta` server that starts long work can list the tools that start it
+in `"wake_tools"`. A call to one in a person's turn also carries
+`params._meta.wake_url`, a private [callback watch](watches.md#callback-watches)
+link; one the caller supplied is removed. Each `POST` of the outcome wakes the
+conversation once, in a turn that reads and reports. Keep the link out of logs.
+
+Each call gets its own link to one watch per conversation and server. The watch
+follows the conversation to its newest session and lasts a day after the latest call.
+It needs the `watches` feature and `DAIMON_WATCHES__CALLBACK_BASE_URL`. In a Discord
+DM each post runs as a fresh private turn in that DM. A Slack DM, a helper or an owner
+at the watch limit gets none.
 
 A request body that is not JSON, repeats a key, cannot be re-encoded, or holds
 a tool call without object `params` is refused with a 400. GET and DELETE

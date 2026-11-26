@@ -8,13 +8,16 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 from daimon.adapters.teams.activity_feed import ActivityFeed, chain_id
-from daimon.adapters.teams.routine_delivery import make_teams_routine_poster
+from daimon.adapters.teams.routine_delivery import make_teams_owner_dm, make_teams_routine_poster
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.config import DirectMessagePolicy
+from daimon.core.owner_notices import OwnerNotice
 from daimon.core.routine_delivery import DeliveryOutcome
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_posts import get_post, list_reply_posts
-from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.direct_messages import set_dm_enabled
+from daimon.core.stores.domain import FeatureTarget, RoutineRow
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.tenants import get_tenant
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -100,6 +103,21 @@ async def test_a_thread_destination_gets_the_result_in_the_thread(
     assert await _post(db_session_factory, teams, _row()) == DeliveryOutcome(status="delivered")
     [(where, text)] = teams.posts
     assert where == f"{CHANNEL};messageid=17" and "All green." in text
+
+
+async def test_with_the_header_off_the_result_posts_without_it(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with db_session_factory.begin() as session:
+        await make_tenant(session, platform="teams", id=TENANT)
+        await set_feature_value(
+            session, tenant_id=TENANT, target=FeatureTarget("workspace"),
+            key="routine_result_header", value="off", set_by=None, surface="cli",
+        )  # fmt: skip
+    teams = _Teams()
+    assert (await _post(db_session_factory, teams, _row())).status == "delivered"
+    [(_, text)] = teams.posts
+    assert text.startswith("All green.") and "Result from" not in text, text
 
 
 @pytest.mark.parametrize(
@@ -452,3 +470,37 @@ async def test_dm_fallback_when_dms_are_off_then_nothing_is_sent(
     outcome = await poster(_row(tenant_id=tenant.id))
     assert outcome == DeliveryOutcome(status="skipped", note="destination_unavailable")
     assert teams.posts == [], "no 1:1 while DMs are off"
+
+
+@pytest.mark.parametrize(
+    ("text", "dms_on", "sent"),
+    [("Your readout failed.", True, "text"), (None, True, "card"), ("x", False, None)],
+)
+async def test_the_owner_gets_its_failure_notice_in_their_1_1_chat_where_dms_are_on(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    text: str | None,
+    dms_on: bool,
+    sent: str | None,
+) -> None:
+    """The agent's words, else the error card; with routine DMs off, nothing."""
+    async with db_session_factory.begin() as session:
+        await make_tenant(session, platform="teams", id=TENANT)
+        await set_dm_enabled(session, tenant_id=TENANT, enabled=dms_on)
+    teams = _Teams()
+    cards: list[str] = []
+
+    async def post_card(conversation_id: str, card: object) -> str:
+        cards.append(conversation_id)
+        return "m-card"
+
+    teams.post_card = post_card  # type: ignore[attr-defined]
+    send = make_teams_owner_dm(db_session_factory, teams, tenant_id=TENANT, dm_policies={})  # type: ignore[arg-type]
+
+    closed = await send(_row(), OwnerNotice('Your routine "x" failed', "It stopped.", text))
+
+    chat = f"a:dm-29:{CREATOR}"
+    if sent is None:
+        assert (closed, teams.posts, cards) == ("dms_off", [], []), "no DM with DMs off"
+    else:
+        assert closed is None
+        assert (teams.posts, cards) == (([(chat, text)], []) if sent == "text" else ([], [chat]))

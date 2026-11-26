@@ -183,7 +183,7 @@ async def test_actual_default_sdk_provisioning_record_and_fresh_replay(
                 }
             ]
             assert "bash" not in [tool["type"] for tool in body["tools"]]
-            assert body["metadata"]["mux_skill_pins"].startswith("chunks:")
+            assert body["metadata"]["mux_skill_pins"].startswith("chunks2:")
             assert all(len(value) <= 512 for value in body["metadata"].values())
     tape = json.loads(path.read_text())
     Audit(()).audit(tape)

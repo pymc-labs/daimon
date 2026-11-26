@@ -69,7 +69,8 @@ class FeaturePlace:
         backend: str | None = None,
         routine_id: uuid.UUID | None = None,
     ) -> FeaturePlace:
-        """From a turn's ids; a thread equal to its channel (or a timer's scope) is none."""
+        """From a turn's ids; a thread equal to its channel (or a timer's scope) is none,
+        and so is an empty agent id (a blank `?agent=` is no agent, not an agent tier)."""
         thread_id = place_thread_id(thread_id)
         if thread_id and platform == "slack" and ":" in thread_id:
             channel, _, thread_id = thread_id.partition(":")
@@ -77,7 +78,13 @@ class FeaturePlace:
         if not thread_id or thread_id == channel_id or not channel_id:
             thread_id = None
         return cls(
-            tenant_id, platform, channel_id or None, thread_id, agent_id, backend, routine_id
+            tenant_id,
+            platform,
+            channel_id or None,
+            thread_id,
+            agent_id or None,
+            backend,
+            routine_id,
         )
 
     @property
@@ -94,10 +101,7 @@ def _adapter_set_up(settings: Settings, platform: str) -> bool:
 
 _SETUP: Final[Mapping[Requirement, Callable[[Settings], bool]]] = {
     "compute_setup": lambda s: (
-        s.compute.enabled
-        and bool(s.compute.deployment_id)
-        and s.compute.api_token is not None
-        and bool(s.compute.org_slug)
+        s.compute.enabled and bool(s.compute.deployment_id) and s.compute.provider_configured
     ),
     "notebook_host": lambda s: (
         s.notebook.host_url is not None and s.notebook.admin_secret is not None
@@ -397,11 +401,11 @@ async def _place_rows(
 
 def approvals_from_gate(value: str, scope: str) -> ResolvedFeature:
     """The approval gate's answer as a resolved feature (its scope is ``server`` or
-    ``<channel|thread>:<id>``; ``inherit`` everywhere is the registry default)."""
+    ``<agent|channel|thread>:<id>``; ``inherit`` everywhere is the registry default)."""
     if value == "inherit":
         return ResolvedFeature("approvals", FEATURES["approvals"].default, "default")
     kind = scope.split(":", 1)[0]
-    tier: Tier = "workspace" if kind == "server" else "thread" if kind == "thread" else "channel"
+    tier = cast(Tier, "workspace" if kind == "server" else kind)
     return ResolvedFeature("approvals", value, tier)
 
 
@@ -440,6 +444,7 @@ async def resolve_features(
                 platform=place.platform,
                 channel_id=place.channel_id,
                 thread_id=place.thread_id,
+                agent_id=place.agent_id,
             )
             resolved["approvals"] = approvals_from_gate(gate.value, gate.scope)
     # A feature's dependencies resolve first, even ones the caller did not ask for.
