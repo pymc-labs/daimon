@@ -1877,6 +1877,8 @@ class WebApprovalCard(BaseModel):
     details: tuple[str, ...] = ()
     footer: str | None = None
     always_allowed: bool = False
+    session_allowed: bool = False
+    """It offers "Allow for this conversation"."""
 
 
 class WebRefusalCard(BaseModel):

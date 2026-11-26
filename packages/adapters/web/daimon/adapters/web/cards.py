@@ -24,13 +24,15 @@ from daimon.core.posted_controls.tool_rule_confirmation import (
     save_always_allow,
     snapshot_tool_rule,
 )
+from daimon.core.session_allowances import allow
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores.domain import WebApprovalCard, WebMessageRow
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 
-CardChoice = Literal["approve", "always", "deny"]
+CardChoice = Literal["approve", "always", "session", "deny"]
+SESSION_FOOTER = "Allowed for this conversation"
 _ENDED = {"expired": "Ended without an answer", "stopped": "Stopped"}
 
 
@@ -84,6 +86,7 @@ class WebCards:
                     consequence=prompt.consequence,
                     details=prompt.detail_lines,
                     always_allowed=scope is not None,
+                    session_allowed=prompt.session_allow is not None,
                 )
                 row = await lifecycle().end_segment(card)
                 return _PostedCard(prompt, thread_id, card, row, scope, subject)
@@ -121,6 +124,8 @@ class WebCards:
         state: Literal["approved", "always", "denied"] = (
             "denied" if choice == "deny" else "approved"
         )
+        if choice == "session" and posted.prompt.session_allow:
+            allow(posted.prompt.session_allow)
         reference = posted.prompt.tool_rule
         if choice == "always" and reference is not None and posted.rule_scope is not None:
             saved = await save_always_allow(
@@ -134,7 +139,10 @@ class WebCards:
                 state = "always"
             else:
                 log.info("web.card.always_not_saved", result=saved)
-        await posted.settle(self._sessionmaker, posted.card.model_copy(update={"state": state}))
+        footer = SESSION_FOOTER if choice == "session" else posted.card.footer
+        await posted.settle(
+            self._sessionmaker, posted.card.model_copy(update={"state": state, "footer": footer})
+        )
         return None
 
     async def deny_open(self, thread_id: uuid.UUID, clicker: str) -> None:

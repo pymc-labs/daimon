@@ -156,6 +156,8 @@ class ConfirmationPrompt(BaseModel):
         default=None, exclude_if=lambda value: value is None
     )
     tool_rules_enabled: bool = Field(default=False, exclude_if=lambda value: not value)
+    session_allow: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    """With it, the card also offers "Allow for this conversation" (`session_allowances`)."""
     visible_lines: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     lead_intake_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
     # A publish that may leave a lasting public link (a report, any notebook

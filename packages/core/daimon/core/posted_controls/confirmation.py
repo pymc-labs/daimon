@@ -31,16 +31,19 @@ __all__ = [
     "confirmation_card_text",
     "confirmation_custom_id",
     "parse_always_custom_id",
+    "is_session_custom_id",
+    "SESSION_LABEL",
     "parse_confirmation_custom_id",
 ]
 
 ConfirmationCardState = Literal["pending", "approved", "denied", "expired", "stopped"]
-ConfirmationChoice = Literal["approve", "deny", "always", "details"]
-ConfirmationHow = Literal["once", "always", "channel"]
+ConfirmationChoice = Literal["approve", "deny", "always", "session", "details"]
+ConfirmationHow = Literal["once", "always", "channel", "session"]
 CONFIRMATION_CUSTOM_ID_PREFIX: Final[str] = "dcf:"
 CONFIRMATION_ACTION_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^dcf:(?P<token>[A-Za-z0-9_-]{8,64}):(?P<choice>approve|deny|always|details)$"
+    r"^dcf:(?P<token>[A-Za-z0-9_-]{8,64}):(?P<choice>approve|deny|always|session|details)$"
 )
+SESSION_LABEL: Final[str] = "Allow for this conversation"
 NOT_YOURS_MESSAGE: Final[str] = "Only {requester} can approve or deny this request."
 NO_LONGER_PENDING_MESSAGE: Final[str] = "This request was already answered."
 EXPIRED_MESSAGE: Final[str] = "This request expired."
@@ -61,6 +64,7 @@ class ConfirmationCard(BaseModel):
     footer: str | None
     token: str | None = None
     allow_always: bool = Field(default=False, exclude_if=lambda value: not value)
+    allow_session: bool = Field(default=False, exclude_if=lambda value: not value)
     answered_by_platform_user_id: str | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -76,9 +80,15 @@ def parse_confirmation_custom_id(custom_id: str) -> tuple[str, ConfirmationAnswe
     Details has its own handler and is never interpreted as an answer.
     """
     match = CONFIRMATION_ACTION_PATTERN.match(custom_id)
-    if match is None or match["choice"] not in {"approve", "deny"}:
+    if match is None or match["choice"] not in {"approve", "deny", "session"}:
         return None
-    return match["token"], "approved" if match["choice"] == "approve" else "denied"
+    return match["token"], "denied" if match["choice"] == "deny" else "approved"
+
+
+def is_session_custom_id(custom_id: str) -> bool:
+    """Whether this is an "Allow for this conversation" click (answered as Approve)."""
+    match = CONFIRMATION_ACTION_PATTERN.match(custom_id)
+    return match is not None and match["choice"] == "session"
 
 
 def parse_always_custom_id(custom_id: str) -> str | None:
@@ -139,6 +149,8 @@ def build_confirmation_card(
             footer = "Always allowed by {actor}"
         elif how == "channel":
             footer = "Always allowed in this channel by {actor}"
+        elif how == "session":
+            footer = "Allowed for this conversation by {actor}"
         else:
             footer = "Approved once by {actor}"
     return ConfirmationCard(
@@ -150,6 +162,7 @@ def build_confirmation_card(
         footer=footer,
         token=token,
         allow_always=allow_always,
+        allow_session=state == "pending" and prompt.session_allow is not None,
         answered_by_platform_user_id=answered_by_platform_user_id if how is not None else None,
     )
 
@@ -199,6 +212,15 @@ def build_confirmation_blocks(
                     "type": "button",
                     "text": {"type": "plain_text", "text": "Always allow"},
                     "action_id": confirmation_custom_id(card.token, "always"),
+                    "value": card.token,
+                }
+            )
+        if card.allow_session:
+            buttons.append(
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": SESSION_LABEL},
+                    "action_id": confirmation_custom_id(card.token, "session"),
                     "value": card.token,
                 }
             )

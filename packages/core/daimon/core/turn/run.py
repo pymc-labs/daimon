@@ -2312,6 +2312,7 @@ async def run_prepared_turn_impl(
                 trusted_servers=trusted_servers,
                 asks_before_publishing=prepared.admission.asks_before_publishing,
                 data_read=prepared.admission.data_reading,
+                session_key=prepared.ma_session_id,
                 approval_gate_for=lambda: refresh_approval_gate(deps, prepared.admission),
                 server_urls=server_urls,
                 skill_update_for=skill_update_lookup(deps.sessionmaker, tenant_id=tenant_id),

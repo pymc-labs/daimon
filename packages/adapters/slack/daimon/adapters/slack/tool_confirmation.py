@@ -44,6 +44,7 @@ from daimon.core.posted_controls.confirmation import (
     build_confirmation_blocks,
     build_confirmation_card,
     confirmation_card_text,
+    is_session_custom_id,
     parse_always_custom_id,
     parse_confirmation_custom_id,
     parse_details_custom_id,
@@ -64,6 +65,7 @@ from daimon.core.posted_controls.tool_rule_confirmation import (
     save_always_allow,
     snapshot_tool_rule,
 )
+from daimon.core.session_allowances import allow
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.webhook.async_client import AsyncWebhookClient
@@ -345,8 +347,11 @@ class SlackConfirmationCards:
                 refusal = refusal.format(requester=f"<@{posted.prompt.requester_platform_user_id}>")
             await _ephemeral(posted, clicker, refusal)
             return
+        session = is_session_custom_id(action_id)
+        if session and posted.prompt.session_allow:
+            allow(posted.prompt.session_allow)
         try:
-            await _edit(posted, answer, answered_by=clicker)
+            await _edit(posted, answer, answered_by=clicker, how="session" if session else None)
         finally:
             posted.answered_edit_done.set()
 

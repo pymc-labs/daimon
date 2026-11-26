@@ -40,6 +40,7 @@ from daimon.core.native_admins import load_live_subject
 from daimon.core.outbound.opt_out import tag_opt_outs
 from daimon.core.posted_controls.confirmation import (
     NOT_YOURS_MESSAGE,
+    SESSION_LABEL,
     ConfirmationCard,
     ConfirmationCardState,
     build_confirmation_card,
@@ -61,6 +62,7 @@ from daimon.core.posted_controls.tool_rule_confirmation import (
     save_always_allow,
     snapshot_tool_rule,
 )
+from daimon.core.session_allowances import allow
 from microsoft_teams.api import (
     Account,
     AdaptiveCardInvokeActivity,
@@ -89,7 +91,11 @@ __all__ = ["VERB", "TeamsConfirmationCards", "confirmation_adaptive_card"]
 log = structlog.get_logger(__name__)
 
 VERB = "tool_confirm"
-_ANSWERS: dict[str, ConfirmationAnswer] = {"approve": "approved", "deny": "denied"}
+_ANSWERS: dict[str, ConfirmationAnswer] = {
+    "approve": "approved",
+    "session": "approved",
+    "deny": "denied",
+}
 #: Waits between attempts to send a card edit; the last value is unused.
 _CARD_SEND_RETRY_DELAYS_S: tuple[float, ...] = (1.0, 3.0, 0.0)
 #: The click's brief acknowledgement; the card itself updates through its queue.
@@ -194,6 +200,8 @@ def confirmation_adaptive_card(
         actions = [approve, deny]
         if card.allow_always:
             actions.append(button(VERB, "Always allow", "always", token=card.token))
+        if card.allow_session:
+            actions.append(button(VERB, SESSION_LABEL, "session", token=card.token))
         detail_lines = card.detail_lines or ("No additional details.",)
         body.append(
             Container(
@@ -448,11 +456,14 @@ class TeamsConfirmationCards:
                     requester=posted.prompt.requester_display_name or "requester"
                 )
             return toast(refusal)
+        session = data.get("op") == "session"
+        if session and posted.prompt.session_allow:
+            allow(posted.prompt.session_allow)
         card = build_confirmation_card(
             posted.prompt,
             state=answer,
             answered_by_platform_user_id=clicker,
-            how="once" if posted.prompt.tool_rules_enabled else None,
+            how="session" if session else "once" if posted.prompt.tool_rules_enabled else None,
         )
         name = activity.from_.name
         # The answered card goes through the card's edit queue, registered
