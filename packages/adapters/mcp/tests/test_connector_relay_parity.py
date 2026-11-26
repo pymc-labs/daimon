@@ -632,12 +632,13 @@ async def test_a_self_hosted_record_serves_only_its_daimon_signed_connectors(rig
     assert (owner, legacy) == ("daimon", "ma"), "a record has no vault; MA keeps its own"
 
 
-async def test_the_relay_stays_closed_until_turned_on(rig: Rig) -> None:
-    """Off by default and when turned off: the relay answers nothing."""
-    for features in ({}, {"mcp_connector_relay": "off"}):
-        rig.features = features
-        assert (await rig.send("tools/list")).status_code == 404, f"closed with {features}"
+async def test_the_relay_stays_closed_when_turned_off(rig: Rig) -> None:
+    """On by default; turned off, the relay answers nothing."""
+    rig.features = {"mcp_connector_relay": "off"}
+    assert (await rig.send("tools/list")).status_code == 404, "closed when turned off"
     assert rig.upstream.lists == 0, "and reaches no connector"
+    rig.features = {}
+    assert (await rig.send("tools/list")).status_code != 404, "open by default"
 
 
 # --- tokens ------------------------------------------------------------------------

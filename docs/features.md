@@ -67,7 +67,7 @@ Where each feature can be set, and its default.
 | Vote buttons | `message_feedback` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Direct message wait | `dm_debounce_seconds` | Chat | Off | ✓ | ✓ |  |  |  |  |  |
 | /new in threads | `thread_new` | Chat | Off | ✓ | ✓ |  |  |  |  | Only Discord |
-| Other providers per conversation | `thread_providers` | Chat | Off | ✓ | ✓ | ✓ |  |  |  |  |
+| Other providers per conversation | `thread_providers` | Chat | On | ✓ | ✓ | ✓ |  |  |  |  |
 | Repository memory | `repo_memory` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Context provider | `context_provider` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
 | Personal memory | `memory_personal` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
@@ -113,7 +113,7 @@ Where each feature can be set, and its default.
 | Rooms with outside people | `audience_hold` | Guardrail | Off | ✓ | ✓ |  |  |  |  | Only Discord |
 | Tool safety | `tool_safety` | Guardrail | On | ✓ |  |  |  |  |  |  |
 | Approve cards for OpenAI and Gemini | `host_call_gate` | Guardrail | On | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
-| Connectors on OpenAI and Gemini | `mcp_connector_relay` | Guardrail | Off | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
+| Connectors on OpenAI and Gemini | `mcp_connector_relay` | Guardrail | On | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
 | Reach check | `reach_budget` | Guardrail | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Built-in tools in routines | `unattended_capabilities` | Guardrail | Allowed | ✓ | ✓ | ✓ |  |  |  |  |
 | Sandbox tools in routines | `routine_sandbox_tools` | Guardrail | Off |  | ✓ | ✓ |  |  | ✓ |  |
@@ -1018,7 +1018,7 @@ Anyone who can change a conversation's model may pick an OpenAI or Gemini model 
 | --- | --- |
 | Key | `thread_providers` |
 | Values | `on` (On), `off` (Off) |
-| Default | `off` |
+| Default | `on` |
 | Levels | Deployment, Workspace, Agent |
 | Combines | Off above is a ceiling |
 
@@ -1254,7 +1254,7 @@ An agent's own connectors work on OpenAI and Gemini agents with the person's sig
 | --- | --- |
 | Key | `mcp_connector_relay` |
 | Values | `off` (Off), `on` (On) |
-| Default | `off` |
+| Default | `on` |
 | Levels | Deployment |
 | Combines | Stricter wins |
 
