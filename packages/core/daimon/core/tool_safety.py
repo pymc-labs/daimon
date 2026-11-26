@@ -206,6 +206,8 @@ CARDED_TOOLS: Final[Mapping[str, str]] = {
     "set_agent_helpers": "agent_id",
     "restore_library_skill_version": "skill_id",
     "approve_server_skill_update": "skill_id",
+    "change_shared_connection": "action",
+    "change_shared_connection_tool": "action",
 }
 
 #: Daimon's own tools that wait for the card like a third-party write, keyed

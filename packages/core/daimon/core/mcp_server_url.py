@@ -14,6 +14,14 @@ GITHUB_COPILOT_MCP_URL = "https://api.githubcopilot.com/mcp"
 GITHUB_ROUTER_PATH = "/github/mcp"
 
 
+def shown_mcp_url(url: str) -> str:
+    """The server's address without a sign-in or query, which can carry a key."""
+    parts = urlsplit(url.strip())
+    host = parts.hostname or ""
+    port = f":{parts.port}" if parts.port else ""
+    return f"{parts.scheme}://{host}{port}{parts.path}".rstrip("/")
+
+
 def canonical_mcp_url(url: str) -> str:
     """Lowercase scheme and host, drop a default port, the fragment and a trailing slash.
 

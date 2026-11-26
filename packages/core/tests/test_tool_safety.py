@@ -288,6 +288,8 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
                 "approve_reach",
                 "approve_server_skill_update",
                 "change_setting",
+                "change_shared_connection",
+                "change_shared_connection_tool",
                 "change_workspace_settings",
                 "compute_extend_session",
                 "compute_launch_session",

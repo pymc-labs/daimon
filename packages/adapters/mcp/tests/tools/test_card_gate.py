@@ -24,6 +24,8 @@ from fastmcp.exceptions import ToolError
 from .parity_fakes import fake_runtime, make_auth
 
 _TOOLS = {
+    "change_shared_connection",
+    "change_shared_connection_tool",
     "remove_my_data",
     "revoke_web_link",
     "delete_allowance",

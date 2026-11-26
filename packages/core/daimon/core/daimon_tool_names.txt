@@ -17,6 +17,8 @@ cancel_timer
 cancel_turn
 change_issue_state
 change_setting
+change_shared_connection
+change_shared_connection_tool
 change_workspace_settings
 check_server_skill
 clear_agent_default
@@ -133,6 +135,7 @@ list_promo_codes
 list_routines
 list_session_events
 list_sessions
+list_shared_connections
 list_skills
 list_thread_overrides
 list_threads

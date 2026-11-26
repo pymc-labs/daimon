@@ -53,7 +53,7 @@
    "tool": "delete_allowance"
   },
   "DELETE /api/integrations/connections/{connection_id}": {
-   "exempt": "shared connections are set up on the web only"
+   "tool": "change_shared_connection"
   },
   "DELETE /api/integrations/tokens/{jti}": {
    "panel": {
@@ -111,10 +111,10 @@
    "tool": "set_allowance_amount"
   },
   "PATCH /api/integrations/connections/{connection_id}": {
-   "exempt": "shared connections are set up on the web only"
+   "tool": "change_shared_connection"
   },
   "PATCH /api/integrations/connections/{connection_id}/tools/{name}": {
-   "exempt": "shared connections are set up on the web only"
+   "tool": "change_shared_connection_tool"
   },
   "PATCH /api/routines/{routine_id}": {
    "tool": "update_routine"
@@ -286,10 +286,10 @@
    }
   },
   "POST /api/integrations/connections": {
-   "exempt": "shared connections are set up on the web only"
+   "tool": "change_shared_connection"
   },
   "POST /api/integrations/connections/{connection_id}/refresh": {
-   "exempt": "shared connections are set up on the web only"
+   "tool": "change_shared_connection"
   },
   "POST /api/integrations/data/sources": {
    "exempt": "data sources are a web-only feature"

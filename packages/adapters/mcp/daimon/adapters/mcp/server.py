@@ -110,6 +110,9 @@ from daimon.adapters.mcp.tools.scope_settings import register_scope_settings_too
 from daimon.adapters.mcp.tools.secret_shares import register_secret_share_tools
 from daimon.adapters.mcp.tools.server_skills import register_server_skill_tools
 from daimon.adapters.mcp.tools.setup_target import register_setup_target_tools
+from daimon.adapters.mcp.tools.shared_connection_admin import (
+    register_shared_connection_admin_tools,
+)
 from daimon.adapters.mcp.tools.skill_library_edits import register_skill_library_edit_tools
 from daimon.adapters.mcp.tools.skill_uploads import register_skill_upload_tools
 from daimon.adapters.mcp.tools.support import register_support_tools
@@ -601,6 +604,7 @@ def create_mcp_app(
     compute.register_compute_tools(mcp, runtime)
     register_lead_intake_tools(mcp, runtime)
     register_data_tools(mcp, runtime)  # data_* reads, behind data_reads
+    register_shared_connection_admin_tools(mcp, runtime)  # the shared connections page
     from daimon.adapters.mcp.tools.watches import register_watch_tools
 
     register_watch_tools(mcp, runtime)
