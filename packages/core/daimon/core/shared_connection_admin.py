@@ -26,8 +26,8 @@ from pydantic import BaseModel, JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
 
 NO_CONNECTION = "This connection isn't here."
-READ_ONLY = "This connection comes from the workspace's configuration. Change it there."
-OFF = "Shared connections are turned off for this workspace. Turn them on in Settings first."
+READ_ONLY = "This connection comes from Daimon's configuration. Change it there."
+OFF = "Shared connections are turned off here. Turn them on in Settings first."
 
 
 class ConnectionTool(BaseModel):

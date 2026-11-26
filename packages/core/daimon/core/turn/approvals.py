@@ -31,10 +31,12 @@ from anthropic.types.beta.sessions import BetaManagedAgentsUserToolConfirmationE
 from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event import StopReason
 from daimon.core.approval_gate import ApprovalGate
 from daimon.core.confirmation import (
+    SHARED_CONNECTION_TOOLS,
     ApprovedConfirmation,
     CardRefusal,
     ConfirmationHook,
     ServerSkillUpdateCard,
+    SharedConnectionCard,
     StalePreview,
     ToolRuleCardReference,
     no_confirmation_surface,
@@ -78,6 +80,8 @@ RuleCardFor = Callable[[ToolCall], ToolRuleCardReference | None]
 
 SkillUpdateLookup = Callable[[ToolCall], Awaitable[ServerSkillUpdateCard | None]]
 """The waiting update a skill-approval call names, read from the mirror."""
+SharedConnectionLookup = Callable[[ToolCall], Awaitable[SharedConnectionCard | None]]
+"""What a shared connection change names, read from the store."""
 
 
 def channel_for_tool_rules(
@@ -585,6 +589,9 @@ def unattended_decider(
 
 CARD_TURN_MARGIN = timedelta(seconds=5)
 SKILL_UPDATE_UNREADABLE = "Couldn't load this update. Check the skill again."
+SHARED_CONNECTION_UNREADABLE = (
+    "This connection or tool isn't here, or changed since it was listed. List it again."
+)
 #: Too little time left to show a card someone could answer: refuse instead.
 NO_TIME_TO_ASK_MESSAGE = (
     "There isn't enough time left to ask for approval here. Ask again to redo it."
@@ -622,6 +629,7 @@ def interactive_decider(
     approval_gate_for: Callable[[], Awaitable[ApprovalGate | None]] | None = None,
     server_urls: Mapping[str, str] | None = None,
     skill_update_for: SkillUpdateLookup | None = None,
+    shared_connection_for: SharedConnectionLookup | None = None,
     data_read: bool = False,
 ) -> ToolCallDecider:
     """Decider for chat: reads run, writes wait for `confirm`. With `data_read` (a session
@@ -720,6 +728,20 @@ def interactive_decider(
             if skill_update is None:
                 # Approving what the card cannot show would be approving unseen changes.
                 return ToolConfirmationResult(allow=False, deny_message=SKILL_UPDATE_UNREADABLE)
+        shared_connection: SharedConnectionCard | None = None
+        if call.tool_name in SHARED_CONNECTION_TOOLS and call.server_name in trusted_servers:
+            try:
+                shared_connection = (
+                    None if shared_connection_for is None else await shared_connection_for(call)
+                )
+            except Exception:
+                # Named boundary: a failed read means no card, so the call is denied below.
+                log.warning("tool_safety.shared_connection_read_failed", tool=call.key)
+            if shared_connection is None:
+                # A card that can't name what it changes approves nothing.
+                return ToolConfirmationResult(
+                    allow=False, deny_message=SHARED_CONNECTION_UNREADABLE
+                )
         try:
             prompt = prompt_for_tool_call(
                 call,
@@ -728,6 +750,7 @@ def interactive_decider(
                 timeout=timeout,
                 trusted_servers=trusted_servers,
                 server_skill_update=skill_update,
+                shared_connection=shared_connection,
             )
             if policy.enabled and policy.agent_rules:
                 prompt = prompt.model_copy(update={"tool_rules_enabled": True})
@@ -809,6 +832,7 @@ def chat_tool_confirmation(
     approval_gate_for: Callable[[], Awaitable[ApprovalGate | None]] | None = None,
     server_urls: Mapping[str, str] | None = None,
     skill_update_for: SkillUpdateLookup | None = None,
+    shared_connection_for: SharedConnectionLookup | None = None,
     data_read: bool = False,
 ) -> ToolConfirmation:
     """Posture for a chat turn.
@@ -839,6 +863,7 @@ def chat_tool_confirmation(
             approval_gate_for=approval_gate_for,
             server_urls=server_urls,
             skill_update_for=skill_update_for,
+            shared_connection_for=shared_connection_for,
             data_read=data_read,
         )
         if attended

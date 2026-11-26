@@ -20,19 +20,20 @@ import hashlib
 import json
 import re
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.resources import files
 from typing import Final, Literal, Protocol
 from urllib.parse import urlsplit
 
 from cryptography.fernet import MultiFernet
 from daimon.core.config import Settings
+from daimon.core.confirmation import SharedConnectionCard
 from daimon.core.features.snapshot import FeaturePlace, Sessions, place_feature_or_none
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_https_url
-from daimon.core.mcp_server_url import ascii_mcp_url
+from daimon.core.mcp_server_url import ascii_mcp_url, shown_mcp_url
 from daimon.core.mcp_tool_call import (
     INTERACTIVE_LIMITS,
     McpCallError,
@@ -64,6 +65,7 @@ __all__ = [
     "ASK_FEATURE",
     "DAIMON_TOOL_NAMES",
     "FEATURE",
+    "SERVED_TAG",
     "WRITE_NOTE",
     "NAME_PATTERN",
     "SCOPE_PATTERN",
@@ -74,9 +76,11 @@ __all__ = [
     "SharedTool",
     "add_connection",
     "approve_tool",
+    "card_lookup",
     "call_upstream",
     "checked_address",
     "encrypt_auth",
+    "find_connection",
     "decide_shared_call",
     "is_served_name",
     "refresh_connection",
@@ -89,6 +93,8 @@ __all__ = [
 
 FEATURE: Final = "shared_connections"
 ASK_FEATURE: Final = "shared_write_approval"
+#: The tag of every served tool: listed by name, not behind search, and open to agent keys.
+SERVED_TAG: Final = "shared-connection"
 """Whether a shared write asks on a card in chat: on (`ask`) by default."""
 WRITE_NOTE: Final = "This tool changes things. Ask your user and get their yes before you call it."
 NAME_PATTERN: Final = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
@@ -524,3 +530,47 @@ async def call_upstream(
             return _result_of(await up.call_tool_result(shared.tool.name, arguments))
     except McpCallError as err:
         raise SharedConnectionError("The connection didn't answer. Try again later.") from err
+
+
+async def find_connection(
+    db: AsyncSession, tenant_id: uuid.UUID, ref: str
+) -> McpConnectionRow | None:
+    """A connection by its id or its name, as listed."""
+    try:
+        return await store.get_connection(
+            db, tenant_id=tenant_id, connection_id=uuid.UUID(ref.strip())
+        )
+    except ValueError:
+        return await store.get_connection_by_name(db, tenant_id=tenant_id, name=ref.strip())
+
+
+def card_lookup(
+    sessions: Sessions, *, tenant_id: uuid.UUID
+) -> Callable[[ToolCall], Awaitable[SharedConnectionCard | None]]:
+    """What a chat change names, from the store: `None` when it is gone, or when turn_on's
+    `seen` no longer matches what the upstream shows."""
+
+    async def _lookup(call: ToolCall) -> SharedConnectionCard | None:
+        data = call.input
+        if call.tool_name == "change_shared_connection" and data.get("action") == "add":
+            return SharedConnectionCard(
+                str(data.get("name") or ""), shown_mcp_url(str(data.get("url") or ""))
+            )
+        async with sessions() as db:
+            row = await find_connection(db, tenant_id, str(data.get("connection") or ""))
+            if row is None:
+                return None
+            card = SharedConnectionCard(row.name, shown_mcp_url(row.url))
+            if call.tool_name == "change_shared_connection":
+                return card
+            tools = await store.list_tools(db, tenant_id=tenant_id, connection_id=row.id)
+        tool = next((t for t in tools if t.name == data.get("tool")), None)
+        if tool is None:
+            return None
+        if data.get("action") != "turn_on":
+            return replace(card, tool=tool.name, description=tool.description, writes=tool.writes)
+        if data.get("seen") != seen_digest(tool):
+            return None
+        return replace(card, tool=tool.name, description=tool.seen_description, writes=tool.writes)
+
+    return _lookup
