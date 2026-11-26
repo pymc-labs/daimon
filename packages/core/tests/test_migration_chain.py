@@ -197,6 +197,7 @@ TAIL = (
     "0233_turn_origin_public_thread",
     "0234_evals_foundation",
     "0235_eval_scrub_entities",
+    "0236_eval_world",
 )
 HEAD = TAIL[-1]
 
