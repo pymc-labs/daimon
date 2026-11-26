@@ -134,6 +134,13 @@ def failing(error: ProviderError) -> AsyncIterator[Object]:
     return OwnedStream(fail(), nothing)
 
 
+class Refused:
+    """The stream open itself fails with `error`; `finish` first ends the interaction."""
+
+    def __init__(self, error: ProviderError, *, finish: bool = False) -> None:
+        self.error, self.finish = error, finish
+
+
 def http_error(category: str, status: int, *, retryable: bool) -> ProviderError:
     """What `transport.normalize_error` yields for an unmapped HTTP status."""
     return ProviderError(category, retryable=retryable, native_error_code=f"http_{status}")
@@ -144,10 +151,11 @@ def fast_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gemini_turn, "STREAM_RETRY_BASE_S", 0.01)
 
 
-def script(harness: Harness, streams: list[str | ProviderError]) -> list[int]:
+def script(harness: Harness, streams: list[str | ProviderError | Refused]) -> list[int]:
     """Serve one scripted behaviour per stream open: 'stall', 'complete' or an error.
 
-    'complete' finishes the interaction natively and serves the real stream.
+    'complete' finishes the interaction natively and serves the real stream. A
+    `ProviderError` fails the stream's first read; a `Refused` fails the open.
     Opens past the script stall.
     """
     harness.transport.responses.append(interaction("in_progress"))
@@ -159,6 +167,10 @@ def script(harness: Harness, streams: list[str | ProviderError]) -> list[int]:
     ) -> AsyncIterator[Object]:
         opened.append(1)
         behaviour = streams[len(opened) - 1] if len(opened) <= len(streams) else "stall"
+        if isinstance(behaviour, Refused):
+            if behaviour.finish:
+                harness.transport.saved["host"] = interaction("completed")
+            raise behaviour.error
         if isinstance(behaviour, ProviderError):
             return failing(behaviour)
         if behaviour == "complete":
@@ -280,6 +292,69 @@ async def test_definite_stream_failures_end_the_turn_and_stop_the_interaction(
     assert state.termination == TerminationReason.UPSTREAM
     assert len(lifecycle.terminal_failures) == 1
     # The host gave up, so Gemini must not keep running (and spending).
+    assert harness.transport.cancelled == ["host"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 404, 409])
+async def test_a_refused_reopen_while_running_polls_until_the_interaction_ends(
+    harness: Harness, status: int
+) -> None:
+    # A silent stream past the read timeout, a status check that says running,
+    # then Gemini refuses every re-open while the interaction still runs, and
+    # still refuses the one after it ends: the answer comes from its saved steps.
+    category = {400: "invalid_request", 404: "not_found", 409: "conflict"}[status]
+    refused = http_error(category, status, retryable=False)
+    opened = script(
+        harness, ["stall", Refused(refused), Refused(refused), Refused(refused, finish=True)]
+    )
+    answered(*await turn(harness))
+    assert len(opened) == 4 and len(harness.transport.requests) == 1  # never re-sent
+    assert harness.transport.cancelled == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        http_error("auth", 401, retryable=False),
+        http_error("permission", 403, retryable=False),
+        ProviderError("permission", retryable=False, native_code="gcs_token_echo"),
+        ProviderError(
+            "rate_limited", retryable=False, native_code="quota_daily", native_error_code="http_429"
+        ),
+    ],
+)
+async def test_a_definite_refusal_on_a_reopen_still_ends_the_turn(
+    harness: Harness, error: ProviderError
+) -> None:
+    # Only a plain 4xx is polled: auth, permission, the driver's own checks and
+    # rate limits keep their own ends even after a status read said running.
+    script(harness, ["stall", Refused(error)])
+    state, lifecycle = await turn(harness)
+    assert state.termination != TerminationReason.COMPLETED
+    assert len(lifecycle.terminal_failures) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_refused_first_open_still_ends_the_turn(harness: Harness) -> None:
+    # Deliberate: a turn's first open in this process is never polled, including
+    # a turn resumed after a restart that re-attaches to a running interaction.
+    # No status read in this turn has said the interaction is running yet.
+    script(harness, [Refused(http_error("invalid_request", 400, retryable=False))])
+    state, lifecycle = await turn(harness)
+    assert state.termination == TerminationReason.UPSTREAM
+    assert len(lifecycle.terminal_failures) == 1
+    assert harness.transport.cancelled == ["host"]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_reopen_that_never_ends_is_the_ceiling(harness: Harness) -> None:
+    refused = http_error("invalid_request", 400, retryable=False)
+    script(harness, ["stall", *[Refused(refused)] * 1000])
+    state, lifecycle = await turn(harness, deadline_s=1.0)
+    assert state.termination == TerminationReason.CEILING
+    assert len(lifecycle.terminal_failures) == 1
     assert harness.transport.cancelled == ["host"]
 
 

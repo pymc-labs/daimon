@@ -13,15 +13,74 @@ Keep one logical change per PR, fill in the `## Summary` and `## Checklist`
 sections of the PR template, and make `pytest`, `pyright`, `ruff` and
 `lint-imports` pass locally before asking for review.
 
-## User-facing text
+## Make it dumb simple
 
-Anything a person reads in Discord, Slack or Teams (cards, buttons, refusals,
-notices, tool results the model relays) is dumb simple:
+The people who use Daimon are members of a team in a chat app. They are not
+engineers, and they are busy. The bar for all that they meet: a tired person
+with no technical knowledge can scan it and act.
 
-- One line for what is happening, one line for what to do.
-- A button over prose; never ask someone to type what a button can do.
-- Everyday words, the same on every platform: no internal terms, no " · " separators.
-- A refusal names who can help ("Ask an admin or an owner").
+This is a design rule before it is a wording rule. Plain words do not rescue a
+flow that makes a person learn a concept, choose between modes or remember a
+command. Decide it when you design the feature, not when you write the card. It
+comes before speed of build.
+
+It covers all that a person can meet: cards, buttons, refusals, notices, the web
+app, the names of settings and their choices. It also covers what the model reads
+and repeats to a person: tool names, tool descriptions, tool results and notices
+to the agent. Operators who run Daimon (the CLI, environment settings, logs) are
+a different reader; exact technical words are right for them.
+
+1. **Do the hard work, so the person does not.** Daimon decides, remembers and
+   recovers where its permissions allow. Where they do not, it gives a button or
+   a link to the action and says who can take it. Complexity does not go away:
+   we carry it one time, or each person carries it each time.
+2. **Do less.** Each concept, mode, setting and step costs every person who meets
+   it. Add one only when a person needs the choice, and give it a default that
+   works for most people. Name each choice by its effect, so a person can tell
+   what changes. Send an answer with no extra card when no permission, decision
+   or error needs one, and do not fill a chat with cards. More choices make each
+   decision slower, and most people keep the default.
+3. **Ask late.** Ask for a sign-in, a permission or a decision only when a task
+   needs it, and say why in one line. Keep what the decision needs in view (a
+   cost, who receives it, whose account is used, what is deleted) and put other
+   detail behind a button. A person who has not met the problem does not need
+   its explanation.
+4. **One thing, one name, in the person's words.** Use the name a person would
+   say ("cloud computer") on cards, in tool descriptions and results, in settings
+   and in the docs. Never show a name made for code: a tool name, an argument, a
+   setting key, an id, a reason code or JSON. Text that falls back to one is a
+   bug. The model repeats our words, and two names read as two things.
+5. **Two lines and a button.** One line for what is happening, one line for what
+   to do. A button over prose; never ask someone to type what a button can do.
+   No " · " separators: each fact gets its own line. Use the same words on every
+   platform. A card is a piece of UI, not a message from an assistant: no
+   greeting, no filler, and space between things that are separate. People scan
+   a card, and few read it.
+6. **A problem ends with a next step.** Say what happened as the person saw it,
+   not what broke inside. Then give a step that resolves it, as a button or a
+   link where one exists, or name who can help ("Ask an admin or an owner").
+   "That didn't work. Try again." gives neither.
+
+Text in the code today that these rules stop:
+
+| Daimon's text | Rule | Instead |
+| --- | --- | --- |
+| A card titled "Compute launch session" with "Ttl hours: 4" | 4 | "Start a cloud computer for 4 hours?" |
+| "Ask an admin to check the image profile it was launched from." | 4 | "The cloud computer could not start, so it is being removed. Ask an admin." |
+| "Ask a server admin to set approval for cloud computers to Ask." | 1 | offer the usual time, or give the admin a link to the setting |
+| "Ask an admin to run /dm-me enable." | 5 | a button the admin presses |
+| A setting with the choices "Off", "Report only", "On" | 2 | choices that say what each one does |
+
+Before you call it done, open the card, panel or reply as the person meets it,
+not its source. Ask: can someone who has never heard of this act on it after one
+look? Did they have to learn a word, pick a mode or type a command?
+
+These are our rules. They apply "Do the hard work to make it simple" from the
+GOV.UK Government Design Principles
+(<https://www.gov.uk/guidance/government-design-principles>) and Nielsen Norman
+Group's usability heuristics on familiar words, consistency, recognition over
+recall and recovery from errors
+(<https://www.nngroup.com/articles/ten-usability-heuristics/>).
 
 Errors and notices are never hardcoded text in or beside the agent's reply:
 
@@ -34,9 +93,12 @@ Errors and notices are never hardcoded text in or beside the agent's reply:
 
 `tests/parity/test_agent_notices.py` records the first rule.
 
-`tests/parity/test_plain_words.py` and `tests/parity/test_plain_words_parity.py`
-enforce the words and the separators; Daimon's own prompt carries the setup part
-(`defaults/agents/default.yaml`).
+`tests/parity/test_plain_words.py`, `tests/parity/test_plain_words_web.py` and
+`tests/parity/test_plain_words_parity.py` enforce a list of words and the
+separators; Daimon's own prompt carries the setup part
+(`defaults/agents/default.yaml`). These tests cover the listed words and
+selected messages. They do not read a tool docstring, and they do not prove that
+a flow is easy, so check those yourself.
 
 ## One rule, every path
 
