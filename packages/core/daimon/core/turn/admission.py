@@ -717,6 +717,7 @@ async def admit(
     is_dm: bool = False,
     dm_source_channel_id: str | None = None,
     dm_agent_name: str | None = None,
+    routine_agent_name: str | None = None,
     dm_no_source: bool = False,
     cold_dm: bool = False,
     category_id: str | None = None,
@@ -745,7 +746,8 @@ async def admit(
     `surface` overrides the DM-or-channel surface (the web chat), and
     `principal_platform` names the platform `external_user_id` belongs to when it
     is not the one the turn runs on (a web person linked to a platform account).
-    `helper` admits a helper's turn as its agent (`admit_helper`).
+    `helper` admits a helper's turn as its agent (`admit_helper`), and
+    `routine_agent_name` a routine's fire as the routine's own agent.
     """
     observation = current_outcome.get() or TurnObservation(
         deps.sessionmaker, tenant_id, platform, channel_id, thread_id
@@ -768,6 +770,7 @@ async def admit(
                 is_dm=is_dm,
                 dm_source_channel_id=dm_source_channel_id,
                 dm_agent_name=dm_agent_name,
+                routine_agent_name=routine_agent_name,
                 dm_no_source=dm_no_source,
                 cold_dm=cold_dm,
                 category_id=category_id,
@@ -905,6 +908,7 @@ async def admit_impl(
     is_dm: bool = False,
     dm_source_channel_id: str | None = None,
     dm_agent_name: str | None = None,
+    routine_agent_name: str | None = None,
     dm_no_source: bool = False,
     cold_dm: bool = False,
     category_id: str | None = None,
@@ -944,6 +948,7 @@ async def admit_impl(
         is_dm=is_dm,
         dm_source_channel_id=dm_source_channel_id,
         dm_agent_name=dm_agent_name,
+        routine_agent_name=routine_agent_name,
         dm_no_source=dm_no_source,
         cold_dm=cold_dm,
         category_id=category_id,
@@ -985,6 +990,7 @@ async def _admit_gates(
     is_dm: bool = False,
     dm_source_channel_id: str | None = None,
     dm_agent_name: str | None = None,
+    routine_agent_name: str | None = None,
     dm_no_source: bool = False,
     cold_dm: bool = False,
     category_id: str | None = None,
@@ -1180,6 +1186,13 @@ async def _admit_gates(
                 raise ValueError("A cold DM agent override requires a fresh private scope")
             config = config.model_copy(
                 update={"agent_name": dm_agent_name, "responder_ma_agent_id": None}
+            )
+        if routine_agent_name is not None:
+            # A routine runs its own agent, not the channel's, in a fresh scope.
+            if thread_id is not None:
+                raise ValueError("A routine's agent override requires a fresh scope")
+            config = config.model_copy(
+                update={"agent_name": routine_agent_name, "responder_ma_agent_id": None}
             )
         # Feature-disabled turns retain the existing channel read and skip all
         # agent preference, materialization and thread-pinning work.
