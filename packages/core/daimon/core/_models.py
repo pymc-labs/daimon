@@ -1365,6 +1365,10 @@ class TenantRetirement(Base):
     # Consecutive failed passes, and when the next may run (`stores.tenant_retirement.defer`).
     failures: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Failed tries per `kind:item`, so one stuck item is given up on (`note_failure`).
+    tries: Mapped[dict[str, int]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
 
 
 class AgentMemoryStore(Base):

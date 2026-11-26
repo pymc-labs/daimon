@@ -102,16 +102,19 @@ memory, credentials and their vaults, skills, reports and notebooks are deleted,
 that an interrupted run resumes. Its Anthropic agents are archived, as
 Anthropic offers no way to delete them. Usage not yet settled delays it. Reinstalling before then keeps
 everything. Reinstalling during a retirement stops it: what was not yet
-deleted is kept, and the Anthropic cleanup still queued is abandoned.
+deleted is kept, and the Anthropic cleanup still queued is abandoned. An
+Anthropic resource whose deletion keeps failing is given up after 12 tries.
 
 Conversation history is on by default. An operator turns it off with
 `DAIMON_FEATURES__CONVERSATION_RETENTION=0`, and a workspace admin can shorten
 it in `/settings`.
 
 When a workspace is retired, its billing, usage and support-credit records
-are kept for accounting without the person, account or thread they came from,
-so a reinstalled workspace keeps its balance and the support credits it spent.
-Per-person support limits are deleted. Notebooks keep the expiry
+are kept for accounting without the account or thread they came from. Usage
+keeps no person. A support request keeps only a one-way hash of its
+requester's platform id, so after a reinstall the workspace keeps its balance
+and each person keeps the support credits they spent. Per-person support limit
+settings are deleted. Notebooks keep the expiry
 they were published with, at most 365 days.
 
 Blogs are public pages someone published on purpose, so they have no expiry.

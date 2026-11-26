@@ -38,6 +38,9 @@ def upgrade() -> None:
         ),
         sa.Column("failures", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("next_attempt_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column(
+            "tries", postgresql.JSONB(), nullable=False, server_default=sa.text("'{}'::jsonb")
+        ),
     )
 
 

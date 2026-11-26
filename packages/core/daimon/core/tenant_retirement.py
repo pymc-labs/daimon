@@ -145,7 +145,7 @@ def deleters(
     client = client.with_options(timeout=_UPSTREAM_TIMEOUT_SECONDS)
     scope = resource_scope(tenant_id=str(tenant_id), authorization_id="tenant-retirement")
     vault_scope = platform_scope("tenant_retirement.named_vaults")
-    listed: list[tuple[str, str]] = []
+    listed: list[tuple[str, str]] | None = None
 
     async def memory_store(store_id: str) -> None:
         await delete_memory_store(client, store_id, scope=scope)
@@ -155,10 +155,9 @@ def deleters(
 
     async def named_vaults(owner: str) -> None:
         # Listed once per pass: every owner's vaults come from the same listing.
-        if not listed:
-            listed.extend(
-                [(v.id, v.display_name) async for v in list_vaults(client, scope=vault_scope)]
-            )
+        nonlocal listed
+        if listed is None:
+            listed = [(v.id, v.display_name) async for v in list_vaults(client, scope=vault_scope)]
         for vault_id, name in listed:
             if names_owner(name, owner):
                 await delete_vault(client, vault_id, scope=vault_scope)
@@ -194,22 +193,36 @@ def deleters(
 # Client errors a retry cannot fix. Auth and permission errors are left out: a bad key
 # would otherwise drop the whole queue.
 _RETRYABLE_CLIENT_ERRORS = {401, 403, 408, 409, 429}
+# Failures about the whole provider (a bad key, a rate limit, no connection): the kind
+# waits for the next pass, and no item is charged a try.
+_PROVIDER_WIDE = {401, 429}
+
+
+def _status(error: Exception) -> int | None:
+    if isinstance(error, ProviderError):
+        return {"auth": 401, "rate_limited": 429, "invalid_request": 400}.get(error.category)
+    if isinstance(error, anthropic_errors.APIStatusError):
+        return error.status_code
+    if isinstance(error, httpx.HTTPStatusError):
+        return error.response.status_code
+    return None
 
 
 def _permanent(error: Exception) -> bool:
     """Whether an upstream failure is about the item itself, so retrying is pointless."""
-    if isinstance(error, ProviderError):
-        return error.category == "invalid_request"
-    if isinstance(error, anthropic_errors.APIStatusError):
-        status = error.status_code
-    elif isinstance(error, httpx.HTTPStatusError):
-        status = error.response.status_code
-    else:
-        return False
-    return 400 <= status < 500 and status not in _RETRYABLE_CLIENT_ERRORS
+    status = _status(error)
+    return status is not None and 400 <= status < 500 and status not in _RETRYABLE_CLIENT_ERRORS
 
 
-Cleaned = Literal["done", "retry", "stopped"]
+def _provider_wide(error: Exception) -> bool:
+    if isinstance(error, (anthropic_errors.APIConnectionError, httpx.TransportError)):
+        return True
+    if isinstance(error, ProviderError) and error.category == "transient_network":
+        return True
+    return _status(error) in _PROVIDER_WIDE
+
+
+Cleaned = Literal["done", "retry", "stop_kind", "stopped"]
 
 
 async def _clean_item(
@@ -219,8 +232,9 @@ async def _clean_item(
     item: str,
     delete: Deleter,
 ) -> Cleaned:
-    """Delete one queued item under the tenant lock: done (or dropped as permanent),
-    retry later, or stopped because the tenant came back or the item is gone."""
+    """Delete one queued item under the tenant lock: done (or dropped as permanent or
+    after `ITEM_TRIES`), retry later, stop the kind on a provider-wide failure, or
+    stopped because the tenant came back or the item is gone."""
     async with sm() as session, session.begin():
         if not await store.lock_item(session, tenant_id=tenant_id, kind=kind, item=item):
             return "stopped"
@@ -235,9 +249,15 @@ async def _clean_item(
                 "error": type(error).__name__,
                 "causes": backend_refusal_causes(error),
             }
-            if not _permanent(error):
+            if _provider_wide(error):
                 log.warning("tenant_retirement.upstream_failed", **fields)
-                return "retry"
+                return "stop_kind"
+            if not _permanent(error):
+                key = f"{kind}:{item}"
+                tries = await store.note_failure(session, tenant_id=tenant_id, key=key)
+                if tries < store.ITEM_TRIES:
+                    log.warning("tenant_retirement.upstream_failed", **fields)
+                    return "retry"
             # Logged once: the item leaves the queue, so it is never retried.
             log.warning("tenant_retirement.upstream_dropped", **fields)
     return "done"
@@ -256,35 +276,42 @@ async def clean_upstream(
     sm: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, deleters: Mapping[str, Deleter]
 ) -> bool:
     """Delete one tenant's queued upstream resources, one transaction per item, each
-    re-checking that the tenant is still retired. A kind stops at its first retryable
-    failure and the queue backs off. True when nothing is left."""
+    re-checking that the tenant is still retired. A failed item is passed over; a kind
+    stops at a provider-wide failure, and the queue backs off. True when nothing is left."""
     async with sm() as session:
         pending = await store.get_work(session, tenant_id=tenant_id)
     if pending is None:
         return True
-    failed = False
+    failed = progressed = False
     for kind in store.PENDING_KINDS:
         done: set[str] = set()
+        kind_failed = finished = False
         try:
             for item in pending.get(kind, []):
                 outcome = await _clean_item(sm, tenant_id, kind, item, deleters[kind])
                 if outcome == "stopped":
                     await _remove(sm, tenant_id, kind, done)
                     return await _finished(sm, tenant_id)
-                if outcome == "retry":
-                    failed = True
-                    break
+                if outcome != "done":
+                    kind_failed = True
+                    if outcome == "stop_kind":
+                        break
+                    continue
                 done.add(item)
+                finished = True
                 if len(done) >= _REMOVE_BATCH:
                     await _remove(sm, tenant_id, kind, done)
         # Boundary: one kind failing in an unforeseen way must not starve the others.
         except Exception:
-            failed = True
+            kind_failed = True
             log.exception("tenant_retirement.kind_failed", tenant_id=str(tenant_id), kind=kind)
         await _remove(sm, tenant_id, kind, done)
+        failed |= kind_failed
+        progressed |= kind_failed and finished
     if failed:
         async with sm() as session, session.begin():
-            await store.defer(session, tenant_id=tenant_id, now=datetime.now(UTC))
+            now = datetime.now(UTC)
+            await store.defer(session, tenant_id=tenant_id, now=now, progressed=progressed)
     return await _finished(sm, tenant_id)
 
 

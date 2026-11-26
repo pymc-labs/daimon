@@ -106,8 +106,8 @@ _SCRUBBED_ON_BEGIN = {"support_escalations", "support_limits"}
 # Ledger keys that name a provider session (`turn:<session>:<id>`) or a person
 # (`promo:<code>:<tenant>:<channel>:<account>`). Keys that only name the tenant stay
 # as they are, so a reinstall still finds its trial, promo and payment keys taken.
-_PERSON_LEDGER_KEY = (
-    "^(turn|media|classifier|thread-naming|owner-notice):|^promo:[^:]+:[^:]+:[^:]+:[^:]+$"
+PERSON_LEDGER_KEY = (
+    "^(turn|media|classifier|thread-naming|owner-notice):|^promo:[^:]+:[^:]+:.+:[^:]+$"
 )
 # Person paths inside a kept observation. The outbox row and the usage revision hold the
 # same observation, compared for equality on replay, so both are cleared alike.
@@ -141,6 +141,8 @@ SESSION_ID_PREFIX = "sesn_"
 # A failed queue waits this long, doubling per failure up to the cap.
 RETRY_FIRST = timedelta(minutes=1)
 RETRY_MAX = timedelta(hours=6)
+# An item that failed this many passes is given up on, so it cannot hold its queue forever.
+ITEM_TRIES = 12
 
 
 def is_tenant_scoped(table: Table) -> bool:
@@ -242,7 +244,7 @@ async def _scrub(session: AsyncSession, tenant_id: uuid.UUID) -> None:
                 values[column] = literal("retired:") + func.md5(col)
             elif column == "idempotency_key":
                 col = cast(Column[str], table.c[column])
-                person = col.regexp_match(_PERSON_LEDGER_KEY)
+                person = col.regexp_match(PERSON_LEDGER_KEY)
                 values[column] = case((person, literal("retired:") + func.md5(col)), else_=col)
             elif column in ("row", "applied"):
                 value: Any = table.c[column]
@@ -402,14 +404,31 @@ async def list_work(
     return [(tenant_id, pending) for tenant_id, pending in rows.tuples()]
 
 
-async def defer(session: AsyncSession, *, tenant_id: uuid.UUID, now: datetime) -> None:
-    """Back a queue off after a failed delete, so a revoked key is not retried every tick."""
+async def defer(
+    session: AsyncSession, *, tenant_id: uuid.UUID, now: datetime, progressed: bool = False
+) -> None:
+    """Back a queue off after a failed delete, so a revoked key is not retried every tick.
+    `progressed`: the failing kind still deleted something, so the backoff starts over."""
     row = await session.scalar(
         select(TenantRetirement).where(TenantRetirement.tenant_id == tenant_id).with_for_update()
     )
     if row is not None:
+        if progressed:
+            row.failures = 0
         row.next_attempt_at = now + min(RETRY_FIRST * 2 ** min(row.failures, 16), RETRY_MAX)
         row.failures += 1
+
+
+async def note_failure(session: AsyncSession, *, tenant_id: uuid.UUID, key: str) -> int:
+    """Count one failed try of a queued `kind:item`; returns its tries so far."""
+    row = await session.scalar(
+        select(TenantRetirement).where(TenantRetirement.tenant_id == tenant_id).with_for_update()
+    )
+    if row is None:
+        return 0
+    tries = row.tries.get(key, 0) + 1
+    row.tries = {**row.tries, key: tries}
+    return tries
 
 
 async def get_work(session: AsyncSession, *, tenant_id: uuid.UUID) -> dict[str, list[str]] | None:
@@ -452,5 +471,6 @@ async def remove_done(
         await session.delete(row)
         return True
     row.pending = pending
-    row.failures, row.next_attempt_at = 0, None
+    gone = {f"{kind}:{item}" for item in done}
+    row.tries = {key: n for key, n in row.tries.items() if key not in gone}
     return False

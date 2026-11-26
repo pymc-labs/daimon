@@ -33,17 +33,9 @@ BACKFILL_BATCH = 1000
 def upgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
     bind = op.get_bind()
-    # Existing rows take this transaction's now(), or an earlier failed run's.
+    # Existing rows take this run's now(); a turn since then stamps a later time.
     stamp = bind.scalar(sa.text("SELECT now()"))
     # Idempotent up to the backfill, which commits as it goes: a failed run is rerun whole.
-    op.execute(
-        "ALTER TABLE thread_sessions "
-        "ADD COLUMN IF NOT EXISTS last_turn_at timestamptz NOT NULL DEFAULT now()"
-    )
-    op.execute(
-        "ALTER TABLE journal_session "
-        "ADD COLUMN IF NOT EXISTS last_appended_at timestamptz NOT NULL DEFAULT now()"
-    )
     op.execute(
         "DELETE FROM slack_turn_contexts c "
         "WHERE NOT EXISTS (SELECT 1 FROM tenants t WHERE t.id = c.tenant_id)"
@@ -53,9 +45,19 @@ def upgrade() -> None:
         f"ALTER TABLE slack_turn_contexts ADD CONSTRAINT {FK} FOREIGN KEY (tenant_id) "
         "REFERENCES tenants (id) ON DELETE CASCADE NOT VALID"
     )
+    # Last, so their exclusive locks cover only instant statements until the commit.
+    op.execute(
+        "ALTER TABLE thread_sessions "
+        "ADD COLUMN IF NOT EXISTS last_turn_at timestamptz NOT NULL DEFAULT now()"
+    )
+    op.execute(
+        "ALTER TABLE journal_session "
+        "ADD COLUMN IF NOT EXISTS last_appended_at timestamptz NOT NULL DEFAULT now()"
+    )
     with op.get_context().autocommit_block():
         op.execute(f"ALTER TABLE slack_turn_contexts VALIDATE CONSTRAINT {FK}")
         # One read of turn_outcomes, which has no index on session_id; it locks nothing.
+        op.execute("DROP TABLE IF EXISTS last_turns")
         op.execute(
             "CREATE TEMP TABLE last_turns AS SELECT session_id, max(started_at) AS started_at "
             "FROM turn_outcomes WHERE session_id IS NOT NULL GROUP BY session_id"

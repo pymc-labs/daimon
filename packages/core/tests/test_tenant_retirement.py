@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -34,7 +35,7 @@ from daimon.core._models import (
 from daimon.core.config import Settings, load_settings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import SettlePending
-from daimon.core.stores import slack_bot_tokens, tenant_ledger, tenants
+from daimon.core.stores import slack_bot_tokens, support_escalation, tenant_ledger, tenants
 from daimon.core.stores import tenant_retirement as store
 from daimon.core.stores.domain import TenantRow
 from daimon.core.stores.tenants import get_tenant
@@ -115,7 +116,14 @@ async def test_retirement_keeps_the_balance_and_the_spent_trial(
     tenant_id = await _seed(db_session, db_session_factory, "retired-guild")
     account_id = await db_session.scalar(select(Account.id).where(Account.tenant_id == tenant_id))
     await make_support_escalation(db_session, tenant_id=tenant_id, account_id=account_id)
-    await db_session.flush()
+    await db_session.execute(
+        update(SupportEscalation).values(
+            ma_session_id="sesn_a", settled_by="U2", settled_by_account_id=account_id
+        )
+    )
+    spent = await support_escalation.default_spent(
+        db_session, tenant_id=tenant_id, platform_user_id="U1"
+    )
     balance = await tenant_ledger.get_balance(db_session, tenant_id=tenant_id)
     ledger_rows = await db_session.scalar(select(func.count()).select_from(TenantLedger))
 
@@ -134,9 +142,10 @@ async def test_retirement_keeps_the_balance_and_the_spent_trial(
     assert usage.platform_user_id is None, "kept usage no longer names the person"
     assert usage.managed_session_id.startswith("retired:"), "nor the conversation"
     support = (await db_session.scalars(select(SupportEscalation))).one()
-    assert (support.account_id, support.platform_user_id, support.note) == (None, "purged", ""), (
-        "the spent support credit stays without the person"
-    )
+    person = (support.account_id, support.ma_session_id, support.settled_by, support.note)
+    assert person == (None, None, None, ""), "the spent support credit stays without the person"
+    assert support.settled_by_account_id is None, "nor who settled it"
+    assert support.platform_user_id == support_escalation.retired_user("U1"), "only a pseudonym"
     assert await tenant_ledger.get_balance(db_session, tenant_id=tenant_id) == balance, (
         "the balance survives retirement"
     )
@@ -156,6 +165,12 @@ async def test_retirement_keeps_the_balance_and_the_spent_trial(
         "a reinstall grants no second trial"
     )
     assert await tenant_ledger.get_balance(db_session, tenant_id=tenant_id) == balance
+    assert spent and spent == await support_escalation.default_spent(
+        db_session, tenant_id=tenant_id, platform_user_id="U1"
+    ), "a reinstall gives no one fresh support credits"
+    assert await support_escalation.delete_support_escalations_for_platform_user(
+        db_session, tenant_id=tenant_id, platform_user_id="U1"
+    ), "erasing the person still finds their kept requests"
     tenant = await db_session.get(Tenant, tenant_id, populate_existing=True)
     assert tenant is not None and tenant.retired_at is None, "a reinstall ends the retirement"
     assert await store.get_work(db_session, tenant_id=tenant_id) is None, (
@@ -597,6 +612,64 @@ async def test_a_permanent_client_error_is_dropped_and_a_broken_kind_is_isolated
     )
 
 
+async def test_a_stuck_item_is_passed_over_and_given_up_after_its_tries(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_id = uuid.uuid4()
+    db_session.add(TenantRetirement(tenant_id=tenant_id, pending={"sessions": ["stuck", "ok"]}))
+    await db_session.flush()
+    deleted: list[str] = []
+
+    async def delete(item: str) -> None:
+        if item == "stuck":
+            raise _status(409)
+        deleted.append(item)
+
+    deleters: dict[str, tenant_retirement.Deleter] = dict.fromkeys(store.PENDING_KINDS, delete)
+    monkeypatch.setattr(store, "ITEM_TRIES", 2)
+    assert not await tenant_retirement.clean_upstream(
+        db_session_factory, tenant_id=tenant_id, deleters=deleters
+    ), "the stuck item stays for a retry"
+    assert deleted == ["ok"], "the next item is not blocked"
+    assert await tenant_retirement.clean_upstream(
+        db_session_factory, tenant_id=tenant_id, deleters=deleters
+    ), "the stuck item is given up after its tries"
+
+
+async def test_the_backoff_doubles_to_its_cap_and_progress_elsewhere_keeps_it(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant_id = uuid.uuid4()
+    row = TenantRetirement(tenant_id=tenant_id, pending={"sessions": ["stuck"], "skills": ["sk"]})
+    db_session.add(row)
+    await db_session.flush()
+    now = datetime.now(UTC)
+    delays: list[timedelta | None] = []
+    for _ in range(10):
+        await store.defer(db_session, tenant_id=tenant_id, now=now)
+        delays.append(row.next_attempt_at and row.next_attempt_at - now)
+    minute = timedelta(minutes=1)
+    assert delays[:3] == [minute, 2 * minute, 4 * minute], "the wait doubles"
+    assert delays[-1] == store.RETRY_MAX, "up to its cap"
+    due = {t for t, _ in await store.list_work(db_session, now=now + store.RETRY_MAX)}
+    assert tenant_id in due, "due after its wait"
+    assert tenant_id not in {t for t, _ in await store.list_work(db_session, now=now)}, "not before"
+
+    async def delete(item: str) -> None:
+        if item == "stuck":
+            raise _status(409)
+
+    await tenant_retirement.clean_upstream(
+        db_session_factory, tenant_id=tenant_id, deleters=dict.fromkeys(store.PENDING_KINDS, delete)
+    )
+    await db_session.refresh(row)
+    assert row.pending["skills"] == [] and row.failures == 11, (
+        "another kind's progress does not reset the failing kind's backoff"
+    )
+
+
 async def test_retiring_at_once_refuses_settling_usage_unless_forced(
     own_connections: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -637,6 +710,19 @@ def _observation(tenant_id: uuid.UUID) -> dict[str, Any]:
         completeness="measured",
         observed_at=datetime(2026, 1, 1, tzinfo=UTC),
     ).model_dump(mode="json")
+
+
+@pytest.mark.parametrize(
+    ("key", "person"),
+    [
+        ("promo:code:tenant", False),
+        ("promo:code:tenant:C1:acct", True),
+        ("promo:code:tenant:19:abc@thread.tacv2:acct", True),
+        ("turn:abc", True),
+    ],
+)
+def test_ledger_keys_that_name_a_person_are_matched(key: str, person: bool) -> None:
+    assert bool(re.search(store.PERSON_LEDGER_KEY, key)) == person, "a Teams id may hold `:`"
 
 
 async def test_kept_settlement_records_lose_who_and_where_but_stay_equal(
