@@ -1534,6 +1534,7 @@ async def test_hand_off_then_switch_moves_the_copy_with_its_summary_too(
             runtime, auth, origin, "research-bot", "gemini", pinned_here=False
         )
     assert moved.startswith("This conversation moves to Gemini")
+    assert "continues from the summary" in moved, "a copy doesn't keep the earlier messages"
     async with committing_sessionmaker.begin() as session:
         assert len(await pending_releases(session, tenant_id=tenant.id)) == 1
         taken = await take_handoff_summary(

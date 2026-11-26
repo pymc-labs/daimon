@@ -18,6 +18,7 @@ from typing import Any
 
 import structlog
 from daimon.adapters.discord.notice_card import build_notice_embed
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.media.filenames import display_filename_for, sanitize_title
 from daimon.core.output_delivery import (
     MAX_BYTES_CEILING,
@@ -29,6 +30,7 @@ from daimon.core.output_delivery import (
     sweep_outputs,
 )
 from daimon.core.output_runtime import OutputRuntime
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
 
@@ -104,6 +106,7 @@ async def deliver_session_outputs(
     requester_id: int | None = None,
     requester_label: str | None = None,
     reply_to: int | None = None,
+    sessions: async_sessionmaker[AsyncSession] | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     """Attach session outputs to the turn's answer; leave failed uploads listed for retry.
@@ -188,6 +191,12 @@ async def deliver_session_outputs(
             sleep=sleep,
             max_bytes=max_bytes,
             noticed=noticed_files,
+            # A DM has no guild, hence no tenant here.
+            tenant_id=derive_tenant_uuid(platform="discord", workspace_id=str(thread.guild.id))
+            if thread.guild is not None
+            else None,
+            platform="discord",
+            sessions=sessions,
         )
     except OutputPostingUnavailable as exc:
         reason = str(exc)

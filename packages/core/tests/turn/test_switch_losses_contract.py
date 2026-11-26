@@ -14,6 +14,7 @@ from daimon.core.tool_safety import confirmation_gated_tools
 
 from ..test_agent_backend import owned as owned
 from .test_declared_drop_preparation import switched_request as switched_request
+from .test_gemini_full_source import UNSEEDED_BUILT_INS
 from .test_gemini_template_mcp import CONNECTOR_PARAMS as GEMINI_CONNECTOR
 from .test_gemini_template_mcp import template as gemini_template  # noqa: F401
 from .test_openai_template_mcp import CONNECTOR_PARAMS as OPENAI_CONNECTOR
@@ -92,7 +93,9 @@ async def source_mcp(switched_request):
         yield app
 
 
-async def _one_reading(request, quote, switched_request, *, relay: bool, finer=()):
+async def _one_reading(
+    request, quote, switched_request, *, relay: bool, finer=(), built_ins: bool = True
+):
     from daimon.core.channel_backend import switch_losses
     from daimon.core.confirmation import drop_words
     from daimon.core.stores.accounts import set_role
@@ -115,11 +118,15 @@ async def _one_reading(request, quote, switched_request, *, relay: bool, finer=(
     lost_tools = {d.rpartition(":")[2] for d in drops if d.startswith("mcp_tool:")}
     assert lost_tools <= confirmation_gated_tools(), drops
     assert quote.unsupported_mcps == (() if relay else ("linear",))
-    # A skill past the provider's size limits is the only skill named, each by itself:
-    # keyed by id in the drops, shown by its own name.
+    # Past the unseeded built-ins (shown by id), a skill past the provider's size limits is
+    # the only skill named, each by itself: keyed by id in the drops, shown by its own name.
+    # A record holds no skills, so it has no built-in to lose.
+    assert (set(drops) >= UNSEEDED_BUILT_INS) is built_ins, drops
+    assert built_ins or not UNSEEDED_BUILT_INS & set(drops), drops
     ids = [d.removeprefix("skill:") for d in drops if d.startswith("skill:")]
-    assert set(ids) <= set(quote.skill_names), f"each lost skill has its name: {ids}"
-    assert quote.unsupported_skills == tuple(sorted(quote.skill_names[i] for i in ids))
+    named = [i for i in ids if f"skill:{i}" not in UNSEEDED_BUILT_INS]
+    assert set(named) <= set(quote.skill_names), f"each lost skill has its name: {named}"
+    assert quote.unsupported_skills == tuple(sorted(quote.skill_names.get(i, i) for i in ids))
     assert (quote.unsupported_skills, quote.unsupported_mcps, quote.unsupported_capabilities) == (
         switch_losses(drops, switched_request[2], quote.skill_names)
     )
@@ -149,8 +156,9 @@ async def test_gemini_names_only_what_its_turn_loses(gemini_template, switched_r
     request, quote, *_ = gemini_template
     relay = "mcp_server:linear" not in quote.declared_drops
     await _one_reading(request, quote, switched_request, relay=relay)
-    # Its large default skill (fonts, images) uploads, so no skill is a loss.
-    assert not [d for d in quote.declared_drops if d.startswith("skill:")], quote.declared_drops
+    # Its large default skill (fonts, images) uploads: only the unseeded built-ins are lost.
+    skills = {d for d in quote.declared_drops if d.startswith("skill:")}
+    assert skills == UNSEEDED_BUILT_INS, quote.declared_drops
     # Web search maps to Google Search; Daimon's own web_fetch carries fetch.
     assert "builtin_tool:web_search" not in quote.declared_drops
     assert "builtin_tool:web_fetch" not in quote.declared_drops
@@ -217,4 +225,11 @@ async def test_a_record_names_its_connector_as_a_managed_agents_agent_would(
     request, quote, *_ = openai_template
     assert request.admission.agent.id.startswith("dm_agent_"), "the source is a Daimon record"
     assert "mcp_server:linear" in quote.declared_drops, quote.declared_drops
-    await _one_reading(request, quote, switched_request, relay=False, finer=("installed_packages",))
+    await _one_reading(
+        request,
+        quote,
+        switched_request,
+        relay=False,
+        finer=("installed_packages",),
+        built_ins=False,
+    )

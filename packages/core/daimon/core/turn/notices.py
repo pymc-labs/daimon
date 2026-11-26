@@ -383,7 +383,8 @@ def default_agent_switch_text(agent: str, wanted: str, *, place: str, me: bool) 
     provider = provider_name(wanted)
     return (
         f"Switching {agent} changes it for everyone on this {place}. To try {provider} "
-        f"just here, I can make a copy of {'me' if me else agent} on {provider}."
+        f"just here, I can switch only this conversation to {provider}, or make a copy of "
+        f"{'me' if me else agent} on {provider}."
     )
 
 

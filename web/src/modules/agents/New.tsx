@@ -8,14 +8,14 @@ import { Page } from "@/components/shell/Page"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
 import { api } from "@/lib/api"
 import { useCan } from "@/lib/hooks"
+import { byProvider } from "@/lib/providers"
 import { cn } from "@/lib/utils"
 import { NotFound } from "@/pages/Status"
 import { modelValue, useCatalog, useTemplates } from "./api"
-import { PROVIDER } from "./lib"
 import type { Agent } from "./types"
 
 const ICON: Record<string, React.ReactNode> = {
@@ -85,14 +85,18 @@ export function NewAgent() {
             <Select value={picked ? modelValue(picked) : ""} onValueChange={setModel}>
               <SelectTrigger className="h-8 w-full"><SelectValue>{picked?.label}</SelectValue></SelectTrigger>
               <SelectContent>
-                {catalog?.models.map((m) => (
-                  <SelectItem key={modelValue(m)} value={modelValue(m)}>
-                    <span className="flex w-full items-center gap-2">
-                      {m.label}
-                      <span className="inline-flex h-5 items-center rounded bg-muted px-1.5 text-[11px] font-medium text-muted-foreground">{PROVIDER[m.backend]}</span>
-                      <span className="ml-auto pl-4 text-xs text-muted-foreground tabular">${m.in_usd} / ${m.out_usd} per M</span>
-                    </span>
-                  </SelectItem>
+                {byProvider(catalog?.models ?? [], (m) => m.backend).map((g) => (
+                  <SelectGroup key={g.provider}>
+                    <SelectLabel>{g.name}</SelectLabel>
+                    {g.models.map((m) => (
+                      <SelectItem key={modelValue(m)} value={modelValue(m)}>
+                        <span className="flex w-full items-center gap-2">
+                          {m.label}
+                          <span className="ml-auto pl-4 text-xs text-muted-foreground tabular">${m.in_usd} / ${m.out_usd} per M</span>
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
                 ))}
               </SelectContent>
             </Select>

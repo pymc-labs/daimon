@@ -17,10 +17,11 @@ const models = {
     { value: "openai:gpt-6-luna", label: "GPT-6 Luna", price: "$2 / $10", provider: "openai" },
   ],
 }
-const open = async (onChanged = vi.fn()) => {
-  render(<QueryClientProvider client={new QueryClient()}><ThreadModel sid="s1" model="Sonnet 5.5" onChanged={onChanged} /></QueryClientProvider>)
+const open = async () => {
+  const qc = new QueryClient()
+  render(<QueryClientProvider client={qc}><ThreadModel sid="s1" model="Sonnet 5.5" /></QueryClientProvider>)
   await userEvent.click(screen.getByRole("button", { name: "Chat model" }))
-  return onChanged
+  return vi.spyOn(qc, "invalidateQueries")
 }
 
 beforeEach(() => {
@@ -37,10 +38,11 @@ describe("ThreadModel", () => {
   })
 
   it("keeps a pick on the agent's own provider at once", async () => {
-    const changed = await open()
+    const invalidate = await open()
     await userEvent.click(await screen.findByText("Haiku 5.5"))
     await vi.waitFor(() => expect(api.put).toHaveBeenCalledWith("/api/chat/sessions/s1/model", { value: "anthropic:claude-haiku-5-5" }))
-    expect(changed, "the chat refreshes").toHaveBeenCalled()
+    await vi.waitFor(() => expect(invalidate, "the chat refreshes").toHaveBeenCalledWith({ queryKey: ["chat", "session", "s1"] }))
+    expect(invalidate, "the header's thread list refreshes").toHaveBeenCalledWith({ queryKey: ["chat", "sessions"] })
   })
 
   it("keeps a cross-provider pick at once and says what is off as information", async () => {

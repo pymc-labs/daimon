@@ -534,6 +534,42 @@ async def test_the_sweep_names_the_turns_person_and_replies_to_their_message() -
     assert deliver.await_args.kwargs["reply_to"] == 5150
 
 
+async def test_a_sweep_that_fails_outright_is_an_ops_issue() -> None:
+    from daimon.core.ma_identity import derive_tenant_uuid
+
+    from .harness import make_bot
+
+    bot = make_bot(MagicMock())
+    thread = _thread()
+    outcome = RunOutcome(
+        TurnState(
+            content=[
+                ToolUseBlock(
+                    kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={}
+                )
+            ]
+        ),
+        "sesn_1",
+        None,
+        False,
+        outputs=_runtime(AsyncAnthropic(api_key="test-key"), "sesn_1"),
+    )
+    with (
+        patch("daimon.adapters.discord.bot.deliver_session_outputs", side_effect=OSError),
+        patch("daimon.adapters.discord.bot.report_ops_event") as report,
+    ):
+        bot._schedule_output_sweep(outcome, thread=thread, tenant_id=uuid.uuid4())  # pyright: ignore[reportPrivateUsage]
+        await asyncio.gather(*list(bot._bg_tasks))  # pyright: ignore[reportPrivateUsage]
+
+    event = report.call_args.args[1]
+    assert (event.code, event.tenant_id, event.reason, event.session_id) == (
+        "delivery.output_failed",
+        derive_tenant_uuid(platform="discord", workspace_id="456"),
+        "OSError",
+        "sesn_1",
+    )
+
+
 # --- Files go onto the turn's answer -----------------------------------------
 
 _ANSWER_ID = 888

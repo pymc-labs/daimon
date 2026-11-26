@@ -55,7 +55,7 @@ The model's token ID is an abstraction for a vault credential, not a secret valu
 
 ## TLC results
 
-Run `TLA2TOOLS_JAR=/home/derick/scratch/daimon-os-devenv/tla2tools.jar FORMAL_CHECK_FILTER=github_session_token formal/check.sh`. The checker uses one TLC worker, a timeout, and a metadir cap. `formal/expected.tsv` pins verdicts and distinct-state counts.
+Run `TLA2TOOLS_JAR=/path/to/tla2tools.jar FORMAL_CHECK_FILTER=github_session_token formal/check.sh`. The checker uses one TLC worker, a timeout, and a metadir cap. `formal/expected.tsv` pins verdicts and distinct-state counts.
 
 | Config | Verdict | States | User-visible failure shown |
 | --- | --- | ---: | --- |

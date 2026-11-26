@@ -32,6 +32,7 @@ silently loses files instead.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -42,9 +43,11 @@ from anthropic.types.beta import FileMetadata
 from daimon.core.checkpoint_prompt import HANDOFF_FILENAME_PREFIX
 from daimon.core.errors import DaimonError
 from daimon.core.media.filenames import sanitize_title
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.output_ports_compat import list_output_records, read_output_record
 from daimon.core.output_runtime import AnthropicOutputRuntime, OutputRuntime, SessionOutput
 from mux.contracts.ids import Scope
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
 
@@ -289,8 +292,13 @@ async def sweep_outputs(
     discard_skipped_up_to: int = 0,
     order: Callable[[Sequence[str]], Sequence[int]] | None = None,
     quiet_s: float | None = None,
+    tenant_id: uuid.UUID | None = None,
+    platform: str | None = None,
+    sessions: async_sessionmaker[AsyncSession] | None = None,
 ) -> int:
     """Deliver the session's output files via ``post``; return how many posted.
+
+    ``tenant_id`` and ``platform`` label an abort or a failed file, which ``sessions`` records.
 
     ``order`` takes the listed filenames and returns the indexes to handle
     them in; without it they go in listing order.
@@ -384,8 +392,26 @@ async def sweep_outputs(
         except OutputDeliveryDeferred:
             _log.info("output_delivery.deferred", session_id=session_id, file_id=meta.id)
             continue
-        except OutputPostingUnavailable:
-            _log.warning("output_delivery.aborted", session_id=session_id, file_id=meta.id)
+        except OutputPostingUnavailable as exc:
+            _log.warning(
+                "output_delivery.aborted",
+                session_id=session_id,
+                file_id=meta.id,
+                tenant_id=str(tenant_id) if tenant_id is not None else None,
+                platform=platform,
+            )
+            if sessions is not None:
+                report_ops_event(
+                    sessions,
+                    OpsEvent(
+                        "delivery.output_failed",
+                        tenant_id,
+                        reason=str(exc),
+                        platform=platform,
+                        session_id=session_id,
+                    ),
+                    logged=False,
+                )
             raise
         except Exception as exc:  # named boundary: per-file failures must not kill the sweep
             _log.warning(
@@ -394,6 +420,18 @@ async def sweep_outputs(
                 file_id=meta.id,
                 error=str(exc)[:300],
             )
+            if sessions is not None:
+                report_ops_event(
+                    sessions,
+                    OpsEvent(
+                        "delivery.output_failed",
+                        tenant_id,
+                        reason="file_failed",
+                        platform=platform,
+                        session_id=session_id,
+                    ),
+                    logged=False,
+                )
             continue
 
         await runtime.delete_output(meta.id)

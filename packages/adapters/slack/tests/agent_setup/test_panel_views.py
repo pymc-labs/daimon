@@ -32,6 +32,7 @@ from daimon.adapters.slack.agent_setup.panel_views import (
     ACTION_PAGE_NEXT,
     ACTION_ROUTING,
     CALLBACK_NEW_AGENT,
+    CHANNEL_SKILLS_REMOVE_INPUT_ID,
     LEGACY_ACTION_IDS,
     build_agents_view,
     build_channel_skills_form,
@@ -64,6 +65,7 @@ from daimon.core.routing_facts import UNROUTED_LINE, precedence_line
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault, ResolvedConfig, TenantConfigRow
 from daimon.core.stores.domain import (
     AgentFileRow,
+    ChannelSkillRow,
 )
 from daimon.testing.ma_models import ma_agent
 
@@ -1096,6 +1098,27 @@ def test_channel_skills_form_names_the_channel_hints_the_field_and_says_who_can_
         "These skills apply only here, from the next message.\n\n"
         "Only workspace admins can change them."
     )
+
+
+def test_channel_skills_form_says_when_the_remove_list_shows_only_the_first_skills() -> None:
+    rows = [
+        ChannelSkillRow(
+            tenant_id=_TENANT_ID,
+            platform="slack",
+            channel_id=_CHANNEL_ID,
+            skill_id=f"skill_{i}",
+            version="v1",
+            name=f"skill-{i}",
+            owner_agent_name=None,
+            added_by_account_id=None,
+            added_at=datetime(2026, 10, 10, tzinfo=UTC),
+        )
+        for i in range(11)
+    ]
+    form = build_channel_skills_form(meta=_meta(view="channel_skills"), rows=rows)
+    remove = next(b for b in form["blocks"] if b.get("block_id") == CHANNEL_SKILLS_REMOVE_INPUT_ID)
+    assert remove["label"]["text"] == "Remove (first 10 shown; remove some to reach the rest)"
+    assert len(remove["element"]["options"]) == 10, "Slack shows ten checkboxes"
 
 
 def test_agents_view_emits_no_legacy_action_ids() -> None:

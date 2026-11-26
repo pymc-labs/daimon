@@ -1,9 +1,20 @@
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { useEffect, useMemo } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { useNavigate } from "react-router"
 
+import { reset } from "@/modules/chat/turns"
 import { api } from "./api"
 import type { AgentRef, Capability, ChatSession, Group, Me, Person, Provider } from "./types"
+
+/** `value` once it has held still for `ms`. */
+export function useDebounced<T>(value: T, ms: number) {
+  const [v, setV] = useState(value)
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), ms)
+    return () => clearTimeout(t)
+  }, [value, ms])
+  return v
+}
 
 export const useMe = () => useQuery({ queryKey: ["me"], queryFn: () => api.get<Me>("/api/me"), staleTime: 60_000, refetchOnWindowFocus: true })
 /** Move to another of the person's workspaces, then to `next` with nothing from the old one cached. */
@@ -12,22 +23,27 @@ export function useSwitchWorkspace(next: string, { replace = false, onError }: {
   const navigate = useNavigate()
   return useMutation({
     mutationFn: (id: string) => api.post("/api/workspaces/switch", { id }),
-    onSuccess: () => { qc.clear(); navigate(next, { replace }) },
+    onSuccess: () => { qc.clear(); reset(); navigate(next, { replace }) },
     onError,
   })
 }
 export const useProviders = () => useQuery({ queryKey: ["auth", "providers"], queryFn: () => api.get<Provider[]>("/auth/providers") })
 
 /** A list the server pages: `data` is every row loaded so far, `loadMore` fetches the next page. */
-export function usePaged<T>(key: readonly unknown[], path: string) {
+export function usePaged<T>(key: readonly unknown[], path: string, { refetchInterval }: { refetchInterval?: number } = {}) {
   const q = useInfiniteQuery({
     queryKey: key,
     initialPageParam: null as string | null,
     queryFn: ({ pageParam }) => api.page<T>(path, pageParam),
     getNextPageParam: (last) => last.next,
+    // Polling refetches every loaded page, so it stops once the person has paged on.
+    refetchInterval: (q) => (refetchInterval && (q.state.data?.pages.length ?? 1) <= 1 ? refetchInterval : false),
   })
   const data = useMemo(() => q.data?.pages.flatMap((p) => p.rows), [q.data])
-  return { data, error: q.error, isError: q.isError, refetch: q.refetch, hasMore: q.hasNextPage, loadMore: q.fetchNextPage, loadingMore: q.isFetchingNextPage }
+  return {
+    data, error: q.error, isError: q.isError, refetch: q.refetch, hasMore: q.hasNextPage, loadMore: q.fetchNextPage, loadingMore: q.isFetchingNextPage,
+    updatedAt: q.dataUpdatedAt,
+  }
 }
 export type Paged<T> = ReturnType<typeof usePaged<T>>
 

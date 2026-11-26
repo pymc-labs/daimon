@@ -774,3 +774,72 @@ async def test_a_routed_session_keeps_the_router_and_renews_its_record(
         renewed = await github_router_sessions.get(session, router_session_id=record.id)
     assert renewed is not None
     assert renewed.expires_at == _NOW + GITHUB_ROUTER_SESSION_TTL
+
+
+@pytest.mark.parametrize(
+    ("vault_id", "server_url", "synced"),
+    [
+        (None, "https://notion.example/mcp", False),
+        ("vlt_mine", "https://daimon.example/mcp", False),
+        ("vlt_mine", "https://daimon.example/mcp-identity/crm", False),
+        ("vlt_mine", "https://notion.example/mcp", True),
+    ],
+    ids=["no-vault", "own-mcp-only", "relay-only", "external-connector"],
+)
+async def test_the_vault_mirror_runs_only_for_a_vault_and_an_external_connector(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    vault_id: str | None,
+    server_url: str,
+    synced: bool,
+) -> None:
+    """A reused session with nothing external to mirror makes no Anthropic vault calls."""
+    from cryptography.fernet import Fernet, MultiFernet
+    from daimon.core import session_update_ops
+    from pydantic import HttpUrl, SecretStr
+
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    state = FakeSessionsState(ma=FakeMAState())
+    _register_agent(state.ma)
+    client = _build_client(state)
+    session_id, recorded = await _session_with_env(client, content=b"A=1\n")
+    calls: list[str] = []
+
+    async def sync(*_args: object, **_kwargs: object) -> None:
+        calls.append("sync")
+
+    async def refresh(*_args: object, **_kwargs: object) -> None:
+        calls.append("refresh")
+
+    monkeypatch.setattr(session_update_ops, "sync_agent_mcp_credentials", sync)
+    monkeypatch.setattr(session_update_ops, "refresh_mounted_mcp_vaults", refresh)
+    agent = _agent(
+        mcp_servers=[
+            BetaManagedAgentsMCPServerURLDefinition(name="srv", type="url", url=server_url)
+        ]
+    )
+
+    await apply_update_ops(
+        client,
+        db_session_factory,
+        ops=(RemirrorVaultCredentials(),),
+        session_id=session_id,
+        recorded=recorded.model_copy(update={"vault_id": vault_id}),
+        agent=agent,
+        tenant_id=tenant.id,
+        agent_uuid=uuid.uuid4(),
+        account_id=uuid.uuid4(),
+        mcp=McpSettings(
+            public_url=HttpUrl("https://daimon.example/mcp"), jwt_secret=SecretStr("s" * 32)
+        ),
+        tool_safety=OPEN_TOOL_SAFETY,
+        fernet=MultiFernet([Fernet(Fernet.generate_key())]),
+        github_fallback_pat=None,
+        github_app_id=None,
+        github_app_private_key=None,
+        now=_NOW,
+    )
+
+    assert ("sync" in calls) is synced

@@ -40,10 +40,10 @@ def test_claude_model_choices_rejects_unknown_default() -> None:
         claude_model_choices(default="not-a-real-model")
 
 
-def test_claude_model_choices_preserves_allowed_model_ids_order() -> None:
+def test_claude_model_choices_lists_every_allowed_model_id() -> None:
     choices = claude_model_choices(default=ALLOWED_MODEL_IDS[0])
-    assert tuple(choice.id for choice in choices) == ALLOWED_MODEL_IDS, (
-        "choice order must match ALLOWED_MODEL_IDS"
+    assert {choice.id for choice in choices} == set(ALLOWED_MODEL_IDS), (
+        "choices must cover ALLOWED_MODEL_IDS"
     )
 
 

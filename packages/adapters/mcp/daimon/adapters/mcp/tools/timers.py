@@ -15,6 +15,7 @@ from typing import Annotated, cast
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._channel_policy import require_schedulable
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._rule_view import load_isolation_view
 from daimon.adapters.mcp.tools.setup_target import refuse_helper, require_turn_origin
@@ -63,6 +64,7 @@ async def _create_timer_impl(
     note: str,
 ) -> Timer:
     origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
+    await require_schedulable(runtime, auth)
     if auth.platform_user_id is None:
         raise ToolError(
             "A timer runs as the person who asked for it, and this connection does not "

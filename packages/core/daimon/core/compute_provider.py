@@ -36,6 +36,16 @@ def session_token(settings: ComputeSettings, session_id: uuid.UUID) -> str:
 
 
 class ComputeProvider(Protocol):
+    """Where session machines run.
+
+    `ensure` creates the machine if it is missing and returns at once; it does not
+    wait for the machine to start. `ensure` and `inspect` report `machine_state` as one
+    of `MachineState`, and `started` only when `call` would reach the machine. The
+    session logic keeps a session out of `running` until then (`machine_readiness`),
+    so a provider that reports `started` early hands people a machine that cannot
+    answer.
+    """
+
     async def ensure(self, session: ComputeSession, token: str) -> ComputeResource: ...
     async def delete(self, resource: ComputeResource) -> None: ...
     async def inspect(self, session: ComputeSession) -> ComputeResource: ...
@@ -43,3 +53,15 @@ class ComputeProvider(Protocol):
     async def call(
         self, session: ComputeSession, token: str, tool: str, arguments: dict[str, JsonValue]
     ) -> JsonValue: ...
+
+
+def compute_provider_for(settings: ComputeSettings) -> ComputeProvider:
+    """The compute provider of this deployment: the only place one is built.
+
+    Every process that launches, uses or cleans up sessions builds its provider here,
+    so they cannot disagree about where a session runs.
+    """
+    # Imported here because the provider module imports this boundary.
+    from daimon.core.compute_cloud_run import CloudRunComputeProvider
+
+    return CloudRunComputeProvider(settings)

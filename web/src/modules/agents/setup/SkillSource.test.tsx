@@ -73,7 +73,7 @@ describe("SkillsRelease", () => {
   it("shows the release name as a link and when it was made", async () => {
     serve(link([], { name: "v2.4.1", at: AT, url: "https://github.com/acme/data/releases/tag/v2.4.1" }))
     wrap(<SkillsRelease agent={agent} />)
-    expect(await screen.findByText("Release")).toBeInTheDocument()
+    expect(await screen.findByText("Skills release")).toBeInTheDocument()
     expect(screen.getByRole("link", { name: "v2.4.1" })).toHaveAttribute("href", "https://github.com/acme/data/releases/tag/v2.4.1")
   })
 

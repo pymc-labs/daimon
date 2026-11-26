@@ -1,9 +1,10 @@
 import { Check, ChevronDown, UserRound } from "lucide-react"
-import { useEffect, useState } from "react"
+import { useState } from "react"
 
 import { Button } from "@/components/ui/button"
 import { Command, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { useDebounced } from "@/lib/hooks"
 import type { Subject } from "@/modules/credits/types"
 import { usePeopleFind } from "./api"
 import { platformUserId } from "./lib"
@@ -12,11 +13,7 @@ import { platformUserId } from "./lib"
 export function PersonPicker({ platform, value, onChange }: { platform: string; value: Subject | null; onChange: (s: Subject) => void }) {
   const [open, setOpen] = useState(false)
   const [text, setText] = useState("")
-  const [term, setTerm] = useState("")
-  useEffect(() => {
-    const t = setTimeout(() => setTerm(text.trim()), 200)
-    return () => clearTimeout(t)
-  }, [text])
+  const term = useDebounced(text.trim(), 200)
   const found = usePeopleFind(term)
   const id = platformUserId(platform, text)
   const people = term === text.trim() ? (found.data ?? []) : []

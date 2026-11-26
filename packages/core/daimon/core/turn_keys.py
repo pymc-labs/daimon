@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 from xml.sax.saxutils import quoteattr
 
 from daimon.core.credential_env import assemble_env_bytes
@@ -41,6 +42,10 @@ from daimon.core.env_file import env_row_skip_reason
 from daimon.core.session_snapshot import hash_env_bytes
 from daimon.core.stores.agent_files import list_agent_files
 from sqlalchemy.ext.asyncio import AsyncSession
+
+if TYPE_CHECKING:
+    from daimon.core.stores.domain import ThreadSessionRow
+    from daimon.core.turn.prepare import PreparedTurn
 
 
 async def list_turn_key_names(
@@ -91,6 +96,18 @@ async def list_mounted_key_names(
     # A row the assembler leaves out (hard-denied name, NUL value) is not in the
     # mounted file; naming it would promise the model a key it cannot read.
     return tuple(row.key for row in rows if env_row_skip_reason(row.key, row.content) is None)
+
+
+def answering_env_sha256(prepared: PreparedTurn, live: ThreadSessionRow | None) -> str | None:
+    """The keys file hash the answering session holds, for `list_mounted_key_names`.
+
+    An OpenAI or Gemini session holds `prepared.env_sha256`; a Claude session froze
+    its hash on the live `thread_sessions` row the adapter just bound.
+    """
+    if prepared.session_ref is not None:
+        return prepared.env_sha256
+    config = None if live is None else live.effective_config
+    return None if config is None else config.env_sha256
 
 
 def render_keys_element(names: Sequence[str]) -> str:

@@ -91,7 +91,8 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
         "keyed by provider account and month; a deployment-wide count with no tenant data"
     ),
     "usage_reconcile_progress": (
-        "keyed by MA session id (globally unique); a read cursor holding no tenant data"
+        "keyed by MA session id (globally unique); its settle cursor and, for an agent-chat "
+        "session, who drives it and where it came from, read only by that session id or grant"
     ),
     # A signed Stripe refund/dispute can arrive before Checkout completion.
     # The event has no tenant identity yet; the verified payment_intent links

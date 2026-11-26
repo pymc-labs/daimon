@@ -1,7 +1,7 @@
 {
   "version": 1,
   "total_cap_usd": "150",
-  "ledger_path": "/home/clsandoval/cs/daimon-neutral-core-20261009/lanes/N9-qa/spend.md",
+  "ledger_path": "/var/lib/daimon-qa/spend.md",
   "providers": {
     "gemini": {
       "cap_usd": "30",

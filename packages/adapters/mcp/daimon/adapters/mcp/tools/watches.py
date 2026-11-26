@@ -50,7 +50,9 @@ from daimon.core.continuity.poll_tools import (
     validate_mcp_poll,
 )
 from daimon.core.dm_access import member_roles, roles_by_membership
+from daimon.core.features.registry import FEATURES
 from daimon.core.features.snapshot import FeaturePlace, feature_in
+from daimon.core.features.surface import ask_to_turn_on
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_identity import RelayBinding
 from daimon.core.mcp_server_url import ascii_mcp_url, same_ascii_mcp_url
@@ -588,7 +590,7 @@ async def callback_watch_terms(
     )
     async with session_factory() as db:
         if not (await feature_in(db, settings, place, "watches")).on:
-            raise ToolError("Watches are turned off here. Ask an admin or an owner.")
+            raise ToolError(f"Watches are turned off here. {ask_to_turn_on(FEATURES['watches'])}")
         return await watches.callback_lifetime(db, settings, origin.tenant_id)
 
 

@@ -1,6 +1,7 @@
 import { Suspense, useState } from "react"
 import { Outlet, useLocation, useNavigate } from "react-router"
 
+import { Crashed } from "@/components/Crashed"
 import { Rows } from "@/components/QueryState"
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { useKey, useMe } from "@/lib/hooks"
@@ -22,7 +23,10 @@ export function AppShell() {
   useKey((e) => {
     const mod = e.metaKey || e.ctrlKey
     if (mod && e.key.toLowerCase() === "k") { e.preventDefault(); setPalette((v) => !v) }
-    else if (mod && e.key.toLowerCase() === "o") { e.preventDefault(); navigate("/chat"); setTimeout(() => document.getElementById("composer")?.focus(), 50) }
+    else if (mod && e.key.toLowerCase() === "o") {
+      // A new page's composer takes focus itself; one already on /chat stays mounted, so focus it here.
+      e.preventDefault(); navigate("/chat"); document.getElementById("composer")?.focus()
+    }
   }, [navigate], true)
   useKey((e) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return
@@ -42,8 +46,11 @@ export function AppShell() {
 
   return (
     <ShellCtx.Provider value={{ openNav: () => setNav(true), openPalette: () => setPalette(true), openShortcuts: () => setShortcuts(true) }}>
-      <div className="flex h-dvh overflow-hidden">
-        <aside className="hidden w-60 shrink-0 border-r bg-muted lg:flex">
+      {/* relative: hidden form inputs (Radix selects, checkboxes) are positioned absolutely; without a
+          positioned ancestor they escape the clip and stretch the page into a second, blank scroll. */}
+      <div className="relative flex h-dvh overflow-hidden">
+        {/* md, not lg: a phone in desktop mode lays the page out 980px wide. */}
+        <aside className="hidden w-60 shrink-0 border-r bg-muted md:flex">
           <Sidebar />
         </aside>
         <Sheet open={nav} onOpenChange={setNav}>
@@ -53,7 +60,7 @@ export function AppShell() {
           </SheetContent>
         </Sheet>
         <div key={loc.pathname.split("/").slice(1, 3).join("/")} className="flex min-w-0 flex-1">
-          <Suspense fallback={<Rows className="w-full p-6" />}><Outlet /></Suspense>
+          <Crashed className="h-auto flex-1" resetKey={loc.pathname}><Suspense fallback={<Rows className="w-full p-6" />}><Outlet /></Suspense></Crashed>
         </div>
       </div>
       <CommandPalette open={palette} onOpenChange={setPalette} />
