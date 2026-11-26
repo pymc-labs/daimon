@@ -195,6 +195,11 @@ SERVER_SEPARATOR: Final[str] = "/"
 #: Each is a write whatever it is given, so every call asks.
 CARDED_TOOLS: Final[Mapping[str, str]] = {
     "remove_my_data": "kind",
+    "change_data_source": "action",
+    "change_data_access": "action",
+    "change_data_links": "action",
+    "approve_data_rule_set": "name",
+    "connect_my_data": "source_id",
     "revoke_web_link": "kind",
     "delete_allowance": "allowance_id",
     "update_web_person": "person_id",

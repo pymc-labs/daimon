@@ -39,7 +39,13 @@ _ROWS: list[tuple[str, DataOrigin, uuid.UUID | None, str | tuple[bool, bool, boo
     ("routine, no destination", DataOrigin("private", asker), OWNER, (False, True, False)),
     ("helper from plain agent", DataOrigin("agent_request", asker, frozenset({asker})), OWNER, "agent_request"),
     (
-        "helper from data agent",
+        "helper from data agent, in a room",
+        DataOrigin("agent_request", asker, frozenset({asker, viewer}), caller_reads_data=True),
+        OWNER,
+        (False, True, False),
+    ),
+    (
+        "helper from data agent, asked from a DM: the asker's own access",
         DataOrigin("agent_request", asker, frozenset({asker}), caller_reads_data=True),
         OWNER,
         (False, True, False),

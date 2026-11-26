@@ -629,14 +629,15 @@ async def test_a_failed_data_reads_lookup_runs_the_turn_without_data_tools(
     assert admission.features is not None and not admission.features.on(DATA_READS)
 
 
-async def test_a_session_that_read_data_keeps_the_data_seal_until_a_fresh_start(
+async def test_a_session_that_read_data_stays_data_reading_but_unsealed_until_a_fresh_start(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With `data_reads` Off now, or its lookup failing, a live session that read data stays
-    sealed: relay scoped, no long-term memory. Only a fresh start ends it."""
+    data-reading until a fresh start, yet is not sealed: no relay scope or hold, so the
+    session is reused, and memory stays on with provider stores mounted read-only."""
     monkeypatch.setenv("DAIMON_FEATURES__DATA_SOURCES", "on")
     tenant = await make_tenant(db_session)
     await _tenant_config(db_session, tenant=tenant)
@@ -661,16 +662,18 @@ async def test_a_session_that_read_data_keeps_the_data_seal_until_a_fresh_start(
     )
     deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
 
-    sealed = await admit_chat(deps, tenant, now=_NOW)
-    assert sealed.data_reading and sealed.relay_scoped, "the read keeps the seal"
+    kept = await admit_chat(deps, tenant, now=_NOW)
+    assert kept.data_reading and kept.stores_read_only, "the read is remembered"
+    assert not kept.relay_scoped and kept.hold is None, "no fresh session, no room hold"
+    assert not kept.memory_read_only, "Daimon's own memory stays writable"
     with monkeypatch.context() as m:
         m.setattr("daimon.core.turn.admission.reads_data", AsyncMock(side_effect=RuntimeError))
         failed = await admit_chat(deps, tenant, now=_NOW)
-    assert failed.data_reading and failed.relay_scoped, "a failed lookup keeps the seal"
+    assert failed.data_reading, "a failed lookup keeps it data-reading"
     async with db_session_factory.begin() as session:
         await request_fresh_start(session, id=row.id, at=_NOW)
     fresh = await admit_chat(deps, tenant, now=_NOW)
-    assert not fresh.data_reading and not fresh.relay_scoped, "a fresh start ends it"
+    assert not fresh.data_reading and not fresh.stores_read_only, "a fresh start ends it"
 
 
 async def test_admission_limits_follow_their_settings(

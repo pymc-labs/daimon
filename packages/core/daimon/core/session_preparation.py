@@ -941,7 +941,7 @@ async def _prepare_session_for_turn_locked(
             if (
                 recorded is None
                 and not fresh_start
-                and not admission.memory_read_only
+                and not admission.stores_read_only
                 and admission.hold is None
                 and not admission.relay_scoped
                 and row.budget_channel_id in ("", admission.budget_channel_id)
@@ -1013,7 +1013,7 @@ async def _prepare_session_for_turn_locked(
                 and deps.mcp.jwt_secret is not None
                 and any(server.name == "daimon-mcp" for server in admission.agent.mcp_servers)
             ),
-            memory_read_only=admission.memory_read_only,
+            memory_read_only=admission.stores_read_only,
             asks_before_publishing=admission.asks_before_publishing,
             confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id, admission.agent.id),
             daimon_rule_tools=admission.daimon_rule_tools,
@@ -1110,7 +1110,7 @@ async def _prepare_session_for_turn_locked(
             model_choice_id(admission.agent.model) if recorded is None else recorded.pricing_id
         )
 
-        tightening_memory = admission.memory_read_only and (
+        tightening_memory = admission.stores_read_only and (
             recorded is None or not recorded.memory_read_only
         )
         # Leaving one memory store for another is a boundary: the old session

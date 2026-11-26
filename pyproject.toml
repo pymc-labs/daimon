@@ -266,7 +266,7 @@ source_modules = [
     "daimon.core.cron_words",
     "daimon.core.cursor",
     "daimon.core.data_audience",
-    "daimon.core.data_seal",
+    "daimon.core.data_reading",
     "daimon.core.data_tools",
     "daimon.core.db",
     "daimon.core.env_file",

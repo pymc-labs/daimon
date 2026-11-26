@@ -13,14 +13,16 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from datetime import UTC, datetime
 from typing import Any, Final, cast
 
+import psycopg
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
+from daimon.adapters.mcp.tools.teams._directory import graph_for, locate_channel, split_thread
 from daimon.core.channel_audience import channel_has_outsiders
 from daimon.core.config import Settings
 from daimon.core.data_audience import (
@@ -33,7 +35,7 @@ from daimon.core.data_audience import (
     data_audience,
     user_subject,
 )
-from daimon.core.data_seal import reads_data
+from daimon.core.data_reading import reads_data
 from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.mcp_identity import matching_turn
 from daimon.core.ports.gate import data_sources_on
@@ -43,9 +45,12 @@ from daimon.core.stores.identity import accounts_of
 from daimon.core.stores.room_viewers import read_viewers
 from daimon.core.stores.routines import get_routine
 from daimon.core.stores.turn_origins import get_active_origin, get_session_origin
-from daimon.data import identity, pool
+from daimon.core.teams_graph import GraphUnavailable
+from daimon.core.teams_threads import is_group_chat
+from daimon.data import identity, pool, reads
 from daimon.data.reading import open_read
 from daimon.data.schema import Schemas
+from daimon.data.sync.engine import Env
 from fastmcp.exceptions import ToolError
 from psycopg import Error
 from slack_sdk.errors import SlackApiError
@@ -94,6 +99,31 @@ async def held_scopes(runtime: McpRuntime, auth: AuthIdentity) -> tuple[str, ...
     except (ToolError, Error):
         return ()
     return r.ctx.scopes
+
+
+async def readable_by_audience(
+    runtime: McpRuntime, auth: AuthIdentity, ref_sets: Sequence[Sequence[str]]
+) -> list[bool]:
+    """For each set of data items a memory recorded, whether everyone a call by `auth` answers
+    for could read every one (`daimon.core.stores.data_memory`). Closed when unsure: data
+    sources off or down, no audience here, or names hidden from someone."""
+    if not ref_sets:
+        return []
+    settings = runtime.settings
+    if not data_sources_on(settings):
+        return [False] * len(ref_sets)
+    schemas = Schemas.of(settings.data)
+    try:
+        audience = await data_audience_for(runtime, auth)
+        async with pool.connection(settings) as conn:
+            r = await open_read(conn, schemas, auth.tenant_id, audience, salt="memory")
+            if r.entities is not None:  # what it saw may name what someone here may not see
+                return [False] * len(ref_sets)
+            env = Env.of(settings)
+            return [await reads.readable(conn, schemas, r.ctx, refs, env) for refs in ref_sets]
+    except (ToolError, psycopg.Error):
+        log.info("data.memory_audience_unknown", tenant_id=str(auth.tenant_id))
+        return [False] * len(ref_sets)
 
 
 async def data_origin(runtime: McpRuntime, auth: AuthIdentity, *, now: datetime) -> DataOrigin:
@@ -175,8 +205,8 @@ async def _turn_origin(runtime: McpRuntime, auth: AuthIdentity, *, now: datetime
         return DataOrigin("room", asker, contained=True)
     if is_dm_thread(turn.platform, turn.thread_id) or turn.platform == "web":
         origin = DataOrigin("private", asker)
-    elif turn.platform not in ("discord", "slack"):
-        return DataOrigin("none")  # a Teams room's readers are unknown
+    elif turn.platform not in ("discord", "slack", "teams"):
+        return DataOrigin("none")
     else:
         origin = await _room(runtime, auth, asker, turn.parent_channel_id, turn.thread_id, now=now)
     if parent is None:
@@ -190,6 +220,7 @@ async def _turn_origin(runtime: McpRuntime, auth: AuthIdentity, *, now: datetime
         agent_id=parent.responder_ma_agent_id,
     )
     caller_reads = await reads_data(runtime.session_factory, runtime.settings, place)
+    # From a DM (or web chat) the helper answers the asker alone, with their own access.
     viewers = origin.viewers if origin.kind == "room" else frozenset({asker})
     return DataOrigin(
         "agent_request", asker, viewers, origin.contained, caller_reads_data=caller_reads
@@ -229,6 +260,8 @@ async def _room(
             users = None if stored is None else frozenset(s.removeprefix(prefix) for s in stored)
     if platform == "slack" and auth.external_id is not None:
         users = await _slack_viewers(runtime, auth.external_id, channel_id)
+    if platform == "teams":
+        users = await _teams_viewers(runtime, auth, channel_id)
     if users is None:
         return DataOrigin("room", asker, None)
     async with runtime.session_factory() as session:
@@ -266,6 +299,26 @@ async def _slack_viewers(
     except SlackApiError:
         return None
     return None
+
+
+async def _teams_viewers(
+    runtime: McpRuntime, auth: AuthIdentity, conversation_id: str
+) -> frozenset[str] | None:
+    """A Teams channel's or group chat's members by Entra id, read now; None (public only)
+    while the app lacks the consent to read them, or on any failure."""
+    client = runtime.teams_client
+    if client is None:
+        return None
+    graph = graph_for(client)
+    channel, _ = split_thread(conversation_id)
+    try:
+        if is_group_chat(channel):
+            return await graph.list_chat_member_ids(channel)
+        ref = await locate_channel(runtime, auth, client, channel)
+        return await graph.list_channel_member_ids(ref.group_id, ref.channel_id)
+    except (GraphUnavailable, ToolError) as e:
+        log.info("data.teams_viewers_unknown", error=str(e))
+        return None
 
 
 async def _slack_people(
@@ -315,7 +368,7 @@ async def link_github(
 ) -> None:
     """A personal GitHub link, as the person's GitHub identity in the data store where the
     workspace has data sources on (`identity.github_proof`). Never fails the link."""
-    if not data_sources_on(settings):
+    if not data_sources_on(settings) or not await pool.ready(settings):
         return
     try:
         async with sessionmaker() as session:

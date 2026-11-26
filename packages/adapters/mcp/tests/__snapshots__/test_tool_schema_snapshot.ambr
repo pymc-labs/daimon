@@ -794,6 +794,32 @@
         'type': 'object',
       }),
     }),
+    'approve_data_rule_set': dict({
+      'description': '''
+        Approve a redaction rule set's waiting version (sha, as listed). Runs on the
+        asker's Approve card. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'name': dict({
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'sha': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'name',
+          'sha',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'approve_reach': dict({
       'description': '''
         Ask the person on a card before posting more widely than the turn's limit.
@@ -1257,6 +1283,179 @@
         'type': 'object',
       }),
     }),
+    'change_data_access': dict({
+      'description': '''
+        Change who may read what in the data sources. create_scope (scope_id, kind, name,
+        description), delete_scope (scope_id), grant or revoke a scope (scope_id, holder: a
+        person's name or account id, or a holder as listed), add_data_admin or
+        remove_data_admin (person). Runs on the asker's Approve card. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'action': dict({
+            'enum': list([
+              'create_scope',
+              'delete_scope',
+              'grant',
+              'revoke',
+              'add_data_admin',
+              'remove_data_admin',
+            ]),
+            'type': 'string',
+          }),
+          'description': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'holder': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'kind': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'name': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'person': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'scope_id': dict({
+            'default': '',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'action',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'change_data_links': dict({
+      'description': '''
+        Link an account the data sources know to a person (link: provider, workspace,
+        subject as listed, person), turn down a suggestion (reject: the same), unlink an
+        account (unlink: provider, workspace, subject), or hide or show a person's name in
+        what agents read (hide_names, show_names: person). Runs on the asker's Approve card.
+        Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'action': dict({
+            'enum': list([
+              'link',
+              'reject',
+              'unlink',
+              'hide_names',
+              'show_names',
+            ]),
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'person': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'provider': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'subject': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'workspace': dict({
+            'default': '',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'action',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'change_data_source': dict({
+      'description': '''
+        Add a data source (create: kind, name, settings by the kind's fields) or pause,
+        resume, retire, publish, unpublish or sync one (source_id). Runs on the asker's
+        Approve card. A source whose kind needs a credential can't be added here, so a
+        credential never passes through chat. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'action': dict({
+            'enum': list([
+              'create',
+              'pause',
+              'resume',
+              'retire',
+              'publish',
+              'unpublish',
+              'sync',
+            ]),
+            'type': 'string',
+          }),
+          'kind': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'name': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'settings': dict({
+            'anyOf': list([
+              dict({
+                'additionalProperties': dict({
+                  'anyOf': list([
+                    dict({
+                      'type': 'string',
+                    }),
+                    dict({
+                      'items': dict({
+                        'type': 'string',
+                      }),
+                      'type': 'array',
+                    }),
+                  ]),
+                }),
+                'type': 'object',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'source_id': dict({
+            'default': '',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'action',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'change_issue_state': dict({
       'description': '''
         Resolve, mute or reopen an issue by its ``fingerprint`` (from list_issues). Resolve
@@ -1502,6 +1701,24 @@
         }),
         'required': list([
           'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'check_my_data_connection': dict({
+      'description': '''
+        Whether the sign-in started by connect_my_data (pending_id) is finished. Where
+        the link opened a page, it finishes there and shows in list_my_data.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'pending_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'pending_id',
         ]),
         'type': 'object',
       }),
@@ -2099,6 +2316,30 @@
             'type': 'string',
           }),
         }),
+        'type': 'object',
+      }),
+    }),
+    'connect_my_data': dict({
+      'description': '''
+        Start your own sign-in to a data source (source_id from list_my_data's
+        can_connect). Runs on your Approve card. The link or code is sent to you by direct
+        message, never shown here; after you approve it there, check_my_data_connection
+        finishes it.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'source_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'source_id',
+          'origin_context_id',
+        ]),
         'type': 'object',
       }),
     }),
@@ -4398,6 +4639,18 @@
         'type': 'object',
       }),
     }),
+    'dismiss_data_notices': dict({
+      'description': '''
+        Mark your notices about data-source links an admin changed as read. They show in
+        list_my_data until then.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
     'edit_message': dict({
       'description': '''
         Replace the text of a message you posted.
@@ -6303,6 +6556,98 @@
         'type': 'object',
       }),
     }),
+    'list_data_access': dict({
+      'description': '''
+        List who may read what in the data sources: each scope with its holders, the data
+        admins and the workspace's people (names and account ids). Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
+    'list_data_links': dict({
+      'description': '''
+        List the accounts the data sources know, each linked to a person or not, and the
+        open suggestions (an account whose verified email matches a person). Emails show only
+        in a direct message with the admin. Pass this active turn's origin_context_id.
+        Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'linked': dict({
+            'anyOf': list([
+              dict({
+                'type': 'boolean',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
+    'list_data_rule_sets': dict({
+      'description': '''
+        List the redaction rule sets, or show one (name) with its approved and waiting
+        rules. The rules name what is hidden, so they show only in a direct message with the
+        admin. Pass this active turn's origin_context_id. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'name': dict({
+            'default': '',
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
+    'list_data_sources': dict({
+      'description': '''
+        List the workspace's data sources with their state, or one source's latest sync
+        runs (source_id). The kinds of source that can be added are listed too. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'source_id': dict({
+            'default': '',
+            'type': 'string',
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
     'list_environments': dict({
       'description': '''
         List environments in the tenant pool. ``page`` is reserved for future pagination.
@@ -6655,8 +7000,8 @@
     }),
     'list_my_data': dict({
       'description': '''
-        List what is held for you: connected accounts and sign-ins, and personal memory per
-        agent. Ids feed remove_my_data.
+        List what is held for you: connected accounts and sign-ins, personal memory per
+        agent, and your accounts in the data sources. Ids feed remove_my_data.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -8212,8 +8557,9 @@
     'remove_my_data': dict({
       'description': '''
         Remove your own, by ids from list_my_data or list_coding_keys: memory (agent_id), a
-        connected account (its kind, as listed), an mcp sign-in (agent_id, key) or a
-        coding_key (key; an admin adds agent_id for another person's).
+        connected account (its kind, as listed), an mcp sign-in (agent_id, key), a data
+        source sign-in (data_source; key is its source_id) or a coding_key (key; an admin adds
+        agent_id for another person's).
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -8233,6 +8579,7 @@
               'slack',
               'mcp',
               'coding_key',
+              'data_source',
             ]),
             'type': 'string',
           }),

@@ -199,6 +199,7 @@ TAIL = (
     "0241_data_identity",
     "0242_data_ops",
     "0243_data_redaction",
+    "0244_data_memory",
     "0250_workspace_skills",
 )
 HEAD = TAIL[-1]
@@ -498,6 +499,14 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
                 and name == "login_id"
                 and getattr(getattr(obj, "table", None), "name", None) == "web_sessions"
             )
+        ):
+            return False
+        # Added by the data memory migration (0244), the head.
+        if (
+            expected != HEAD
+            and kind == "column"
+            and name == "data_refs"
+            and getattr(getattr(obj, "table", None), "name", None) == "repo_memory"
         ):
             return False
         # Added by the invite files migration (0177).
