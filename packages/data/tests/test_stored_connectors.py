@@ -396,6 +396,28 @@ async def test_a_bluedot_meeting_is_read_by_the_people_who_list_it(
     assert bluedot.reads.count("m1") == 1, "a shared meeting that has not changed is read once"
 
 
+async def test_a_bluedot_meeting_whose_lists_disagree_is_read_by_those_on_every_list(
+    store: Store, bluedot: FakeBluedot
+) -> None:
+    bluedot.collections = {"u-alice": ["c1"], "u-bob": ["c1"], "u-carol": ["c1"]}
+    bluedot.lists = {
+        "u-alice": {"m1": meeting("m1", "c1")},
+        "u-bob": {"m1": meeting("m1", None, "user")},
+        "u-carol": {},
+    }
+    src = await store.add("bluedot", {}, workspace="ws")
+    for who in ("u-alice", "u-bob", "u-carol"):
+        await store.connect(src, who)
+    await store.ok(src)
+
+    assert await store.stored(src) == {"meeting:m1"}, "a disputed meeting is kept"
+    assert await store.sees("bluedot", "ws", "u-alice") == {"meeting:m1"}
+    assert await store.sees("bluedot", "ws", "u-bob") == {"meeting:m1"}
+    assert await store.sees("bluedot", "ws", "u-carol") == set(), (
+        "in the collection but not listing it: not on every list"
+    )
+
+
 async def test_a_bluedot_meeting_goes_only_when_every_list_is_complete_and_a_refusal_keeps_the_rest(
     store: Store, bluedot: FakeBluedot
 ) -> None:

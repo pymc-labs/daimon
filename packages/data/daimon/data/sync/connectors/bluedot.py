@@ -8,8 +8,9 @@ in their list. Each run
 publishes every completed list as one permission unit that lives `LEASE_MINUTES` (a group per
 collection, holding the person), so a person whose list is not renewed, or whose sign-in stops
 working, stops reading. A meeting of a collection is readable by that collection's group; any
-other (private, or in no collection) by the people who list it. A meeting listed by nobody who
-is signed in is not stored.
+other (private, or in no collection) by the people who list it. When the lists disagree on
+where a meeting sits, it is readable only by those on every list: each collection's group and
+the people who list it, all at once. A meeting listed by nobody who is signed in is not stored.
 
 A meeting is read once, through a person who lists it, and read again when its summary or
 transcript was missing (for `WAIT_DAYS`) or when who may read it changed. A meeting is removed
@@ -319,34 +320,33 @@ class PersonList:
     """What `get_meeting` said of the meetings read to learn who may read them."""
 
 
-def agrees(rows_: list[Listed]) -> bool:
-    """Whether every list that shows a meeting says the same of where it sits and, for a
-    private one, who uploaded it."""
-    first = rows_[0]
-    return all(
-        (r.collection, r.tenancy) == (first.collection, first.tenancy)
-        and (not first.private or r.uploader == first.uploader)
-        for r in rows_
-    )
-
-
 def acl_of(ws: str, listers: list[tuple[Person, Listed]]) -> Acl:
-    """Who may read a meeting: its collection's group, or the people who list it."""
-    first = listers[0][1]
-    if first.collection and not first.private:
-        return Acl((AclRef(subject(PROVIDER, ws, "collection", first.collection), group=True),))
+    """Who may read a meeting: its collection's group, or the people who list it. Lists that
+    disagree (another collection, private on one) give only the people on every list."""
+    views = {(m.collection, m.tenancy, m.uploader if m.private else None) for _, m in listers}
     refs: dict[str, AclRef] = {}
     for p, _ in listers:
         unit = ("list", f"person:{p.account_id}")
         mine = subject(PROVIDER, ws, "user", p.subject)
         refs.setdefault(mine, AclRef(mine, unit=unit))
-    return Acl(tuple(refs[k] for k in sorted(refs)), personal=first.private)
+    private = any(t == "user" for _, t, _ in views)
+    listed = Acl(tuple(refs[k] for k in sorted(refs)), personal=private)
+    groups = sorted({c for c, t, _ in views if c and t != "user"})
+    leaves = [Acl((AclRef(subject(PROVIDER, ws, "collection", c), group=True),)) for c in groups]
+    if not leaves:
+        return listed
+    if len(views) == 1:
+        return leaves[0]
+    return Acl(all_of=(*leaves, listed), personal=private)
 
 
 def signature(a: Acl) -> str:
     """Of the access list: a change of it makes the meeting be read again."""
-    key = [sorted(r.ref for r in a.refs), a.personal]
-    return hashlib.sha256(json.dumps(key).encode()).hexdigest()[:16]
+
+    def key(x: Acl) -> object:
+        return [sorted(r.ref for r in x.refs), x.personal, [key(k) for k in x.all_of]]
+
+    return hashlib.sha256(json.dumps(key(a)).encode()).hexdigest()[:16]
 
 
 @dataclass
@@ -504,9 +504,6 @@ class BluedotConnector(Connector):
         n = 0
         for mid in sorted(by_meeting):
             listers = by_meeting[mid]
-            if not agrees([m for _, m in listers]):
-                read.pop(mid, None)  # who may read it is disputed: it is not kept
-                continue
             a = acl_of(ws, listers)
             prev = read.get(mid)
             had = cast("list[object]", prev) if isinstance(prev, list) else None
