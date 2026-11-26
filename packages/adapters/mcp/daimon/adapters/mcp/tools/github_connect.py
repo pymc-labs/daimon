@@ -33,7 +33,7 @@ from daimon.core.github_connect_cards import (
     teams_connect_card,
 )
 from daimon.core.github_credentials import encrypt_token
-from daimon.core.github_panel import requester_manages_agent
+from daimon.core.github_panel import connect_root, requester_manages_agent
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.github_access import (
@@ -200,13 +200,8 @@ async def _github_connect_impl(
 ) -> ConnectResult:
     if auth.platform not in ("discord", "slack", "teams") or auth.platform_user_id is None:
         raise ToolError("GitHub setup from chat isn't available here.")
-    root = runtime.settings.mcp.app_root_url
-    config = runtime.settings.github_app
-    if runtime.fernet is None:
-        raise ToolError(f"GitHub setup is unavailable on this {space_noun(auth.platform)}.")
-    if root is None or not all(
-        (config.app_id, config.app_slug, config.private_key, config.client_id, config.client_secret)
-    ):
+    root = connect_root(runtime.settings)
+    if runtime.fernet is None or root is None:
         raise ToolError(f"GitHub setup is unavailable on this {space_noun(auth.platform)}.")
     origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
     target_name = agent_name or origin.configuration_target_name or origin.responder_name

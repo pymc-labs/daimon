@@ -14,6 +14,13 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 from daimon.adapters.mcp import oauth_github
+from daimon.core.github_connect_views import (
+    FLOW_COOKIE,
+    STATE_COOKIE,
+    ConnectInstallation,
+    ConnectRepo,
+    agent_editor_view,
+)
 
 # The fixture is defined next to the route tests; importing it registers it here.
 from .test_oauth_github_connect import (  # noqa: F401
@@ -59,39 +66,39 @@ async def test_setup_redirect_without_state_resumes_the_flow_from_the_cookie(
 
 
 def _editor_html() -> str:
-    def owner(
-        inst: int, owner_id: int, login: str, kind: str, repos: int
-    ) -> oauth_github._Installation:
-        return oauth_github._Installation(
+    def owner(inst: int, owner_id: int, login: str, kind: str, repos: int) -> ConnectInstallation:
+        return ConnectInstallation(
             id=inst,
             owner_id=owner_id,
             owner_login=login,
             repository_selection="selected",
             owner_type=kind,
             repos=tuple(
-                oauth_github._Repo(inst * 100 + n, owner_id, inst, f"{login}/repo-{n}", "admin")
+                ConnectRepo(inst * 100 + n, owner_id, inst, f"{login}/repo-{n}", "admin")
                 for n in range(repos)
             ),
         )
 
     page = oauth_github._agent_editor_page(
-        root="https://mcp.test",
-        state="state",
-        invitation_hash="invitation",
-        secret="secret",
-        agent_name="Editor",
-        workspace="Test",
-        platform="discord",
-        grants=[],
-        installations=[
-            owner(1, 1, "sam", "User", 2),
-            owner(2, 2, "northwind", "Organization", 2),
-            owner(3, 3, "emptyorg", "Organization", 0),
-        ],
-        snapshot="snap",
-        cancel_url="https://mcp.test/cancel",
-        install_url="https://github.com/apps/x/installations/new",
-        github_user_id=1,
+        agent_editor_view(
+            root="https://mcp.test",
+            state="state",
+            invitation_hash="invitation",
+            secret="secret",
+            agent_name="Editor",
+            workspace="Test",
+            platform="discord",
+            grants=[],
+            installations=[
+                owner(1, 1, "sam", "User", 2),
+                owner(2, 2, "northwind", "Organization", 2),
+                owner(3, 3, "emptyorg", "Organization", 0),
+            ],
+            snapshot="snap",
+            cancel_url="https://mcp.test/cancel",
+            install_url="https://github.com/apps/x/installations/new",
+            github_user_id=1,
+        )
     )
     return page.body.decode()
 
@@ -140,16 +147,16 @@ async def test_setup_without_state_still_needs_the_matching_flow_cookie(
     state, _hidden = await env.open_editor()
     params = {"installation_id": "78", "setup_action": "update"}
 
-    flow_cookie = env.browser.cookies.get(oauth_github._COOKIE)
-    env.browser.cookies.delete(oauth_github._COOKIE)
+    flow_cookie = env.browser.cookies.get(FLOW_COOKIE)
+    env.browser.cookies.delete(FLOW_COOKIE)
     assert (await env.browser.get("/oauth/github/setup", params=params)).status_code == 400
 
-    env.browser.cookies.set(oauth_github._COOKIE, "someone-else")
+    env.browser.cookies.set(FLOW_COOKIE, "someone-else")
     assert (await env.browser.get("/oauth/github/setup", params=params)).status_code == 400
 
     assert flow_cookie is not None
-    env.browser.cookies.set(oauth_github._COOKIE, flow_cookie)
-    env.browser.cookies.delete(oauth_github._STATE_COOKIE)
+    env.browser.cookies.set(FLOW_COOKIE, flow_cookie)
+    env.browser.cookies.delete(STATE_COOKIE)
     assert (await env.browser.get("/oauth/github/setup", params=params)).status_code == 400
 
     # A state in the query wins over the remembered one and must still be the flow's.
@@ -182,15 +189,15 @@ def _twelve_account_editor_html(*, renamed_first: bool = False) -> str:
 
     now = datetime.now(UTC)
     installations = [
-        oauth_github._Installation(
+        ConnectInstallation(
             id=100 + n,
             owner_id=500 + n,
             owner_login=f"org{n:02d}",
             repository_selection="selected",
             owner_type="Organization",
-            repos=(oauth_github._Repo(7000 + n, 500 + n, 100 + n, f"org{n:02d}/r", "admin"),)
+            repos=(ConnectRepo(7000 + n, 500 + n, 100 + n, f"org{n:02d}/r", "admin"),)
             + (
-                (oauth_github._Repo(8000, 500, 100, "org00/r2", "admin"),)
+                (ConnectRepo(8000, 500, 100, "org00/r2", "admin"),)
                 if renamed_first and n == 0
                 else ()
             ),
@@ -218,19 +225,21 @@ def _twelve_account_editor_html(*, renamed_first: bool = False) -> str:
         for n in range(12)
     ]
     page = oauth_github._agent_editor_page(
-        root="https://mcp.test",
-        state="state",
-        invitation_hash="invitation",
-        secret="secret",
-        agent_name="Editor",
-        workspace="Test",
-        platform="discord",
-        grants=grants,
-        installations=installations,
-        snapshot="snap",
-        cancel_url="https://mcp.test/cancel",
-        install_url="https://github.com/apps/x/installations/new",
-        github_user_id=1,
+        agent_editor_view(
+            root="https://mcp.test",
+            state="state",
+            invitation_hash="invitation",
+            secret="secret",
+            agent_name="Editor",
+            workspace="Test",
+            platform="discord",
+            grants=grants,
+            installations=installations,
+            snapshot="snap",
+            cancel_url="https://mcp.test/cancel",
+            install_url="https://github.com/apps/x/installations/new",
+            github_user_id=1,
+        )
     )
     return page.body.decode()
 
