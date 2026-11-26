@@ -23,7 +23,6 @@ import binascii
 import json
 import re
 import uuid
-from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -46,8 +45,6 @@ RELAY_PATH: Final = "/mcp-identity"
 RELAY_CLAIM: Final = "daimon_relay"
 #: Servers accept at most 300 s between iat and exp; 120 s leaves room for skew.
 TOKEN_TTL: Final = timedelta(seconds=120)
-#: A cached token is re-signed once it has less than this left.
-RESIGN_MARGIN: Final = timedelta(seconds=30)
 _SEED_BYTES: Final = 32
 
 SigningKey = Ed25519PrivateKey
@@ -244,7 +241,7 @@ class TurnPlace:
 
 @dataclass(frozen=True)
 class IdentityClaims:
-    """Every claim but `iat` and `exp`; a value of None is left out of the token."""
+    """Every claim but `iat`, `exp` and `jti`; a value of None is left out of the token."""
 
     iss: str
     aud: str
@@ -314,48 +311,28 @@ def sign_identity(
     key: Ed25519PrivateKey,
     now: datetime,
     ttl: timedelta = TOKEN_TTL,
+    jti: str | None = None,
 ) -> str:
-    """Compact JWS, header `{"alg":"EdDSA","typ":"JWT"}`."""
-    return pyjwt.encode(
-        claims.payload(now=now, ttl=ttl), key, algorithm="EdDSA", headers={"typ": "JWT"}
-    )
+    """Compact JWS, header `{"alg":"EdDSA","typ":"JWT"}`, with a fresh `jti` unless one is given.
+
+    A server may accept each `jti` once, so every relayed request gets its own token: a
+    replayed one is refused there. That stops a replay, not a stale claim."""
+    payload: dict[str, str | int] = {
+        **claims.payload(now=now, ttl=ttl),
+        "jti": jti or uuid.uuid4().hex,
+    }
+    return pyjwt.encode(payload, key, algorithm="EdDSA", headers={"typ": "JWT"})
 
 
-class IdentityTokenCache:
-    """Reuse a token for the same claims until it is within `margin` of expiry.
+class IdentitySigner:
+    """Signs one token per relayed request (`sign_identity`); nothing is cached or reused."""
 
-    The claims carry the turn's message, so in practice one token serves one
-    turn. Bounded: the oldest entry goes first.
-    """
-
-    def __init__(
-        self,
-        key: Ed25519PrivateKey,
-        *,
-        ttl: timedelta = TOKEN_TTL,
-        margin: timedelta = RESIGN_MARGIN,
-        max_entries: int = 1024,
-    ) -> None:
-        if not timedelta(0) <= margin < ttl:
-            raise ValueError("re-sign margin must be shorter than the token lifetime")
+    def __init__(self, key: Ed25519PrivateKey, *, ttl: timedelta = TOKEN_TTL) -> None:
         self._key = key
         self._ttl = ttl
-        self._margin = margin
-        self._max_entries = max_entries
-        self._tokens: OrderedDict[IdentityClaims, tuple[str, datetime]] = OrderedDict()
 
     def token(self, claims: IdentityClaims, *, now: datetime) -> str:
-        cached = self._tokens.get(claims)
-        if cached is not None and cached[1] - now > self._margin:
-            self._tokens.move_to_end(claims)
-            return cached[0]
-        token = sign_identity(claims, key=self._key, now=now, ttl=self._ttl)
-        expires_at = datetime.fromtimestamp(int(now.timestamp()), tz=now.tzinfo) + self._ttl
-        self._tokens[claims] = (token, expires_at)
-        self._tokens.move_to_end(claims)
-        while len(self._tokens) > self._max_entries:
-            self._tokens.popitem(last=False)
-        return token
+        return sign_identity(claims, key=self._key, now=now, ttl=self._ttl)
 
 
 def matching_turn(
