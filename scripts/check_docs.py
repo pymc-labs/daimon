@@ -103,6 +103,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Check docs pages against their length budgets.")
     parser.add_argument("root", nargs="?", default="docs", type=Path)
     args = parser.parse_args()
+    if not (args.root / "features.md").is_file():  # generated, never committed, still checked
+        print("docs/features.md is missing: run scripts/generate_feature_reference.py first")
+        return 1
     pages = sorted(p for p in args.root.glob("*.md") if p.name not in GENERATED)
     findings = [f for page in pages for f in check(page)]
     print("\n".join(findings) or f"docs: {len(pages)} pages within limits")
