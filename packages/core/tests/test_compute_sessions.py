@@ -33,6 +33,7 @@ from daimon.core.compute_tasks import WAKE_OUTPUT_CHARS, wake_key
 from daimon.core.config import ComputeProfile, ComputeSettings
 from daimon.core.continuity.wakes import WAKE_RUN_LEASE, claim_wake, settle_wake, start_wake
 from daimon.core.errors import StoreError
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.stores import compute_sessions as session_store
 from daimon.core.stores import compute_tasks as task_store
 from daimon.core.stores import session_settle_state as settle_store
@@ -43,6 +44,7 @@ from daimon.core.stores.turn_origins import bind_origin_session, create_origin, 
 from daimon.testing.compute import FakeComputeProvider
 from daimon.testing.factories import make_account, make_tenant
 from pydantic import SecretStr
+from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -2293,7 +2295,7 @@ async def _switch(sm, tenant_id, key, value, target=None):
         )
 
 
-async def agent_chat(sm, tenant, account, *, channel=None):
+async def agent_chat(sm, tenant, account, *, channel=None, platform="discord"):
     """The caller of an agent-chat session whose send was recorded (`record_driver`), with
     `compute_agent_chat` on; None when the rule does not hold."""
     async with sm.begin() as db:
@@ -2307,17 +2309,17 @@ async def agent_chat(sm, tenant, account, *, channel=None):
             ),
         )
     await _switch(sm, tenant.id, "compute_agent_chat", "on")
-    return await _agent_chat_caller(sm, tenant.id, account.id)
+    return await _agent_chat_caller(sm, tenant.id, account.id, platform=platform)
 
 
-async def _agent_chat_caller(sm, tenant_id, account_id, grant=GRANT):
+async def _agent_chat_caller(sm, tenant_id, account_id, grant=GRANT, *, platform="discord"):
     async with sm() as db:
         place = await agent_chat_owner(
             db,
             tenant_id=tenant_id,
             account_id=account_id,
             chat_session_id=grant,
-            platform="discord",
+            platform=platform,
             agent_id="agent",
             agent_name="Daimon",
         )
@@ -2421,3 +2423,46 @@ async def test_turning_agent_chat_off_refuses_its_next_call(db_engine, db_clean)
     for refused in (service.get(owner, session.id), service.list(owner)):
         with pytest.raises(StoreError, match="Cloud computers from agent chat are turned off"):
             await refused
+
+
+@pytest.mark.parametrize("left", ["both_on", "channel_off", "agent_chat_off", "slack", "no_record"])
+async def test_a_starting_agent_chat_machine_is_read_at_its_recorded_session(
+    db_engine, db_clean, left
+):
+    """The scheduler reads a machine still starting where its session was recorded: the
+    channel and agent, with both switches. Never at its scope, which on Slack would read as
+    a channel named `agentchat`. With its record gone it is stopped."""
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    _, tenant, account = await caller(sm)
+    platform = "slack" if left == "slack" else "discord"
+    owner = await agent_chat(sm, tenant, account, channel="chan-k", platform=platform)
+    fake = FakeComputeProvider()
+    fake.starts_after = 10**9
+    service, _ = _waiting(sm, fake)
+    session = await launch(service, owner)
+    assert session.state == "launching"
+    if left in ("channel_off", "slack"):
+        off = FeatureTarget("channel", channel_id="chan-k")
+        await _switch(sm, tenant.id, "compute", "off", off)
+    if left == "agent_chat_off":
+        await _switch(sm, tenant.id, "compute_agent_chat", "off")
+    if left == "no_record":
+        # A machine whose scope names a grant no send recorded for its owner.
+        async with sm.begin() as db:
+            await db.execute(
+                text("UPDATE compute_sessions SET thread_id = :scope WHERE id = :id"),
+                {"scope": "agentchat:unrecorded", "id": session.id},
+            )
+    fake.starts_after = 0
+    await service.reconcile()
+    assert await _state(sm, owner, session.id) == ("running" if left == "both_on" else "deleted")
+
+
+async def test_a_chat_machines_features_are_read_where_they_always_were(db_engine, db_clean):
+    sm = async_sessionmaker(db_engine, expire_on_commit=False)
+    owner, tenant, _ = await caller(sm)
+    service = ComputeSessions(sm, settings(), FakeComputeProvider(), clock=lambda: NOW)
+    session = await launch(service, owner)
+    async with sm.begin() as db:
+        place = await session_store.feature_place(db, session)
+    assert place == FeaturePlace.of(tenant.id, "discord", "parent", "thread", agent_id="agent")

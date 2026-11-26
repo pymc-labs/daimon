@@ -151,10 +151,10 @@ async def agent_chat_owner(
     if found is None:
         return None
     place = FeaturePlace.of(tenant_id, platform, found.channel_id, agent_id=agent_id)
-    for key in ("compute", "compute_agent_chat"):
-        feature = await feature_in_or_none(db, None, place, key)
-        if feature is None or not feature.on:
-            return None
+    compute = await feature_in_or_none(db, None, place, "compute")
+    agent_chat = await feature_in_or_none(db, None, place, "compute_agent_chat")
+    if compute is None or agent_chat is None or not (compute.on and agent_chat.on):
+        return None
     return ComputePlace(
         platform=platform,
         thread_id=agent_chat_thread(chat_session_id),
@@ -723,19 +723,21 @@ class ComputeSessions:
 
     async def _allowed(self, db: AsyncSession, session: ComputeSession) -> bool | None:
         """Whether a session still waiting to launch may: the deployment switch and the
-        `compute` feature at its place. Off here stops it instead of provisioning; None
-        when the feature cannot be read, so this tick leaves the session as it is."""
-        place = FeaturePlace.of(
-            session.tenant_id,
-            session.platform,
-            session.parent_channel_id,
-            session.thread_id,
-            agent_id=session.agent_id,
-        )
+        `compute` feature at its place (`store.feature_place`). Off here stops it instead of
+        provisioning; None when a feature cannot be read, so this tick leaves the session
+        as it is. An agent-chat session's machine also needs `compute_agent_chat`, and is
+        stopped when its session's record is not found."""
         if not self.settings.enabled:
             return False
-        found = await feature_in_or_none(db, None, place, "compute")
-        return None if found is None else found.on
+        place = await store.feature_place(db, session)
+        if place is None:
+            return False
+        found = [await feature_in_or_none(db, None, place, "compute")]
+        if store.in_agent_chat(session):
+            found.append(await feature_in_or_none(db, None, place, "compute_agent_chat"))
+        if any(feature is not None and not feature.on for feature in found):
+            return False
+        return None if None in found else True
 
     async def _reconcile_one(self, session: ComputeSession, *, archived: bool) -> None:
         async with self.sm.begin() as db:

@@ -15,8 +15,8 @@ from daimon.core.compute_models import (
 )
 from daimon.core.compute_tasks import wake_key, wake_text
 from daimon.core.errors import StoreError
-from daimon.core.features.snapshot import FeaturePlace, feature_in_or_none
-from daimon.core.stores.compute_sessions import notices_reach, scope
+from daimon.core.features.snapshot import feature_in_or_none
+from daimon.core.stores.compute_sessions import feature_place, notices_reach, scope
 from daimon.core.stores.domain import TurnOriginRow
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -256,12 +256,8 @@ async def wake_runs_on(db: AsyncSession, session: ComputeSession) -> bool:
     `feature_in_or_none` does not check `depends_on`, and this needs `compute` on too.
     It is: the session exists, and `ComputeSessions._allowed` checked it at launch.
     """
-    place = FeaturePlace.of(
-        session.tenant_id,
-        session.platform,
-        session.parent_channel_id,
-        session.thread_id,
-        agent_id=session.agent_id,
-    )
+    place = await feature_place(db, session)
+    if place is None:
+        return False
     found = await feature_in_or_none(db, None, place, "compute_wake_runs")
     return found is not None and found.on

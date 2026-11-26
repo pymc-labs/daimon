@@ -9,6 +9,8 @@ from daimon.core._models import Account, ComputeSessionRecord, Tenant
 from daimon.core.access_policy import AGENT_CHAT_SCOPE_PREFIX
 from daimon.core.compute_models import ComputeSession
 from daimon.core.errors import StoreError
+from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.stores.session_settle_state import find_agent_chat_session
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,11 +19,45 @@ async def scope(db: AsyncSession, tenant_id: uuid.UUID) -> None:
     await db.execute(select(func.set_config("daimon.tenant_id", str(tenant_id), True)))
 
 
+def in_agent_chat(session: ComputeSession) -> bool:
+    """Whether the machine belongs to an agent-chat session (`AGENT_CHAT_SCOPE_PREFIX`)."""
+    return session.thread_id.startswith(AGENT_CHAT_SCOPE_PREFIX)
+
+
 def notices_reach(session: ComputeSession) -> bool:
     """Whether a notice queued for the session's conversation can reach it: the one rule for
     every notice (a command's end, the expiry warning and a failed start). Not for an
     agent-chat session's machine: no poller serves its scope, so it checks again itself."""
-    return not session.thread_id.startswith(AGENT_CHAT_SCOPE_PREFIX)
+    return not in_agent_chat(session)
+
+
+async def feature_place(db: AsyncSession, session: ComputeSession) -> FeaturePlace | None:
+    """Where a machine's features are read: the one place for every reader of a row
+    (`ComputeSessions._allowed`, `compute_tasks.wake_runs_on`).
+
+    A chat conversation's machine is read at its channel, thread and agent. An agent-chat
+    session's machine has no channel or thread of its own: it is read at the channel and
+    agent its session was recorded with (`find_agent_chat_session`, for the grant in its
+    scope and its owner), never at its scope. None when that record is not found.
+    """
+    if not in_agent_chat(session):
+        return FeaturePlace.of(
+            session.tenant_id,
+            session.platform,
+            session.parent_channel_id,
+            session.thread_id,
+            agent_id=session.agent_id,
+        )
+    found = await find_agent_chat_session(
+        db,
+        grant=session.thread_id.removeprefix(AGENT_CHAT_SCOPE_PREFIX),
+        account_id=session.owner_account_id,
+    )
+    if found is None:
+        return None
+    return FeaturePlace.of(
+        session.tenant_id, session.platform, found.channel_id, agent_id=session.agent_id
+    )
 
 
 async def get(
