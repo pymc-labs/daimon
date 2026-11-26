@@ -21,6 +21,7 @@ import structlog
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.verifier import FOREIGN_HOME_CLAIM, TOKEN_KIND_CLAIM
 from daimon.adapters.mcp.tools.watches import callback_watch_terms
+from daimon.core.agent_chat_requester import driver_signed_in
 from daimon.core.audience_gate import read_audience_mode
 from daimon.core.channel_audience import channel_has_outsiders
 from daimon.core.config import SignedIdentityServer, load_watches_settings
@@ -605,9 +606,10 @@ def build_identity_relay_route(
             # A turn a person started names that person. An unattended run names who
             # it acts for, as kind "routine": a routine's owner and delivery place, a
             # watch poll's owner and report place, or the person and place of a wake
-            # (watch, timer, continuation). A foreign sender, or a session whose calling
-            # turn is unknown (`_session_turn`), matches none and carries no requester
-            # fields.
+            # (watch, timer, continuation). An agent-chat session names the person
+            # signed in to the hub who drives it, as kind "agent_chat" with no place, on a
+            # server that opted in. A foreign sender, or a session whose calling turn is
+            # unknown (`_session_turn`), matches none and carries no requester fields.
             named: str | None = None
             conversation: dict[str, str | None] | None = None
             kind: RequesterKind | None = None
@@ -644,6 +646,18 @@ def build_identity_relay_route(
                     watch_conversation(watch),
                     "routine",
                 )
+            elif (
+                binding.agent_chat is not None
+                and server.agent_chat_requester
+                and platform in REQUESTER_PLATFORMS
+                and FOREIGN_HOME_CLAIM not in claims
+                and isinstance(person, str)
+                and person
+                and await driver_signed_in(sessionmaker, managed_session_id=binding.agent_chat)
+            ):
+                # The credential's own account's platform user, read live by the
+                # verifier; the request body cannot set it (`stamp_parsed`).
+                named, kind = person, "agent_chat"
             wake_url: str | None = None
             # Only a person's call that names them and their place gets a link.
             if (

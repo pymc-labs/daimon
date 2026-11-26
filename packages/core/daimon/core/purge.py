@@ -192,6 +192,7 @@ class PurgeReport(BaseModel):
     support_settlers_cleared: int = 0
     daimon_admins: int = 0
     agent_post_requesters: int = 0
+    agent_chat_session_links: int = 0
     platform_user_names: int = 0
     teams_messages: int = 0
     microsoft_user_tokens: int = 0

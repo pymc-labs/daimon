@@ -1,5 +1,6 @@
 """Exercise the pinned SDK over HTTPX; every response is synthetic and offline."""
 
+import contextlib
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -474,6 +475,105 @@ async def test_sdk_errors_record_the_http_status_for_logs(status: int, category:
         await client.aio.aclose()
 
 
+REFUSED_REOPEN = {
+    "error": {
+        "code": 400,
+        "status": "INVALID_ARGUMENT",
+        "message": "Invalid value at 'last_event_id', \"user prompt text\" with key"
+        " AIzaSyFAKEFAKEFAKEFAKEFAKEFAKE00, see https://example.invalid/errors",
+    }
+}
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "reason"),
+    [
+        (
+            400,
+            REFUSED_REOPEN,
+            "INVALID_ARGUMENT: Invalid value at 'last_event_id', \"[redacted]\" with key"
+            " [redacted], see [redacted URL]",
+        ),
+        (404, {"error": {"code": 404, "message": "not\nfound"}}, "not found"),
+        (400, {"error": {"code": 400, "message": "x" * 1000}}, "x" * 300),
+        (400, {"error": {"code": 400}}, None),
+        (500, REFUSED_REOPEN, None),  # only a refusal (4xx) carries its reason
+    ],
+)
+async def test_a_refused_stream_open_keeps_a_redacted_capped_reason(
+    status: int, body: dict[str, JsonValue], reason: str | None
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = genai.Client(
+            api_key="offline-fixture",
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
+        )
+        with pytest.raises(ProviderError) as exc:
+            await SDKTransport(client).open_stream("i1", after="7")
+        assert exc.value.native_error_code == f"http_{status}"
+        assert exc.value.native_message == reason
+        # The exception text, which reaches user-facing paths, never carries it.
+        assert str(exc.value) == f"provider error: {exc.value.category}"
+        await client.aio.aclose()
+
+
+@pytest.mark.parametrize("call", ["create", "get"])
+async def test_a_refused_request_with_a_body_or_a_plain_read_keeps_no_reason(call: str) -> None:
+    # Only a stream open keeps the reason: a create's refusal can echo its prompt.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json=REFUSED_REOPEN)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = genai.Client(
+            api_key="offline-fixture",
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
+        )
+        with pytest.raises(ProviderError) as exc:
+            if call == "create":
+                await SDKTransport(client).create(
+                    {"agent": "antigravity-preview-05-2026", "input": "user prompt text"}
+                )
+            else:
+                await SDKTransport(client).get("i1")
+        assert exc.value.native_error_code == "http_400"
+        assert exc.value.native_message is None
+        await client.aio.aclose()
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(400, text="raw body echoing user prompt text"),
+        httpx.Response(400, json=[{"error": {"message": "user prompt text"}}]),
+    ],
+)
+async def test_a_refused_stream_open_without_a_json_error_object_keeps_no_reason(
+    response: httpx.Response,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return response
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = genai.Client(
+            api_key="offline-fixture",
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
+        )
+        with pytest.raises(ProviderError) as exc:
+            await SDKTransport(client).open_stream("i1", after="7")
+        assert exc.value.native_error_code == "http_400"
+        assert exc.value.native_message is None
+        await client.aio.aclose()
+
+
 def _quota_body(
     limit: int,
     model: str = "gemini-4-argon",
@@ -612,3 +712,36 @@ async def test_sdk_effort_when_a_model_interaction_then_rides_generation_config(
         "a model interaction sends effort in generation_config"
     )
     assert "agent_config" not in posted, "a model interaction sends no agent_config"
+
+
+async def test_an_event_stream_waits_twenty_minutes_between_bytes_a_plain_read_does_not() -> None:
+    """Google's long-decode guidance: a stream's HTTP read timeout is 15-20 minutes."""
+    timeouts: dict[str, dict[str, float | None]] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        kind = "stream" if request.url.params.get("stream") == "true" else "get"
+        timeouts[kind] = request.extensions["timeout"]
+        if kind == "stream":
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=b"")
+        return httpx.Response(200, json={"id": "i1", "status": "in_progress"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=60) as http:
+        client = genai.Client(
+            api_key="offline-fixture",
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
+        )
+        transport = SDKTransport(client)
+        stream = await transport.open_stream("i1")
+        async for _ in stream:
+            pass
+        with contextlib.suppress(ProviderError, ValueError, KeyError):
+            await transport.get("i1")
+        await client.aio.aclose()
+    assert timeouts["stream"]["read"] == 1200.0
+    assert timeouts["stream"]["connect"] == 60.0
+    # The SDK sends no timeout of its own, so without this a stream had no read bound.
+    assert timeouts["get"] == {"connect": None, "read": None, "write": None, "pool": None}, (
+        "a plain read is unchanged"
+    )

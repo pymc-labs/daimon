@@ -23,13 +23,16 @@ from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
     WATCH_APPROVAL_TOOLS,
     WATCH_CONFIRMED_TOOLS,
+    ResolvedAgentToolRule,
     ToolCall,
     ToolSafetyPolicy,
+    ToolVerdict,
     decide_tool_call,
     has_confirmation_gate,
     session_tools_for_policy,
 )
 from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn.unattended_capabilities import protected_tools
 from daimon.testing.factories import make_tenant
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -203,3 +206,104 @@ async def test_only_the_skippable_tools_ever_leave_a_turns_set(
     both = await confirmed_tools_for_tenant(deps, tenant.id, AGENT)
     assert every - both == APPROVAL_SKIPPABLE_TOOLS
     assert both >= WATCH_CONFIRMED_TOOLS - APPROVAL_SKIPPABLE_TOOLS
+
+
+def _verdict(
+    policy: ToolSafetyPolicy,
+    tool: str,
+    *,
+    owner: frozenset[str] | None,
+    rule: ResolvedAgentToolRule | None = None,
+) -> ToolVerdict:
+    """The unattended verdict, as an agent-chat turn's worker decides it. `owner=None` calls
+    the decider as a caller with no owner tools does."""
+    call = ToolCall(
+        tool_use_id="tu", server_name=DAIMON_SERVER_NAME, tool_name=tool,
+        input={CONFIRMED_DAIMON_TOOLS[tool] or "": "x"},
+    )  # fmt: skip
+    extra = {} if owner is None else {"owner_tools": owner}
+    return decide_tool_call(
+        policy,
+        call,
+        attended=False,
+        trusted_servers=_DAIMON,
+        confirmed_tools=protected_tools(policy),
+        agent_rule=rule,
+        **extra,
+    )
+
+
+_DENIED = tuple(f"daimon-mcp/{t}" for t in COMPUTE_APPROVAL_TOOLS)
+#: Each case: the operator's deny list, the agent's rule, and the verdict for launch and
+#: extend from an owner the agent-chat rule counts as present.
+_OWNER_CASES = {
+    "operator_deny": (_DENIED, None, ("deny", "write", "denied_by_operator")),
+    "agent_deny": ((), "deny", ("deny", "write", "agent_rule_deny")),
+    "agent_ask": ((), "ask", ("deny", "write", "agent_rule_ask")),
+    "no_rule": ((), None, ("allow", "write", "agent_chat_owner")),
+}
+
+
+@pytest.mark.parametrize("enabled", [True, False], ids=["policy_on", "policy_off"])
+@pytest.mark.parametrize("case", sorted(_OWNER_CASES))
+def test_the_owners_start_stays_a_write_that_every_deny_and_ask_decides(
+    enabled: bool, case: str
+) -> None:
+    """With the policy on or off, launch and extend stay confirmed writes through every
+    check; the owner exception only turns what is left into an allow, last."""
+    denied, rule, expected = _OWNER_CASES[case]
+    policy = ToolSafetyPolicy(enabled=enabled, agent_rules=True, denied=denied)
+    held = None if rule is None else ResolvedAgentToolRule(rule=rule)  # type: ignore[arg-type]
+    for tool in sorted(COMPUTE_APPROVAL_TOOLS):
+        got = _verdict(policy, tool, owner=COMPUTE_APPROVAL_TOOLS, rule=held)
+        assert (got.outcome, got.effect, got.reason) == expected, tool
+
+
+@pytest.mark.parametrize("enabled", [True, False], ids=["policy_on", "policy_off"])
+@pytest.mark.parametrize("case", sorted(_OWNER_CASES))
+def test_with_no_owner_tools_every_verdict_is_as_before(enabled: bool, case: str) -> None:
+    """Every confirmed tool, every case: an empty exception decides as a caller without it."""
+    denied, rule, _ = _OWNER_CASES[case]
+    policy = ToolSafetyPolicy(enabled=enabled, agent_rules=True, denied=denied)
+    held = None if rule is None else ResolvedAgentToolRule(rule=rule)  # type: ignore[arg-type]
+    for tool in sorted(STILL_ASK | COMPUTE_APPROVAL_TOOLS):
+        assert _verdict(policy, tool, owner=frozenset(), rule=held) == _verdict(
+            policy, tool, owner=None, rule=held
+        ), tool
+        assert _verdict(policy, tool, owner=None, rule=held).outcome == "deny", tool
+
+
+@pytest.mark.parametrize("enabled", [True, False], ids=["policy_on", "policy_off"])
+async def test_the_worker_reads_the_agents_rule_for_the_owners_start_with_the_policy_off(
+    enabled: bool,
+) -> None:
+    """The unattended decider reads the agent's rule for launch and extend even with the
+    policy off, so a stored deny refuses them there; other calls read it as before."""
+    from daimon.core.turn.approvals import unattended_decider
+
+    policy = ToolSafetyPolicy(enabled=enabled, agent_rules=True)
+    asked: list[str] = []
+
+    async def deny(call: ToolCall) -> ResolvedAgentToolRule:
+        asked.append(call.tool_name)
+        return ResolvedAgentToolRule(rule="deny")
+
+    decide = unattended_decider(
+        policy,
+        trusted_servers=_DAIMON,
+        confirmed_tools=protected_tools(policy),
+        rules_for=deny,
+        daimon_rules=True,
+        owner_tools=COMPUTE_APPROVAL_TOOLS,
+    )
+    for tool in sorted(COMPUTE_APPROVAL_TOOLS):
+        call = ToolCall(
+            tool_use_id="tu", server_name=DAIMON_SERVER_NAME, tool_name=tool,
+            input={CONFIRMED_DAIMON_TOOLS[tool] or "": "x"},
+        )  # fmt: skip
+        assert not (await decide(call)).allow, tool
+    assert sorted(asked) == sorted(COMPUTE_APPROVAL_TOOLS)
+    other = ToolCall(tool_use_id="tu", server_name=DAIMON_SERVER_NAME, tool_name="list_routines")
+    asked.clear()
+    await decide(other)
+    assert asked == (["list_routines"] if enabled else []), "other calls read rules as before"

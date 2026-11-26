@@ -90,6 +90,7 @@ RELAY_SESSION_METADATA_KEY = "daimon_relay_session"
 RELAY_ROUTINE_METADATA_KEY = "daimon_relay_routine"
 RELAY_OWNER_METADATA_KEY = "daimon_relay_owner"
 RELAY_GRANT_METADATA_KEY = "daimon_relay_grant"
+RELAY_AGENT_CHAT_METADATA_KEY = "daimon_relay_agent_chat"
 #: Display-name prefix of a session's own relay vault.
 RELAY_VAULT_PREFIX = "daimon-relay:"
 
@@ -256,6 +257,8 @@ async def chat_mcp_credential(
             metadata[RELAY_OWNER_METADATA_KEY] = relay.owner
         if relay.grant is not None:
             metadata[RELAY_GRANT_METADATA_KEY] = relay.grant
+        if relay.agent_chat is not None:
+            metadata[RELAY_AGENT_CHAT_METADATA_KEY] = relay.agent_chat
     return {
         "metadata": metadata,
         "auth": {"type": "static_bearer", "mcp_server_url": public_url, "token": token},
@@ -463,11 +466,14 @@ async def refresh_mounted_mcp_vaults(
     scope: Scope,
     relay_urls: Sequence[str] = (),
     hold: TurnHold | None = None,
+    agent_chat: str | None = None,
 ) -> None:
     """Renew every actually mounted Daimon slot, without creating missing slots.
 
     With ``relay_urls`` (the agent's signed-identity relays) a mounted relay vault
     is renewed too and gains any of them attached since the session started.
+    ``agent_chat`` binds that relay vault to the agent-chat session it is mounted in
+    (`refresh_relay_vault`).
     """
     for vault_id in dict.fromkeys(vault_ids):
         await refresh_agent_mcp_vault(
@@ -493,6 +499,7 @@ async def refresh_mounted_mcp_vaults(
                 now=now,
                 session_factory=session_factory,
                 scope=scope,
+                agent_chat=agent_chat,
             )
 
 
@@ -626,11 +633,15 @@ async def refresh_relay_vault(
     now: dt.datetime,
     session_factory: async_sessionmaker[AsyncSession],
     scope: Scope,
+    agent_chat: str | None = None,
 ) -> None:
     """Renew a session's relay credentials and add any relay URL attached since.
 
     The binding, hold and Slack context come from the credential's own metadata,
     never from the caller. A vault without relay credentials is left alone.
+    ``agent_chat``, the agent-chat session that mounts the vault, is added to a
+    binding that names no chat session, routine or watch, so the relay can read that
+    session's driver; a session opened before such bindings existed gains it here.
     """
     slots: dict[str, BetaManagedAgentsCredential] = {}
     async for cred in list_credentials(client, vault_id, scope=scope):
@@ -649,14 +660,24 @@ async def refresh_relay_vault(
     metadata = next(iter(slots.values())).metadata or {}
     expiries = {(cred.metadata or {}).get("daimon_chat_expires_at") for cred in slots.values()}
     expires_at = next(iter(expiries)) if len(expiries) == 1 else None
+    raw_key = metadata.get(RELAY_SESSION_METADATA_KEY)
+    raw_routine = metadata.get(RELAY_ROUTINE_METADATA_KEY)
+    bound = metadata.get(RELAY_AGENT_CHAT_METADATA_KEY)
+    # Only a binding naming no chat session, routine or watch may name an agent chat.
+    names_other = {
+        RELAY_SESSION_METADATA_KEY,
+        RELAY_ROUTINE_METADATA_KEY,
+        RELAY_OWNER_METADATA_KEY,
+        RELAY_GRANT_METADATA_KEY,
+    } & set(metadata)
+    rebind = agent_chat is not None and agent_chat != bound and not names_other
     if (
         not missing
+        and not rebind
         and expires_at is not None
         and dt.datetime.fromisoformat(expires_at) > now + CHAT_TOKEN_REFRESH_MARGIN
     ):
         return
-    raw_key = metadata.get(RELAY_SESSION_METADATA_KEY)
-    raw_routine = metadata.get(RELAY_ROUTINE_METADATA_KEY)
     context = metadata.get("daimon_chat_context")
     # No vault lock: only the session that mounts this vault refreshes it, while
     # preparing its own turn.
@@ -676,6 +697,7 @@ async def refresh_relay_vault(
                 routine_id=None if raw_routine is None else uuid.UUID(raw_routine),
                 owner=metadata.get(RELAY_OWNER_METADATA_KEY),
                 grant=metadata.get(RELAY_GRANT_METADATA_KEY) if raw_key is not None else None,
+                agent_chat=agent_chat if rebind else bound,
             ),
         )
     # Registered before the provider write, as for the shared vault.
