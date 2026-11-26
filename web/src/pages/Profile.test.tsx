@@ -33,7 +33,7 @@ const dataAccounts: Connected = {
   accounts: [{ provider: "slack", workspace: "T1", name: "maya", email: null, proof: "admin", linked_at: "2026-11-01T00:00:00Z" }],
   connections: [{ source_id: "s1", source: "Shared drive", provider: "google", subject: "maya@fernhill.example", status: "ok", last_ok_at: null }],
   connectable: [{ source_id: "s1", name: "Shared drive", provider: "google" }, { source_id: "s2", name: "Support inbox", provider: "google" }],
-  personal: { drive: true, calendar: true },
+  personal: { drive: true },
 }
 
 const view = (modules: string[] = []) => {
@@ -77,6 +77,8 @@ describe("Profile", () => {
     expect(screen.queryByText("Data accounts")).toBeNull()
     expect(within(list).getByRole("button", { name: "Connect Support inbox" })).toBeInTheDocument()
     expect(within(list).queryByRole("button", { name: "Connect Shared drive" })).toBeNull()
+    expect(within(list).getByRole("switch", { name: "Read my Google Drive as me" })).toBeChecked()
+    expect(within(list).queryByRole("switch", { name: "Read my calendar as me" })).toBeNull()
     await userEvent.click(within(list).getByRole("button", { name: "Disconnect Shared drive" }))
     await userEvent.click(await screen.findByRole("button", { name: "Disconnect" }))
     expect(api.del).toHaveBeenCalledWith("/api/profile/data/connections/s1")

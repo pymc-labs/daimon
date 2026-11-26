@@ -10,23 +10,39 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from typing import Final, Literal, get_args
+from typing import Final, get_args
 
 from daimon.data.audit import record_audit
 from daimon.data.schema import Schemas
+from daimon.data.sync.connector import CONNECTORS, Json, Part
+from daimon.data.sync.connectors.chat import switch
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
 
-type Part = Literal["drive", "calendar"]
+__all__ = ["PARTS", "Part", "parts", "set_part", "turned_off"]
 PARTS: Final[tuple[Part, ...]] = get_args(Part.__value__)
 
 
 async def parts(
     conn: AsyncConnection[DictRow], schemas: Schemas, tenant_id: uuid.UUID, account_id: uuid.UUID
 ) -> dict[Part, bool]:
-    """Each part, and whether Daimon may read it as this person."""
+    """Each part a source of the workspace reads, and whether Daimon may read it as this
+    person."""
+    cur = await conn.execute(
+        f"select kind, config from {schemas.data}.sources where tenant_id = %s"
+        " and status = 'active' and publication = 'published'".encode(),
+        (tenant_id,),
+    )
+    offered = {p for r in await cur.fetchall() if (p := _offered(r["kind"], r["config"]))}
     off = await _off(conn, schemas, [tenant_id], [account_id])
-    return {p: p not in off for p in PARTS}
+    return {p: p not in off for p in PARTS if p in offered}
+
+
+def _offered(kind: str, config: Json) -> Part | None:
+    connector = CONNECTORS.get(kind)
+    if connector is None or (kind == "gdrive" and not switch(config, "personal_drive")):
+        return None
+    return connector.personal_part
 
 
 async def set_part(

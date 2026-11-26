@@ -15,15 +15,16 @@ import hashlib
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, ClassVar, Final
+from typing import Any, ClassVar, Final, Literal
 from uuid import UUID
 
 import psycopg.conninfo
 from daimon.data.identity import SourceAccount
-from daimon.data.personal import Part
 from daimon.data.sync.rate import RateBudget
 
 Json = dict[str, Any]
+type Part = Literal["drive", "calendar"]
+"""What Daimon reads as a person, which each person can turn off (`daimon.data.personal`)."""
 
 
 @dataclass(frozen=True)

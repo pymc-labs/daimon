@@ -51,7 +51,7 @@ export function useDataAccounts(enabled: boolean) {
   const notices = d?.notices ?? []
   const have = new Set(d?.connections.map((c) => c.source_id))
   const open = d?.connectable.filter((c) => !have.has(c.source_id)) ?? []
-  const parts = Object.keys(PARTS) as PersonalPart[]
+  const parts = (Object.keys(PARTS) as PersonalPart[]).filter((p) => d?.personal[p] !== undefined)
   const count = notices.length + (d ? d.accounts.length + d.connections.length + open.length + parts.length : 0)
   const rows = d && (
     <>
@@ -88,7 +88,7 @@ export function useDataAccounts(enabled: boolean) {
       {parts.map((part) => (
         <Row key={part}>
           <span className="min-w-0 flex-1 truncate">{PARTS[part]}</span>
-          <Switch checked={d.personal[part]} disabled={setPart.isPending} aria-label={PARTS[part]} onCheckedChange={(on) => setPart.mutate({ part, on })} />
+          <Switch checked={d.personal[part] ?? false} disabled={setPart.isPending} aria-label={PARTS[part]} onCheckedChange={(on) => setPart.mutate({ part, on })} />
         </Row>
       ))}
       {start.error && <p role="alert" className="px-4 py-3 text-right text-sm text-destructive">{start.error.message}</p>}

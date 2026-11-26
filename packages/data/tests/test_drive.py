@@ -582,6 +582,8 @@ async def test_a_persons_own_drive_is_searched_as_them_and_never_stored(
         store.conn, store.schemas, store.env, store.tenant, alice, "budget"
     )
     assert mine == [], "she turned her own Drive off"
+    shown = await personal.parts(store.conn, store.schemas, store.tenant, alice)
+    assert shown == {"drive": False}, "only parts a source reads: no Calendar source"
     await personal.set_part(store.conn, store.schemas, store.tenant, alice, "drive", True)
     await store.conn.execute(
         f'update {store.d}.sources set config = config || \'{{"personal_drive": "no"}}\''
@@ -590,3 +592,5 @@ async def test_a_persons_own_drive_is_searched_as_them_and_never_stored(
     )
     off = await my_drive.search(store.conn, store.schemas, store.env, store.tenant, alice, "budget")
     assert off == [], "an admin turned it off for the workspace"
+    shown = await personal.parts(store.conn, store.schemas, store.tenant, alice)
+    assert shown == {}, "so her profile offers no Drive switch"

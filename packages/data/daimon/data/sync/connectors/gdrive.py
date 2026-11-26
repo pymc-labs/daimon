@@ -46,6 +46,7 @@ from daimon.data.sync.connector import (
     ItemRecord,
     Json,
     LiveHit,
+    Part,
     PermissionUnit,
     Record,
     Replaced,
@@ -434,6 +435,7 @@ class Run:
 class GDriveConnector(Connector):
     kind: ClassVar[str] = "gdrive"
     name: ClassVar[str] = "Google Drive"
+    personal_part: ClassVar[Part | None] = "drive"
     category: ClassVar[str] = "docs"
     descriptor: ClassVar[Descriptor | None] = Descriptor(PROVIDER)
     fields: ClassVar[tuple[Field, ...]] = (

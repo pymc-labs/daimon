@@ -224,7 +224,7 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> str:
         """Turn on or off Daimon reading your own `drive` (My Drive) or `calendar` as you in
         this workspace; both stay on until you turn them off. Each call asks you on a card first.
-        Returns each part and whether it is on."""
+        Returns each part a source here reads, and whether it is on."""
         auth = await _auth(ctx)
         if auth.is_external_agent or auth.hold is not None or auth.client:
             raise ToolError("Only a person can change what Daimon reads as them.")

@@ -18,8 +18,7 @@ from datetime import UTC, datetime, timedelta
 from typing import ClassVar, Final
 
 import httpx
-from daimon.data.personal import Part
-from daimon.data.sync.connector import Connector, Field, Json, LiveHit, Source
+from daimon.data.sync.connector import Connector, Field, Json, LiveHit, Part, Source
 from daimon.data.sync.connectors.chat import obj, rows
 from daimon.data.sync.connectors.google import ApiError, DelegationRefused, connect, person_email
 from daimon.data.sync.http import Upstream

@@ -45,5 +45,5 @@ export type Connection = { source_id: string; source: string; provider: string; 
 export type Connectable = { source_id: string; name: string; provider: string }
 export type PersonalPart = "drive" | "calendar"
 export type Notice = { kind: "linked" | "unlinked"; identity: string; provider: string; name: string }
-export type Connected = { accounts: Account[]; notices: Notice[]; connections: Connection[]; connectable: Connectable[]; personal: Record<PersonalPart, boolean> }
+export type Connected = { accounts: Account[]; notices: Notice[]; connections: Connection[]; connectable: Connectable[]; personal: Partial<Record<PersonalPart, boolean>> }
 export type Started = { flow: "code" | "device"; url: string; pending_id: string; user_code: string; interval: number; source: string; expires_at: string | null }
