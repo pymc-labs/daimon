@@ -38,6 +38,7 @@ from daimon.core.posted_controls import (
     card_text,
     expired_message,
 )
+from daimon.core.posted_controls.cards import data_source_content
 from daimon.core.stores.domain import CredentialRequestRow
 
 __all__ = [
@@ -64,6 +65,7 @@ _TITLE_FALLBACK: Final[dict[CredentialRequestKind, str]] = {
     "mcp": "Your connection token",
     "repo": "Your GitHub token",
     "skill_repo": "Your GitHub token",
+    "data_source": "Source credential",
 }
 
 
@@ -135,6 +137,8 @@ def _form_facts(
             f"anyone who talks to {agent_name} can use it",
             "the value is not shown in chat",
         )
+    if kind == "data_source":
+        return (f"for data source *{target}*", data_source_content(target)[1][0].lower())
     if kind == "env_file":
         return (
             f"for *{agent_name}*",
@@ -175,7 +179,7 @@ def _form_input(kind: CredentialRequestKind) -> dict[str, Any]:
                 "max_files": 1,
             },
         }
-    if kind == "env":
+    if kind in ("env", "data_source"):
         return {
             "type": "input",
             "block_id": _VALUE_BLOCK,

@@ -15,10 +15,16 @@ from typing import TYPE_CHECKING, Annotated, Final, Literal, Protocol, Self, cas
 from uuid import UUID
 
 import structlog
-from daimon.core.caller_resources import CALLER_RESOURCES_ID, CALLER_VAULT_PREFIX
+from daimon.core.caller_resources import (
+    APP_REPO_CREDENTIAL_PREFIX,
+    APP_SESSION_VAULT_PREFIX,
+    CALLER_RESOURCES_ID,
+    CALLER_VAULT_PREFIX,
+)
 from daimon.core.config import get_repo_memory_settings
 from daimon.core.connector_relay import relay_key
 from daimon.core.constants import DEFAULT_AGENT_MODEL
+from daimon.core.credential_env import ENV_REQUIREMENT_PREFIX
 from daimon.core.errors import DaimonError
 from daimon.core.finer_drops import FINER_DROPS, kept_environment, sandbox_losses
 from daimon.core.host_web_fetch import WEB_FETCH_TOOL
@@ -27,6 +33,7 @@ from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import remaining_s, turn_deadline
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.provider_env import carries_keys
 from daimon.core.turn.stage_timing import stage_timer
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode
 from mux.contracts.extensions import ExtensionConfig
@@ -52,6 +59,7 @@ from mux.profiles.anthropic import (
     MODEL_CONFIG_NAMESPACE,
     MULTIAGENT_NAMESPACE,
     SESSION_RESOURCE_CREATE_NAMESPACE,
+    is_builtin_skill,
 )
 from mux.profiles.gemini import INLINE_REUSE
 from mux.profiles.openai import PERSISTENT_WORKSPACE
@@ -86,6 +94,8 @@ _WILDCARD = "*"
 #: Built-in web tools an agent template never carries off Anthropic: named losses.
 #: Web search maps to the provider's own search, metered per search.
 _WEB_TOOLS = frozenset({"web_fetch"})
+_EXECUTION_TOOLS = frozenset({"bash", "read", "edit", "write", "grep", "glob"})
+"""Source tools the provider's one execution tool carries: any one off cuts them all."""
 """Reserved sentinel for 'every value' on `platform`, `channel_id` and
 `account_id` only. Never accepted for `tenant_id` or `profile`: a manifest
 row always authorizes resources for exactly one tenant, so the one hard
@@ -102,7 +112,7 @@ _ADMISSION_FACTS = {
 }
 
 #: Admission facts a root retained before they existed read as their default.
-_LEGACY_ADMISSION_FACTS = frozenset({"daimon_rule_tools", "daimon_rules_need_driver"})
+_LEGACY_ADMISSION_FACTS = frozenset({"daimon_rule_tools"})
 
 log = structlog.get_logger(__name__)
 
@@ -505,6 +515,7 @@ async def _capture_source_capabilities(
         environment_inline_bytes,
         fitting_skills,
         measure_carried_skills,
+        open_skills,
         skill_losses,
         skill_names,
     )
@@ -630,6 +641,15 @@ async def _capture_source_capabilities(
         # skills once, not once per model the preview offers.
         source_catalogue: frozenset[str] | None = None
         measured: tuple[tuple[SkillRef, ...], dict[tuple[str, str], SkillSizeRow]] | None = None
+        env_refs = (
+            tuple(
+                requirement.credential_ref
+                for requirement in source.resource_requirements
+                if requirement.id.startswith(ENV_REQUIREMENT_PREFIX) and requirement.credential_ref
+            )
+            if carries_keys(request)
+            else ()
+        )
         for row, inputs in candidates:
             template = isinstance(inputs, _TemplateInputs)
             profile_id = row.get("profile")
@@ -802,7 +822,15 @@ async def _capture_source_capabilities(
             # The catalogue lists every tool (`_lists_everything`); a feature Off here leaves
             # its tools out of a template's allowlist, as a Claude session's toolset does. A
             # pinned install keeps its exact allowlist; the server refuses them on call.
-            hidden = request.admission.toolset.hidden_daimon_tools if template else frozenset[str]()
+            # A built-in a place switched off leaves this reply, as on Claude.
+            off = {name for name, on in request.admission.toolset.builtins.items() if not on}
+            if off & _EXECUTION_TOOLS:
+                off |= _EXECUTION_TOOLS
+            hidden = (
+                request.admission.toolset.hidden_daimon_tools | (off & {WEB_FETCH_TOOL})
+                if template
+                else frozenset[str]()
+            )
             if settings is not None and deployment_on_everywhere(
                 settings, "host_call_gate", request.answers_on or (request.platform,)
             ):
@@ -828,25 +856,22 @@ async def _capture_source_capabilities(
             # treating shell HTTP execution as the provider's fetch tool.
             # Daimon's own `web_fetch` (`daimon.core.host_web_fetch`) carries it when listed.
             host_fetch = permissions.get(WEB_FETCH_TOOL) == "auto"
+            own_tools = tuple(
+                tool
+                for tool in tools
+                if tool.kind != "mcp_toolset" and not (tool.kind == "builtin" and tool.name in off)
+            )
             unavailable_builtin_tools = (
                 ("builtin_tool:web_fetch",)
                 if profile.provider == PERSISTENT_WORKSPACE.provider
                 and not host_fetch
-                and any(tool.kind == "builtin" and tool.name == "web_fetch" for tool in tools)
+                and any(tool.kind == "builtin" and tool.name == "web_fetch" for tool in own_tools)
                 else ()
             )
-            own_tools = tuple(tool for tool in tools if tool.kind != "mcp_toolset")
             template_losses: tuple[str, ...] = ()
             # A template's custom and channel skills, where its provider installs them.
             carried: tuple[SkillRef, ...] = ()
             if template:
-                if request.admission.toolset.builtins.get("web_search") is False:
-                    # A place with `tool.web_search` off leaves it out, as on Claude.
-                    own_tools = tuple(
-                        tool
-                        for tool in own_tools
-                        if not (tool.kind == "builtin" and tool.name == "web_search")
-                    )
                 # A template maps the source's execution tools to the provider's own
                 # (OpenAI bash in its hosted environment, Gemini code_execution): both
                 # are billed as tokens and container time already measured, never per
@@ -880,8 +905,17 @@ async def _capture_source_capabilities(
                     mapped_tools, unavailable_builtin_tools = (), ()
                     template_losses = ("tools",)
                 carried = carried_skills(spec)
-                if carried and not attaches_session_skills(profile):
+                built_ins = tuple(s.id for s in spec.skills or () if is_builtin_skill(s))
+                if (carried or built_ins) and not attaches_session_skills(profile):
                     template_losses, carried = ("skills", *template_losses), ()
+                elif built_ins:
+                    # Anthropic's built-ins have no bytes to carry: their open copies go
+                    # instead, and one with no copy is a named loss.
+                    copies, missing = await open_skills(
+                        request.deps.sessionmaker, source.tenant_id, built_ins
+                    )
+                    carried = (*carried, *copies)
+                    template_losses = (*template_losses, *missing)
             else:
                 mapped_tools = represented_execution_tools(
                     profile,
@@ -962,7 +996,7 @@ async def _capture_source_capabilities(
             mounted = {f"mcp_server:{server.name}" for server in relayed}
             connector_losses = tuple(c for c in connector_losses if c not in mounted)
             # The provider's built-in skills (docx, pptx, ...) have no bytes to
-            # carry and run only there: another backend goes without them.
+            # carry and run only there; a template carries open ones instead.
             portable = tuple(
                 s for s in spec.skills or () if s.source in (None, "custom") and not template
             )
@@ -1086,11 +1120,17 @@ async def _capture_source_capabilities(
                 skills=tuple(item.target for item in inputs.skills),
                 mcp_servers=(connection, *relayed),
             )
+            # The agent's keys go as a file in the provider's sandbox (`provider_env`).
+            keys = (
+                env_refs
+                if profile.provider in (PERSISTENT_WORKSPACE.provider, INLINE_REUSE.provider)
+                else ()
+            )
             represented.append(
                 SourceRepresentation(
                     source_pin=pin,
                     target=target,
-                    credential_refs=(reference,),
+                    credential_refs=(reference, *keys),
                     unavailable_mcp_tools=unavailable_mcp_tools,
                     unavailable_builtin_tools=unavailable_builtin_tools,
                     environment=kept if template else inputs.environment,
@@ -1524,10 +1564,31 @@ def classify_source_obligations(
     if (
         not native_retained
         and "credentials" not in drops
-        and any(repository.credential_ref for repository in source.repository_sources)
+        # An App repository's token is minted per session, never one of the
+        # agent's keys: it goes with the repository.
+        and any(
+            repository.credential_ref
+            and not repository.credential_ref.startswith(APP_REPO_CREDENTIAL_PREFIX)
+            for repository in source.repository_sources
+        )
     ):
         missing.add("credentials")
+    # A provider turn's relay routes `github` through a turn's own App tokens.
+    github_relayed = target is not None and target.model.provider in (
+        PERSISTENT_WORKSPACE.provider,
+        INLINE_REUSE.provider,
+    )
     for resource in source.resource_requirements:
+        if (
+            github_relayed
+            and resource.kind == "native"
+            and resource.id.startswith(APP_SESSION_VAULT_PREFIX)
+        ):
+            # The App vault's shell tokens stay with the repository; its `github`
+            # MCP is relayed (`relayed_connectors`, `github_turn_router`).
+            if "repository" not in drops:
+                missing.add("repository")
+            continue
         if (
             native_retained
             and resource.kind == "credential"
@@ -1536,10 +1597,11 @@ def classify_source_obligations(
             and resource.resource is None
         ):
             continue
+        # A credential the representation carries (Daimon's own, the agent's keys file).
+        if represented and resource.credential_ref in represented.credential_refs:
+            continue
         paired = _mcp_credential_servers(source, resource)
         if paired:
-            if represented and resource.credential_ref in represented.credential_refs:
-                continue
             if paired <= lost_servers:
                 continue
             if paired & retained_mcp or resource.credential_ref in retained_credentials:

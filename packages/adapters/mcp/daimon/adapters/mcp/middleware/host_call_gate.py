@@ -1,9 +1,10 @@
 """The MCP side of press-applies confirmation (`daimon.core.host_calls`).
 
-A provider-turn credential has no confirmation card, so a gated Daimon tool is not
-refused here when the gate is on: the call is checked, recorded and carded, and the
-model gets a waiting result. The wake turn's one-shot `confirmed_call` credential
-later runs exactly that call, consumed once, on exactly that tool and arguments.
+A provider-turn credential has no confirmation card, so a gated Daimon tool, or one
+an agent's `ask` or channel rule covers, is not refused here when the gate is on: the
+call is checked, recorded and carded, and the model gets a waiting result. The wake
+turn's one-shot `confirmed_call` credential later runs exactly that call, consumed
+once, on exactly that tool and arguments.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from daimon.core.stores.mcp_tokens import revoke_mcp_token
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.stores.turn_origins import get_session_origin
 from daimon.core.switch_cards import SWITCH_CARD_MAX_S
-from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall, confirmation_gated_tools
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, MiddlewareContext
 from fastmcp.tools import ToolResult
@@ -182,8 +183,9 @@ class HostCallGate:
         self, context: MiddlewareContext, identity: AuthIdentity, run: CallNext
     ) -> object:
         """Record the gated call and post its card; fail closed on anything missing.
-        A call Claude's session runs without a card runs through `run` here too, and so does
-        a shared-connection tool's: it is decided as a third party's, not as Daimon's own, after
+        A call Claude's session runs without a card runs through `run` here too, and so
+        does a call that only an agent tool rule sent here, where the rule allows it. A
+        shared-connection tool's is decided as a third party's, not as Daimon's own, after
         a data read as every other write is, and only its card waits on the gate being on."""
         from daimon.adapters.mcp.shared_connections import SharedConnectionTool
         from daimon.adapters.mcp.tools._own_card import post_own_card
@@ -193,6 +195,7 @@ class HostCallGate:
             agent_rule_lookup,
             channel_for_tool_rules,
             read_error_verdict,
+            refusal_message,
             rule_for,
             tool_call_verdict,
         )
@@ -204,8 +207,10 @@ class HostCallGate:
         platform = identity.platform or ""
         fastmcp_ctx = context.fastmcp_context
         tool = None if fastmcp_ctx is None else await fastmcp_ctx.fastmcp.get_tool(name)
+        # With the gate off a gated tool is refused as before; a tool only a rule sent
+        # here still runs where its rule allows it, and so does a shared-connection tool.
         off = self.off_for(identity)
-        if off and not isinstance(tool, SharedConnectionTool):
+        if off and name in confirmation_gated_tools() and not isinstance(tool, SharedConnectionTool):
             raise _refuse("off")
         # A held turn gets here only with a held-allowlisted tool, as Claude's card asks.
         if (
@@ -311,8 +316,8 @@ class HostCallGate:
         if verdict.outcome == "allow":
             return await run(context)
         if verdict.outcome != "ask":
-            # An unattended or operator refusal, as on Claude.
-            raise _refuse(f"verdict_{verdict.reason}")
+            # An unattended, operator or rule refusal, in Claude's words.
+            raise _refuse(f"verdict_{verdict.reason}", refusal_message(call, verdict))
         if off:
             raise _refuse("off")
         expires_at = now + timedelta(seconds=min(policy.confirmation_timeout_s, SWITCH_CARD_MAX_S))

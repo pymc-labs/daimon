@@ -53,7 +53,6 @@ from daimon.core.thread_model_switch import (
     thread_pick_for,
 )
 from daimon.core.thread_models import (
-    EFFORT_NOT_CLAUDE,
     EFFORT_OFF_CLAUDE,
     THREAD_EFFORTS,
     THREAD_MODEL_CHOICES,
@@ -61,12 +60,13 @@ from daimon.core.thread_models import (
     ThreadModelRefused,
     choose_thread_model,
     describe_thread_model,
+    effort_refusal,
     may_choose_thread_model,
     model_efforts,
-    model_label,
     resolve_effort,
 )
 from mux.contracts.config import DEFAULT_BACKEND
+from mux.contracts.ids import Provider
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -181,10 +181,12 @@ async def _pick_of(interaction: BotInteraction, place: _Place, *, admin: bool) -
     )
 
 
-async def _off_claude(pick: ThreadPick) -> bool:
-    """Whether the conversation's agent runs on another provider, so it takes no effort."""
+async def _agent_provider(pick: ThreadPick) -> Provider | None:
+    """The provider the conversation's agent runs on when it is not Claude's, else None."""
     revision = await pick.service.current(pick.agent)
-    return revision is not None and revision.backend not in (None, DEFAULT_BACKEND)
+    if revision is None or revision.backend in (None, DEFAULT_BACKEND):
+        return None
+    return revision.backend
 
 
 async def may_switch_thread(
@@ -401,43 +403,41 @@ class ModelCog(commands.Cog):
             or not channel_backend.backend_selection_enabled(runtime.settings.turn)
         )
         if legacy:
-            off = False
+            provider = None
             if effort is not None and channel_backend.backend_selection_enabled(
                 runtime.settings.turn
             ):
                 admin = await is_guild_admin(interaction, action=DelegatedAction.AGENT_SETTINGS)
                 pick = await _pick_in(interaction, place, admin=admin)
-                off = pick is not None and await _off_claude(pick)
-                if off and choice is None:
-                    raise UserFacingError(f"{EFFORT_OFF_CLAUDE} {NOTHING_CHANGED}")
+                provider = await _agent_provider(pick) if pick is not None else None
             change = await choose_thread_model(
                 sessionmaker,
                 tenant_id=place.tenant_id,
                 platform="discord",
                 thread_id=place.conversation_id,
                 choice=choice,
-                effort=None if off else effort,
+                effort=effort,
+                agent_provider=provider,
             )
-            return f"{change.note} {EFFORT_OFF_CLAUDE}" if off else change.note
+            return change.note
         assert choice is not None
         admin = await is_guild_admin(interaction, action=DelegatedAction.AGENT_SETTINGS)
         pick = await _pick_in(interaction, place, admin=admin)
         if pick is None:
             raise UserFacingError(NO_AGENT)
-        off = False
-        if effort is not None:
+        off = effort is not None and await _agent_provider(pick) is not None
+        claude = pick_value(choice).startswith(f"{DEFAULT_BACKEND}:")
+        if effort is not None and claude and not off:
             # Refuse before the pick is kept: a refusal changes nothing.
             chosen, _reset = resolve_effort(effort)
             model_id = THREAD_MODEL_CHOICES.get(word)
-            off = await _off_claude(pick)
             if (
                 chosen is not None
                 and model_id is not None
                 and chosen not in model_efforts(model_id)
-                and not off
             ):
                 raise ThreadModelRefused(
-                    f"{model_label(model_id)} doesn't take an effort. {NOTHING_CHANGED}"
+                    f"{effort_refusal(DEFAULT_BACKEND, model_id)} {NOTHING_CHANGED}"
                 )
         done = await pick_thread(
             pick, pick_value(choice), thread_id=place.conversation_id, admin=admin
@@ -445,18 +445,18 @@ class ModelCog(commands.Cog):
         text = thread_pick_result(done)
         if effort is None or not isinstance(done, ThreadModelChange):
             return text
-        picked = done.model_id or "default"
-        if ":" in picked and not picked.startswith(f"{DEFAULT_BACKEND}:"):
-            return f"{text} {EFFORT_NOT_CLAUDE}"
-        if off:
+        if claude and off:
             return f"{text} {EFFORT_OFF_CLAUDE}"
-        kept = await choose_thread_model(
-            sessionmaker,
-            tenant_id=place.tenant_id,
-            platform="discord",
-            thread_id=place.conversation_id,
-            effort=effort,
-        )
+        try:
+            kept = await choose_thread_model(
+                sessionmaker,
+                tenant_id=place.tenant_id,
+                platform="discord",
+                thread_id=place.conversation_id,
+                effort=effort,
+            )
+        except ThreadModelRefused as refused:
+            return f"{text} The effort was not set: {refused}"
         return kept.note
 
     @model.autocomplete("choice")

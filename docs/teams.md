@@ -43,9 +43,9 @@ You need:
    **Value**, not the Secret ID, as `DAIMON_TEAMS__CLIENT_SECRET`. It is shown
    once. Note its expiry date: the bot stops answering when it lapses.
 
-You need no API permissions yet. A team owner grants channel access when
-adding the app, and a chat member grants group-chat access. Only channel files
-and private-channel messages need an application permission, covered below.
+You need no API permissions yet: team owners and chat members grant access when
+adding the app. Channel files, private-channel messages and company-wide member
+reads need application permissions, covered below.
 
 ### 2. Create the Azure Bot
 
@@ -112,9 +112,8 @@ teams.example.com {
 }
 ```
 
-Only those paths need to be public, plus two Graph paths if you enable
-private-channel messages. Check it with
-`curl https://teams.example.com/healthz`, which returns `{"status":"live"}`.
+Only those paths are public, plus two Graph paths for private-channel
+messages. `curl https://teams.example.com/healthz` returns `{"status":"live"}`.
 
 ### 4. Point the bot at Daimon
 
@@ -125,9 +124,9 @@ endpoint**, including the `/api/messages` suffix:
 https://teams.example.com/api/messages
 ```
 
-A missing suffix is the usual reason a bot never answers. Check that
-**Microsoft App ID** and **App Tenant ID** match step 1 and **App type** is
-SingleTenant, then select **Apply**.
+A missing suffix is the usual reason a bot never answers. Check **Microsoft App
+ID** and **App Tenant ID** match step 1 and **App type** is SingleTenant, then
+**Apply**.
 
 ### 5. Build the app package
 
@@ -210,6 +209,12 @@ permission reaches every file in the organisation, so Daimon opens and saves
 files only inside the channel's own Files folder. A shared channel hosted by
 another organisation keeps its files out of reach.
 
+### Read members company-wide (optional)
+
+Data answers in a room read who is in it. To allow that for every team and chat
+at once, grant `ChannelMember.Read.All` and `ChatMember.Read.All` as for channel
+files.
+
 ### Turn on private and shared channel messages (optional)
 
 Teams sends the bot only private and shared channel posts that @mention it.
@@ -250,8 +255,8 @@ manifest 1.25, which lack `/` commands, group chats and private or shared channe
 
 ## How Daimon behaves in Teams
 
-Teams uses one bot identity for every agent. Answers from an agent other than
-the built-in one start with its bold name. Agents, memory and billing match
+Teams uses one bot identity for every agent. Answers from agents but the
+built-in one start with their bold name. Agents, memory and billing match
 Discord and Slack. Only the commercial Microsoft 365 cloud is supported.
 
 ### Where it answers
@@ -314,11 +319,11 @@ policy or label that blocks app writes), the agent posts a new file instead.
 
 ### Keys and sign-ins
 
-When an agent needs an API key, `.env` file or MCP token, it posts a card that
-only the asker can open. The secret goes into a Teams dialog, never the chat.
-Paste `.env` contents into the multi-line field, since dialogs have no file
-input. For an MCP sign-in the agent sends a private link the same way. Once
-the value is saved, the card shows the outcome and waiting work resumes.
+When an agent needs an API key, `.env` file, MCP token or data source
+credential, it posts a card only the asker can open; the secret goes into a
+Teams dialog, never the chat. Paste `.env` contents into the multi-line field.
+An MCP sign-in gets a private link. Once saved, the card shows the outcome and
+waiting work resumes.
 
 ### Microsoft account (optional)
 

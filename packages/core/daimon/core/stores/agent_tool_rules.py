@@ -6,7 +6,7 @@ import re
 import uuid
 from collections.abc import Collection, Sequence
 from datetime import UTC, datetime
-from typing import Literal, NamedTuple
+from typing import Literal
 
 import structlog
 from daimon.core._models import AgentToolRuleHistoryRecord, AgentToolRuleRecord, Tenant
@@ -256,16 +256,28 @@ async def deny_rules_for_trusted_tool(
     return [_view(row) for row in _current(rows) if row.rule in rules]
 
 
-class DaimonRuleSet(NamedTuple):
-    """What an agent's rules on daimon's own tools ask of a session."""
+async def gate_rules_for_trusted_tool(
+    session: AsyncSession, *, tenant_id: uuid.UUID, tool_key: str
+) -> list[AgentToolRule]:
+    """Every `ask` row and channel `deny` row for `tool_key` in a tenant, whichever agent holds it.
 
-    #: Tool names the session must ask on (`WILDCARD_TOOL` stands for the
-    #: agent-wide deny-all). Empty when the agent has no applicable rule.
-    tools: frozenset[str]
-    #: Some rule only the turn driver can apply: any `ask`, or a channel `deny`.
-    #: An agent-wide `deny` (a tool's own or `*`) is also enforced by the MCP
-    #: server, so a backend with no approval pause still honours it.
-    needs_driver: bool
+    The rules a provider turn's call goes to the host call gate for, which reads the
+    call's channel from its turn origin; an agent-wide `deny` is the backstop's
+    (`deny_rules_for_trusted_tool`). One query on the tenant's rows for the key.
+    """
+    rows = (
+        await session.scalars(
+            select(AgentToolRuleRecord).where(
+                AgentToolRuleRecord.tenant_id == tenant_id,
+                AgentToolRuleRecord.tool_key.in_(_with_old_keys([tool_key])),
+            )
+        )
+    ).all()
+    return [
+        _view(row)
+        for row in _current(rows)
+        if row.rule == "ask" or (row.rule == "deny" and row.channel_id is not None)
+    ]
 
 
 #: A tool name MA accepts in a toolset config, and a daimon tool name in practice.
@@ -277,9 +289,9 @@ def valid_tool_name(name: str) -> bool:
     return name == WILDCARD_TOOL or _TOOL_NAME.fullmatch(name) is not None
 
 
-async def daimon_rule_set(
+async def daimon_rule_tools(
     session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: str
-) -> DaimonRuleSet:
+) -> frozenset[str]:
     """The daimon tools this agent has a non-null ask or deny rule on.
 
     Any scope, agent-wide or channel, any channel: a chat session names no
@@ -302,7 +314,6 @@ async def daimon_rule_set(
         )
     ).all()
     names: set[str] = set()
-    needs_driver = False
     for row in _current(rows):
         if row.rule not in ("ask", "deny"):
             continue
@@ -316,15 +327,7 @@ async def daimon_rule_set(
             _log.warning("tool_safety.rule_name_skipped", tool=key[:160])
             continue
         names.add(name)
-        needs_driver = needs_driver or row.rule == "ask" or row.channel_id is not None
-    return DaimonRuleSet(frozenset(names), needs_driver)
-
-
-async def daimon_rule_tools(
-    session: AsyncSession, *, tenant_id: uuid.UUID, agent_id: str
-) -> frozenset[str]:
-    """`daimon_rule_set(...).tools`: the names a session must ask on."""
-    return (await daimon_rule_set(session, tenant_id=tenant_id, agent_id=agent_id)).tools
+    return frozenset(names)
 
 
 async def set_rule(

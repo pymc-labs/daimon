@@ -28,18 +28,18 @@ Where each feature can be set, and its default.
 | Direct message memory | `dm_history_depth` | Model input | 12 messages | ✓ | ✓ | ✓ |  |  |  | Only Discord, Slack, Teams, Web; 100 messages by default on Teams |
 | Channel background | `channel_history` | Model input | 25 messages | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Setup guidance | `guidance` | Model input | On | ✓ | ✓ | ✓ |  |  |  |  |
-| Run commands | `tool.bash` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Up to Agent on Gemini, OpenAI |
-| Read files | `tool.read` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Up to Agent on Gemini, OpenAI |
-| Edit files | `tool.edit` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Up to Agent on Gemini, OpenAI |
-| Write files | `tool.write` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Up to Agent on Gemini, OpenAI |
-| Search file contents | `tool.grep` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Up to Agent on Gemini, OpenAI |
-| Find files | `tool.glob` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Up to Agent on Gemini, OpenAI |
-| Open web pages | `tool.web_fetch` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Up to Agent on Gemini, OpenAI |
-| Search the web | `tool.web_search` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Up to Agent on Gemini, OpenAI |
+| Run commands | `tool.bash` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Read files | `tool.read` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Edit files | `tool.edit` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Write files | `tool.write` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Search file contents | `tool.grep` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Find files | `tool.glob` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Open web pages | `tool.web_fetch` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Search the web | `tool.web_search` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Web app | `web_awareness` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Connected server briefing | `mcp_briefing` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
 | Notes on non-chat messages | `origin_fragments` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
-| Keys file | `agent_env_file` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
+| Keys file | `agent_env_file` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Platform prompt | `platform_prompt` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Always Off on OpenAI |
 | Platform skills | `platform_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
 | Agent skills | `agent_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Always On on Gemini, OpenAI |
@@ -70,7 +70,7 @@ Where each feature can be set, and its default.
 | Vote buttons | `message_feedback` | Chat | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Direct message wait | `dm_debounce_seconds` | Chat | Off | ✓ | ✓ |  |  |  |  |  |
 | /new in threads | `thread_new` | Chat | Off | ✓ | ✓ |  |  |  |  | Only Discord |
-| Other providers per conversation | `thread_providers` | Chat | Off | ✓ | ✓ | ✓ |  |  |  |  |
+| Other providers per conversation | `thread_providers` | Chat | On | ✓ | ✓ | ✓ |  |  |  |  |
 | Repository memory | `repo_memory` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Context provider | `context_provider` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
 | Personal memory | `memory_personal` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
@@ -116,7 +116,8 @@ Where each feature can be set, and its default.
 | Rooms with outside people | `audience_hold` | Guardrail | Off | ✓ | ✓ |  |  |  |  | Only Discord |
 | Tool safety | `tool_safety` | Guardrail | On | ✓ |  |  |  |  |  |  |
 | Approve cards for OpenAI and Gemini | `host_call_gate` | Guardrail | On | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
-| Connectors on OpenAI and Gemini | `mcp_connector_relay` | Guardrail | Off | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
+| Connectors on OpenAI and Gemini | `mcp_connector_relay` | Guardrail | On | ✓ |  |  |  |  |  | Only Discord, Slack, Teams, Web |
+| Keys on OpenAI and Gemini | `provider_keys_file` | Guardrail | On | ✓ |  |  |  |  |  |  |
 | Reach check | `reach_budget` | Guardrail | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Built-in tools in routines | `unattended_capabilities` | Guardrail | Allowed | ✓ | ✓ | ✓ |  |  |  |  |
 | Sandbox tools in routines | `routine_sandbox_tools` | Guardrail | Off |  | ✓ | ✓ |  |  | ✓ |  |
@@ -289,8 +290,6 @@ The agent can run commands. Off removes it here; On never gives more than the ag
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
-| Levels on Gemini | Deployment, Workspace, Agent |
-| Levels on OpenAI | Deployment, Workspace, Agent |
 
 ## Read files
 
@@ -303,8 +302,6 @@ The agent can read files. Off removes it here; On never gives more than the agen
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
-| Levels on Gemini | Deployment, Workspace, Agent |
-| Levels on OpenAI | Deployment, Workspace, Agent |
 
 ## Edit files
 
@@ -317,8 +314,6 @@ The agent can edit files. Off removes it here; On never gives more than the agen
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
-| Levels on Gemini | Deployment, Workspace, Agent |
-| Levels on OpenAI | Deployment, Workspace, Agent |
 
 ## Write files
 
@@ -331,8 +326,6 @@ The agent can write new files. Off removes it here; On never gives more than the
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
-| Levels on Gemini | Deployment, Workspace, Agent |
-| Levels on OpenAI | Deployment, Workspace, Agent |
 
 ## Search file contents
 
@@ -345,8 +338,6 @@ The agent can search inside files. Off removes it here; On never gives more than
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
-| Levels on Gemini | Deployment, Workspace, Agent |
-| Levels on OpenAI | Deployment, Workspace, Agent |
 
 ## Find files
 
@@ -359,8 +350,6 @@ The agent can find files by name. Off removes it here; On never gives more than 
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
-| Levels on Gemini | Deployment, Workspace, Agent |
-| Levels on OpenAI | Deployment, Workspace, Agent |
 
 ## Open web pages
 
@@ -373,8 +362,6 @@ The agent can open web pages. Off removes it here; On never gives more than the 
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
-| Levels on Gemini | Deployment, Workspace, Agent |
-| Levels on OpenAI | Deployment, Workspace, Agent |
 
 ## Search the web
 
@@ -387,8 +374,6 @@ The agent can search the web. Off removes it here; On never gives more than the 
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
-| Levels on Gemini | Deployment, Workspace, Agent |
-| Levels on OpenAI | Deployment, Workspace, Agent |
 
 ## Web app
 
@@ -431,7 +416,7 @@ A short note in front of a message that did not come from chat, such as a routin
 
 ## Keys file
 
-The agent's saved keys as a .env file in its working files. Off leaves the file out; the keys stay saved. Applies from the next message. Claude agents only.
+The agent's saved keys as a .env file in its sandbox; Off leaves it out. Applies from the next message.
 
 | | |
 | --- | --- |
@@ -440,8 +425,6 @@ The agent's saved keys as a .env file in its working files. Off leaves the file 
 | Default | `on` |
 | Levels | Deployment, Workspace, Agent, Channel, Thread |
 | Combines | Most specific wins |
-| Levels on Gemini | Not available |
-| Levels on OpenAI | Not available |
 
 ## Platform prompt
 
@@ -1047,7 +1030,7 @@ Anyone who can change a conversation's model may pick an OpenAI or Gemini model 
 | --- | --- |
 | Key | `thread_providers` |
 | Values | `on` (On), `off` (Off) |
-| Default | `off` |
+| Default | `on` |
 | Levels | Deployment, Workspace, Agent |
 | Combines | Off above is a ceiling |
 
@@ -1295,7 +1278,19 @@ An agent's own connectors work on OpenAI and Gemini agents with the person's sig
 | --- | --- |
 | Key | `mcp_connector_relay` |
 | Values | `off` (Off), `on` (On) |
-| Default | `off` |
+| Default | `on` |
+| Levels | Deployment |
+| Combines | Stricter wins |
+
+## Keys on OpenAI and Gemini
+
+Sends the keys file to OpenAI and Gemini.
+
+| | |
+| --- | --- |
+| Key | `provider_keys_file` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
 | Levels | Deployment |
 | Combines | Stricter wins |
 

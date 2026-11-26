@@ -58,6 +58,7 @@ ChangeKind = Literal[
     "repo",
     "environment",
     "watch_key",
+    "data_source_credential",
 ]
 ChangeAvailability = Literal["saved", "ready_now", "next_message", "preparation_failed"]
 TransferKind = Literal["full", "transcript", "history"]
@@ -350,6 +351,8 @@ def render_change_confirmation(change: ConfigurationChange) -> str:
         return _render_environment_changed(change.target_name, change.detail)
     if kind == "watch_key":
         return _render_watch_key_saved(change.detail)
+    if kind == "data_source_credential":
+        return f"The credential for {change.detail or 'the source'} is saved on the source."
     raise ValueError(f"unknown ChangeKind: {kind!r}")
 
 

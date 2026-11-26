@@ -8,7 +8,8 @@ never follow a redirect. The app's resource-specific consent
 message reads here, `TeamMember.Read.Group` the owner list
 (`list_team_owner_ids`, for native admin-team owners), `ChannelMember.Read.Group` a
 channel's and `ChatMember.Read.Chat` a group chat's members (`list_channel_members`,
-`list_chat_members`, for who reads a data answer); `ChatMessage.Read.Chat`,
+`list_chat_members`, for who reads a data answer; or the tenant-wide application permissions
+`ChannelMember.Read.All` and `ChatMember.Read.All`); `ChatMessage.Read.Chat`,
 granted when the app is added to a group chat, the chat reads
 (`list_chat_messages`, `get_chat_message`); `teams_sharepoint` sends its file
 calls through `send`. The subscription calls (`create_subscription` and its renewal and

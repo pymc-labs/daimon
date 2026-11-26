@@ -10,11 +10,23 @@ from datetime import UTC, datetime
 
 import psycopg
 import pytest
-from daimon.data import acl, caller_sql, declared, federated, identity, parity, reads
+from cryptography.fernet import Fernet
+from daimon.data import (
+    acl,
+    caller_sql,
+    declared,
+    federated,
+    identity,
+    manage,
+    parity,
+    reads,
+    redaction,
+)
 from daimon.data.access import ReadContext
 from daimon.data.identity import IdentityKey, Proof
 from daimon.data.search import search
 from daimon.data.sync.connector import CONNECTORS, Connector, LiveHit, Source
+from daimon.data.sync.credentials import unseal
 from daimon.data.sync.engine import Env
 from daimon.testing.data_db import DataDb
 from psycopg import AsyncConnection
@@ -42,6 +54,11 @@ class Fake(Connector):
         if self.live_mode == "slow":
             await asyncio.sleep(5)
         return [LiveHit(ref="1", title=query)]
+
+    async def fetch_file(
+        self, source: Source, payload: object, message: str, name: str, index: int = 0
+    ) -> tuple[bytes, str] | None:
+        return (b"Acme wrote", "text/plain") if name.endswith(".txt") else (b"Acme", "image/png")
 
 
 @pytest.fixture
@@ -291,6 +308,63 @@ async def test_a_record_the_source_now_refuses_is_not_shown(
         use_vectors=False, use_rerank=False, env=store.env,
     )  # fmt: skip
     assert found.hits == [], "search drops it too"
+
+
+async def test_a_text_file_goes_through_its_sources_answer_rules(store: Store, fake: Fake) -> None:
+    """Answer-time rules reach file text, best effort; other bytes pass as the source sent them."""
+    src = await store.source("published")
+    record = await store.record(src)
+    for ord_, name in enumerate(("notes.txt", "logo.png")):
+        await store.sql(
+            f"insert into {store.d}.attachments (source_id, external_id, ord, name)"
+            " values (%s, 'doc:1', %s, %s)",
+            src, ord_, name,
+        )  # fmt: skip
+    ctx = ReadContext((store.tenant,), scopes=("internal",))
+    rules = redaction.Rules.model_validate({"aliases": {"Acme": "client A"}, "at": "answer"})
+    answer = {src: redaction.Redactor(rules, answer=True)}
+    read = [
+        await reads.read_file(store.conn, store.data.schemas, ctx, store.env, record, i, answer)
+        for i in (0, 1)
+    ]
+    assert read == [(b"client A wrote", "text/plain"), (b"Acme", "image/png")]
+
+
+async def test_a_source_made_for_a_private_form_waits_paused_for_its_credential(
+    store: Store,
+) -> None:
+    """Made without its secret it is paused; the form's value seals onto it and resumes it once.
+    A later value replaces the credential and leaves the state alone."""
+    keys, schemas, by = (Fernet.generate_key().decode(),), store.data.schemas, uuid.uuid4()
+    src = await manage.create_source(
+        store.conn, schemas, keys, tenant_id=store.tenant, by=by, kind="postgres", name="Orders",
+        settings={"view": "public.docs"}, credential_later=True,
+    )  # fmt: skip
+
+    async def state() -> tuple[str, dict[str, str]]:
+        row = (
+            await store.sql(f"select status, credential from {store.d}.sources where id = %s", src)
+        )[0]
+        return row["status"], unseal(keys, row["credential"])
+
+    assert await state() == ("paused", {})
+
+    async def put(value: str) -> None:
+        await manage.set_credential(
+            store.conn, schemas, keys, tenant_id=store.tenant, by=by, source_id=src, value=value
+        )
+
+    await put("postgresql://a@db/app")
+    assert await state() == ("active", {"dsn": "postgresql://a@db/app"}), "its first one resumes it"
+    await manage.act(
+        store.conn, schemas, tenant_id=store.tenant, by=by, source_id=src, action="pause"
+    )
+    await put("postgresql://b@db/app")
+    assert await state() == ("paused", {"dsn": "postgresql://b@db/app"}), "a paused source stays so"
+    with pytest.raises(identity.Missing):
+        await manage.set_credential(
+            store.conn, schemas, keys, tenant_id=uuid.uuid4(), by=by, source_id=src, value="x"
+        )
 
 
 async def test_a_live_answer_in_search_is_recorded_as_the_askers(store: Store, fake: Fake) -> None:

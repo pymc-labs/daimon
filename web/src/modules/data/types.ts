@@ -34,7 +34,7 @@ export type RedactionSet = {
   pending: boolean; usable: boolean; checked_at: string | null; error: string | null
 }
 export type Rules = {
-  aliases: Record<string, string>; removals: string[]; regex: { pattern: string; replace: string }[]
+  at?: "storage" | "answer" | null; aliases: Record<string, string>; removals: string[]; regex: { pattern: string; replace: string }[]
   exclude_ids: string[]; entities: { name: string; aliases: string[]; scope: string | null; label: string }[]
 }
 export type RedactionDetail = { info: RedactionSet; rules: Rules | null; pending_rules: Rules | null }

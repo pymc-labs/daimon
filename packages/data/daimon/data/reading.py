@@ -3,9 +3,10 @@
 The caller resolves the audience (`daimon.core.data_audience`) from signed facts. `open_read`
 turns it into the store's `ReadContext` and the read-time redaction: every string goes
 through its source's answer-time rules, and, when a guest or a person marked redacted will read
-the answer, its entity lists. What redaction cannot cover is refused (`Reading.redacted`):
-caller SQL, file bytes, and a query that names a hidden term, whose hit or miss would tell
-what the rules hide.
+the answer, its entity lists. What entity lists cannot cover is refused while they apply
+(`Reading.redacted`): caller SQL, file bytes, and a query that names a hidden term, whose hit
+or miss would tell what the rules hide. Answer-time rules reach SQL values and file text best
+effort.
 """
 
 from __future__ import annotations
@@ -35,8 +36,8 @@ class Reading:
 
     @property
     def redacted(self) -> bool:
-        """Whether this audience reads anything other than what is stored."""
-        return self.entities is not None or bool(self.answer)
+        """Whether names are hidden from this audience."""
+        return self.entities is not None
 
     def show[T](self, value: T, source_id: uuid.UUID | None = None) -> T:
         """`value` (JSON-like) as this audience may read it: the rules of `source_id`, or of

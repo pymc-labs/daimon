@@ -94,6 +94,7 @@ from daimon.adapters.slack.continuation_dispatch import dispatch_pending_continu
 from daimon.adapters.slack.credential_requests import (
     evaluate_credential_submission,
     handle_credential_request_click,
+    run_data_source_credential_submission,
     run_env_credential_submission,
     run_env_file_credential_submission,
     run_mcp_credential_submission,
@@ -327,6 +328,7 @@ from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import protection_state, turn_target_protected
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
+from daimon.core.turn.shown_model import shown_model
 from daimon.core.turn.slots import (
     QUEUE_TIMED_OUT_TEXT,
     holding,
@@ -343,7 +345,7 @@ from daimon.core.turn.thread_queue import (
     group_by_author,
     release_thread,
 )
-from daimon.core.turn_keys import list_mounted_key_names
+from daimon.core.turn_keys import answering_env_sha256, list_mounted_key_names
 from daimon.core.turn_origin import (
     build_handoff_notice,
     render_turn_origin,
@@ -713,6 +715,10 @@ class SlackApp:
                 )
             elif decision.kind == "repo":
                 await run_repo_bind_credential_submission(
+                    self.runtime, value=decision.value, **common
+                )
+            elif decision.kind == "data_source":
+                await run_data_source_credential_submission(
                     self.runtime, value=decision.value, **common
                 )
             else:
@@ -2573,7 +2579,7 @@ class SlackApp:
 
         agent = admission.agent
         _lc_agent_name: str = admission.display_name(agent.name)
-        _lc_model_id: str = agent.model.id
+        _lc_model_id: str = shown_model(admission).id
         turn_identity: AgentIdentity | None = None
         try:
             async with self.runtime.sessionmaker.begin() as identity_session:
@@ -2923,15 +2929,11 @@ class SlackApp:
                     thread_id=thread_id,
                     account_id=admission.account_id,
                 )
-                _live_config = (
-                    None if _live_row_for_keys is None else _live_row_for_keys.effective_config
-                )
-                _env_sha256 = None if _live_config is None else _live_config.env_sha256
                 key_names = await list_mounted_key_names(
                     _keys_session,
                     tenant_id=tenant_id,
                     agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)),
-                    env_sha256=_env_sha256,
+                    env_sha256=answering_env_sha256(prepared, _live_row_for_keys),
                 )
 
             # --- Build user message ---
@@ -3563,7 +3565,7 @@ class SlackApp:
             requester_foreign=standing.foreign,
             notify_on_completion=follow_admission.shown("completion_pings", "slack"),
             agent_name=follow_admission.display_name(follow_admission.agent.name),
-            model_id=follow_admission.agent.model.id,
+            model_id=shown_model(follow_admission).id,
             markup=self.runtime.turn_deps.markup,
             register=functools.partial(self._register_cancel, team_id=team_id, channel=channel),
             deregister=functools.partial(self._deregister_cancel, team_id=team_id, channel=channel),
@@ -3666,7 +3668,7 @@ class SlackApp:
                 requester_foreign=standing.foreign,
                 notify_on_completion=follow_admission.shown("completion_pings", "slack"),
                 agent_name=follow_admission.display_name(follow_admission.agent.name),
-                model_id=follow_admission.agent.model.id,
+                model_id=shown_model(follow_admission).id,
                 markup=self.runtime.turn_deps.markup,
                 register=functools.partial(self._register_cancel, team_id=team_id, channel=channel),
                 deregister=functools.partial(

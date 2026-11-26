@@ -7,11 +7,16 @@ import uuid
 import pytest
 from daimon.core.data_audience import (
     CAP,
+    UNKNOWN_READ,
     DataAudience,
     DataOrigin,
     DataRefusal,
     Reader,
+    audience_ref,
+    audience_ref_holds,
     data_audience,
+    is_audience_ref,
+    saver_ref,
     scope_ceiling,
 )
 
@@ -94,3 +99,32 @@ def test_redacted_person_turns_on_redaction() -> None:
         redacted=frozenset({VIEWER}),
     )
     assert isinstance(got, DataAudience) and got.redact, "a redacted viewer redacts the answer"
+
+
+def test_audience_refs_recall_only_in_place_and_among_the_readers() -> None:
+    """A live read recalls in its place among its readers; a saver's, only to the saver alone."""
+    room = DataOrigin("room", asker, frozenset({asker, viewer}), place="slack:C1")
+    read = data_audience(room, agent_owner=OWNER)
+    alone = data_audience(
+        DataOrigin("room", asker, frozenset({asker}), place="slack:C1"), agent_owner=OWNER
+    )
+    elsewhere = data_audience(DataOrigin("private", asker, place="slack:D1"), agent_owner=OWNER)
+    joined = data_audience(
+        DataOrigin(
+            "room", asker, frozenset({asker, viewer, Reader("s", uuid.uuid4())}), place="slack:C1"
+        ),
+        agent_owner=OWNER,
+    )
+    unknown = data_audience(DataOrigin("room", asker, None, place="slack:C1"), agent_owner=OWNER)
+    assert isinstance(read, DataAudience) and isinstance(alone, DataAudience)
+    assert isinstance(elsewhere, DataAudience) and isinstance(joined, DataAudience)
+    assert isinstance(unknown, DataAudience)
+    ref = audience_ref(read)
+    assert is_audience_ref(ref) and audience_ref_holds(ref, read) and audience_ref_holds(ref, alone)
+    assert not audience_ref_holds(ref, elsewhere), "another place never recalls it"
+    assert not audience_ref_holds(ref, joined), "a newcomer was not a reader at the read"
+    assert audience_ref(unknown) == UNKNOWN_READ, "unlisted readers record a read no one recalls"
+    saver = saver_ref(ASKER)
+    assert audience_ref_holds(saver, elsewhere), "the saver alone, anywhere"
+    assert not audience_ref_holds(saver, read), "never where anyone else is reached"
+    assert not audience_ref_holds(saver_ref(VIEWER), elsewhere), "nor to another person"

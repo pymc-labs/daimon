@@ -55,7 +55,7 @@ from daimon.core.tool_safety import (
     ToolSafetyPolicy,
     confirmation_gated_tools,
 )
-from daimon.core.turn.approvals import agent_rule_lookup, interactive_decider
+from daimon.core.turn.approvals import agent_rule_lookup, interactive_decider, unattended_decider
 from daimon.core.turn.unattended_capabilities import protected_tools
 from daimon.core.turn_origin import ExecutionFlags, current_execution_origin_id, execution_origin
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
@@ -558,6 +558,76 @@ async def test_each_gated_tool_asks_and_runs_as_on_claude(
     await _call(rig, await _credential(rig, card.id), name, args)
     assert [ran for ran, _, _ in rig.ran] == [name], "ran once after the press"
     assert (await _card(rig)).status == "applied"
+
+
+@pytest.mark.parametrize("gate", ["on", "off"])
+@pytest.mark.parametrize(
+    ("rule", "channel", "attended"),
+    [
+        ("ask", None, True),
+        ("ask", None, False),
+        ("ask", "elsewhere", True),
+        ("deny", _CHANNEL, True),
+        ("deny", "elsewhere", True),
+    ],
+    ids=["ask", "ask_unattended", "ask_elsewhere", "channel_deny", "deny_elsewhere"],
+)
+async def test_a_rule_on_an_ungated_tool_is_decided_as_on_claude(
+    rig: Rig, rule: Literal["ask", "deny"], channel: str | None, attended: bool, gate: str
+) -> None:
+    """A provider turn has no approval pause: a tool with an `ask` or channel rule goes
+    to the gate, which gets the outcome Claude's decider gives. With the gate off an
+    `ask` is refused, not run, and a rule elsewhere still lets the tool run."""
+    policy = _settings().tool_safety.model_copy(update={"enabled": True, "agent_rules": True})
+    settings = _settings(host_call_gate=gate).model_copy(update={"tool_safety": policy})
+    runtime = SimpleNamespace(session_factory=rig.sessions, settings=settings)
+    rig.middleware = IdentityMiddleware(
+        subject_resolver=_none, tenant_resolver=_none, role_resolver=_none,
+        agent_id_resolver=_none, is_admin_resolver=_none, internal_resolver=_none,
+        sessionmaker=rig.sessions, tool_safety=policy, public_url=_URL,
+    )  # fmt: skip
+    rig.middleware.attach_host_call_gate(HostCallGate(runtime, public_url=_URL))  # pyright: ignore[reportArgumentType]
+    await _set_rule(rig, "list_agents", rule, channel)
+    identity = rig.identity()
+    if attended:
+        expected = await _claude_outcome(rig, policy, "list_agents", {})
+    else:
+        grant = f"grant-{uuid.uuid4()}"
+        now = dt.datetime.now(dt.UTC)
+        async with rig.sessions.begin() as session:
+            await create_origin(
+                session, tenant_id=rig.tenant_id, account_id=rig.account_id,
+                platform="discord", parent_channel_id=_CHANNEL, thread_id=_THREAD,
+                responder_ma_agent_id=_MA_AGENT, responder_name="Researcher",
+                configuration_target_ma_agent_id=None, configuration_target_name=None,
+                role=Role.USER, expires_at=now + dt.timedelta(hours=1), now=now,
+                sender_foreign=False, shared_channel=False, chat_session_id=grant,
+                attended=False,
+            )  # fmt: skip
+        identity = rig.identity(chat_session_id=grant)
+        decide = unattended_decider(
+            policy,
+            trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+            confirmed_tools=protected_tools(policy),
+            rules_for=agent_rule_lookup(
+                rig.sessions, tenant_id=rig.tenant_id, agent_id=_MA_AGENT,
+                server_urls={DAIMON_SERVER_NAME: _URL}, also_urls={DAIMON_SERVER_NAME: _URL},
+                channel_id=_CHANNEL,
+            ),
+            daimon_rules=True,
+        )  # fmt: skip
+        call = ToolCall(tool_use_id="c", server_name=DAIMON_SERVER_NAME, tool_name="list_agents")
+        expected = "ran" if (await decide(call)).allow else "refused"
+    if gate == "off" and expected == "asked":
+        expected = "refused"
+
+    try:
+        await _call(rig, identity, "list_agents", {}, proxy=True)
+        actual = "asked" if await _cards(rig) else "ran" if rig.ran else "refused"
+    except ToolError:
+        actual = "refused"
+
+    assert actual == expected, f"{rule} in {channel} ({gate}): the gate and Claude's differ"
 
 
 @pytest.mark.parametrize("name", sorted(COMPUTE_APPROVAL_TOOLS))

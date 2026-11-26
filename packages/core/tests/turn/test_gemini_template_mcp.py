@@ -15,6 +15,7 @@ import io
 import json
 import os
 import tarfile
+import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -40,7 +41,13 @@ from mux.errors import ScopeViolation
 from ..test_agent_backend import owned as owned
 from .test_declared_drop_preparation import switched_request as switched_request
 from .test_gemini_codec import interaction
-from .test_gemini_full_source import CUSTOM, PARAMS, default_skill_bundles, serve_source_skill
+from .test_gemini_full_source import (
+    CUSTOM,
+    PARAMS,
+    UNSEEDED_BUILT_INS,
+    default_skill_bundles,
+    serve_source_skill,
+)
 from .test_gemini_full_source import source_mcp as source_mcp
 from .test_gemini_runtime_transport import clients_for
 
@@ -267,8 +274,10 @@ async def test_consent_keeps_daimon_tools_and_drops_only_what_gemini_lacks(templ
     _, quote, *_ = template
     assert "mcp" not in quote.declared_drops
     assert "memory" in quote.declared_drops
-    # Its custom skills attach per session; the large one uploads, so none is a loss.
-    assert not any(d == "skills" or d.startswith("skill:") for d in quote.declared_drops)
+    # Its custom skills attach per session; the large one uploads. Only the unseeded
+    # built-ins are lost.
+    assert "skills" not in quote.declared_drops
+    assert {d for d in quote.declared_drops if d.startswith("skill:")} == UNSEEDED_BUILT_INS
     # J6b: its execution tools map to code_execution and web search to Google
     # Search; only web fetch is a named loss, never all of its tools.
     assert "tools" not in quote.declared_drops
@@ -378,7 +387,12 @@ async def test_a_catalogue_blip_at_a_preview_records_no_loss(
 
 @pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_a_template_turn_mints_one_registered_credential_and_revokes_it(template):
+    from daimon.core.github_turn_router import turn_session_id
+    from daimon.core.stores import github_router_sessions
+    from daimon.testing.crypto import make_fernet
+
     request, _, native, calls, _ = template
+    request = replace(request, deps=replace(request.deps, fernet=make_fernet()))
     selected, runtime = await _prepared(request)
     assert native["tools"] and native["tools"][-1]["type"] == "mcp_server"
     assert "headers" not in native["tools"][-1], "the stored agent holds no credential"
@@ -399,7 +413,19 @@ async def test_a_template_turn_mints_one_registered_credential_and_revokes_it(te
     assert str(row.account_id) == request.scope.account_id
     assert row.expires_at <= datetime.now(UTC) + timedelta(seconds=30 + 60 + 5)
     assert row.expires_at <= datetime.now(UTC) + timedelta(seconds=900)
+    # The relay's GitHub router for this credential (`github_turn_router`) ends with it.
+    async with request.deps.sessionmaker.begin() as db:
+        _, bearer = await github_router_sessions.create(
+            db,
+            tenant_id=row.tenant_id,
+            agent_id=uuid.uuid4(),
+            account_id=row.account_id,
+            expires_at=row.expires_at,
+            ma_session_id=turn_session_id(row.jti),
+        )
     await runtime.end_of_turn()
+    async with request.deps.sessionmaker() as db:
+        assert await github_router_sessions.verify(db, bearer=bearer) is None
     async with request.deps.sessionmaker() as db:
         revoked = await get_mcp_token(db, jti=token_jti(token))
     assert revoked is not None and revoked.revoked_at is not None
@@ -1293,17 +1319,31 @@ async def test_a_switch_that_lost_web_search_runs_google_search_once_it_is_on(
 
 
 @pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
-async def test_a_place_with_web_search_off_leaves_it_out_unasked(template, monkeypatch):
-    """`tool.web_search` off at a place removes Google Search, as it removes Claude's."""
+@pytest.mark.parametrize(
+    ("switched", "gone", "kept"),
+    [
+        ("web_search", "google_search", "code_execution"),
+        # One execution tool carries all six: any one off cuts it (a deliberate gap).
+        ("grep", "code_execution", "google_search"),
+        ("web_fetch", "web_fetch", "code_execution"),
+    ],
+)
+async def test_a_place_with_a_builtin_off_leaves_it_out_unasked(
+    template, monkeypatch, switched, gone, kept
+):
+    """A built-in a channel or thread switched off leaves the reply, as it leaves Claude's."""
     from daimon.core.features.model_input import SessionToolset
     from daimon.core.turn.admission import Admission
 
     request, *_ = template
-    off = property(lambda _: SessionToolset(builtins={"web_search": False}))
+    off = property(lambda _: SessionToolset(builtins={switched: False}))
     monkeypatch.setattr(Admission, "toolset", off)
     selected, _ = await _prepared(request)
-    assert "google_search" not in [tool.name for tool in selected.target_spec.tools or ()]
-    assert "builtin_tool:web_search" not in selected.target_spec.declared_drops
+    names = [tool.name for tool in selected.target_spec.tools or ()]
+    names += _connection(selected).tool_policy["allowed_tools"]
+    assert gone not in names
+    assert kept in names
+    assert f"builtin_tool:{switched}" not in selected.target_spec.declared_drops
 
 
 @pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)

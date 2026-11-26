@@ -252,6 +252,7 @@ from daimon.core.turn.protection import (
     protection_state,
 )
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
+from daimon.core.turn.shown_model import shown_model
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT, holding, release_turn_slot, wait_for_slot
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn.thread_queue import (
@@ -264,7 +265,7 @@ from daimon.core.turn.thread_queue import (
     release_thread,
 )
 from daimon.core.turn_hold import RequesterOrg
-from daimon.core.turn_keys import list_mounted_key_names
+from daimon.core.turn_keys import answering_env_sha256, list_mounted_key_names
 from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
 from daimon.core.turn_queue import TurnQueue
 from mux.contracts.config import DEFAULT_BACKEND
@@ -406,14 +407,6 @@ def turn_model(admission: Admission) -> tuple[str | None, object]:
     if backend is not None and backend.backend not in (None, DEFAULT_BACKEND):
         return backend.model, backend.effort
     return admission.agent.model.id, (admission.agent.model.model_extra or {}).get("effort")
-
-
-def turn_model_label(admission: Admission) -> str:
-    """The model id a turn's card is labelled with (see `turn_model`); "" when none."""
-    backend = admission.backend_revision
-    if backend is not None and backend.backend not in (None, DEFAULT_BACKEND):
-        return backend.model or ""
-    return admission.agent.model.id
 
 
 class _ThreadOpenFailed(Exception):
@@ -4921,7 +4914,7 @@ class DaimonBot(commands.Bot):
                 agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
-                model_id=turn_model_label(admission),
+                model_id=shown_model(admission).id,
                 turn_id=turn_id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
@@ -5104,7 +5097,7 @@ class DaimonBot(commands.Bot):
                 agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
-                model_id=turn_model_label(admission),
+                model_id=shown_model(admission).id,
                 turn_id=turn_card_intent.id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
@@ -6070,7 +6063,7 @@ class DaimonBot(commands.Bot):
                 agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
-                model_id=turn_model_label(admission),
+                model_id=shown_model(admission).id,
                 turn_id=turn_id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
@@ -6405,15 +6398,11 @@ class DaimonBot(commands.Bot):
                 thread_id=str(thread.id),
                 account_id=session_account_id,
             )
-            _live_config = (
-                None if _live_row_for_keys is None else _live_row_for_keys.effective_config
-            )
-            _env_sha256 = None if _live_config is None else _live_config.env_sha256
             key_names = await list_mounted_key_names(
                 _keys_session,
                 tenant_id=tenant_id,
                 agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)),
-                env_sha256=_env_sha256,
+                env_sha256=answering_env_sha256(prepared, _live_row_for_keys),
             )
 
         # Split trigger-message attachments: API-consumable images → vision
@@ -6619,7 +6608,7 @@ class DaimonBot(commands.Bot):
                 agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
-                model_id=turn_model_label(admission),
+                model_id=shown_model(admission).id,
                 turn_id=turn_card_intent.id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(

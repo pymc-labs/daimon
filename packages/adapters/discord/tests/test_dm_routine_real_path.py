@@ -44,6 +44,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.mcp_vault import add_external_mcp_credential
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.mux_backend import resource_scope
+from daimon.core.provider_routine import SHELL_NEEDS_SANDBOX
 from daimon.core.routine_delivery import poll_deliveries_once
 from daimon.core.scheduler import RoutineDispatcher, run_one_tick
 from daimon.core.scope import DeploymentDefault
@@ -852,14 +853,15 @@ async def test_revoked_owner_gets_no_run_and_no_delivery(harness: Harness):
     assert after is not None and after.last_error and after.delivery_status is None
 
 
-async def test_a_provider_native_agent_is_refused_before_any_session(
+async def test_an_openai_agent_without_the_sandbox_opt_in_is_refused_before_any_session(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ):
+    """OpenAI's shell cannot be left out of its session, so the fire stops before one."""
     real_admit = direct_messages.admit
 
     async def native_admit(*args: Any, **kwargs: Any) -> Any:
         admission = await real_admit(*args, **kwargs)
-        revision = type("Revision", (), {"profile": "openai.responses"})()
+        revision = type("Revision", (), {"profile": "openai.persistent_workspace"})()
         return replace(admission, backend_revision=revision, backend_revision_origin="agent")
 
     monkeypatch.setattr(direct_messages, "admit", native_admit)
@@ -868,10 +870,8 @@ async def test_a_provider_native_agent_is_refused_before_any_session(
     assert not harness.upstream.state.sessions, "no session was created"
     after = await harness.reload(row)
     assert after is not None
-    assert after.last_error == "DM routines need a Managed Agents agent"
+    assert after.last_error == f"backend_unsupported: {SHELL_NEEDS_SANDBOX}"
     assert after.delivery_status is None
-    with pytest.raises(RuntimeError, match="Managed Agents"):
-        await harness.routine()
 
 
 async def test_attached_owner_credentials_are_nonempty_distinct_and_scope_checked(harness: Harness):

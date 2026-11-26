@@ -68,11 +68,6 @@ _OFF_ON: Final[Mapping[str, str]] = {"off": "Off", "on": "On"}
 """A guardrail's on/off: On is the stricter value, so it comes last."""
 EVERY_PLATFORM: Final[frozenset[str]] = frozenset({"*"})
 """`platforms` for a feature that applies wherever a turn runs, chat or not (web, CLI, MCP)."""
-_PROVIDER_ONLY: Final[Mapping[str, tuple[Tier, ...]]] = {
-    _GEMINI: ("deployment", "workspace", "agent"),
-    _OPENAI: ("deployment", "workspace", "agent"),
-}
-"""Gemini and OpenAI compile one revision per agent, so a model feature stops at the agent."""
 _MANAGED_AGENTS_ONLY: Final[Mapping[str, tuple[Tier, ...]]] = {_GEMINI: (), _OPENAI: ()}
 """Runs only on Claude agent turns; Gemini and OpenAI agents never get it."""
 BACKEND_NAMES: Final[Mapping[str, str]] = {
@@ -255,7 +250,6 @@ def _builtin(tool: str) -> FeatureSpec:
             "agent's own tool settings allow. Applies from the next message."
             + (_SEARCH_BILLING if tool == "web_search" else "")
         ),
-        backend_tiers=_PROVIDER_ONLY,
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     )
@@ -341,11 +335,9 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         tiers=TIERS,
         binds="session_mutable",
         doc=(
-            "The agent's saved keys as a .env file in its working files. Off leaves the file "
-            "out; the keys stay saved. Applies from the next message. "
-            "Claude agents only."
+            "The agent's saved keys as a .env file in its sandbox; Off leaves it out. "
+            "Applies from the next message."
         ),
-        backend_tiers=_MANAGED_AGENTS_ONLY,
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
@@ -881,7 +873,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         category="guardrails",
         effect="guardrail",
         values=_OFF_ON,
-        default="off",
+        default="on",
         tiers=("deployment",),
         binds="turn",
         doc=(
@@ -889,6 +881,19 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
             "sign-in, and that provider receives what they return. Off leaves them out."
         ),
         platforms=_CALL_GATE_PLATFORMS,
+        authority=_ADMIN,
+    ),
+    FeatureSpec(
+        key="provider_keys_file",
+        name="Keys on OpenAI and Gemini",
+        category="guardrails",
+        effect="guardrail",
+        values=_ON_OFF,
+        default="on",
+        tiers=("deployment",),
+        binds="turn",
+        doc="Sends the keys file to OpenAI and Gemini.",
+        platforms=EVERY_PLATFORM,
         authority=_ADMIN,
     ),
     FeatureSpec(
@@ -1284,7 +1289,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         category="chat",
         effect="capability",
         values=_ON_OFF,
-        default="off",
+        default="on",
         tiers=("deployment", "workspace", "agent"),
         binds="turn",
         doc=(
