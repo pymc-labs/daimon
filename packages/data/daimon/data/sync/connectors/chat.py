@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
+from datetime import datetime, timedelta
 from typing import Final, cast
 
 from daimon.data.sync.connector import Json
@@ -9,6 +11,11 @@ from daimon.data.sync.connector import Json
 WINDOW: Final = 20_000
 """Characters of message lines in one record before a day splits into parts."""
 MAX_DAYS: Final = 3650
+REWALK_DAYS: Final = 7
+"""Days re-read by default for edits and deletes."""
+LOST: Final = timedelta(days=30)
+"""How long a channel the bot lost keeps its records, hidden, for access to come back: the
+usual soft-delete window."""
 
 
 class Unreadable(Exception):
@@ -17,6 +24,20 @@ class Unreadable(Exception):
     def __init__(self, message: str, code: int | None = None) -> None:
         super().__init__(message)
         self.code = code
+
+
+def lost_for_good(lost: Json, missing: Collection[str], now: datetime) -> set[str]:
+    """Track channels the bot cannot read now in `lost` (`{id: first missed}`): one back is
+    forgotten, and those missed for `LOST` are returned (and forgotten) for their records to go.
+    Until then they stay, hidden: a channel the bot lost publishes no readers."""
+    for k in [k for k in lost if k not in missing]:
+        del lost[k]
+    for k in missing:
+        lost.setdefault(k, now.isoformat())
+    gone = {k for k in missing if now - datetime.fromisoformat(str(lost[k])) >= LOST}
+    for k in gone:
+        del lost[k]
+    return gone
 
 
 def rows(value: object) -> list[Json]:

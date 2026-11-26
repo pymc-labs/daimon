@@ -17,7 +17,9 @@ from daimon.data.access import ReadContext, scoped, subject
 from daimon.data.schema import Schemas
 from daimon.data.sync import connectors  # noqa: F401  # pyright: ignore[reportUnusedImport]
 from daimon.data.sync.connector import CONNECTORS, Json, Source
+from daimon.data.sync.connectors.discord import Config as DiscordConfig
 from daimon.data.sync.connectors.discord import snowflake
+from daimon.data.sync.connectors.slack import Config as SlackConfig
 from daimon.data.sync.credentials import seal
 from daimon.data.sync.engine import Env, RunResult, run_source
 from daimon.data.sync.http import GuardedTransport, Refused, send
@@ -452,12 +454,13 @@ def day_window(cid: str, day: date) -> str:
 async def test_a_slack_channel_is_read_by_its_members_and_people_are_listed(
     store: Store, workspace: FakeSlack
 ) -> None:
-    src = await store.add("slack", "xoxb-example", workspace=TEAM, private="yes")
+    src = await store.add("slack", "xoxb-example", workspace=TEAM)
     await store.run(src)
 
     bodies = await store.bodies(src)
     assert set(bodies) == {day_window(PUBLIC, D1), day_window(PRIV, TODAY)}, (
-        "the direct message and the channel the bot has not joined are never read"
+        "private channels the bot is in are read by default; the direct message and the "
+        "channel the bot has not joined are never read"
     )
     assert "Alice: hello" in bodies[day_window(PUBLIC, D1)]
     assert await store.sees("slack", TEAM, SBOB) == {day_window(PUBLIC, D1)}
@@ -473,6 +476,41 @@ async def test_a_slack_channel_is_read_by_its_members_and_people_are_listed(
         SGUEST: (None, True),
         SGONE: (None, False),
     }, "humans of the workspace; an email only where Slack confirmed it"
+
+
+async def test_a_lost_slack_channel_is_hidden_at_once_restored_on_return_and_gone_after_30_days(
+    store: Store, workspace: FakeSlack
+) -> None:
+    src = await store.add("slack", "xoxb-example", workspace=TEAM)
+    await store.run(src)
+    leads = day_window(PRIV, TODAY)
+
+    workspace.channels[PRIV]["is_member"] = False
+    await store.run(src)
+    assert leads in await store.bodies(src), "kept while access may come back"
+    assert leads not in await store.sees("slack", TEAM, SALICE), "hidden from every read at once"
+
+    workspace.channels[PRIV]["is_member"] = True
+    await store.run(src)
+    assert leads in await store.sees("slack", TEAM, SALICE), "access back restores it"
+
+    workspace.channels[PRIV]["is_member"] = False
+    await store.run(src)
+    await store.conn.execute(
+        f"update {store.d}.source_cursors set state = jsonb_set(state, %s, %s)"
+        " where source_id = %s".encode(),
+        (["lost", PRIV], Jsonb((datetime.now(UTC) - timedelta(days=31)).isoformat()), src),
+    )
+    await store.run(src)
+    assert leads not in await store.bodies(src), "lost for 30 days: its records go"
+    assert day_window(PUBLIC, D1) in await store.bodies(src)
+
+
+def test_slack_and_discord_recheck_a_week_and_slack_reads_private_channels_by_default() -> None:
+    s, d = SlackConfig.of({"workspace": TEAM}), DiscordConfig.of({"workspace": G})
+    assert (s.days, d.days) == (7, 7), "both re-read the last 7 days for edits and deletes"
+    assert s.private, "private channels the bot is in are read unless turned off"
+    assert not SlackConfig.of({"workspace": TEAM, "private": "no"}).private
 
 
 async def test_a_slack_thread_is_a_window_of_its_own_and_goes_with_its_parent(

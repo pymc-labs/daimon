@@ -1,7 +1,7 @@
 """Slack: every conversation window is readable by the people Slack itself lets read its channel.
 
-Public channels are read (with a bot token, those the bot is in; with a user token, all). With
-`private` on, a bot token also reads the private channels it is in. Direct messages and group
+Public channels are read (with a bot token, those the bot is in; with a user token, all). A bot
+token also reads the private channels it is in, unless `private` is `no`. Direct messages and group
 direct messages are never read. Each run computes Slack's own answer (a public channel is read
 by every active full member of the workspace and the active guests in it, a private one by its
 members among them; never bots, deactivated or invited-only users, or Slack Connect users of
@@ -11,7 +11,9 @@ read the workspace raises: nothing is published and the last pass expires within
 
 A channel is one record per UTC day of top-level messages; a thread's replies are records of
 their own, one per day of reply. The last `rewalk_days` are re-read on every run (edits, deletes
-and new replies), and a channel the bot no longer reads loses its windows.
+and new replies). An excluded channel loses its windows. A channel the bot no longer reads
+publishes no readers, so its windows are hidden at once; read again within `LOST` (30 days)
+they show again where they were, later they go.
 
 Scopes: `channels:read`, `channels:history`, `users:read`; for private channels also
 `groups:read` and `groups:history`; `files:read` to open attachments. `users:read.email` is
@@ -20,8 +22,8 @@ optional: with it, confirmed emails are kept for linking accounts.
 Configuration (`sources.config`), credential `{"token": "xoxb-..." or "xoxp-..."}`:
 
 - `workspace`: the workspace's team id (`T...`); the token must read that workspace.
-- `private`: `yes` to read private channels the bot is in (bot tokens only). `exclude`: channel
-  ids or names to never read. `rewalk_days`: days re-read for edits and replies (default 30).
+- `private`: `no` to leave out the private channels the bot is in (bot tokens only). `exclude`:
+  channel ids or names to never read. `rewalk_days`: days re-read for edits and replies (7).
 """
 
 from __future__ import annotations
@@ -58,8 +60,10 @@ from daimon.data.sync.connector import (
     SyncState,
 )
 from daimon.data.sync.connectors.chat import (
+    REWALK_DAYS,
     Unreadable,
     authors_of,
+    lost_for_good,
     names,
     obj,
     rows,
@@ -105,9 +109,9 @@ class Config:
             raise ValueError("config.workspace must be the workspace's team id")
         return cls(
             team,
-            str(config.get("private") or "").strip().lower() in YES,
+            str(config.get("private") or "yes").strip().lower() in YES,
             frozenset(x.lower() for x in names(config, "exclude")),
-            whole_days(config, SPAN),
+            whole_days(config, REWALK_DAYS),
         )
 
 
@@ -313,11 +317,9 @@ class SlackConnector(Connector):
     fields: ClassVar[tuple[Field, ...]] = (
         Field("token", "Bot or user token", "secret", placeholder="xoxb-… or xoxp-…"),
         Field("workspace", "Workspace ID", placeholder="T…"),
-        Field("private", "Private channels", "select", ("no", "yes"), required=False),
+        Field("private", "Private channels", "select", ("yes", "no"), required=False),
         Field("exclude", "Never read", "list", required=False, placeholder="channel IDs or names"),
-        Field(
-            "rewalk_days", "Days re-read for edits and replies", required=False, placeholder="30"
-        ),
+        Field("rewalk_days", "Days re-read for edits and replies", required=False, placeholder="7"),
     )
 
     def __init__(self, transport: httpx.AsyncBaseTransport | None = None) -> None:
@@ -389,17 +391,26 @@ class SlackConnector(Connector):
             cid: (ch, self._facets(ch)) for cid, ch in sorted(world.roots(cfg.exclude).items())
         }
         old = source.state
+        had = obj(old.get("streams"))
+
+        def excluded(cid: str) -> bool:
+            name = str((world.channels.get(cid) or {}).get("name") or "")
+            return bool({cid.lower(), name.lower()} & cfg.exclude)
+
+        lost = dict(obj(old.get("lost")))
+        missing = {c for c in had if c not in roots and not excluded(c)}
+        gone = {c for c in had if c not in roots and excluded(c)}
+        gone |= lost_for_good(lost, missing, datetime.now(UTC))
         state: Json = {
             "v": 1,
             "cycle": old.get("cycle", 0) + (old.get("complete") is not False),
             "complete": False,
             "team": cfg.team,
-            "streams": {k: v for k, v in obj(old.get("streams")).items() if k in roots},
-            "threads": {k: dict(v) for k, v in obj(old.get("threads")).items() if k in roots},
+            "streams": {k: v for k, v in had.items() if k not in gone},
+            "threads": {k: dict(v) for k, v in obj(old.get("threads")).items() if k not in gone},
+            "lost": lost,
         }
-        for cid in set(obj(old.get("streams"))) - set(
-            roots
-        ):  # left: its windows go, and so does its cursor
+        for cid in sorted(gone):  # excluded, or lost for good: its windows and cursor go
             yield Replaced(f"conversation:{cid}:", "")
         run = Run(
             world.url,

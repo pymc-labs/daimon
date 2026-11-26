@@ -9,9 +9,10 @@ own). The bot needs the Server Members intent, and View Channel and Read Message
 the channels to archive (Manage Threads to read private threads).
 
 Messages become one record per channel or thread and UTC day (split past `WINDOW` characters).
-The last `rewalk_days` are re-read once per full pass, so edits and deletes reach the store; a
-channel or thread that left, or is excluded, loses its windows. A channel the bot can no longer
-read keeps its windows as they were.
+The last `rewalk_days` are re-read once per full pass, so edits and deletes reach the store. An
+excluded channel or thread loses its windows, as does a thread Discord says is gone. A channel
+the bot can no longer read (or that went) publishes no readers, so its windows are hidden at
+once; read again within `LOST` (30 days) they show again where they were, later they go.
 
 Configuration (`sources.config`), credential `{"token": "<bot token>"}`:
 
@@ -52,8 +53,10 @@ from daimon.data.sync.connector import (
     SyncState,
 )
 from daimon.data.sync.connectors.chat import (
+    REWALK_DAYS,
     Unreadable,
     authors_of,
+    lost_for_good,
     names,
     obj,
     rows,
@@ -84,7 +87,6 @@ RELIST: Final = timedelta(days=7)
 """How often a channel's archived threads are all listed again (to notice deleted ones)."""
 UNKNOWN_CHANNEL: Final = 10003
 PASS_MINUTES: Final = 60
-DEFAULT_DAYS: Final = 7
 
 
 # ---- Discord's permission rules --------------------------------------------------------------
@@ -160,7 +162,7 @@ class Config:
         return cls(
             guild,
             frozenset(x.lower() for x in names(config, "exclude")),
-            whole_days(config, DEFAULT_DAYS),
+            whole_days(config, REWALK_DAYS),
         )
 
 
@@ -193,11 +195,11 @@ class World:
         return sorted(on_parent & members)
 
     def access(self, exclude: frozenset[str]) -> dict[str, list[str]]:
-        """Group id (a root, or a private thread) to the humans who read it."""
+        """Group id (a root the bot reads, or a private thread) to the humans who read it."""
         out = {
             cid: self.readers(ch)
             for cid, ch in self.channels.items()
-            if ch["type"] in ROOTS and not hidden(exclude, ch)
+            if ch["type"] in ROOTS and not hidden(exclude, ch) and self.bot_holds(ch, READ)
         }
         for tid, t in self.private.items():
             if t.get("parent_id") in out and not hidden(exclude, t):
@@ -452,7 +454,8 @@ class DiscordConnector(Connector):
     def _layout(
         self, source: Source, cfg: Config, world: World
     ) -> tuple[Run, dict[str, tuple[Json, Json]], list[str]]:
-        """The run's position, the roots the bot reads with their facets, and streams that left."""
+        """The run's position, the roots the bot reads with their facets, and the streams whose
+        windows go: excluded ones, and those of a root lost for good."""
         old = source.state
         kept = {
             k
@@ -473,6 +476,7 @@ class DiscordConnector(Connector):
             "exclude": sorted(cfg.exclude),
             "streams": dict(obj(old.get("streams"))),
             "listed": {k: v for k, v in obj(old.get("listed")).items() if k in roots and same},
+            "lost": dict(obj(old.get("lost"))),
         }
         run = Run(
             cfg.guild,
@@ -483,11 +487,15 @@ class DiscordConnector(Connector):
         )
         run.names = {**{k: c.get("name") or k for k, c in world.channels.items()}, **world.roles}
         run.vis = {k: digest(v) for k, v in world.access(cfg.exclude).items()}
-        gone = [
-            s
-            for s, cur in run.streams.items()
-            if root_of(s, cur) not in kept or s.lower() in cfg.exclude
-        ]
+
+        def excluded(s: str, cur: list[Any]) -> bool:
+            root = world.channels.get(root_of(s, cur))
+            return s.lower() in cfg.exclude or (root is not None and hidden(cfg.exclude, root))
+
+        gone = [s for s, cur in run.streams.items() if excluded(s, cur)]
+        missing = {root_of(s, c) for s, c in run.streams.items() if s not in gone} - set(roots)
+        lost = lost_for_good(state["lost"], missing, datetime.now(UTC))
+        gone += [s for s, cur in run.streams.items() if root_of(s, cur) in lost]
         return run, roots, gone
 
     async def fetch(self, source: Source) -> AsyncGenerator[Record]:
