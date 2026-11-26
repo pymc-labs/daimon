@@ -61,6 +61,7 @@ from daimon.core.stores.feature_values import (
 )
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.tenants import get_tenant
+from mux.contracts.config import DEFAULT_BACKEND
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -213,7 +214,7 @@ async def current_agent_pin(
     except Exception as exc:  # any read failure refuses the opt-in
         raise _unavailable(f"agent {agent_name}", str(exc)) from exc
     return AgentSandboxPin(
-        agent_id=agent.id, environment_name=environment_name, provider=provider or "anthropic"
+        agent_id=agent.id, environment_name=environment_name, provider=provider or DEFAULT_BACKEND
     )
 
 
@@ -232,7 +233,7 @@ async def run_matches_pin(
     `AgentSandboxPin` needs only the same agent id and the environment its name
     resolves to now.
     """
-    if pin.provider != "anthropic":
+    if pin.provider != DEFAULT_BACKEND:
         return False
     return await _matches(
         client,

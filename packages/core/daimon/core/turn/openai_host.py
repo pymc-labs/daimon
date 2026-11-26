@@ -392,7 +392,7 @@ async def _delete_env(scope: Scope, uploaded: list[tuple[OpenAIDriver, ResourceR
         except MuxError as error:
             # Left at the provider; logged by category, never content.
             log.warning(
-                "openai.env_file_delete_failed",
+                "openai_host.env_file_delete_failed",
                 error=type(error).__name__,
                 causes=backend_refusal_causes(error),
             )
