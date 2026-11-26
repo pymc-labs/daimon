@@ -663,16 +663,18 @@ asker while their turn is live, or the person an unattended run acts for. Set
 agent_chat_requester to true as well for a server that accepts requester_kind
 "agent_chat": a turn a person started through the MCP hub, signed in with their platform
 login, then names that person with no place. Turns started with an agent, coding or CLI
-key name nobody. An agent using a server stays in its channel with no long-term memory,
-a fresh session per channel turn and no handoffs, because the server answers with what
-the channel's readers can read. Set channel_scoped to false for a server that checks
-each call's asker and place itself: its agents then get their normal memory and
-sessions, so what they learn can surface in their other channels. A requester_meta
-server may list wake_tools: a person's call to one carries params._meta.wake_url, a
-private callback watch link for that conversation; each POST of the work's outcome to it
-wakes the conversation once. Each call gets its own link to one watch per conversation,
-which lasts a day after the latest call. Needs the watches feature and
-DAIMON_WATCHES__CALLBACK_BASE_URL. The MCP service requires
+key name nobody. Set routine_claims to true for a signed server that accepts the routine
+claim: a routine run that posts to a Discord room then names its routine, that room and
+the room's kind, and no person. An agent using a server stays in its channel with no
+long-term memory, a fresh session per channel turn and no handoffs, because the server
+answers with what the channel's readers can read. Set channel_scoped to false for a
+server that checks each call's asker and place itself: its agents then get their normal
+memory and sessions, so what they learn can surface in their other channels. A
+requester_meta server may list wake_tools: a person's call to one carries
+params._meta.wake_url, a private callback watch link for that conversation; each POST of
+the work's outcome to it wakes the conversation once. Each call gets its own link to one
+watch per conversation, which lasts a day after the latest call. Needs the watches
+feature and DAIMON_WATCHES__CALLBACK_BASE_URL. The MCP service requires
 DAIMON_MCP_IDENTITY__SIGNING_KEY when any server is signed; chat workers use the same
 server policy without the signing key. Default: [] (off).
 

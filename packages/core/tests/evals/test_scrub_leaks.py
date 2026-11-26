@@ -138,12 +138,12 @@ def _docx() -> bytes:
         "[Content_Types].xml": "<Types/>",
         "word/_rels/document.xml.rels": '<Relationships><Relationship Id="r1" '
         'Target="media/alice_smith.jpeg"/><Relationship Id="r2" TargetMode="External" '
-        'Target="file:///C:/Users/psmith/q3.docx"/></Relationships>',
+        'Target="file:///C:/Users/harness/q3.docx"/></Relationships>',
         "word/document.xml": f"<w:document {W}><w:body><w:p><w:r><w:t>Alice Smith met Priya "
         'Raman.</w:t></w:r></w:p><w:p><w:del w:author="Priya Raman"><w:r><w:delText>Note '
         "from Globex Industries</w:delText></w:r></w:del></w:p></w:body></w:document>",
         "docProps/core.xml": '<cp:coreProperties xmlns:cp="urn:cp" xmlns:dc="urn:dc">'
-        "<dc:creator>Priya Raman</dc:creator><cp:keywords>psmith</cp:keywords>"
+        "<dc:creator>Priya Raman</dc:creator><cp:keywords>harness</cp:keywords>"
         "<x>lead <b/>Alice Smith tail</x></cp:coreProperties>",
         "docProps/app.xml": "<Properties><Company>Globex Industries</Company></Properties>",
     }
@@ -165,7 +165,7 @@ def test_docx_when_metadata_deletions_and_embedded_parts_then_nothing_real_and_n
         rels = z.read("word/_rels/document.xml.rels").decode()
     media = next(n for n in names if n.startswith("word/media/"))
     assert f'Target="media/{media.rsplit("/", 1)[1]}"' in rels, "renamed parts keep rels valid"
-    assert _real_in(dumped) == [] and "psmith" not in dumped, dumped
+    assert _real_in(dumped) == [] and "harness" not in dumped, dumped
 
 
 def _record(files: list[dict[str, object]], result: object = None) -> ThreadRecord:
@@ -330,13 +330,13 @@ def test_value_when_secret_in_nested_or_list_shapes_then_dropped(doc: dict[str, 
         "&#65;lice Smith and Alice&nbsp;Smith",
         "note: " + base64.b64encode(b"Alice Smith").decode(),
         "state=" + base64.urlsafe_b64encode(b"Alice Smith, hunter2!?>").decode(),
-        "C:\\Users\\asmith\\x.txt /home/asmith/x",
+        "C:\\Users\\harness\\x.txt /home/harness/x",
     ],
 )
 def test_text_when_labelled_encoded_or_home_path_then_nothing_left(text: str) -> None:
     scrubber = _scrubber(KnownEntities.model_validate({"people": ["Alice Smith"]}))
     out = scrubber.text(text)
-    leaked = ("hunter2", "abc123", "horse", "staple", "s3cr3t", "0123456789abcdef", "asmith")
+    leaked = ("hunter2", "abc123", "horse", "staple", "s3cr3t", "0123456789abcdef", "harness")
     assert _real_in(out) == [] and not [x for x in leaked if x in out], out
     assert scrubber.residue(out) == {}, "the sweep finds nothing, nor its own markers"
     for word in re.findall(r"[A-Za-z0-9+/_-]{12,}={0,2}", out):

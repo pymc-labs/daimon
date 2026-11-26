@@ -196,13 +196,14 @@ def test_relay_claim_round_trips_and_refuses_other_shapes() -> None:
 
 def test_relay_claim_carries_the_routine_owner_and_refuses_a_stray_one() -> None:
     routine_id = uuid.uuid4()
-    owned = RelayBinding("Helper", routine_id=routine_id, owner="42")
-    assert parse_relay_claim(owned.claim()) == owned, "the owner reads back"
+    owned = RelayBinding("Helper", routine_id=routine_id, owner="42", destination="channel:9:")
+    assert parse_relay_claim(owned.claim()) == owned, "the owner and destination read back"
     assert parse_relay_claim(RelayBinding("Helper", routine_id=routine_id).claim()).owner is None
     for bad in (
         {"agent_name": "Helper", "owner": "42"},
         {"agent_name": "Helper", "routine": str(routine_id), "owner": ""},
         {"agent_name": "Helper", "routine": str(routine_id), "owner": 42},
+        {"agent_name": "Helper", "destination": "channel:9:"},  # only with its routine
     ):
         with pytest.raises(ValueError):
             parse_relay_claim(bad)
