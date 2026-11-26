@@ -408,6 +408,14 @@ def turn_model(admission: Admission) -> tuple[str | None, object]:
     return admission.agent.model.id, (admission.agent.model.model_extra or {}).get("effort")
 
 
+def turn_model_label(admission: Admission) -> str:
+    """The model id a turn's card is labelled with (see `turn_model`); "" when none."""
+    backend = admission.backend_revision
+    if backend is not None and backend.backend not in (None, DEFAULT_BACKEND):
+        return backend.model or ""
+    return admission.agent.model.id
+
+
 class _ThreadOpenFailed(Exception):
     """The opening mention's thread could not be created; the person was told.
 
@@ -4911,7 +4919,7 @@ class DaimonBot(commands.Bot):
                 agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
-                model_id=turn_model(admission)[0] or "",
+                model_id=turn_model_label(admission),
                 turn_id=turn_id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
@@ -5094,7 +5102,7 @@ class DaimonBot(commands.Bot):
                 agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
-                model_id=turn_model(admission)[0] or "",
+                model_id=turn_model_label(admission),
                 turn_id=turn_card_intent.id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
@@ -6060,7 +6068,7 @@ class DaimonBot(commands.Bot):
                 agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
-                model_id=turn_model(admission)[0] or "",
+                model_id=turn_model_label(admission),
                 turn_id=turn_id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
@@ -6609,7 +6617,7 @@ class DaimonBot(commands.Bot):
                 agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
-                model_id=turn_model(admission)[0] or "",
+                model_id=turn_model_label(admission),
                 turn_id=turn_card_intent.id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(

@@ -71,6 +71,8 @@ PRIOR_READ_BUDGET_S = 90.0
 """How long a reused session's last interaction may take to read before the turn
 starts a fresh session instead. One read answers within Google's 60 s deadline;
 without a bound, a run Google can no longer read held each turn for over 6 min."""
+UNREADABLE_CODE = "upstream_read_retries_exhausted"
+"""Every retry of the read got a plain 5xx (`Base.retrying` names it from the category)."""
 
 
 async def prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedTurn:
@@ -536,22 +538,28 @@ async def _readable_session(
     """The reused session, or None when its last interaction cannot be read in time.
 
     Reading it applies that interaction's final state; a new interaction then chains
-    on it. When the provider keeps failing that read (a 5xx, or no answer within
-    `PRIOR_READ_BUDGET_S`), the caller replaces the session, so the thread is not
-    stuck behind a run that the provider cannot serve.
+    on it. When the provider keeps answering that read with a plain server error (every
+    retry spent), or does not answer within `PRIOR_READ_BUDGET_S`, the caller replaces
+    the session, so the conversation is not stuck behind a run the provider cannot
+    serve. Capacity (overloaded, high demand) and network failures still fail the turn:
+    they pass, and replacing would throw away a session that is fine.
     """
+    deadline = asyncio.timeout(PRIOR_READ_BUDGET_S)
     try:
-        async with asyncio.timeout(PRIOR_READ_BUDGET_S):
+        async with deadline:
             return await backend.sessions.retrieve(scope, ref)
     except TimeoutError:
+        if not deadline.expired():
+            raise
         cause = "timeout"
     except ProviderError as error:
-        if not (error.native_code or "").endswith("_read_retries_exhausted"):
+        if error.category != "upstream" or error.native_code != UNREADABLE_CODE:
             raise
-        cause = error.native_code or error.category
+        cause = error.native_code
     log.warning(
         "gemini.prior_interaction_unreadable",
         binding_id=binding_id,
+        session_id=ref.id,
         cause=cause,
         budget_s=PRIOR_READ_BUDGET_S,
         action="replace_session",

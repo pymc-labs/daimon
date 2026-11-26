@@ -1007,3 +1007,30 @@ async def test_a_refused_last_interaction_read_still_fails_the_turn(
     with pytest.raises(ProviderError):
         await prepare(host)
     assert host.transport.read_requests.count("one") - reads == 1
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ProviderError(
+            "overloaded", retryable=True, native_code="high_demand", native_error_code="http_500"
+        ),
+        ProviderError("overloaded", retryable=True, native_error_code="http_503"),
+        ProviderError("transient_network", retryable=True, native_code="connect_failed"),
+    ],
+    ids=["high_demand", "unavailable", "connect_failed"],
+)
+async def test_capacity_or_network_failures_keep_the_session(
+    host: Host, monkeypatch: pytest.MonkeyPatch, failure: ProviderError
+) -> None:
+    """These pass: the message fails as before and the conversation stays whole."""
+    monkeypatch.setattr(gemini_core, "INTERACTION_READ_RETRY_DELAYS_S", (0.0,) * 5)
+    host.transport.responses.append(interaction("one"))
+    first = await prepare(host)
+    await _turn(host, first, "1")
+    host.transport.reads["one"] = [failure for _ in range(6)]
+    with pytest.raises(ProviderError):
+        await prepare(host)
+    host.transport.reads["one"] = []
+    again = await prepare(host)
+    assert again.reused and again.session_ref == first.session_ref

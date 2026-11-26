@@ -8,12 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - **A Gemini conversation no longer gets stuck when Gemini can't read its last reply.** Each
-  new message first reads the previous reply. When Gemini kept failing that read, every
-  later message in the conversation waited over six minutes and then failed. Daimon now waits
-  at most 90 seconds, then starts a fresh Gemini session that carries the conversation so far.
-  The new session doesn't have the unreadable reply, or Gemini's own memory of tool results
-  and workspace from before (the same as any other session replacement). Any other refusal
-  of that read still fails the message.
+  new message first reads the previous reply. When Gemini kept answering that read with a
+  server error, every later message in the conversation waited over six minutes and then
+  failed. Daimon now waits at most 90 seconds, then starts a fresh Gemini session that carries
+  the conversation so far. The new session doesn't have the unreadable reply, or Gemini's own
+  memory of tool results and workspace files from before (the same as any other session
+  replacement). Gemini being busy, a network failure, or a refusal of the read still fails
+  only that message and keeps the session.
 
 - **The reply card names the model a reply runs on.** An agent copied onto Gemini showed
   the Claude model it was copied from on its "Working on it" card. The card now shows the
