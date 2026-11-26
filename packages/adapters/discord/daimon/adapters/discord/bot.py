@@ -396,6 +396,18 @@ def _capture_turn_error(
         sentry_sdk.capture_exception(exc)
 
 
+def turn_model(admission: Admission) -> tuple[str | None, object]:
+    """The model and effort a turn runs on: a non-default backend's own, else the agent's.
+
+    An agent copied onto another backend keeps its original agent's model id, so labelling
+    the card from the agent showed a Gemini turn as the Claude model it was copied from.
+    """
+    backend = admission.backend_revision
+    if backend is not None and backend.backend not in (None, DEFAULT_BACKEND):
+        return backend.model, backend.effort
+    return admission.agent.model.id, (admission.agent.model.model_extra or {}).get("effort")
+
+
 class _ThreadOpenFailed(Exception):
     """The opening mention's thread could not be created; the person was told.
 
@@ -4147,12 +4159,7 @@ class DaimonBot(commands.Bot):
         is on and they differ from the pair last shown in this thread."""
         if not admission.shown("model_reactions", "discord"):
             return ()
-        backend = admission.backend_revision
-        if backend is not None and backend.backend not in (None, DEFAULT_BACKEND):
-            model_id, effort = backend.model, backend.effort
-        else:
-            model_id = admission.agent.model.id
-            effort = (admission.agent.model.model_extra or {}).get("effort")
+        model_id, effort = turn_model(admission)
         marks = model_marks(model_id, effort if isinstance(effort, str) else None)
         if not marks:
             return ()
@@ -4904,7 +4911,7 @@ class DaimonBot(commands.Bot):
                 agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
-                model_id=agent.model.id,
+                model_id=turn_model(admission)[0] or "",
                 turn_id=turn_id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
@@ -5087,7 +5094,7 @@ class DaimonBot(commands.Bot):
                 agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
-                model_id=agent.model.id,
+                model_id=turn_model(admission)[0] or "",
                 turn_id=turn_card_intent.id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
@@ -6053,7 +6060,7 @@ class DaimonBot(commands.Bot):
                 agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
-                model_id=agent.model.id,
+                model_id=turn_model(admission)[0] or "",
                 turn_id=turn_id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
@@ -6602,7 +6609,7 @@ class DaimonBot(commands.Bot):
                 agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
-                model_id=agent.model.id,
+                model_id=turn_model(admission)[0] or "",
                 turn_id=turn_card_intent.id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
