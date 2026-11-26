@@ -2043,127 +2043,97 @@ async def _ask_impl(
     deadline = clock() + timeout_seconds
     feed = feed or TurnFeed(runtime, auth, handle)
     try:
-        return await _ask_wait(
-            runtime,
-            auth,
-            handle,
-            started=started,
-            turn_event_id=turn_event_id,
-            turn_started_at=turn_started_at,
-            timeout_seconds=timeout_seconds,
-            deadline=deadline,
-            clock=clock,
-            feed=feed,
-            on_read=on_read,
-        )
+        while True:
+            await feed.open()
+            current = await _get_session_impl(runtime, auth, handle, on_read=on_read)
+            # Only terminated is treated as terminal: the status value set is
+            # upstream-controlled (see SessionInfo.status), so an unmodeled
+            # transient status keeps waiting until the deadline instead of
+            # failing a turn that admission already billed.
+            if current.status == "paused":
+                raise ToolError(
+                    f"Daimon turn on handle {handle} is {current.hint}"
+                    + (" or wait with await_turn" if current.hint == PAUSED_HINT else "")
+                )
+            if current.status == "terminated":
+                if (observation := current_outcome.get()) is not None:
+                    observation.finish(reason=TerminationReason.SESSION_TERMINATED)
+                raise ToolError(
+                    f"The reply reached final status {current.status!r}; "
+                    f"resume or inspect events with handle {handle}"
+                )
+            if current.status == "idle":
+                page: str | None = None
+                final_text: str | None = None
+                # The newest idle decides: a refusal ends the turn whatever text came before it.
+                refused: bool | None = None
+                for _ in range(_MAX_EVENT_PAGES):
+                    events = await _list_events_impl(
+                        runtime,
+                        auth,
+                        handle,
+                        page,
+                        100,
+                        "desc",
+                        created_at_gte=turn_started_at.isoformat(),
+                        types=["agent.message", "session.status_idle"],
+                    )
+                    for event in events.items:
+                        if event.id == turn_event_id:
+                            continue
+                        if event.type == "session.status_idle":
+                            if refused is None:
+                                details = (event.model_extra or {}).get("stop_details")
+                                refused = refusal_error(details) is not None
+                            continue
+                        final_text = _agent_message_text(event)
+                        if final_text is not None:
+                            break
+                    if final_text is not None or events.next_page is None:
+                        break
+                    page = events.next_page
+
+                if refused:
+                    if (observation := current_outcome.get()) is not None:
+                        observation.finish(reason=TerminationReason.REFUSED)
+                    raise ToolError(_DECLINED_MSG.format(handle=handle))
+                if final_text is not None:
+                    delivery = await deliver_hosted_charts(
+                        runtime.client,
+                        settings=runtime.settings.artifacts,
+                        tenant_id=str(auth.tenant_id),
+                        account_id=str(auth.account_id),
+                        session_id=handle,
+                        turn_started_at=turn_started_at,
+                        message=final_text,
+                        store=runtime.artifact_store,
+                    )
+                    if (observation := current_outcome.get()) is not None:
+                        observation.finish(reason=TerminationReason.COMPLETED)
+                    await _require_live_result_access(runtime, auth)
+                    return AskResult(
+                        handle=handle,
+                        message=delivery.message,
+                        chart_urls=delivery.chart_urls,
+                        image_blocks=delivery.image_blocks,
+                        monitoring=started.get("monitoring"),
+                    )
+
+            remaining = deadline - clock()
+            if remaining <= 0:
+                if (observation := current_outcome.get()) is not None:
+                    observation.finish(reason=TerminationReason.CEILING)
+                notice = started.get("monitoring")
+                raise ToolError(
+                    f"Daimon did not finish a reply within "
+                    f"{timeout_seconds:g} seconds and is still working; wait for it with "
+                    f"await_turn and handle {handle}" + (f"\n{notice}" if notice else "")
+                )
+            await _wait_for_news(
+                feed, TURN_STOPPED, worker=local_worker(runtime, handle), seconds=remaining
+            )
     finally:
         await feed.close()
-
-
-async def _ask_wait(
-    runtime: McpRuntime,
-    auth: AuthIdentity,
-    handle: str,
-    *,
-    started: dict[str, str],
-    turn_event_id: str,
-    turn_started_at: dt.datetime,
-    timeout_seconds: float,
-    deadline: float,
-    clock: Callable[[], float],
-    feed: TurnFeed,
-    on_read: OnRead | None,
-) -> AskResult:
-    """``ask``'s wait: read the turn, and sleep on `feed` until it stops or the bound passes."""
-    while True:
-        await feed.open()
-        current = await _get_session_impl(runtime, auth, handle, on_read=on_read)
-        # Only terminated is treated as terminal: the status value set is
-        # upstream-controlled (see SessionInfo.status), so an unmodeled
-        # transient status keeps waiting until the deadline instead of
-        # failing a turn that admission already billed.
-        if current.status == "paused":
-            raise ToolError(
-                f"Daimon turn on handle {handle} is {current.hint}"
-                + (" or wait with await_turn" if current.hint == PAUSED_HINT else "")
-            )
-        if current.status == "terminated":
-            if (observation := current_outcome.get()) is not None:
-                observation.finish(reason=TerminationReason.SESSION_TERMINATED)
-            raise ToolError(
-                f"The reply reached final status {current.status!r}; "
-                f"resume or inspect events with handle {handle}"
-            )
-        if current.status == "idle":
-            page: str | None = None
-            final_text: str | None = None
-            # The newest idle decides: a refusal ends the turn whatever text came before it.
-            refused: bool | None = None
-            for _ in range(_MAX_EVENT_PAGES):
-                events = await _list_events_impl(
-                    runtime,
-                    auth,
-                    handle,
-                    page,
-                    100,
-                    "desc",
-                    created_at_gte=turn_started_at.isoformat(),
-                    types=["agent.message", "session.status_idle"],
-                )
-                for event in events.items:
-                    if event.id == turn_event_id:
-                        continue
-                    if event.type == "session.status_idle":
-                        if refused is None:
-                            details = (event.model_extra or {}).get("stop_details")
-                            refused = refusal_error(details) is not None
-                        continue
-                    final_text = _agent_message_text(event)
-                    if final_text is not None:
-                        break
-                if final_text is not None or events.next_page is None:
-                    break
-                page = events.next_page
-
-            if refused:
-                if (observation := current_outcome.get()) is not None:
-                    observation.finish(reason=TerminationReason.REFUSED)
-                raise ToolError(_DECLINED_MSG.format(handle=handle))
-            if final_text is not None:
-                delivery = await deliver_hosted_charts(
-                    runtime.client,
-                    settings=runtime.settings.artifacts,
-                    tenant_id=str(auth.tenant_id),
-                    account_id=str(auth.account_id),
-                    session_id=handle,
-                    turn_started_at=turn_started_at,
-                    message=final_text,
-                    store=runtime.artifact_store,
-                )
-                if (observation := current_outcome.get()) is not None:
-                    observation.finish(reason=TerminationReason.COMPLETED)
-                await _require_live_result_access(runtime, auth)
-                return AskResult(
-                    handle=handle,
-                    message=delivery.message,
-                    chart_urls=delivery.chart_urls,
-                    image_blocks=delivery.image_blocks,
-                    monitoring=started.get("monitoring"),
-                )
-
-        remaining = deadline - clock()
-        if remaining <= 0:
-            if (observation := current_outcome.get()) is not None:
-                observation.finish(reason=TerminationReason.CEILING)
-            notice = started.get("monitoring")
-            raise ToolError(
-                f"Daimon did not finish a reply within "
-                f"{timeout_seconds:g} seconds and is still working; wait for it with "
-                f"await_turn and handle {handle}" + (f"\n{notice}" if notice else "")
-            )
-        await _wait_for_news(
-            feed, TURN_STOPPED, worker=local_worker(runtime, handle), seconds=remaining
-        )
 
 
 def still_waiting(ctx: Context) -> OnTick:
