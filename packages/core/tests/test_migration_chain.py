@@ -195,6 +195,7 @@ TAIL = (
     "0231_agent_chat_send_count",
     "0232_agent_chat_session_grant",
     "0233_turn_origin_public_thread",
+    "0234_evals_foundation",
 )
 HEAD = TAIL[-1]
 
