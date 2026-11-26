@@ -188,6 +188,19 @@ async def test_a_source_that_needs_a_credential_is_added_on_the_web(rig: Rig) ->
     assert not rig.calls, "a credential never goes through chat"
 
 
+async def test_a_source_group_reaches_the_store(rig: Rig) -> None:
+    await rig.call(
+        "change_data_source",
+        action="create",
+        kind="bluedot",
+        name="Calls",
+        group="team-a",
+        origin_context_id="o",
+    )
+    name, sent = rig.calls[-1]
+    assert name == "create_source" and "team-a" in sent, "the chat group is the source's group"
+
+
 async def test_a_refusal_of_the_store_reads_as_its_message(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:

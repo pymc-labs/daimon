@@ -82,8 +82,10 @@ def register_data_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         kind: str = "",
         name: str = "",
         settings: dict[str, str | list[str]] | None = None,
+        group: str = "",
     ) -> dict[str, Any]:
-        """Add a data source (create: kind, name, settings by the kind's fields) or pause,
+        """Add a data source (create: kind, name, settings by the kind's fields, and its source
+        group: sources of one workspace with the same group share group membership) or pause,
         resume, retire, publish, unpublish or sync one (source_id). Runs on the asker's
         Approve card. A source whose kind needs a credential can't be added here, so a
         credential never passes through chat. Admin-only."""
@@ -105,6 +107,7 @@ def register_data_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                     made = await manage.create_source(
                         conn, schemas, keys_of(runtime), tenant_id=actor.tenant_id,
                         by=actor.account_id, kind=kind, name=name, settings=dict(settings or {}),
+                        group=group,
                     )  # fmt: skip
                     return {"created": str(made)}
                 await manage.act(

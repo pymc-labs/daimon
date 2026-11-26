@@ -119,6 +119,16 @@ async def test_only_admins_write(rig: Rig) -> None:
         assert [r["detail"] async for r in cur] == [{"scope": "ops", "self": True}]
 
 
+async def test_a_source_group_is_set_on_create_and_listed(rig: Rig) -> None:
+    async with rig.open() as (client, _):
+        made = await client.post(_SOURCES, json={**_NEW, "group": " Team-A "})
+        assert made.status_code == 201, made.text
+        listed = (await client.get(_SOURCES)).json()
+        assert [row["group"] for row in listed] == ["team-a"], "the group is kept lowercase"
+        bad = await client.post(_SOURCES, json={**_NEW, "name": "Two", "group": "not ok!"})
+        assert bad.status_code == 422, "a malformed group is refused"
+
+
 async def test_declared_sources_refuse_edits(rig: Rig) -> None:
     async with rig.open() as (client, ws), rig.data.aconnect() as conn:
         cur = await conn.execute(

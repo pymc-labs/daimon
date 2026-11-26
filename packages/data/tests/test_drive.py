@@ -543,14 +543,15 @@ async def test_an_event_shows_only_to_the_people_on_it(store: Store, google: Fak
     bob = await link(store, "bob")
     carol = await link(store, "carol")
 
-    async def titles(*readers: str) -> set[str]:
+    async def titles(*readers: str, off: tuple[personal.Part, ...] = ()) -> set[str]:
         ctx = ReadContext((store.tenant,), scopes=("internal",), readers=readers)
         found = await federated.search(
-            store.conn, store.schemas, store.env, ctx, "planning", seconds=5
+            store.conn, store.schemas, store.env, ctx, "planning", seconds=5, off_parts=off
         )
         return {h.title for r in found for h in r.hits}
 
     assert await titles(alice) == {"Planning standup", "Planning review"}
+    assert await titles(alice, off=("calendar",)) == set(), "the workspace turned calendars off"
     assert await titles(carol) == set(), "not on any event"
     assert await titles(alice, bob) == {"Planning standup"}, "only what every reader may see"
     assert await titles() == set(), "no reader, no answer"
@@ -584,14 +585,7 @@ async def test_a_persons_own_drive_is_searched_as_them_and_never_stored(
     )
     assert mine == [], "she turned her own Drive off"
     shown = await personal.parts(store.conn, store.schemas, store.tenant, alice)
-    assert shown == {"drive": False}, "only parts a source reads: no Calendar source"
+    assert shown == {"drive": False, "calendar": True}, "each part is on until she turns it off"
     await personal.set_part(store.conn, store.schemas, store.tenant, alice, "drive", True)
-    await store.conn.execute(
-        f'update {store.d}.sources set config = config || \'{{"personal_drive": "no"}}\''
-        " where id = %s".encode(),
-        (src,),
-    )
-    off = await my_drive.search(store.conn, store.schemas, store.env, store.tenant, alice, "budget")
-    assert off == [], "an admin turned it off for the workspace"
-    shown = await personal.parts(store.conn, store.schemas, store.tenant, alice)
-    assert shown == {}, "so her profile offers no Drive switch"
+    shown = await personal.parts(store.conn, store.schemas, store.tenant, alice, ["calendar"])
+    assert shown == {"calendar": True}, "a part the workspace turned off is not offered"

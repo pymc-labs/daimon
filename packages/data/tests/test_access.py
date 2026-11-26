@@ -15,7 +15,6 @@ from daimon.data.schema import Schemas
 from daimon.testing.data_db import DataDb
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
-from psycopg.types.json import Jsonb
 
 DEFINERS = {
     "visible_sources",
@@ -61,13 +60,8 @@ class Store:
     ) -> uuid.UUID:
         found = await self.one(
             f"insert into {self.d}.sources (tenant_id, kind, name, provider, default_scope, publication,"
-            " config) values (%s, 'docs', 'docs', 'acme', %s, %s, %s) returning id",
-            (
-                tenant or self.tenant,
-                ACL_SCOPE,
-                publication,
-                Jsonb({"group": group} if group else {}),
-            ),
+            " source_group) values (%s, 'docs', 'docs', 'acme', %s, %s, %s) returning id",
+            (tenant or self.tenant, ACL_SCOPE, publication, group),
         )
         assert isinstance(found, uuid.UUID), "a source insert returns its id"
         return found
@@ -358,11 +352,10 @@ async def test_group_membership_counts_within_a_source_group_and_never_outside_i
     foreign = await store.put(outsider, "doc:1", await store.intern(outsider, grp))
     assert await store.seen(store.who(me)) == {shared}, "only a source of the unit's group grants"
     await store.conn.execute(
-        f"update {store.d}.sources set config = '{{}}' where id = %s".encode(), (partner,)
+        f"update {store.d}.sources set source_group = null where id = %s".encode(), (partner,)
     )
     await store.conn.execute(
-        f'update {store.d}.sources set config = \'{{"group": "g"}}\' where id = %s'.encode(),
-        (outsider,),
+        f"update {store.d}.sources set source_group = 'g' where id = %s".encode(), (outsider,)
     )
     assert await store.seen(store.who(me)) == {foreign}, "leaving or joining a group counts at once"
     async with store.conn.transaction():

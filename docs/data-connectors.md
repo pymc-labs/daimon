@@ -99,7 +99,7 @@ with domain-wide delegation:
    shared drives, add that admin to each drive as a manager.
 
 ```json
-{"domain": "example.com", "admin": "admin@example.com", "personal_drive": "yes",
+{"domain": "example.com", "admin": "admin@example.com",
  "exclude_folders": ["1AbC..."], "relist_hours": 24}
 ```
 
@@ -114,9 +114,10 @@ the directory by this source or another of its group). A discoverable share gran
 domain. Link-only shares, outside people and expiring shares grant nothing, and a file
 nobody inside can read is not stored.
 
-A source group is the Google sources of one workspace whose config names the same `group`,
-one per Google connection. Group membership read by any of them counts for all of them. A
-source with no `group`, or another one, never uses another source's membership.
+A source group is the Google sources of one workspace that share the same group, one per
+Google connection. Set it when adding the source on its page (or in chat), or as `group` on a
+declared source. Group membership read by any of them counts for all of them. A source with no
+group, or another one, never uses another source's membership.
 
 Changes arrive through each shared drive's change feed. Everything is listed again every
 `relist_hours`, which is also how soon a new share on a folder reaches the files below it.
@@ -133,16 +134,18 @@ Sheets. Every read shows a card only they can answer, saying that everyone in th
 conversation will see the result; **Allow for this conversation** stops asking for the rest
 of that conversation (kept in the running process: a restart asks again).
 
-It works in direct messages and team rooms wherever data reads are on, never in rooms people
-outside the team can read or on another agent's request. The answer's redaction rules apply,
-and a search returns 60,000 characters of text at most. A memory saved after it is recalled
-only in that person's direct messages. `personal_drive: no` turns it off for the workspace's
-source; the `data_personal_drive` feature (on by default) turns it off for a workspace, agent
-or channel.
+It needs no source and no admin step: it works wherever data sources are on and whoever runs
+Daimon set up a Google sign-in. It works in direct messages and team rooms, including rooms
+people outside the team can read; the card says the room will see the result, and the answer
+is cut down to what anyone may see. It never runs on another agent's request. The answer's
+redaction rules apply, and a search returns 60,000 characters of text at most. A memory saved
+after it is recalled only in that person's direct messages.
 
-Each person can also turn off their own Drive and calendar reads, on their profile page or
-in chat (`data_personal_reads`, on a card). Their Drive is then never read as them, and no
-calendar is searched for an answer they are part of.
+A workspace admin can turn it off for the workspace with the `data_personal_drive` feature
+(on by default; also settable per agent or channel). Each person can also turn off their own
+Drive and calendar reads, on their profile page or in chat (`data_personal_reads`, on a card).
+Their Drive is then never read as them, and no calendar is searched for an answer they are
+part of.
 
 ## Google Calendar
 
@@ -151,12 +154,15 @@ search reads the asker's own primary calendar, acting as them through the same d
 delegation as Drive, so an event shows only to the people Google lists on it. Add
 `https://www.googleapis.com/auth/calendar.readonly` to the authorized scopes, and the
 Calendar API to the project. Give the credential and config as for Drive (`service_account_key` or
-`service_account`; `domain`, `admin`). People are matched through their Google link, which a
-Drive source of the same domain (or Google sign-in) provides.
+`service_account`; `domain`, `admin`). People are matched through their Google link (their Google sign-in).
 
 ```json
 {"domain": "example.com", "admin": "admin@example.com"}
 ```
+
+Calendar reads are on for every workspace with data sources on; a workspace admin turns them
+off with the `data_personal_calendar` feature, and each person for themselves (see Personal
+Drive). They need no Calendar source to be offered.
 
 With several readers an event shows only if every one of their calendars has it. A reader the
 source cannot act as (not linked, suspended) gets nothing. Events within 90 days either side of

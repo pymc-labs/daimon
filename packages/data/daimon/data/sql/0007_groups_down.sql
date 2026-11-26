@@ -1,4 +1,5 @@
--- Revision 0245's downgrade: drop what 0007_groups.sql made and put back 0001's same-source rule.
+-- Revision 0245's downgrade: drop what 0007_groups.sql made and put back 0001's same-source rule
+-- and 0006's trigger functions.
 drop table if exists {{data}}.personal_off;
 drop trigger if exists source_group_moved on {{data}}.sources;
 drop function if exists {{data}}.source_group_moved();
@@ -131,5 +132,46 @@ create or replace view {{data}}.acl_grant_truth as
   union
   select r.ref, r.acl_id, r.unit_id from {{data}}.acl_refs r where not r.is_group;
 drop function if exists {{data}}.shares_evidence(uuid, uuid);
+create or replace function {{data}}.source_generation() returns trigger language plpgsql
+  set search_path = {{data}}, pg_catalog, pg_temp as $$
+begin
+  if (new.kind, new.provider, new.config, new.credential, new.default_scope, new.mode, new.redaction_set)
+     is distinct from (old.kind, old.provider, old.config, old.credential, old.default_scope, old.mode,
+                       old.redaction_set) then
+    new.generation := old.generation + 1;
+  end if;
+  return new;
+end $$;
+create or replace function {{data}}.guard_bound() returns trigger language plpgsql
+  set search_path = {{data}}, pg_catalog, pg_temp as $$
+begin
+  if tg_op = 'DELETE' then
+    if old.bound and coalesce(current_setting('daimon_data.declared', true), '') <> 'on'
+       and coalesce(current_setting('daimon_data.erasing', true), '') <> 'on' then
+      raise exception 'a % row is managed by the deployment', tg_table_name using errcode = '42501';
+    end if;
+    return old;
+  end if;
+  if not old.bound or coalesce(current_setting('daimon_data.declared', true), '') = 'on' then
+    return new;
+  end if;
+  if tg_table_name = 'sources' then
+    if (new.tenant_id, new.kind, new.name, new.provider, new.config, new.credential, new.default_scope,
+        new.mode, new.fresh_floor_minutes, new.fresh_ceiling_minutes, new.bound, new.declared_key,
+        new.redaction_set)
+       is distinct from
+       (old.tenant_id, old.kind, old.name, old.provider, old.config, old.credential, old.default_scope,
+        old.mode, old.fresh_floor_minutes, old.fresh_ceiling_minutes, old.bound, old.declared_key,
+        old.redaction_set)
+       or (new.status = 'disabled' and old.status <> 'disabled') or old.publication = 'retired'
+          and new.publication <> 'retired' then
+      raise exception 'source % is managed by the deployment', old.id using errcode = '42501';
+    end if;
+  elsif to_jsonb(new) - 'created_at' is distinct from to_jsonb(old) - 'created_at' then
+    raise exception 'a % row is managed by the deployment', tg_table_name using errcode = '42501';
+  end if;
+  return new;
+end $$;
+alter table {{data}}.sources drop column if exists source_group;
 select {{data}}.acl_rebuild(true);
 delete from {{data}}.schema_version where file = '0007_groups.sql';

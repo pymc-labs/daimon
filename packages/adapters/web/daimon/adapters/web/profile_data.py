@@ -14,6 +14,7 @@ from typing import Annotated, Literal
 import httpx
 from daimon.adapters.web.data_common import Viewer, refused, schemas_of, store
 from daimon.adapters.web.runtime import WebRuntime
+from daimon.core.personal_parts import allowed_parts
 from daimon.data import identity, manage, personal
 from daimon.data.connect import (
     PROVIDERS,
@@ -104,15 +105,22 @@ def profile_data_router(runtime: WebRuntime) -> APIRouter:
         schemas, keys, runtime.http_client, redirect, clients=configured_clients(settings.data)
     )
 
+    async def workspace_parts(tenant_id: uuid.UUID) -> list[personal.Part]:
+        """The personal parts the workspace allows (`daimon.core.personal_parts`)."""
+        async with runtime.sessionmaker() as db:
+            names = await allowed_parts(db, settings, tenant_id, "web")
+        return [p for p in personal.PARTS if p in names]
+
     @router.get("")
     async def connected(caller: Viewer) -> Connected:  # pyright: ignore[reportUnusedFunction]
         p = caller.person
+        allowed = await workspace_parts(p.tenant_id)
         async with store(runtime) as conn:
             accounts = await manage.identities(conn, schemas, p.tenant_id, account_id=p.account_id)
             made = await manage.person_connections(conn, schemas, p.tenant_id, p.account_id)
             open_ = await manage.connectable(conn, schemas, p.tenant_id, list(PROVIDERS))
             notices = await identity.take_notices(conn, schemas, p.tenant_id, p.account_id)
-            parts = await personal.parts(conn, schemas, p.tenant_id, p.account_id)
+            parts = await personal.parts(conn, schemas, p.tenant_id, p.account_id, allowed)
         return Connected(
             accounts=[AccountOut.model_validate(a, from_attributes=True) for a in accounts],
             notices=[NoticeOut.model_validate(n, from_attributes=True) for n in notices],
@@ -127,9 +135,10 @@ def profile_data_router(runtime: WebRuntime) -> APIRouter:
     ) -> dict[personal.Part, bool]:
         """Turn one personal part on or off for the signed-in person (`data_personal_reads`)."""
         p = caller.person
+        allowed = await workspace_parts(p.tenant_id)
         async with store(runtime) as conn:
             await personal.set_part(conn, schemas, p.tenant_id, p.account_id, part, body.on)
-            return await personal.parts(conn, schemas, p.tenant_id, p.account_id)
+            return await personal.parts(conn, schemas, p.tenant_id, p.account_id, allowed)
 
     @router.post("/connect")
     async def start(caller: Viewer, body: Start) -> Started:  # pyright: ignore[reportUnusedFunction]

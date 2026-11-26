@@ -9,13 +9,13 @@ import { notFound, paged, wait } from "./util"
 const ago = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString()
 
 const sources: SourceState[] = [
-  { id: "s_wiki", name: "Team wiki", kind: "notion", mode: "stored", status: "active", publication: "published", bound: false, default_scope: "internal", created_at: ago(900), records: 1284,
+  { id: "s_wiki", name: "Team wiki", kind: "notion", mode: "stored", status: "active", publication: "published", bound: false, default_scope: "internal", group: null, created_at: ago(900), records: 1284,
     last_sync_at: ago(2), last_status: "ok", last_error: null, errors: 0, parity: { finished_at: ago(300), people: 12, checked: 480, wrong_more: 0, wrong_less: 2, unresolved: null, ok: true }, can_publish: true, blocked: null },
-  { id: "s_drive", name: "Shared drive", kind: "gdrive", mode: "stored", status: "active", publication: "shadow", bound: false, default_scope: "internal", created_at: ago(120), records: 342,
+  { id: "s_drive", name: "Shared drive", kind: "gdrive", mode: "stored", status: "active", publication: "shadow", bound: false, default_scope: "internal", group: "google", created_at: ago(120), records: 342,
     last_sync_at: ago(5), last_status: "ok", last_error: null, errors: 1, parity: { finished_at: ago(20), people: 12, checked: 300, wrong_more: 3, wrong_less: 0, unresolved: null, ok: false }, can_publish: false, blocked: "3 people would see more than before" },
-  { id: "s_mail", name: "Support inbox", kind: "gmail", mode: "federated", status: "paused", publication: "published", bound: true, default_scope: "restricted", created_at: ago(2000), records: 0,
+  { id: "s_mail", name: "Support inbox", kind: "gmail", mode: "federated", status: "paused", publication: "published", bound: true, default_scope: "restricted", group: null, created_at: ago(2000), records: 0,
     last_sync_at: null, last_status: null, last_error: null, errors: 0, parity: null, can_publish: false, blocked: null },
-  { id: "s_crm", name: "Customer notes", kind: "hubspot", mode: "stored", status: "error", publication: "shadow", bound: false, default_scope: "client", created_at: ago(60), records: 58,
+  { id: "s_crm", name: "Customer notes", kind: "hubspot", mode: "stored", status: "error", publication: "shadow", bound: false, default_scope: "client", group: null, created_at: ago(60), records: 58,
     last_sync_at: ago(30), last_status: "failed", last_error: "The credential was refused", errors: 4, parity: null, can_publish: false, blocked: "No parity check yet" },
 ]
 const kinds: Kind[] = [

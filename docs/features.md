@@ -98,7 +98,8 @@ Where each feature can be set, and its default.
 | Own support channel | `support_own_channel` | Capability | On | ✓ |  |  |  |  |  |  |
 | GitHub access | `github` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Lead intake | `lead_intake` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
-| Personal Drive reads | `data_personal_drive` | Capability | On |  | ✓ | ✓ | ✓ |  |  |  |
+| Drive reads | `data_personal_drive` | Capability | On |  | ✓ | ✓ | ✓ |  |  | Needs setup by whoever runs Daimon |
+| Calendar reads | `data_personal_calendar` | Capability | On |  | ✓ |  |  |  |  | Needs setup by whoever runs Daimon |
 | Posting to others | `outbound_reach` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Long job dollar cap | `long_jobs_max_usd` | Limit | $5 | ✓ | ✓ | ✓ |  |  |  |  |
 | Long job time limit | `long_jobs_max_deadline` | Limit | 70 minutes | ✓ | ✓ | ✓ |  |  |  |  |
@@ -1111,9 +1112,9 @@ The agent can search the team's data sources, showing only what everyone who wil
 | Levels | Workspace, Agent, Channel |
 | Combines | Off above is a ceiling |
 
-## Personal Drive reads
+## Drive reads
 
-Reads a person's Drive as them.
+Reads own Drive.
 
 | | |
 | --- | --- |
@@ -1121,6 +1122,18 @@ Reads a person's Drive as them.
 | Values | `on` (On), `off` (Off) |
 | Default | `on` |
 | Levels | Workspace, Agent, Channel |
+| Combines | Off above is a ceiling |
+
+## Calendar reads
+
+Reads own calendars.
+
+| | |
+| --- | --- |
+| Key | `data_personal_calendar` |
+| Values | `on` (On), `off` (Off) |
+| Default | `on` |
+| Levels | Workspace |
 | Combines | Off above is a ceiling |
 
 ## Long job dollar cap

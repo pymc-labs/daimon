@@ -1,18 +1,64 @@
 -- Source groups and personal reads. {{data}} is the store's schema.
 --
--- A source group is the sources of one tenant and one subject namespace whose config names the
--- same `group` (one Google connection: its directory, Drive and Calendar). Group membership read
+-- A source group is the sources of one tenant and one subject namespace that name the same
+-- `source_group` (one Google connection: its directory, Drive and Calendar). Group membership read
 -- by any of them grants the access lists of all of them; a source with no group, or in another
 -- group, tenant or namespace, never grants another's. Before this, evidence never crossed sources.
 -- Inert until a source names a group.
+
+alter table {{data}}.sources add column source_group text check (source_group <> '');
+
+-- 0006's, with the group: moving it changes the generation, and a bound source's group changes
+-- only in the declared apply.
+create or replace function {{data}}.source_generation() returns trigger language plpgsql
+  set search_path = {{data}}, pg_catalog, pg_temp as $$
+begin
+  if (new.kind, new.provider, new.config, new.credential, new.default_scope, new.mode, new.redaction_set,
+     new.source_group)
+     is distinct from (old.kind, old.provider, old.config, old.credential, old.default_scope, old.mode,
+                       old.redaction_set, old.source_group) then
+    new.generation := old.generation + 1;
+  end if;
+  return new;
+end $$;
+create or replace function {{data}}.guard_bound() returns trigger language plpgsql
+  set search_path = {{data}}, pg_catalog, pg_temp as $$
+begin
+  if tg_op = 'DELETE' then
+    if old.bound and coalesce(current_setting('daimon_data.declared', true), '') <> 'on'
+       and coalesce(current_setting('daimon_data.erasing', true), '') <> 'on' then
+      raise exception 'a % row is managed by the deployment', tg_table_name using errcode = '42501';
+    end if;
+    return old;
+  end if;
+  if not old.bound or coalesce(current_setting('daimon_data.declared', true), '') = 'on' then
+    return new;
+  end if;
+  if tg_table_name = 'sources' then
+    if (new.tenant_id, new.kind, new.name, new.provider, new.config, new.credential, new.default_scope,
+        new.mode, new.fresh_floor_minutes, new.fresh_ceiling_minutes, new.bound, new.declared_key,
+        new.redaction_set, new.source_group)
+       is distinct from
+       (old.tenant_id, old.kind, old.name, old.provider, old.config, old.credential, old.default_scope,
+        old.mode, old.fresh_floor_minutes, old.fresh_ceiling_minutes, old.bound, old.declared_key,
+        old.redaction_set, old.source_group)
+       or (new.status = 'disabled' and old.status <> 'disabled') or old.publication = 'retired'
+          and new.publication <> 'retired' then
+      raise exception 'source % is managed by the deployment', old.id using errcode = '42501';
+    end if;
+  elsif to_jsonb(new) - 'created_at' is distinct from to_jsonb(old) - 'created_at' then
+    raise exception 'a % row is managed by the deployment', tg_table_name using errcode = '42501';
+  end if;
+  return new;
+end $$;
 
 create function {{data}}.shares_evidence(unit_source uuid, acl_source uuid) returns boolean
   language sql stable set search_path = {{data}}, pg_catalog, pg_temp as $$
   select unit_source = acl_source or exists (
     select 1 from sources u join sources a on a.tenant_id = u.tenant_id
       and coalesce(a.provider, a.kind) = coalesce(u.provider, u.kind)
-      and a.config->>'group' = u.config->>'group'
-    where u.id = unit_source and a.id = acl_source and coalesce(u.config->>'group', '') <> '')
+      and a.source_group = u.source_group
+    where u.id = unit_source and a.id = acl_source and coalesce(u.source_group, '') <> '')
 $$;
 
 -- 0001's, with evidence shared within a source group.
@@ -147,11 +193,11 @@ create or replace view {{data}}.acl_grant_truth as
   select m.subject, r.acl_id, m.unit_id
     from {{data}}.sources su join {{data}}.sources sa on sa.id <> su.id and sa.tenant_id = su.tenant_id
       and coalesce(sa.provider, sa.kind) = coalesce(su.provider, su.kind)
-      and sa.config->>'group' = su.config->>'group'
+      and sa.source_group = su.source_group
     join {{data}}.evidence_units u on u.source_id = su.id join {{data}}.acls a on a.source_id = sa.id
     join {{data}}.group_members m on m.unit_id = u.id
     join {{data}}.acl_refs r on r.acl_id = a.id and r.is_group and r.ref = m.group_ref
-    where coalesce(su.config->>'group', '') <> ''
+    where coalesce(su.source_group, '') <> ''
   union
   select r.ref, r.acl_id, r.unit_id from {{data}}.acl_refs r where not r.is_group;
 
@@ -164,7 +210,7 @@ begin
   return null;
 end $$;
 create trigger source_group_moved after update on {{data}}.sources for each row
-  when (old.config->>'group' is distinct from new.config->>'group'
+  when (old.source_group is distinct from new.source_group
         or old.provider is distinct from new.provider or old.tenant_id is distinct from new.tenant_id)
   execute function {{data}}.source_group_moved();
 

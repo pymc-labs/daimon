@@ -110,7 +110,7 @@ function Detail({ s }: { s: SourceState }) {
       />
       <PanelSection>
         <Facts rows={[
-          ["State", <State key="s" s={s} />], ["Mode", s.mode === "stored" ? "Stored" : "Live"], ["Items", plural(s.records, "item")], ["Scope", s.default_scope],
+          ["State", <State key="s" s={s} />], ["Mode", s.mode === "stored" ? "Stored" : "Live"], ["Items", plural(s.records, "item")], ["Scope", s.default_scope], ["Group", s.group],
           ["Synced", s.last_sync_at ? <Ago key="a" iso={s.last_sync_at} /> : null], ["Publish", s.publication === "shadow" && !s.parity?.wrong_more ? s.blocked : null],
         ]} />
       </PanelSection>
@@ -168,6 +168,7 @@ export function Add({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient()
   const [kind, setKind] = useState<string | null>(null)
   const [name, setName] = useState("")
+  const [group, setGroup] = useState("")
   const [values, setValues] = useState<Record<string, string>>({})
   const picked = kinds.data?.find((k) => k.kind === (kind ?? kinds.data?.[0]?.kind))
   const create = useMutation({
@@ -179,7 +180,7 @@ export function Add({ onClose }: { onClose: () => void }) {
     if (!picked) return
     const settings: NewSource["settings"] = {}
     for (const f of picked.fields) if (values[f.name]) settings[f.name] = valueOf(f, values[f.name]!)
-    create.mutate({ kind: picked.kind, name: name.trim(), settings })
+    create.mutate({ kind: picked.kind, name: name.trim(), settings, group: group.trim() || null })
   }
   return (
     <Dialog open onOpenChange={(o) => !o && onClose()}>
@@ -195,6 +196,10 @@ export function Add({ onClose }: { onClose: () => void }) {
               <div className="space-y-1.5">
                 <Label htmlFor="source-name">Name</Label>
                 <Input id="source-name" autoComplete="off" maxLength={200} value={name} onChange={(e) => setName(e.target.value)} />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="source-group">Source group</Label>
+                <Input id="source-group" autoComplete="off" maxLength={63} placeholder="google" value={group} onChange={(e) => setGroup(e.target.value)} />
               </div>
               {picked?.fields.map((f) => (
                 <div key={f.name} className="space-y-1.5">

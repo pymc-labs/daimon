@@ -17,9 +17,13 @@ DATA_TOOLS: Final[frozenset[str]] = frozenset(
 )
 """The data tools registered behind `data_reads` (`daimon.adapters.mcp.tools.data`)."""
 PERSONAL_DRIVE: Final = "data_personal_drive"
-PERSONAL_DRIVE_TOOLS: Final[frozenset[str]] = frozenset({"data_my_drive"})
-"""Reading a person's own Drive as them, each read on their card (`daimon.data.my_drive`);
-hidden with `data_reads` too (`daimon.core.relay_scope.without_data_reads`)."""
+PERSONAL_CALENDAR: Final = "data_personal_calendar"
+PERSONAL_PARTS: Final[dict[str, str]] = {"drive": PERSONAL_DRIVE, "calendar": PERSONAL_CALENDAR}
+"""A person's personal part to the feature a workspace admin turns it off with."""
+PERSONAL_DRIVE_TOOLS: Final[frozenset[str]] = frozenset({"data_my_drive", "data_personal_reads"})
+"""A person's own Drive read as them, each read on their card (`daimon.data.my_drive`), and
+their own switch for each personal part. Neither needs a source or `data_reads`, and both stay
+in rooms outsiders may read."""
 DATA_SOURCES: Final = "data_sources"
 DATA_SOURCE_TOOLS: Final[frozenset[str]] = frozenset(
     {
@@ -34,11 +38,10 @@ DATA_SOURCE_TOOLS: Final[frozenset[str]] = frozenset(
         "connect_my_data",
         "check_my_data_connection",
         "dismiss_data_notices",
-        "data_personal_reads",
     }
 )
-"""The data management, sign-in and personal-reads opt-out tools: hidden with `data_sources`,
-and until a workspace has a source (`daimon.core.ports.data_ready`)."""
+"""The data management and sign-in tools: hidden with `data_sources`, and until a workspace has a
+source (`daimon.core.ports.data_ready`)."""
 DATA_RESULT_MARK: Final = "[data source result]"
 REDACTED_DATA_RESULT: Final = f"{DATA_RESULT_MARK} hidden: only its own conversation sees it."
 

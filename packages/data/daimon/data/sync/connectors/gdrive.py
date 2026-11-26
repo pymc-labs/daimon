@@ -1,10 +1,10 @@
 """Google Drive: files of shared drives, readable by the people Drive itself lets read them,
 never more. A person's own My Drive is never stored: `my_drive_search` reads it as them, at
-their request (`daimon.data.my_drive`), while `config.personal_drive` is on (the default).
+their request (`daimon.data.my_drive`), unless the workspace or the person turned it off.
 
 Each file's readers come from its own permission list, read as the admin by domain admin
 access. A permission grants a person of the domain by primary email, a group (its members
-come from the Directory API, read by this source or by another source of its `config.group`,
+come from the Directory API, read by this source or by another source of its source group,
 the same name on each source of one Google connection), the whole domain
 when the share is discoverable, and nobody else: link-only shares, other domains, external
 people, deleted and expiring permissions grant nothing here. A file nobody inside may read is
@@ -54,7 +54,7 @@ from daimon.data.sync.connector import (
     Source,
     SyncState,
 )
-from daimon.data.sync.connectors.chat import names, obj, rows, switch
+from daimon.data.sync.connectors.chat import names, obj, rows
 from daimon.data.sync.connectors.google import (
     ApiError,
     DelegationRefused,
@@ -110,7 +110,6 @@ class Expired(Exception):
 class Config:
     domain: str
     admin: str
-    personal_drive: bool
     drives: tuple[str, ...]
     include: frozenset[str]
     exclude: frozenset[str]
@@ -128,7 +127,6 @@ class Config:
         return cls(
             domain,
             admin,
-            switch(config, "personal_drive"),
             tuple(names(config, "drives")),
             frozenset(names(config, "include_folders")),
             frozenset(names(config, "exclude_folders")),
@@ -449,14 +447,6 @@ class GDriveConnector(Connector):
             placeholder="reader@project.iam.gserviceaccount.com",
         ),
         Field("drives", "Shared drives", "list", required=False, placeholder="IDs; all if empty"),
-        Field(
-            "personal_drive",
-            "People may have their own Drive read as them",
-            "select",
-            ("yes", "no"),
-            required=False,
-        ),
-        Field("group", "Source group", required=False, placeholder="google"),
         Field("include_folders", "Only these folders", "list", required=False, placeholder="IDs"),
         Field("exclude_folders", "Never read", "list", required=False, placeholder="folder IDs"),
         Field("max_mb", "Largest file read, in MB", required=False, placeholder="20"),
@@ -530,11 +520,9 @@ class GDriveConnector(Connector):
         self, source: Source, user_id: str, query: str, limit: int
     ) -> list[LiveHit]:
         """Files of this person's own My Drive that match `query`, read as them now (Docs,
-        Slides and Sheets with their text); never stored. Empty when the source does not allow
-        it or the directory does not list them as active."""
+        Slides and Sheets with their text); never stored. Empty when the directory does not list
+        them as active."""
         cfg = Config.of(source.config)
-        if not cfg.personal_drive:
-            return []
         g = self._google(source)
         try:
             email = await person_email(g, cfg.admin, user_id)

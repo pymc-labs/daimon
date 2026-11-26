@@ -22,7 +22,7 @@ returns a published source to shadow. Credentials are references, `env:NAME` or
 id>` resolved to the tenant here, so one file serves every deployment; an unknown one is skipped.
 
 `redaction_sets` entries are rule sets, inline or a repo file pinned by sha
-(`daimon.data.redaction`); a source names one in `redaction_set`.
+(`daimon.data.redaction`); a source names one in `redaction_set`, and a source group in `group`.
 
 Sections are handlers registered by name (`register_section`), so other features add theirs;
 a section nobody handles is logged and kept in `declared_state.unknown`.
@@ -80,6 +80,9 @@ class SourceEntry(BaseModel):
     replaces: list[str] = []
     redaction_set: str | None = Field(default=None, pattern=KEY)
     """The rule set its records are redacted by as they are ingested (`redaction_sets`)."""
+    group: str | None = Field(default=None, pattern=KEY)
+    """The source group it joins: sources of one workspace that name the same group share the
+    group membership each of them reads."""
     publish: bool = False
     retire: bool = False
 
@@ -357,13 +360,15 @@ async def _source(ctx: Ctx, e: SourceEntry) -> Result:
         e.fresh_floor_minutes,
         e.fresh_ceiling_minutes,
         e.redaction_set,
+        e.group,
     )
     if row is None:
         cur = await ctx.conn.execute(
             f"insert into {d}.sources (tenant_id, kind, name, provider, config, default_scope,"
             " mode,"
-            " fresh_floor_minutes, fresh_ceiling_minutes, redaction_set, credential, status, bound,"
-            " declared_key) values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, true, %s)"
+            " fresh_floor_minutes, fresh_ceiling_minutes, redaction_set, source_group, credential,"
+            " status, bound, declared_key)"
+            " values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, true, %s)"
             " returning id".encode(),
             (ctx.tenant_id, e.kind, *fields, sealed, "paused" if unreadable else "active", e.id),
         )
@@ -388,12 +393,12 @@ async def _source(ctx: Ctx, e: SourceEntry) -> Result:
         cur = await ctx.conn.execute(
             f"update {d}.sources set name = %s::text, provider = %s::text, config = %s::jsonb,"
             " default_scope = %s::text, mode = %s::text, fresh_floor_minutes = %s::int,"
-            " fresh_ceiling_minutes = %s::int, redaction_set = %s::text,"
+            " fresh_ceiling_minutes = %s::int, redaction_set = %s::text, source_group = %s::text,"
             " credential = coalesce(%s::text, credential),"
             " status = %s::text where id = %s and ((name, provider, config, default_scope, mode,"
-            " fresh_floor_minutes, fresh_ceiling_minutes, redaction_set, status) is distinct from"
-            " (%s::text, %s::text, %s::jsonb, %s::text, %s::text, %s::int, %s::int, %s::text,"
-            " %s::text)"
+            " fresh_floor_minutes, fresh_ceiling_minutes, redaction_set, source_group, status)"
+            " is distinct from (%s::text, %s::text, %s::jsonb, %s::text, %s::text, %s::int,"
+            " %s::int, %s::text, %s::text, %s::text)"
             " or %s::text is not null) returning id".encode(),
             (*fields, sealed, status, source_id, *fields, status, sealed),
         )

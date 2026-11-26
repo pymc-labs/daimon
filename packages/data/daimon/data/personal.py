@@ -1,21 +1,20 @@
 """A person's personal parts: what Daimon reads as them, which each person can turn off.
 
 `drive`: their own Drive (`daimon.data.my_drive`); `calendar`: their calendar, read live as
-them (`daimon.data.federated`). Both are on until the person turns them off in a workspace;
-an admin allows each part per workspace through its source (`personal_drive`, a Calendar
-source). The `data_personal_reads` tool and the profile page change them.
+them (`daimon.data.federated`). Both are on in every workspace until an admin turns a part off
+for it (the `data_personal_drive` and `data_personal_calendar` features) or the person turns
+it off for themselves; the `data_personal_reads` tool and the profile page change the latter.
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import Final, get_args
 
 from daimon.data.audit import record_audit
 from daimon.data.schema import Schemas
-from daimon.data.sync.connector import CONNECTORS, Json, Part
-from daimon.data.sync.connectors.chat import switch
+from daimon.data.sync.connector import Part
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
 
@@ -24,25 +23,16 @@ PARTS: Final[tuple[Part, ...]] = get_args(Part.__value__)
 
 
 async def parts(
-    conn: AsyncConnection[DictRow], schemas: Schemas, tenant_id: uuid.UUID, account_id: uuid.UUID
+    conn: AsyncConnection[DictRow],
+    schemas: Schemas,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    allowed: Collection[Part] = PARTS,
 ) -> dict[Part, bool]:
-    """Each part a source of the workspace reads, and whether Daimon may read it as this
+    """Each part the workspace allows (`allowed`), and whether Daimon may read it as this
     person."""
-    cur = await conn.execute(
-        f"select kind, config from {schemas.data}.sources where tenant_id = %s"
-        " and status = 'active' and publication = 'published'".encode(),
-        (tenant_id,),
-    )
-    offered = {p for r in await cur.fetchall() if (p := _offered(r["kind"], r["config"]))}
     off = await _off(conn, schemas, [tenant_id], [account_id])
-    return {p: p not in off for p in PARTS if p in offered}
-
-
-def _offered(kind: str, config: Json) -> Part | None:
-    connector = CONNECTORS.get(kind)
-    if connector is None or (kind == "gdrive" and not switch(config, "personal_drive")):
-        return None
-    return connector.personal_part
+    return {p: p not in off for p in PARTS if p in allowed}
 
 
 async def set_part(

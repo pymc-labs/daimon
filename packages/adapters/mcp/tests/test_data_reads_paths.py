@@ -11,7 +11,7 @@ import ast
 import inspect
 import textwrap
 import uuid
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -36,7 +36,6 @@ from daimon.core.data_audience import DataOrigin, Reader, user_subject
 from daimon.core.data_tools import (
     DATA_READS,
     DATA_TOOLS,
-    PERSONAL_DRIVE_TOOLS,
     REDACTED_DATA_RESULT,
     mark_data_result,
 )
@@ -50,7 +49,6 @@ from daimon.core.turn import admission
 from daimon.core.turn_hold import TurnHold
 from daimon.data.identity import IdentityKey
 from daimon.testing.factories import make_tenant
-from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -116,7 +114,7 @@ def _names(node: ast.AST) -> set[str]:
 
 def test_every_data_tool_reads_as_its_audience_and_marks_its_result() -> None:
     defs = _tool_defs()
-    reading = DATA_TOOLS | PERSONAL_DRIVE_TOOLS
+    reading = DATA_TOOLS | {"data_my_drive"}
     assert set(defs) >= reading, "every data tool registers in register_data_tools"
     for name in reading:
         assert {"reading", "_text"} <= _names(defs[name]), f"{name} skips the audience or mark"
@@ -269,31 +267,36 @@ async def test_a_teams_room_found_with_a_guest_holds_its_next_turns(
         await data_access._room(runtime, auth, asker, "19:d@thread.v2", None, now=now)  # pyright: ignore[reportPrivateUsage]
 
 
-async def test_own_drive_is_refused_in_a_contained_room_before_any_card(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("own_read", [False, True])
+async def test_own_drive_reads_in_a_contained_room_for_the_asker_public_only(
+    monkeypatch: pytest.MonkeyPatch, own_read: bool
 ) -> None:
     async def contained(*_: object, **__: object) -> DataOrigin:
-        return DataOrigin("room", contained=True)
+        return DataOrigin("room", Reader("discord:u", uuid.uuid4()), None, contained=True)
 
-    card = AsyncMock()
     monkeypatch.setattr(data_access, "data_origin", contained)
-    monkeypatch.setattr(data, "require_card", card)
-    monkeypatch.setattr("daimon.data.schema.Schemas.of", lambda _s: None)  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
-    monkeypatch.setattr("daimon.data.sync.engine.Env.of", lambda _s: None)  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
-    mcp, auth = FastMCP("t"), _auth(platform="discord", external_id="u")
-    data.register_data_tools(
-        mcp,
-        cast(
-            McpRuntime,
-            SimpleNamespace(settings=SimpleNamespace(data=None), session_factory=_Sessions()),
-        ),
-    )
-    found: Sequence[Any] = await mcp.local_provider.list_tools()
-    tool = next(t for t in found if t.name == "data_my_drive")
-    ctx = SimpleNamespace(get_state=AsyncMock(return_value=auth))
-    with pytest.raises(ToolError, match="outside the team"):
-        await tool.fn(ctx=ctx, query="plans", origin_context_id="c")
-    card.assert_not_called()
+    runtime = cast(McpRuntime, SimpleNamespace(session_factory=_Sessions()))
+    auth = _auth(platform="discord", external_id="u")
+    if not own_read:
+        with pytest.raises(ToolError, match="outside the team"):
+            await data_access.data_audience_for(runtime, auth)
+        return
+    got = await data_access.data_audience_for(runtime, auth, own_read=True)
+    assert got.public_only and got.redact, "the room's outsiders see only what anyone may"
+
+
+async def test_own_drive_is_refused_on_another_agents_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def asked(*_: object, **__: object) -> DataOrigin:
+        return DataOrigin("agent_request", caller_reads_data=True)
+
+    monkeypatch.setattr(data_access, "data_origin", asked)
+    runtime = cast(McpRuntime, SimpleNamespace(session_factory=_Sessions()))
+    with pytest.raises(ToolError):
+        await data_access.data_audience_for(
+            runtime, _auth(platform="discord", external_id="u"), own_read=True
+        )
 
 
 class _Sessions:

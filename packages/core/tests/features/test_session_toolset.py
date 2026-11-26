@@ -273,7 +273,8 @@ def test_a_capability_off_turns_exactly_its_tools_off(key: str) -> None:
 
 def test_a_workspace_with_no_data_source_is_offered_no_data_tool() -> None:
     toolset = agent_toolset(without_data_sources(_snapshot()), _agent())
-    assert toolset.hidden_daimon_tools == DATA_SOURCE_TOOLS | DATA_TOOLS | PERSONAL_DRIVE_TOOLS
+    assert toolset.hidden_daimon_tools == DATA_SOURCE_TOOLS | DATA_TOOLS
+    assert not toolset.hidden_daimon_tools & PERSONAL_DRIVE_TOOLS, "personal tools need no source"
 
 
 def test_compute_off_keeps_the_stop_tools_and_long_jobs_off_hides_its_own() -> None:
@@ -325,7 +326,14 @@ def test_capabilities_without_setup_hide_their_tools_only_where_the_setup_is_jud
         for key, spec in FEATURES.items()
     }
     toolset = agent_toolset(FeatureSnapshot(place, 1, features), _agent())
-    unset = {"notebooks", "report_publish", "media", "microsoft_365", "compute"}
+    unset = {
+        "notebooks",
+        "report_publish",
+        "media",
+        "microsoft_365",
+        "compute",
+        "data_personal_drive",
+    }
     expected = (unset if server_setup else set()) | set(_OFF_BY_DEFAULT)
     assert toolset.off_capabilities == expected, "setup missing where judged, or Off by default"
     for key in ("watches", "github", "routines", "lead_intake"):

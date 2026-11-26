@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass, replace
 from typing import Final
 
@@ -25,7 +25,7 @@ from daimon.data.access import ReadContext
 from daimon.data.recheck import reader_subjects
 from daimon.data.schema import Schemas
 from daimon.data.sync import request_cache
-from daimon.data.sync.connector import CONNECTORS, LiveHit, Source
+from daimon.data.sync.connector import CONNECTORS, LiveHit, Part, Source
 from daimon.data.sync.engine import Env, build_source, ready
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
@@ -77,8 +77,10 @@ async def search(
     seconds: float,
     limit: int = LIMIT,
     meter: Meter | None = None,
+    off_parts: Collection[Part] = (),
 ) -> list[LiveResult]:
-    """One result per live source the caller may read, within `seconds` for all of them."""
+    """One result per live source the caller may read, within `seconds` for all of them; a
+    source that reads a part the workspace turned off (`off_parts`) is not asked."""
     d = schemas.data
     cur = await conn.execute(
         f"select s.id, s.tenant_id, s.kind, s.name, s.provider, s.config, s.credential,"
@@ -92,7 +94,7 @@ async def search(
     rows = [
         r for r in await cur.fetchall() if CONNECTORS.get(r["kind"]) and CONNECTORS[r["kind"]].live
     ]
-    off = {
+    off = set(off_parts) | {
         part
         for r in rows
         if (part := CONNECTORS[r["kind"]].personal_part)

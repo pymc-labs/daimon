@@ -19,7 +19,6 @@ from daimon.data.sync import connectors  # noqa: F401  # pyright: ignore[reportU
 from daimon.data.sync.connector import CONNECTORS, Json, Source
 from daimon.data.sync.connectors.discord import Config as DiscordConfig
 from daimon.data.sync.connectors.discord import snowflake
-from daimon.data.sync.connectors.gdrive import Config as GDriveConfig
 from daimon.data.sync.connectors.slack import Config as SlackConfig
 from daimon.data.sync.credentials import seal
 from daimon.data.sync.engine import Env, RunResult, run_source
@@ -547,8 +546,6 @@ def test_slack_and_discord_recheck_a_week_and_slack_reads_private_channels_by_de
     assert s.private, "private channels the bot is in are read unless turned off"
     for off in ("no", False):
         assert not SlackConfig.of({"workspace": TEAM, "private": off}).private
-        drive = {"domain": "x.example", "admin": "a@x.example", "personal_drive": off}
-        assert not GDriveConfig.of(drive).personal_drive
 
 
 async def test_a_slack_thread_is_a_window_of_its_own_and_goes_with_its_parent(

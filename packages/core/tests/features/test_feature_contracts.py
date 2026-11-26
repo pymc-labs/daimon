@@ -130,7 +130,8 @@ _NARROWED: dict[str, str] = {
     "turn_time_limit": "a workspace or agent limit, read once when the turn starts",
     "unattended_time_limit": "a workspace or agent limit, read once when the run starts",
     "data_reads": "an admin's choice for the team, an agent or a room; a thread shares its room's readers",
-    "data_personal_drive": "follows data_reads, whose tiers it narrows",
+    "data_personal_drive": "a workspace, agent or room may switch off the tool; no deployment tier",
+    "data_personal_calendar": "read by the data search for the whole workspace, so only it sets it",
     **{f"web.{module}": "workspace-only web app surface" for module in WEB_MODULES},
 }
 
@@ -548,6 +549,7 @@ def test_every_feature_key_read_is_registered_and_every_registered_key_is_read()
         | {f"web.{module}" for module in WEB_MODULES}
         | {"daily_model_cap"}  # request.admission.resolved("daily_model_cap")
         | {"display_name"}  # Admission.display_name resolves it
+        | {"data_personal_calendar"}  # read through PERSONAL_PARTS (`allowed_parts`)
     )
     for path in _PRODUCT:
         constants: set[str] = set()
