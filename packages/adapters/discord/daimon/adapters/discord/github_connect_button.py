@@ -22,7 +22,7 @@ from daimon.core.github_connect_cards import (
     resolve_connect_card,
 )
 from daimon.core.github_credentials import build_multifernet, decrypt_token, encrypt_token
-from daimon.core.github_panel import can_manage_agent_github
+from daimon.core.github_panel import can_manage_agent_github, connect_root
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.stores.github_connect import bind_discord_connect_click, connect_intent_agent
 from daimon.core.stores.security_audit import append_event
@@ -131,7 +131,7 @@ class GitHubConnectButton(
                 return
             manages = True
         settings = bot.runtime.settings
-        root = settings.mcp.app_root_url
+        root = connect_root(settings)
         if root is None:
             await interaction.followup.send(
                 embed=build_notice_embed("GitHub setup is unavailable."), ephemeral=True
