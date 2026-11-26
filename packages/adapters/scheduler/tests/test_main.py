@@ -2021,6 +2021,9 @@ async def test_fire_stamps_a_sealed_destinations_seal_on_the_routine_session(
     async def fake_resolve(*args: object, **kwargs: object) -> str:
         return "agent_z"
 
+    async def fake_agent(*args: object, **kwargs: object) -> object:
+        return types.SimpleNamespace(metadata={})
+
     fire = await _build_fire(
         client=fake_client,
         sm=db_session_factory,
@@ -2033,6 +2036,7 @@ async def test_fire_stamps_a_sealed_destinations_seal_on_the_routine_session(
             "daimon.adapters.scheduler.main.run_turn", side_effect=capturing_run_turn
         ),
         unittest.mock.patch("daimon.adapters.scheduler.main.resolve_agent", fake_resolve),
+        unittest.mock.patch("daimon.adapters.scheduler.main.retrieve_agent_cached", fake_agent),
         unittest.mock.patch("daimon.adapters.scheduler.main.resolve_environment", fake_resolve),
     ):
         await fire(row)
