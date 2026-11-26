@@ -37,6 +37,7 @@ from fastmcp.exceptions import ToolError
 ConnectionAction = Literal["add", "refresh", "pause", "resume", "rescope", "remove"]
 _STATUS: dict[str, Literal["active", "paused"]] = {"pause": "paused", "resume": "active"}
 ToolAction = Literal["turn_on", "turn_off", "mark_writes", "mark_reads", "rescope"]
+_NOT_SENT = "The address and errors couldn't be sent to you privately."
 _NOT_ADMIN = "Only an admin or an owner manages shared connections."
 #: An upstream's words waiting for review: only the turn_on card shows them.
 _UNREVIEWED = frozenset({"seen_description", "seen_schema"})
@@ -80,15 +81,20 @@ def register_shared_connection_admin_tools(mcp: FastMCP, runtime: McpRuntime) ->
 
     async def answer(
         auth: AuthIdentity, origin_context_id: str | None, connections: list[Connection]
-    ) -> tuple[PrivateDetails, list[dict[str, Any]]]:
-        """The connections as the room may read them; addresses and errors to the asker."""
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """The connections as the room may read them; addresses and errors to the asker. A
+        change already made stays reported as made when that message fails."""
         details = await private_details(runtime, auth, origin_context_id)
+        head: dict[str, Any] = {"private_details": details}
         if details != "shown" and connections:
             lines = (
                 f"{c.name}: {c.url}" + (f" ({c.error})" if c.error else "") for c in connections
             )
-            await send_privately(runtime, auth, "\n".join(lines))
-        return details, [_view(c, details) for c in connections]
+            try:
+                await send_privately(runtime, auth, "\n".join(lines))
+            except ToolError:
+                head["details_not_sent"] = _NOT_SENT
+        return head, [_view(c, details) for c in connections]
 
     @mcp.tool(name="list_shared_connections", tags={"admin"})
     async def list_connections(  # pyright: ignore[reportUnusedFunction]
@@ -102,8 +108,8 @@ def register_shared_connection_admin_tools(mcp: FastMCP, runtime: McpRuntime) ->
         auth = await _auth(ctx)
         actor, on = await manager(auth, on=False)
         found = await admin_ops.listing(sessions, actor.tenant_id, on=on)
-        details, shown = await answer(auth, origin_context_id, found.connections)
-        return {"private_details": details, "enabled": on, "connections": shown}
+        head, shown = await answer(auth, origin_context_id, found.connections)
+        return {**head, "enabled": on, "connections": shown}
 
     @mcp.tool(name="change_shared_connection", tags={"admin"})
     async def change_connection(  # pyright: ignore[reportUnusedFunction]
@@ -154,8 +160,8 @@ def register_shared_connection_admin_tools(mcp: FastMCP, runtime: McpRuntime) ->
                 )  # fmt: skip
         except SharedConnectionError as exc:
             raise ToolError(f"{exc} Nothing changed.") from exc
-        details, shown = await answer(auth, origin_context_id, [changed])
-        return {"private_details": details, **shown[0]}
+        head, shown = await answer(auth, origin_context_id, [changed])
+        return {**head, **shown[0]}
 
     @mcp.tool(name="change_shared_connection_tool", tags={"admin"})
     async def change_tool(  # pyright: ignore[reportUnusedFunction]
@@ -192,8 +198,8 @@ def register_shared_connection_admin_tools(mcp: FastMCP, runtime: McpRuntime) ->
             )  # fmt: skip
         except SharedConnectionError as exc:
             raise ToolError(f"{exc} Nothing changed.") from exc
-        details, shown = await answer(auth, origin_context_id, [changed])
-        return {"private_details": details, **shown[0]}
+        head, shown = await answer(auth, origin_context_id, [changed])
+        return {**head, **shown[0]}
 
 
 __all__ = ["register_shared_connection_admin_tools"]

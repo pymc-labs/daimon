@@ -226,6 +226,8 @@ class SharedConnectionCard:
     tool: str | None = None
     description: str | None = None
     writes: bool | None = None
+    parameters: tuple[str, ...] = ()
+    """For turn_on, the argument names the approved schema takes."""
 
 
 #: The tools whose card is a `SharedConnectionCard`.
@@ -259,6 +261,7 @@ def _shared_connection_prompt(
     verb, consequence = _CONNECTION_VERBS.get(str(data.get("action")), ("Change {}", None))
     does = None if card.writes is None else "changes things" if card.writes else "only reads"
     told = _one_line(card.description or "")
+    takes = ", ".join(_one_line(name, limit=64) for name in card.parameters)
     turn_on = data.get("action") == "turn_on" and does is not None
     if turn_on:
         consequence = f"It {does}. Callers are told: {_preview(told)}"
@@ -267,7 +270,7 @@ def _shared_connection_prompt(
         f"{'Tool' if card.tool else 'Connection'}: {name}",
         f"Server: {_one_line(card.url)}",
         *((f"Does: {does}",) if does is not None else ()),
-        *((f"Callers are told: {told}",) if turn_on else ()),
+        *((f"Callers are told: {told}", f"Takes: {takes or 'nothing'}") if turn_on else ()),
         *((f"Scope: {scope}",) if data.get("action") in {"add", "rescope"} else ()),
     )
     return verb.format(subject), consequence, f"{subject} not changed", details

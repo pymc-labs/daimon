@@ -69,7 +69,8 @@ async def tool_rule_refusal(
     agent_keys: bool = False,
 ) -> str | None:
     """Why this agent's rules refuse `tool_name`, or None when the call may go on.
-    `agent_keys` holds an agent key to its agent's rules too (a shared tool's call).
+    `agent_keys` holds an agent key to its agent's rules too (a shared tool's call);
+    a key has no card, so an `ask` rule refuses it as well.
 
     Mirrors the driver's gate: nothing is read unless `tool_safety.enabled` and
     `tool_safety.agent_rules` are both on, so a deployment that leaves rules
@@ -95,7 +96,10 @@ async def tool_rule_refusal(
     try:
         async with sessionmaker() as session:
             rows = await agent_tool_rules.deny_rules_for_trusted_tool(
-                session, tenant_id=identity.tenant_id, tool_keys=keys
+                session,
+                tenant_id=identity.tenant_id,
+                tool_keys=keys,
+                rules=("deny", "ask") if agent_keys else ("deny",),
             )
     except Exception as err:
         log.warning(
@@ -107,7 +111,7 @@ async def tool_rule_refusal(
         return (
             f"Refused: could not check this agent's tool rules for {tool_name}. Nothing was done."
         )
-    wildcard = False
+    wildcard = asked = False
     for row in rows:
         # Rows hold the agent's own daimon-mcp entry URL. A server that merely
         # wears the reserved name elsewhere is not this one.
@@ -118,11 +122,19 @@ async def tool_rule_refusal(
             != chat_agent_id
         ):
             continue
-        if row.tool_key != WILDCARD_TOOL_KEY:
+        if row.rule == "ask":
+            asked = True
+        elif row.tool_key != WILDCARD_TOOL_KEY:
             return _denied(identity, key, chat_agent_id, wildcard=False)
-        wildcard = True
+        else:
+            wildcard = True
     if wildcard:
         return _denied(identity, key, chat_agent_id, wildcard=True)
+    if asked:
+        log.info("tool_safety.server_rule_asked", tool=key, tenant=_prefix(identity.tenant_id))
+        return (
+            f"Refused: {tool_name} needs approval, which an agent key can't give. Nothing was done."
+        )
     return None
 
 

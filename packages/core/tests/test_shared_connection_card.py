@@ -4,8 +4,9 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 from daimon.core.confirmation import SharedConnectionCard, prompt_for_tool_call
+from daimon.core.shared_connections import SHARED_CONNECTION_UNREADABLE
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall, ToolSafetyPolicy
-from daimon.core.turn.approvals import SHARED_CONNECTION_UNREADABLE, interactive_decider
+from daimon.core.turn.approvals import interactive_decider
 
 TURN_ON = ToolCall(
     tool_use_id="t1",
@@ -20,7 +21,9 @@ TURN_ON = ToolCall(
     },
 )
 URL = "https://crm.example/mcp/" + "a" * 80
-CARD = SharedConnectionCard("crm", URL, tool="send", description="Sends a note.", writes=True)
+CARD = SharedConnectionCard(
+    "crm", URL, tool="send", description="Sends a note.", writes=True, parameters=("id", "to")
+)
 
 
 def test_turn_on_names_the_tool_its_server_and_what_callers_are_told() -> None:
@@ -31,6 +34,7 @@ def test_turn_on_names_the_tool_its_server_and_what_callers_are_told() -> None:
     assert prompt.consequence == "It changes things. Callers are told: Sends a note."
     assert f"Server: {URL}" in prompt.detail_lines, "the whole address, not a cut one"
     assert "Tool: crm_send" in prompt.detail_lines
+    assert "Takes: id, to" in prompt.detail_lines, "the parameters the digest approves"
 
 
 async def test_a_change_that_moved_on_is_refused_without_a_card() -> None:

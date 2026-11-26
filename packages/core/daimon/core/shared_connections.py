@@ -68,6 +68,7 @@ __all__ = [
     "DAIMON_TOOL_NAMES",
     "FEATURE",
     "SERVED_TAG",
+    "SHARED_CONNECTION_UNREADABLE",
     "WRITE_NOTE",
     "NAME_PATTERN",
     "SCOPE_PATTERN",
@@ -98,6 +99,10 @@ ASK_FEATURE: Final = "shared_write_approval"
 #: The tag of every served tool: listed by name, not behind search, and open to agent keys.
 SERVED_TAG: Final = "shared-connection"
 """Whether a shared write asks on a card in chat: on (`ask`) by default."""
+SHARED_CONNECTION_UNREADABLE: Final = (
+    "This connection or tool isn't here, or changed since it was listed. List it again."
+)
+"""Why a change is refused when its card can't name what it acts on."""
 WRITE_NOTE: Final = "This tool changes things. Ask your user and get their yes before you call it."
 NAME_PATTERN: Final = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 """A connection name carries no underscore: the first one in `<connection>_<tool>` ends it."""
@@ -576,6 +581,13 @@ def card_lookup(
             return replace(card, tool=tool.name, description=tool.description, writes=tool.writes)
         if data.get("seen") != seen_digest(tool):
             return None
-        return replace(card, tool=tool.name, description=tool.seen_description, writes=tool.writes)
+        properties = tool.seen_schema.get("properties")
+        return replace(
+            card,
+            tool=tool.name,
+            description=tool.seen_description,
+            writes=tool.writes,
+            parameters=tuple(sorted(properties)) if isinstance(properties, dict) else (),
+        )
 
     return _lookup

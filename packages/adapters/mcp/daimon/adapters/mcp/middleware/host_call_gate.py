@@ -16,10 +16,12 @@ from typing import TYPE_CHECKING, Any, cast
 import structlog
 from daimon.adapters.mcp.confirmed_call import host_confirmed_call
 from daimon.core import host_calls
+from daimon.core.confirmation import SHARED_CONNECTION_TOOLS, prompt_for_tool_call
 from daimon.core.data_reading import reads_data
 from daimon.core.features.snapshot import FeaturePlace, deployment_on, place_guardrail
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.security_audit import record_denial
+from daimon.core.shared_connections import SHARED_CONNECTION_UNREADABLE, card_lookup
 from daimon.core.stores import host_call_cards as cards
 from daimon.core.stores.mcp_tokens import revoke_mcp_token
 from daimon.core.stores.thread_sessions import get_live_thread_session
@@ -234,19 +236,34 @@ class HostCallGate:
             raise _refuse("no_tool")
         if (problem := schema_problem(tool.parameters, args)) is not None:
             raise ToolError(problem)
-        title = None
-        if name == "approve_reach":
-            try:
-                title = reach_title(args)
-            except ValueError:
-                raise ToolError(REACH_PLAN_TEXT) from None
-        policy = settings.tool_safety
         call = ToolCall(
             tool_use_id=f"host-{uuid.uuid4()}",
             server_name=DAIMON_SERVER_NAME,
             tool_name=name,
             input=args,
         )
+        title, facts = None, None
+        if name == "approve_reach":
+            try:
+                title = reach_title(args)
+            except ValueError:
+                raise ToolError(REACH_PLAN_TEXT) from None
+        elif name in SHARED_CONNECTION_TOOLS:
+            # As in chat: the card names what the change acts on, read from the store.
+            found = await card_lookup(self._runtime.session_factory, tenant_id=identity.tenant_id)(
+                call
+            )
+            if found is None:
+                raise ToolError(SHARED_CONNECTION_UNREADABLE)
+            prompt = prompt_for_tool_call(
+                call,
+                requester_platform_user_id=identity.platform_user_id or "",
+                now=now,
+                shared_connection=found,
+            )
+            title = prompt.title
+            facts = [line for line in (prompt.consequence, *prompt.detail_lines) if line]
+        policy = settings.tool_safety
         # The agent's and the channel's tool rules, read as Claude's decider reads them.
         rule, read_error = await rule_for(
             policy,
@@ -319,6 +336,7 @@ class HostCallGate:
                     "server": self._server,
                     "args": args,
                     "title": title,
+                    "facts": facts,
                     # An admin's ask is pressed by a person who must still be one.
                     "admin": identity.is_admin,
                 },

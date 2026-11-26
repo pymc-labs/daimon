@@ -955,7 +955,10 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         default="ask",
         tiers=("deployment", "workspace", "agent"),
         binds="turn",
-        doc="Skip runs a shared connection's tools that change things without a card in chat.",
+        doc=(
+            "Skip runs shared connections' writes with no card in chat. After data reads"
+            " each call asks; routines need the operator."
+        ),
         platforms=EVERY_PLATFORM,
         authority=_ADMIN_NOT_OWNER,
         # Ask is the default and the strict value: the nearer tier decides, as for watches.

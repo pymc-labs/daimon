@@ -38,19 +38,20 @@ Daimon lists each tool's description and full input schema; turn on the ones you
 want. A tool whose text changes upstream stays off until you approve it again,
 and one named like a Daimon tool is left out. Each tool appears as
 `<name>_<tool>` on Daimon's MCP server, for members, not web guests. A scoped
-connection or tool is served only when everyone the answer reaches holds its data
-scope: in chat the asker and the room, for a key or the hub its person.
+connection or tool is served only where data reads may answer and everyone the
+answer reaches holds its scope. The agent page lists what its viewer holds.
 
 Daimon marks a tool that changes data by its name; you can change the mark.
 In chat a change waits for the asker's card, unless
 [`shared_write_approval`](features.md) is Skip for the workspace or agent. An
 outside MCP client, agent key or coding key may call it; its description tells
-the client to ask its user first. A chat call with no conversation is refused. Turn a tool off for the workspace here, or for one agent with its tool
-rules, which agent keys follow too. Every call is audited.
+the client to ask its user first. A chat call with no conversation is refused.
+Turn a tool off for the workspace here, or for one agent with its tool rules,
+which agent keys follow too (Ask refuses them). Every call is audited.
 
 Admins can do this from chat too, except setting a token. Each change waits for
-the admin's card, naming the tool, its server and the words callers get. In a
-room, addresses and errors go to the admin by direct message.
+the admin's card, naming the tool, its server, parameters and the words callers
+get. In a room, addresses and errors go to the admin by direct message.
 
 ## Register a client for servers without dynamic registration
 

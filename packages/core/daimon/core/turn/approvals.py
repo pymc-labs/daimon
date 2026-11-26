@@ -43,6 +43,7 @@ from daimon.core.confirmation import (
     prompt_for_tool_call,
 )
 from daimon.core.defaults.metadata import is_private_routine_stamp
+from daimon.core.shared_connections import SHARED_CONNECTION_UNREADABLE
 from daimon.core.stores import agent_tool_rules, server_skills
 from daimon.core.stores.agent_tool_rules import DaimonRuleSet
 from daimon.core.tool_safety import (
@@ -589,9 +590,6 @@ def unattended_decider(
 
 CARD_TURN_MARGIN = timedelta(seconds=5)
 SKILL_UPDATE_UNREADABLE = "Couldn't load this update. Check the skill again."
-SHARED_CONNECTION_UNREADABLE = (
-    "This connection or tool isn't here, or changed since it was listed. List it again."
-)
 #: Too little time left to show a card someone could answer: refuse instead.
 NO_TIME_TO_ASK_MESSAGE = (
     "There isn't enough time left to ask for approval here. Ask again to redo it."

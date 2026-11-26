@@ -1337,7 +1337,7 @@ On gives an agent's or one routine's runs its built-in tools, for the agent and 
 
 ## Approval for shared connection changes
 
-Skip runs a shared connection's tools that change things without a card in chat.
+Skip runs shared connections' writes with no card in chat. After data reads each call asks; routines need the operator.
 
 | | |
 | --- | --- |

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from cryptography.fernet import Fernet
@@ -17,12 +17,17 @@ from daimon.adapters.mcp.hub.identity import HUB_AUTH_STATE_KEY, HubIdentity
 from daimon.adapters.mcp.middleware.host_call_gate import HostCallGate
 from daimon.adapters.mcp.middleware.mcp_identity import IdentityMiddleware, narrow_to_agent_key
 from daimon.adapters.mcp.search_transform import AgentChatAwareBM25SearchTransform
-from daimon.adapters.mcp.shared_connections import OPERATION, SharedConnectionProvider
+from daimon.adapters.mcp.shared_connections import (
+    OPERATION,
+    SharedConnectionProvider,
+    register_scopes,
+)
 from daimon.adapters.mcp.tools.hub_shared import register_hub_shared_tools
 from daimon.core import host_calls
 from daimon.core import shared_connections as shared
 from daimon.core.authz import Subject
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
+from daimon.core.data_audience import DataAudience
 from daimon.core.features.service import FeatureActor, change_feature
 from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.github_credentials import build_multifernet
@@ -45,6 +50,7 @@ from daimon.testing.factories import (
 )
 from daimon.testing.membership import FixtureMembershipResolver
 from fastmcp import Client, FastMCP
+from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from pydantic import HttpUrl, JsonValue, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -353,25 +359,28 @@ async def test_an_agent_key_gets_shared_tools_under_its_agents_rules(world: Worl
     assert await world.listed(world.key()) == ["crm_lookup", "crm_send", "describe_agent"]
     assert await world.call(world.key(), "crm_send") == "send ran", "the write runs"
 
-    async with world.sessions.begin() as session:
-        await agent_tool_rules.set_rule(
-            session,
-            tenant_id=world.tenant_id,
-            agent_id=_MA_AGENT,
-            agent_name="Researcher",
-            tool_key=f"{DAIMON_SERVER_NAME}/crm_send",
-            server_url=_URL,
-            rule="deny",
-            set_by="admin",
-            actor=Subject(is_admin=True),
-        )
+    rules: tuple[tuple[Literal["ask", "deny"], str], ...] = (
+        ("ask", "needs approval"),
+        ("deny", "denies crm_send"),
+    )
+    for rule, refused in rules:
+        async with world.sessions.begin() as session:
+            await agent_tool_rules.set_rule(
+                session,
+                tenant_id=world.tenant_id,
+                agent_id=_MA_AGENT,
+                agent_name="Researcher",
+                tool_key=f"{DAIMON_SERVER_NAME}/crm_send",
+                server_url=_URL,
+                rule=rule,
+                set_by="admin",
+                actor=Subject(is_admin=True),
+            )
+        assert refused in await world.call(world.key(), "crm_send"), f"{rule}: a key has no card"
+    assert [u[0] for u in world.upstream] == ["send"], "the refused calls never left"
 
-    assert "denies crm_send" in await world.call(world.key(), "crm_send"), "the rule refuses"
-    assert [u[0] for u in world.upstream] == ["send"], "the refused call never left"
 
-
-async def test_the_hub_audits_each_call(world: World) -> None:
-    """A hub call leaves a security audit row, allowed for a read and for a write."""
+def _hub(world: World) -> FastMCP:
     hub = FastMCP("hub")
     register_hub_shared_tools(hub, world.runtime)  # pyright: ignore[reportArgumentType]
     caller = HubIdentity(
@@ -394,7 +403,12 @@ async def test_the_hub_audits_each_call(world: World) -> None:
             return await call_next(context)
 
     hub.add_middleware(_Hub())
-    async with Client(hub) as client:
+    return hub
+
+
+async def test_the_hub_audits_each_call(world: World) -> None:
+    """A hub call leaves a security audit row, allowed for a read and for a write."""
+    async with Client(_hub(world)) as client:
         read = await client.call_tool(
             "call_shared_tool", {"workspace_id": _GUILD, "name": "crm_lookup"}
         )
@@ -407,3 +421,81 @@ async def test_the_hub_audits_each_call(world: World) -> None:
         ("crm_lookup", "allowed", OPERATION),
         ("crm_send", "allowed", OPERATION),
     ], f"one row per call: {rows}"
+
+
+def _people(*people: uuid.UUID, public_only: bool = False) -> DataAudience:
+    return DataAudience(frozenset(people), frozenset(), public_only, list_rows=False, redact=False)
+
+
+@pytest.fixture
+async def scoped(world: World, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[World]:
+    """The connection is scoped `sales`, which only the world's person holds, alone."""
+    async with world.sessions.begin() as session:
+        row = await store.get_connection_by_name(session, tenant_id=world.tenant_id, name="crm")
+        assert row is not None
+        await store.update_connection(
+            session, tenant_id=world.tenant_id, connection_id=row.id, values={"scope": "sales"}
+        )
+
+    async def holds(_: object, __: object, audience: DataAudience, scope: str) -> bool:
+        return scope == "sales" and audience == _people(world.account_id)
+
+    monkeypatch.setattr("daimon.adapters.mcp.shared_connections.holds_scope", holds)
+    register_scopes(world.runtime)  # pyright: ignore[reportArgumentType]
+    yield world
+    shared.register_scope_check(None)
+
+
+_AUDIENCES: list[tuple[str, Callable[[World], DataAudience] | Exception, bool]] = [
+    ("the holder in chat", lambda w: _people(w.account_id), True),
+    ("Teams outsiders or unknown viewers", ToolError("Data can't be read here."), False),
+    ("Teams without consent", RuntimeError("no consent"), False),
+    ("viewers capped at public", lambda w: _people(w.account_id, public_only=True), False),
+    ("someone else in the room", lambda w: _people(w.account_id, uuid.uuid4()), False),
+]
+
+
+@pytest.mark.parametrize(("case", "audience", "shown"), _AUDIENCES, ids=[a[0] for a in _AUDIENCES])
+async def test_a_scoped_tool_follows_the_data_reads_audience(
+    scoped: World,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    audience: Callable[[World], DataAudience] | Exception,
+    shown: bool,
+) -> None:
+    """A scoped tool is served only where data reads answer for people who all hold its
+    scope; any failure to read the audience hides it."""
+
+    async def audience_for(*_: object) -> DataAudience:
+        if isinstance(audience, Exception):
+            raise audience
+        return audience(scoped)
+
+    monkeypatch.setattr("daimon.adapters.mcp.shared_connections.data_audience_for", audience_for)
+
+    listed = await scoped.listed(scoped.chat())
+
+    assert ("crm_lookup" in listed) is shown, f"{case}: {listed}"
+    if shown:
+        await _feature(scoped, "off", key="data_sources")
+        assert "crm_lookup" not in await scoped.listed(scoped.chat()), "none with data off"
+
+
+async def test_a_scoped_tool_by_origin(scoped: World) -> None:
+    """With the real audience: a key and the hub answer for their person; an outside client
+    and an operator token get none. The agent page's listing shows what its viewer holds,
+    but its credential can't call it."""
+    key = scoped.key()
+    page = scoped.chat(chat_session_id=None)
+    outside = replace(key, agent_id=None, foreign_home_id="org")
+    operator = replace(key, agent_id=None, platform_user_id=None)
+
+    assert "crm_lookup" in await scoped.listed(key), "a key's person holds it"
+    assert "crm_lookup" in await scoped.listed(page), "the agent page lists it"
+    await scoped.call(page, "crm_lookup")
+    assert scoped.upstream == [], "but can't call it"
+    for caller in (outside, operator):
+        assert "crm_lookup" not in await scoped.listed(caller), caller
+    async with Client(_hub(scoped)) as client:
+        hub = await client.call_tool("list_shared_tools", {"workspace_id": _GUILD})
+    assert "crm_lookup" in str(hub.content), "the hub's person holds it"

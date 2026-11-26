@@ -230,8 +230,9 @@ async def deny_rules_for_trusted_tool(
     *,
     tenant_id: uuid.UUID,
     tool_keys: Sequence[str],
+    rules: Collection[str] = ("deny",),
 ) -> list[AgentToolRule]:
-    """Every agent-wide `deny` row for any of `tool_keys` in a tenant, whichever agent holds it.
+    """Every agent-wide row of `rules` for any of `tool_keys` in a tenant, whichever agent holds it.
 
     The MCP server cannot turn a chat credential's derived agent uuid back into
     the Managed Agents id the rows are keyed by, so it reads the tenant's few
@@ -252,7 +253,7 @@ async def deny_rules_for_trusted_tool(
             )
         )
     ).all()
-    return [_view(row) for row in _current(rows) if row.rule == "deny"]
+    return [_view(row) for row in _current(rows) if row.rule in rules]
 
 
 class DaimonRuleSet(NamedTuple):

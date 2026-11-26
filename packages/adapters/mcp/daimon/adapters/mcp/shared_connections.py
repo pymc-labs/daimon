@@ -47,20 +47,25 @@ def register_scopes(runtime: McpRuntime) -> None:
     settings = runtime.settings
 
     async def check(caller: shared.SharedCaller, scope: str) -> bool:
-        audience = None if caller.audience is None else await caller.audience()
-        if audience is None:
-            return False
-        place = FeaturePlace(caller.tenant_id, caller.platform or "web")
-        async with runtime.session_factory() as db:
-            if not (await feature_in(db, settings, place, "data_sources")).on:
+        try:
+            audience = None if caller.audience is None else await caller.audience()
+            if audience is None:
                 return False
-        return await holds_scope(settings, caller.tenant_id, audience, scope)
+            place = FeaturePlace(caller.tenant_id, caller.platform or "web")
+            async with runtime.session_factory() as db:
+                if not (await feature_in(db, settings, place, "data_sources")).on:
+                    return False
+            return await holds_scope(settings, caller.tenant_id, audience, scope)
+        except Exception as exc:
+            # Named boundary: a failed read holds no scope; the scoped tool stays hidden.
+            log.warning("shared_connections.scope_unread", error=type(exc).__name__)
+            return False
 
     shared.register_scope_check(check)
 
 
 def person_audience(account_id: uuid.UUID) -> DataAudience:
-    """A key's or the hub's answer goes to its person alone."""
+    """The answer goes to its person alone (the hub, the agent page's listing)."""
     return DataAudience(
         people=frozenset({account_id}),
         guests=frozenset(),
@@ -70,26 +75,34 @@ def person_audience(account_id: uuid.UUID) -> DataAudience:
     )
 
 
-def caller_of(runtime: McpRuntime, auth: AuthIdentity) -> shared.SharedCaller:
-    """`auth` as a shared caller: in chat its audience is the data reads' (the asker and the
-    room's viewers), for a key its person."""
-    account = auth.requester_account_id or auth.account_id
+def caller_of(
+    runtime: McpRuntime, auth: AuthIdentity, *, listing: bool = False
+) -> shared.SharedCaller:
+    """`auth` as a shared caller, its audience exactly a data read's from the same origin:
+    the asker and the room's viewers in chat, a key's person or bound room, and none for an
+    outside client, a held turn or an operator token. A `listing` with an agent's credential
+    that names no session (the agent page's tool rules) shows what its viewer holds; a call
+    with it still has none."""
     found: list[DataAudience | None] = []
 
     async def audience() -> DataAudience | None:
         if not found:
-            if auth.chat_agent_id is None:
-                found.append(person_audience(account))
-            else:
-                try:
-                    found.append(await data_audience_for(runtime, auth))
-                except ToolError:  # no audience here: no scope is held
-                    found.append(None)
+            if listing and auth.chat_agent_id is not None and auth.chat_session_id is None:
+                found.append(person_audience(auth.account_id))
+                return found[0]
+            try:
+                found.append(await data_audience_for(runtime, auth))
+            except Exception as exc:
+                # Named boundary: where data reads refuse, or the viewers can't be read, no
+                # scope is held (a ToolError is the reads' own refusal).
+                if not isinstance(exc, ToolError):
+                    log.warning("shared_connections.audience_unread", error=type(exc).__name__)
+                found.append(None)
         return found[0]
 
     return shared.SharedCaller(
         tenant_id=auth.tenant_id,
-        account_id=account,
+        account_id=auth.requester_account_id or auth.account_id,
         platform=auth.platform,
         chat_session_id=auth.chat_session_id,
         audience=audience,
@@ -147,12 +160,12 @@ class SharedConnectionProvider(Provider):
         super().__init__()
         self._runtime = runtime
 
-    async def _visible(self) -> list[shared.SharedTool]:
+    async def _visible(self, *, listing: bool = False) -> list[shared.SharedTool]:
         try:
             ctx = get_context()
         except RuntimeError:
             return []
-        seen = await ctx.get_state(_SEEN)
+        seen = await ctx.get_state(f"{_SEEN}:{listing}")
         if isinstance(seen, list):
             return cast("list[shared.SharedTool]", seen)
         auth = await ctx.get_state("auth")
@@ -160,17 +173,17 @@ class SharedConnectionProvider(Provider):
             return []
         runtime = self._runtime
         async with runtime.session_factory() as session:
-            found = await shared.served_tools(session, caller_of(runtime, auth))
+            found = await shared.served_tools(session, caller_of(runtime, auth, listing=listing))
         # Nothing stored, nothing more read: the feature is on by default.
         if found and not await shared.shared_connections_on(
             runtime.session_factory, runtime.settings, await caller_places(runtime, auth, None)
         ):
             found = []
-        await ctx.set_state(_SEEN, found, serializable=False)
+        await ctx.set_state(f"{_SEEN}:{listing}", found, serializable=False)
         return found
 
     async def _list_tools(self) -> Sequence[Tool]:
-        found = await self._visible()
+        found = await self._visible(listing=True)
         auth = await get_context().get_state("auth") if found else None
         # An outside client has no card: a write's description tells it to ask its user.
         outside = isinstance(auth, AuthIdentity) and auth.chat_agent_id is None

@@ -35,6 +35,7 @@ class Rig:
         self.on = True
         self.details = "shown"
         self.sent: list[str] = []
+        self.dm_ok = True
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
         async def actor(*_: object) -> WebAdmin:
@@ -51,6 +52,8 @@ class Rig:
             return self.details
 
         async def send(_runtime: object, _auth: object, text: str) -> None:
+            if not self.dm_ok:
+                raise ToolError("No direct message here.")
             self.sent.append(text)
 
         monkeypatch.setattr(tools, "web_admin_of", actor)
@@ -67,9 +70,9 @@ class Rig:
             monkeypatch.setattr(admin_ops, name, self.record(name))
 
     def record(self, name: str) -> Any:
-        async def call(*_: object, **kwargs: Any) -> admin_ops.Connections:
+        async def call(*_: object, **kwargs: Any) -> object:
             self.calls.append((name, kwargs))
-            return _LISTED
+            return _LISTED if name == "listing" else _CONNECTION
 
         return call
 
@@ -143,6 +146,13 @@ async def test_a_room_gets_approved_words_and_the_asker_the_address(rig: Rig) ->
     assert not {"seen_description", "seen_schema"} & set(shown["tools"][0]), (
         "words waiting for review show only on the turn_on card"
     )
+
+
+async def test_an_applied_change_says_so_when_the_direct_message_fails(rig: Rig) -> None:
+    rig.details, rig.dm_ok = "direct_message", False
+    changed = await rig.call("change_shared_connection_tool", **_TURN_OFF)
+    assert [n for n, _ in rig.calls] == ["change_tool"], "the change was made"
+    assert changed["name"] == "crm" and changed["details_not_sent"], changed
 
 
 async def test_removal_works_with_the_feature_off(rig: Rig) -> None:
