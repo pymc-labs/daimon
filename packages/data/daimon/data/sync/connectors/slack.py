@@ -68,6 +68,7 @@ from daimon.data.sync.connectors.chat import (
     obj,
     rows,
     split,
+    switch,
     whole_days,
 )
 from daimon.data.sync.http import GuardedTransport, Upstream, download, send
@@ -92,7 +93,6 @@ UNREADABLE: Final = {
     "thread_not_found",
 }
 PASS_MINUTES: Final = 60
-YES: Final = {"yes", "true", "1", "on", "include"}
 
 
 @dataclass(frozen=True)
@@ -109,7 +109,7 @@ class Config:
             raise ValueError("config.workspace must be the workspace's team id")
         return cls(
             team,
-            str(config.get("private") or "yes").strip().lower() in YES,
+            switch(config, "private"),
             frozenset(x.lower() for x in names(config, "exclude")),
             whole_days(config, REWALK_DAYS),
         )

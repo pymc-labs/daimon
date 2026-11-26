@@ -57,6 +57,14 @@ def names(config: Json, key: str) -> list[str]:
     return [s for x in items if (s := str(x).strip().lstrip("#"))]
 
 
+def switch(config: Json, key: str) -> bool:
+    """A yes/no setting, on when unset: a YAML boolean, or yes/no, true/false, on/off, 1/0."""
+    value: object = config.get(key)
+    if value is None or value == "":
+        return True
+    return str(value).strip().lower() in {"yes", "true", "1", "on", "include"}
+
+
 def whole_days(config: Json, default: int) -> int:
     """`rewalk_days`: whole days to re-read for edits, 1 to `MAX_DAYS`."""
     raw = str(config.get("rewalk_days") or "").strip()

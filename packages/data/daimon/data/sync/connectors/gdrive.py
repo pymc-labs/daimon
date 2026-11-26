@@ -53,7 +53,7 @@ from daimon.data.sync.connector import (
     Source,
     SyncState,
 )
-from daimon.data.sync.connectors.chat import names, obj, rows
+from daimon.data.sync.connectors.chat import names, obj, rows, switch
 from daimon.data.sync.connectors.google import (
     ApiError,
     DelegationRefused,
@@ -97,7 +97,6 @@ GONE: Final = (403, 404)
 """A file the identity may not open any more: it reads as absent."""
 END: Final = "\x01"
 """Sorts after every character of a file id: a `Replaced` that ends here removes one record."""
-YES: Final = {"yes", "true", "1", "on"}
 MY_DRIVE_TEXT: Final = 200_000
 """Bytes of one file's text a personal Drive search returns at most (larger: none)."""
 
@@ -128,7 +127,7 @@ class Config:
         return cls(
             domain,
             admin,
-            str(config.get("personal_drive") or "yes").strip().lower() in YES,
+            switch(config, "personal_drive"),
             tuple(names(config, "drives")),
             frozenset(names(config, "include_folders")),
             frozenset(names(config, "exclude_folders")),
