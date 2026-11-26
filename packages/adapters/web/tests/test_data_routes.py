@@ -21,6 +21,7 @@ from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
 from daimon.data.pool import close_pools
 from daimon.testing.data_db import DataDb
+from psycopg.types.json import Jsonb
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .chat_support import Workspace, funded_workspace, signed_in
@@ -141,6 +142,21 @@ async def test_declared_sources_refuse_edits(rig: Rig) -> None:
             )
         ).fetchone()
         assert after == {"status": "active", "publication": "shadow"}, "the source is unchanged"
+
+
+async def test_profile_shows_a_link_notice_once(rig: Rig) -> None:
+    """An admin's link change reaches the person on their profile, read as they see it."""
+    async with rig.open(as_="member") as (client, ws), rig.data.aconnect() as conn:
+        detail = {"identity": "acme:w:user:u1", "provider": "acme", "name": "maya"}
+        await conn.execute(
+            f"insert into {rig.data.schemas.data}.identity_notices"
+            " (tenant_id, account_id, kind, detail) values (%s, %s, 'linked', %s)".encode(),
+            (ws.tenant_id, ws.person.account_id, Jsonb(detail)),
+        )
+        first = (await client.get("/api/profile/data")).json()["notices"]
+        again = (await client.get("/api/profile/data")).json()["notices"]
+        assert [(n["kind"], n["name"]) for n in first] == [("linked", "maya")], "shown on view"
+        assert again == [], "and read once seen"
 
 
 async def test_no_answer_holds_a_credential(rig: Rig) -> None:
