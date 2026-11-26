@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   since the provider has one execution tool. A channel's own fixed deployment is still refused
   there ([Providers](docs/providers.md#what-is-not-supported-yet)).
 
+- **Routines run on Gemini when their agent, channel or thread uses it.** A fire runs as an
+  unattended reply on that provider, under the same rules, spend gates and metering as a chat
+  reply, and posts like any routine, quiet runs included. A routine whose agent runs code on its
+  own, every OpenAI agent included since its hosted shell cannot be turned off, stops with
+  `backend_unsupported`. A routine that sends a direct message still runs only on Anthropic
+  ([Routines](docs/routines.md)).
+
 - **A finished command no longer sends a second message when the conversation already has its
   result, or when its machine was stopped from the conversation.** Reading the result there,
   or stopping the machine from the conversation it started in, withdraws a message nobody has
