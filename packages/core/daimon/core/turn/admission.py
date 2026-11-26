@@ -1627,9 +1627,8 @@ async def _admit_gates(
             agent_name=config.agent_name,
         )
     # An agent that reads data sources is offered no data tool where outsiders may read (a
-    # hold), nor in a Teams room, whose readers are unknown; and a helper ask into it from an
-    # agent that does not read data here is refused, or its answers would land in that
-    # agent's memory. A failed read is unknown: the turn runs with no data tool, and counts
+    # hold); and a helper ask into it from an agent that does not read data here is refused,
+    # or its answers would land in that agent's memory. A failed read is unknown: the turn runs with no data tool, and counts
     # as data-reading if the session read data or that cannot be told either.
     data_unknown = False
     try:
@@ -1667,7 +1666,7 @@ async def _admit_gates(
         )
     if helper is not None and data_reading and not helper.data_reading:
         raise UserFacingError(AGENT_REQUEST_REFUSAL)
-    data_blocked = data_unknown or hold is not None or (platform == "teams" and not is_dm)
+    data_blocked = data_unknown or hold is not None
     relay_agent = (helper is not None and helper.relay_scoped) or agent_has_identity_relay(
         (server.url for server in agent.mcp_servers),
         public_url=deps.public_url,

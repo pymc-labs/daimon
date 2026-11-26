@@ -47,7 +47,7 @@ def _calls(function: Callable[..., Any]) -> set[str]:
 # or a place its results could leave the conversation they were for.
 _GUARDS: list[tuple[str, Callable[..., Any], str]] = [
     ("helper asks into a data-reading agent are refused", admission._admit_gates, "reads_data"),  # pyright: ignore[reportPrivateUsage]
-    ("contained, held and Teams rooms offer no data tool", admission._admit_gates, "without_data_reads"),  # pyright: ignore[reportPrivateUsage]
+    ("contained and held rooms offer no data tool", admission._admit_gates, "without_data_reads"),  # pyright: ignore[reportPrivateUsage]
     ("routine, agent chat and CLI sessions card writes out", toolset.place_session, "replace"),
     ("handoff into a data-reading agent", task_continuity._hand_off_task_impl, "reads_data"),  # pyright: ignore[reportPrivateUsage]
     ("agent chat start", agent_chat._start_turn_impl, "_refuse_data_agent"),  # pyright: ignore[reportPrivateUsage]
@@ -59,6 +59,7 @@ _GUARDS: list[tuple[str, Callable[..., Any], str]] = [
     ("rooms: outsiders close them", data_access._room, "channel_has_outsiders"),  # pyright: ignore[reportPrivateUsage]
     ("Discord rooms: stored viewers", data_access._room, "read_viewers"),  # pyright: ignore[reportPrivateUsage]
     ("Slack rooms: members read per call", data_access._room, "_slack_viewers"),  # pyright: ignore[reportPrivateUsage]
+    ("Teams rooms: members read per call", data_access._room, "_teams_viewers"),  # pyright: ignore[reportPrivateUsage]
     ("helper turns: the asking agent reads data here", data_access._turn_origin, "reads_data"),  # pyright: ignore[reportPrivateUsage]
     ("the data tools register in one place", server.create_mcp_app, "register_data_tools"),  # pyright: ignore[reportUnknownMemberType]
     ("a memory saved after a data read records it", repo_memory.repo_memory_impl, "reads_of"),

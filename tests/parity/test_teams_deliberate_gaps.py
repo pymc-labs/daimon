@@ -286,6 +286,8 @@ def test_teams_channel_files_need_a_tenant_permission_not_a_manifest_permission(
         "ChannelMessage.Read.Group",
         "TeamMember.Read.Group",
         "ChatMessage.Read.Chat",
+        "ChannelMember.Read.Group",
+        "ChatMember.Read.Chat",
         "TeamsActivity.Send.Group",
     ], "no team permission reaches SharePoint, so files need admin consent to Files.ReadWrite.All"
 

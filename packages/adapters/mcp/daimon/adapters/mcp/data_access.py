@@ -22,6 +22,7 @@ import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.slack._client import slack_web_client
+from daimon.adapters.mcp.tools.teams._directory import graph_for, locate_channel, split_thread
 from daimon.core.channel_audience import channel_has_outsiders
 from daimon.core.config import Settings
 from daimon.core.data_audience import (
@@ -44,6 +45,8 @@ from daimon.core.stores.identity import accounts_of
 from daimon.core.stores.room_viewers import read_viewers
 from daimon.core.stores.routines import get_routine
 from daimon.core.stores.turn_origins import get_active_origin, get_session_origin
+from daimon.core.teams_graph import GraphUnavailable
+from daimon.core.teams_threads import is_group_chat
 from daimon.data import identity, pool, reads
 from daimon.data.reading import open_read
 from daimon.data.schema import Schemas
@@ -183,8 +186,8 @@ async def _turn_origin(runtime: McpRuntime, auth: AuthIdentity, *, now: datetime
         return DataOrigin("room", asker, contained=True)
     if is_dm_thread(turn.platform, turn.thread_id) or turn.platform == "web":
         origin = DataOrigin("private", asker)
-    elif turn.platform not in ("discord", "slack"):
-        return DataOrigin("none")  # a Teams room's readers are unknown
+    elif turn.platform not in ("discord", "slack", "teams"):
+        return DataOrigin("none")
     else:
         origin = await _room(runtime, auth, asker, turn.parent_channel_id, turn.thread_id, now=now)
     if parent is None:
@@ -238,6 +241,8 @@ async def _room(
             users = None if stored is None else frozenset(s.removeprefix(prefix) for s in stored)
     if platform == "slack" and auth.external_id is not None:
         users = await _slack_viewers(runtime, auth.external_id, channel_id)
+    if platform == "teams":
+        users = await _teams_viewers(runtime, auth, channel_id)
     if users is None:
         return DataOrigin("room", asker, None)
     async with runtime.session_factory() as session:
@@ -275,6 +280,26 @@ async def _slack_viewers(
     except SlackApiError:
         return None
     return None
+
+
+async def _teams_viewers(
+    runtime: McpRuntime, auth: AuthIdentity, conversation_id: str
+) -> frozenset[str] | None:
+    """A Teams channel's or group chat's members by Entra id, read now; None (public only)
+    while the app lacks the consent to read them, or on any failure."""
+    client = runtime.teams_client
+    if client is None:
+        return None
+    graph = graph_for(client)
+    channel, _ = split_thread(conversation_id)
+    try:
+        if is_group_chat(channel):
+            return await graph.list_chat_member_ids(channel)
+        ref = await locate_channel(runtime, auth, client, channel)
+        return await graph.list_channel_member_ids(ref.group_id, ref.channel_id)
+    except (GraphUnavailable, ToolError) as e:
+        log.info("data.teams_viewers_unknown", error=str(e))
+        return None
 
 
 async def _slack_people(
