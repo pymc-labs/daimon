@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 269 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 260 tools Daimon's MCP server registers, plus the 9 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -59,6 +59,7 @@ Agent-chat primitives plus bounded ``ask`` and completed-chart delivery.
 | --- | --- | --- |
 | `archive_my_session` | agent tokens only | Archive a session when its conversation is finished. |
 | `ask` | agent tokens only | Ask one question and wait for the final answer and any chart images. |
+| `await_turn` | agent tokens only | Wait for news from the turn running on ``handle``, without polling. |
 | `cancel_turn` | agent tokens only | Stop a running turn immediately. |
 | `continue_turn` | agent tokens only | Send a follow-up message on an existing session, or resume a paused one. |
 | `deliver_turn_charts` | agent tokens only | Return the newest completed reply with its chart images and optional links. |
@@ -318,18 +319,8 @@ Eval suites, cases, arms, run items and bundles, over `daimon.core.evals.service
 | `eval_cases_dedupe` | all callers | Mark near-duplicate cases of a suite with a group. |
 | `eval_cases_draft_estimate` | all callers | Estimate what it costs to draft expectations for cases with a model. |
 | `eval_cases_list` | all callers | List the cases of an eval suite version. |
-| `eval_comment_add` | all callers | Comment on an eval item or case, or from inside a review task by column letter. |
-| `eval_compare` | all callers | Compare the arms of an eval run side by side, case by case, with each item's replies and scores. |
 | `eval_item_get` | all callers | Read one eval run item: its transcript, calls and outcome. |
 | `eval_items_list` | all callers | List the items of an eval run, a page at a time (at most 500). |
-| `eval_judge_run` | all callers | Estimate what judging an eval run with models would cost. |
-| `eval_review_next` | all callers | Get your next review task from a queue (`run~queue`), or none when none is left. |
-| `eval_review_queues` | all callers | List the open eval review queues you may work, across every run you review. |
-| `eval_review_submit` | all callers | Submit your scores for a review task: one per criterion the task asks for, naming the column (A, B...) each is about. |
-| `eval_run_cancel` | all callers | Stop an eval run: no more items start, and running ones are interrupted. |
-| `eval_run_estimate` | all callers | Estimate what an eval run would cost: low, expected and high in USD, per category. |
-| `eval_run_start` | all callers | Start an eval run that stops once it has spent `cap_usd`. |
-| `eval_run_status` | all callers | Read an eval run: its status, spend so far and estimate. |
 | `eval_suite_create` | all callers | Create an eval suite with no cases; you own it. |
 | `eval_suite_get` | all callers | Read an eval suite: its cases, weights and defaults. |
 | `eval_suite_share` | all callers | Replace who an eval suite is shared with: people or groups, as viewer, reviewer or editor. |
@@ -848,9 +839,10 @@ visibility tags, so a logged-in caller sees all of them; each takes a `daimon_id
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `ask` | all callers | Ask a Daimon one question and wait up to about two minutes for its answer. |
+| `await_turn` | all callers | Wait for news from the turn running on ``handle``, without polling. |
 | `continue_turn` | all callers | Send a follow-up on an existing session without waiting. |
 | `describe_daimon` | all callers | Describe one Daimon: role, skills, repo, environment, platform and workspace. |
-| `get_session` | all callers | Status of one session. |
+| `get_session` | all callers | Status of one session, read once. |
 | `list_daimons` | all callers | List every Daimon you can reach on this platform, across all your workspaces. |
 | `list_events` | all callers | A session's transcript. |
 | `list_my_sessions` | all callers | Sessions you started with this Daimon, for resuming with ``handle``. |
