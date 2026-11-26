@@ -434,6 +434,7 @@ source_modules = [
     "daimon.core.sessions",
     "daimon.core.settings_panel",
     "daimon.core.setup_conversations",
+    "daimon.core.shared_connections",
     "daimon.core.shared_threads",
     "daimon.core.skill_sync",
     "daimon.core.skill_zip",

@@ -52,6 +52,9 @@
   "DELETE /api/credits/allowances/{allowance_id}": {
    "tool": "delete_allowance"
   },
+  "DELETE /api/integrations/connections/{connection_id}": {
+   "exempt": "shared connections are set up on the web only"
+  },
   "DELETE /api/integrations/tokens/{jti}": {
    "panel": {
     "discord": "daimon.adapters.discord.agent_setup.operator_tokens_view",
@@ -106,6 +109,12 @@
   },
   "PATCH /api/credits/allowances/{allowance_id}": {
    "tool": "set_allowance_amount"
+  },
+  "PATCH /api/integrations/connections/{connection_id}": {
+   "exempt": "shared connections are set up on the web only"
+  },
+  "PATCH /api/integrations/connections/{connection_id}/tools/{name}": {
+   "exempt": "shared connections are set up on the web only"
   },
   "PATCH /api/routines/{routine_id}": {
    "tool": "update_routine"
@@ -275,6 +284,12 @@
     "slack": "daimon.adapters.slack.billing_panel.actions",
     "teams": "daimon.adapters.teams.billing_panel"
    }
+  },
+  "POST /api/integrations/connections": {
+   "exempt": "shared connections are set up on the web only"
+  },
+  "POST /api/integrations/connections/{connection_id}/refresh": {
+   "exempt": "shared connections are set up on the web only"
   },
   "POST /api/integrations/data/sources": {
    "exempt": "data sources are a web-only feature"

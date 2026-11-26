@@ -38,6 +38,8 @@ _HUB_TOOLS = {
     "get_session",
     "list_events",
     "list_my_sessions",
+    "list_shared_tools",
+    "call_shared_tool",
 }
 
 

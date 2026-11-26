@@ -191,6 +191,11 @@ EXEMPT: dict[str, str] = {
     "POST /api/profile/data/connect": "a person's own data, not a channel or an agent's settings",
     "POST /api/profile/data/connect/{pending_id}/poll": "a person's own data, not a channel or an agent's settings",
     "DELETE /api/profile/data/connections/{source_id}": "a person's own data, not a channel or an agent's settings",
+    "POST /api/integrations/connections": "workspace level: the shared connections, no channel and no agent",
+    "PATCH /api/integrations/connections/{connection_id}": "workspace level: the shared connections, no channel and no agent",
+    "DELETE /api/integrations/connections/{connection_id}": "workspace level: the shared connections, no channel and no agent",
+    "POST /api/integrations/connections/{connection_id}/refresh": "workspace level: the shared connections, no channel and no agent",
+    "PATCH /api/integrations/connections/{connection_id}/tools/{name}": "workspace level: the shared connections, no channel and no agent",
     "POST /api/integrations/data/sources": "workspace level: the data store's sources, no channel and no agent",
     "POST /api/integrations/data/sources/{source_id}/{action}": "workspace level: the data store's sources, no channel and no agent",
     "POST /api/agents/server-skills": (
