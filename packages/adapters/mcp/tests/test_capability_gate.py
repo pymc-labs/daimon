@@ -34,7 +34,10 @@ from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import FeatureTarget, Role
 from daimon.core.stores.feature_values import set_feature_value
-from daimon.core.stores.session_settle_state import SessionProvenance
+from daimon.core.stores.session_settle_state import (
+    SessionProvenance,
+    erase_agent_chat_provenance_for_account,
+)
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.tool_safety import RENAMED_DAIMON_TOOLS
 from daimon.testing.factories import make_account, make_routine, make_tenant
@@ -635,6 +638,7 @@ _CALLERS = (
     "agent chat with no send recorded",
     "agent chat recorded before its grant was",
     "agent chat of another account",
+    "agent chat whose account was erased",
 )
 
 
@@ -679,11 +683,16 @@ async def test_each_caller_kind_reads_the_places_it_is_known_by(
         "agent chat without a platform": (account.id, _GRANT),
         "agent chat recorded before its grant was": (account.id, None),
         "agent chat of another account": (other.id, _GRANT),
+        "agent chat whose account was erased": (account.id, _GRANT),
     }
     if caller in recorded:
         owner, grant = recorded[caller]
         resumed = caller == "agent chat resumed by a signed-in person"
         await _sent(sessionmaker, owner, grant=grant, channel="chan-k", resumed_by_person=resumed)
+    if caller == "agent chat whose account was erased":
+        # What the account's erasure runs (`erasure.ERASABLE`).
+        async with sessionmaker.begin() as db:
+            await erase_agent_chat_provenance_for_account(db, account_id=account.id)
     agents = ("agent_key", "agent_hub", "agent_turn", "agent_routine", "agent_chat")
     runtime = _runtime(sessionmaker, t, *agents)
 
@@ -750,6 +759,7 @@ async def test_each_caller_kind_reads_the_places_it_is_known_by(
         "agent chat with no send recorded": (chat, None, workspace),
         "agent chat recorded before its grant was": (chat, None, workspace),
         "agent chat of another account": (chat, None, workspace),
+        "agent chat whose account was erased": (chat, None, workspace),
     }
     assert set(known) == set(_CALLERS)
     auth, named, place = known[caller]

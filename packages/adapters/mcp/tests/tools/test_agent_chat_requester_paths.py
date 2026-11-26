@@ -212,6 +212,13 @@ _DRIVER_STATE_READERS = {
     "is_agent_chat_signed_in",
     "unattended_turn",
     "find_agent_chat_session",
+    "count_agent_chat_provenance_for_account",
+}
+#: Writers outside the fence that only clear where a session came from, for an account's
+#: erasure or its tenant's deletion; no send decides from those columns.
+_PROVENANCE_ERASERS = {
+    "erase_agent_chat_provenance_for_account",
+    "erase_agent_chat_provenance_for_tenant",
 }
 
 
@@ -262,6 +269,7 @@ def test_the_state_that_names_a_driver_is_written_only_under_the_session_fence()
         "record_agent_chat_driver",
         "record_agent_chat_provenance",
         "record_unattended_turn",
+        *_PROVENANCE_ERASERS,
     }
 
     functions = _source_functions()
@@ -277,6 +285,20 @@ def test_the_state_that_names_a_driver_is_written_only_under_the_session_fence()
         assert callers(writer) == {
             "packages/core/daimon/core/agent_chat_requester.py:record_driver"
         }, writer
+    assert callers("erase_agent_chat_provenance_for_tenant") == {
+        "packages/core/daimon/core/stores/tenants.py:delete_tenant"
+    }
+    # The account eraser is an `erasure.ERASABLE` entry, named there and nowhere else.
+    users = {
+        str(path.relative_to(_REPO))
+        for path in (_REPO / "packages").rglob("*.py")
+        if not {"tests", ".venv"} & set(path.parts)
+        and "erase_agent_chat_provenance_for_account" in path.read_text()
+    }
+    assert users == {
+        "packages/core/daimon/core/erasure.py",
+        "packages/core/daimon/core/stores/session_settle_state.py",
+    }
     assert callers("record_unattended_turn") == {
         "packages/adapters/mcp/daimon/adapters/mcp/tools/_agent_chat_safety.py:record_turn"
     }
