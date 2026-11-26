@@ -1,7 +1,6 @@
 """Executable record of what GPT and Gemini turns deliberately do not take from Claude.
 
-A routine that sends a direct message runs only on Anthropic Managed Agents, an
-OpenAI routine needs the sandbox opt-in (its hosted shell cannot be left out of a
+An OpenAI routine needs the sandbox opt-in (its hosted shell cannot be left out of a
 session, while Gemini's built-ins can), and a built-in tool switched off in a channel
 or thread refuses a channel's own deployment there. Each is refused with a message,
 never run quietly without the limit, and the provider guide says so.
@@ -14,7 +13,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from daimon.adapters.scheduler.main import routines_unsupported_error
 from daimon.core import provider_routine
 from daimon.core.features.registry import BUILTIN_TOOLS, FEATURES
 from daimon.core.turn.errors import AdmissionDenied
@@ -49,12 +47,6 @@ async def test_an_openai_routine_without_the_sandbox_opt_in_is_refused_in_words(
         )
     assert refused.value.reason == "backend_unsupported"
     assert "Ask a server admin to turn on sandbox tools" in str(refused.value)
-
-
-@pytest.mark.parametrize("provider", ["openai", "gemini"])
-def test_a_dm_routine_on_a_native_provider_is_refused_in_words(provider: str) -> None:
-    message = routines_unsupported_error(provider)  # pyright: ignore[reportArgumentType]
-    assert "direct message run only on Anthropic" in message, "the refusal says why"
 
 
 @pytest.mark.parametrize("provider", ["openai", "gemini"])

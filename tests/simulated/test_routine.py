@@ -20,6 +20,7 @@ from daimon.core.routine_service import (
 )
 from daimon.core.scheduler import run_one_tick
 from daimon.core.stores import agent_tool_rules
+from daimon.core.stores.direct_messages import set_dm_enabled
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import get_routine
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolSafetyPolicy
@@ -204,15 +205,56 @@ async def test_a_gemini_routine_follows_its_channels_tool_rules_unattended(
         w.script.add(Turn("Listed.", tool=listed))
         fired = await _fire(w, routine)
     assert fired.last_error is None, f"it ran: {fired}"
-    results = [
+    assert _mcp_results(w) == [DENIED], "the channel's deny decides the call, as on Claude"
+
+
+DENIED = (
+    f"Refused: this agent's tool rule denies {DAIMON_SERVER_NAME}/list_agents. Do not retry it."
+)
+
+
+def _mcp_results(w: World) -> list[str]:
+    """What Daimon's MCP server answered the Gemini fires' tool calls."""
+    return [
         step["result"]
         for interaction in w.gemini.interactions.values()
         for step in interaction.raw["steps"]
         if step["type"] == "mcp_server_tool_result"
     ]
-    assert results == [
-        f"Refused: this agent's tool rule denies {DAIMON_SERVER_NAME}/list_agents. Do not retry it."
-    ], "the channel's deny decides the call, as on Claude"
+
+
+async def test_a_dm_routine_runs_on_gemini_under_its_agents_tool_rules(
+    db_preflight: None, db_nullpool_engine: AsyncEngine
+) -> None:
+    """A routine that DMs its owner runs as their private turn on Gemini, and its
+    agent's rules decide its calls unattended, as on Claude."""
+    safety = ToolSafetyPolicy(enabled=True, agent_rules=True)
+    async with _gemini_install(db_nullpool_engine, tool_safety=safety) as (w, discord):
+        async with w.sessions.begin() as db:
+            await set_dm_enabled(db, tenant_id=discord.tenant_id, enabled=True)
+        routine = await _scheduled(w, discord, destination_kind="dm", destination_id=str(PERSON))
+        async with w.sessions.begin() as db:
+            await agent_tool_rules.set_rule(
+                db,
+                tenant_id=discord.tenant_id,
+                agent_id=routine.agent_id,
+                agent_name=routine.agent_name,
+                tool_key=f"{DAIMON_SERVER_NAME}/list_agents",
+                channel_id=None,
+                server_url=str(MCP.public_url),
+                rule="ask",
+                set_by="admin",
+                actor=Subject(is_admin=True),
+            )
+        listed = Tool("list_agents", server="daimon_mcp", live=True)
+        w.script.add(Turn("Your plate is clear.", tool=listed))
+        fired = await _fire(w, routine)
+    assert fired.last_error is None, f"it ran: {fired}"
+    assert "Your plate is clear." in (fired.last_result_tail or ""), fired.last_result_tail
+    assert _mcp_results(w) == [
+        f"Refused: this agent's tool rule requires approval for {DAIMON_SERVER_NAME}/list_agents, "
+        "and nobody is here to approve. Do not retry it."
+    ], "the agent's ask is decided unattended, as on Claude"
 
 
 async def test_a_routine_into_a_thread_runs_on_the_provider_the_thread_kept(
