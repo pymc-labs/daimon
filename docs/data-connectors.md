@@ -134,8 +134,13 @@ Sheets. Every read shows a card only they can answer, saying that everyone in th
 conversation will see the result; **Allow for this conversation** stops asking for the rest
 of that conversation (kept in the running process: a restart asks again).
 
-It needs no source and no admin step: it works wherever data sources are on and whoever runs
-Daimon set up a Google sign-in. It works in direct messages and team rooms, including rooms
+It needs no source of its own and no admin step: it reads through the workspace's Google
+connection, which any active, published Drive or Calendar source provides. When several exist,
+the first by name (then id) whose domain the person is linked to is used, for Drive and for
+calendars alike. With no Google source, or no Google sign-in set up for the deployment, the
+personal tools are not offered.
+
+It works in direct messages and team rooms, including rooms
 people outside the team can read; the card says the room will see the result, and the answer
 is cut down to what anyone may see. It never runs on another agent's request. The answer's
 redaction rules apply, and a search returns 60,000 characters of text at most. A memory saved
@@ -143,30 +148,32 @@ after it is recalled only in that person's direct messages.
 
 A workspace admin can turn it off for the workspace with the `data_personal_drive` feature
 (on by default; also settable per agent or channel). Each person can also turn off their own
-Drive and calendar reads, on their profile page or in chat (`data_personal_reads`, on a card).
-Their Drive is then never read as them, and no calendar is searched for an answer they are
-part of.
+Drive and calendar reads, on their profile page or in chat (`data_drive_reads` and
+`data_calendar_reads`, each on a card). Their Drive is then never read as them, and no
+calendar is searched for an answer they are part of.
 
 ## Google Calendar
 
-A source of kind `gcal` is live: it stores nothing and is created with mode `federated`. A
-search reads the asker's own primary calendar, acting as them through the same domain-wide
-delegation as Drive, so an event shows only to the people Google lists on it. Add
-`https://www.googleapis.com/auth/calendar.readonly` to the authorized scopes, and the
-Calendar API to the project. Give the credential and config as for Drive (`service_account_key` or
-`service_account`; `domain`, `admin`). People are matched through their Google link (their Google sign-in).
+A search also reads the asker's own primary calendar, live and as them, through the same
+domain-wide delegation as Drive (the workspace's Google connection, see Personal Drive), so an
+event shows only to the people Google lists on it. Add
+`https://www.googleapis.com/auth/calendar.readonly` to the authorized scopes, and the Calendar
+API to the project.
+
+Calendar reads are on for every workspace with a Google source; a workspace
+admin turns them off with the `data_personal_calendar` feature, and each person for themselves.
+No Calendar source is needed. A source of kind `gcal` (mode `federated`) is one more way to
+hold the Google credential, with the config of a Drive source (`service_account_key` or
+`service_account`; `domain`, `admin`); it stores nothing. People are matched through their
+Google link (their Google sign-in).
 
 ```json
 {"domain": "example.com", "admin": "admin@example.com"}
 ```
 
-Calendar reads are on for every workspace with data sources on; a workspace admin turns them
-off with the `data_personal_calendar` feature, and each person for themselves (see Personal
-Drive). They need no Calendar source to be offered.
-
-With several readers an event shows only if every one of their calendars has it. A reader the
-source cannot act as (not linked, suspended) gets nothing. Events within 90 days either side of
-now are searched, and those nearest to now come first.
+With several readers an event shows only if every one of their calendars has it. If the
+connection cannot act as every reader (not linked, suspended), no calendar is searched.
+Events within 90 days either side of now are searched, and those nearest to now come first.
 
 ## GitHub
 

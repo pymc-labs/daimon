@@ -60,8 +60,10 @@ UNSET = "isn't set up here yet"
 
 def _set_up() -> Settings:
     """Every capability's setup present, so only a feature Off refuses."""
-    return _fully_configured_settings().model_copy(
+    settings = _fully_configured_settings()
+    return settings.model_copy(
         update={
+            "data": settings.data.model_copy(update={"google_oauth_client_id": "client"}),
             "report_host": ReportHostSettings(
                 host_url=HttpUrl("http://report-host:8002"), admin_secret=SecretStr("r" * 32)
             ),

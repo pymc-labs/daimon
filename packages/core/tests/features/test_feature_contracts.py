@@ -549,7 +549,6 @@ def test_every_feature_key_read_is_registered_and_every_registered_key_is_read()
         | {f"web.{module}" for module in WEB_MODULES}
         | {"daily_model_cap"}  # request.admission.resolved("daily_model_cap")
         | {"display_name"}  # Admission.display_name resolves it
-        | {"data_personal_calendar"}  # read through PERSONAL_PARTS (`allowed_parts`)
     )
     for path in _PRODUCT:
         constants: set[str] = set()

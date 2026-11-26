@@ -20,10 +20,11 @@ PERSONAL_DRIVE: Final = "data_personal_drive"
 PERSONAL_CALENDAR: Final = "data_personal_calendar"
 PERSONAL_PARTS: Final[dict[str, str]] = {"drive": PERSONAL_DRIVE, "calendar": PERSONAL_CALENDAR}
 """A person's personal part to the feature a workspace admin turns it off with."""
-PERSONAL_DRIVE_TOOLS: Final[frozenset[str]] = frozenset({"data_my_drive", "data_personal_reads"})
+PERSONAL_DRIVE_TOOLS: Final[frozenset[str]] = frozenset({"data_my_drive", "data_drive_reads"})
+PERSONAL_CALENDAR_TOOLS: Final[frozenset[str]] = frozenset({"data_calendar_reads"})
 """A person's own Drive read as them, each read on their card (`daimon.data.my_drive`), and
-their own switch for each personal part. Neither needs a source or `data_reads`, and both stay
-in rooms outsiders may read."""
+each person's own switch for a part. They need no `data_reads` and stay in rooms outsiders
+may read, but only a workspace with a Google source is offered them (`place_features`)."""
 DATA_SOURCES: Final = "data_sources"
 DATA_SOURCE_TOOLS: Final[frozenset[str]] = frozenset(
     {

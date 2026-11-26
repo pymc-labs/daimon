@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 258 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 259 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -286,10 +286,11 @@ The `data_*` tools: search and read the workspace's data sources, behind `data_r
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
+| `data_calendar_reads` | all callers | Turn on or off Daimon reading your own calendar as you in this workspace; it stays on until you turn it off. |
+| `data_drive_reads` | all callers | Turn on or off Daimon reading your own Google Drive (My Drive) as you in this workspace; it stays on until you turn it off. |
 | `data_file` | all callers | Read a file attached to a record (`index` from `data_get`'s files), fetched now from its source with the source's permissions and never stored. |
 | `data_get` | all callers | Open one record by its `record_id`: its text (12,000 characters from `start`; a `next_start` says where the rest continues) and its attached files for `data_file`. |
 | `data_my_drive` | all callers | Search your own Google Drive (My Drive) as you for `query`, with the text of Docs, Slides and Sheets; never stored. |
-| `data_personal_reads` | all callers | Turn on or off Daimon reading your own `drive` (My Drive) or `calendar` as you in this workspace; both stay on until you turn them off. |
 | `data_search` | all callers | Search the data sources for `query`; only what everyone who will see the answer may read. |
 | `data_sources` | all callers | The data sources you can read here, with their ids and how many records each holds, and the datasets `data_sql` can query. |
 | `data_sql` | all callers | Read-only SQL over the data views and datasets (`data_sources` lists them), by plain names. |

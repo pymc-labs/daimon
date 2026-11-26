@@ -411,7 +411,7 @@
    }
   },
   "PUT /api/profile/data/personal/{part}": {
-   "tool": "data_personal_reads"
+   "tool": "data_drive_reads"
   },
   "PUT /api/support/channel": {
    "tool": "support_channel_set"

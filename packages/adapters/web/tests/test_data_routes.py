@@ -60,7 +60,10 @@ class Rig:
         settings = Settings(
             _env_file=None,  # pyright: ignore[reportCallIssue]
             database={"url": self.data.url},  # pyright: ignore[reportArgumentType]
-            data={"schema_name": self.data.settings.schema_name},  # pyright: ignore[reportArgumentType]
+            data={
+                "schema_name": self.data.settings.schema_name,
+                "google_oauth_client_id": "client",
+            },  # pyright: ignore[reportArgumentType]
             crypto={"keys": [Fernet.generate_key().decode()]},  # pyright: ignore[reportArgumentType]
             features={"data_sources": "on" if feature else "off"},
         )
@@ -127,6 +130,24 @@ async def test_a_source_group_is_set_on_create_and_listed(rig: Rig) -> None:
         assert [row["group"] for row in listed] == ["team-a"], "the group is kept lowercase"
         bad = await client.post(_SOURCES, json={**_NEW, "name": "Two", "group": "not ok!"})
         assert bad.status_code == 422, "a malformed group is refused"
+
+
+async def test_personal_parts_need_a_google_source_and_follow_the_workspace(rig: Rig) -> None:
+    put = "/api/profile/data/personal"
+    async with rig.open(as_="member") as (client, ws), rig.data.aconnect() as conn:
+        assert (await client.put(f"{put}/drive", json={"on": False})).status_code == 404, (
+            "no Google source, nothing to turn off"
+        )
+        await conn.execute(
+            f"insert into {rig.data.schemas.data}.sources (tenant_id, kind, name, provider,"
+            " default_scope, publication) values (%s, 'gcal', 'Calendar', 'google', 'internal',"
+            " 'published')".encode(),
+            (ws.tenant_id,),
+        )
+        shown = await client.put(f"{put}/drive", json={"on": False})
+        assert shown.status_code == 200 and shown.json() == {"drive": False, "calendar": True}, (
+            "a Calendar source serves both parts, each on until the person turns it off"
+        )
 
 
 async def test_declared_sources_refuse_edits(rig: Rig) -> None:

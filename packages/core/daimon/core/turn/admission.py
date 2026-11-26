@@ -133,6 +133,7 @@ from daimon.core.relay_scope import (
     without_data_sources,
     without_identity_relays,
     without_long_term_memory,
+    without_personal_google,
 )
 from daimon.core.scope import HelperTarget, ResolvedConfig, ScopeContext
 from daimon.core.session_fence_retry import retry_fences
@@ -3250,7 +3251,8 @@ async def place_features(
     keys: tuple[str, ...] = _TURN_FEATURE_KEYS,
 ) -> FeatureSnapshot:
     """The features a turn of `agent` reads at `place`; its toolset hides tools by them. Data
-    tools hide until the workspace has a source."""
+    tools hide until the workspace has a source, and the personal Drive and calendar tools until
+    it has a Google one."""
     features = await resolve_features(
         deps.sessionmaker,
         deps.settings,
@@ -3260,14 +3262,14 @@ async def place_features(
         server_setup=False,
     )
     data = features.features.get(DATA_SOURCES)
-    if (
-        data is None
-        or not data.on
-        or deps.settings is None
-        or await has_sources(deps.sessionmaker, deps.settings, place.tenant_id)
-    ):
+    if data is None or not data.on or deps.settings is None:
         return features
-    return without_data_sources(features)
+    tenant = place.tenant_id
+    if not await has_sources(deps.sessionmaker, deps.settings, tenant):
+        return without_data_sources(without_personal_google(features))
+    if not await has_sources(deps.sessionmaker, deps.settings, tenant, google=True):
+        return without_personal_google(features)
+    return features
 
 
 async def require_tool_limits_hold(deps: TurnDeps, admission: Admission) -> None:

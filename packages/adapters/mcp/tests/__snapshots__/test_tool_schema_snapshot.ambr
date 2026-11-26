@@ -3924,6 +3924,52 @@
         'type': 'object',
       }),
     }),
+    'data_calendar_reads': dict({
+      'description': '''
+        Turn on or off Daimon reading your own calendar as you in this workspace; it stays
+        on until you turn it off. Asks you on a card first. Returns each part this workspace
+        offers, and whether it is on.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'on': dict({
+            'type': 'boolean',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'on',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'data_drive_reads': dict({
+      'description': '''
+        Turn on or off Daimon reading your own Google Drive (My Drive) as you in this
+        workspace; it stays on until you turn it off. Asks you on a card first. Returns each
+        part this workspace offers, and whether it is on.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'on': dict({
+            'type': 'boolean',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'on',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'data_file': dict({
       'description': '''
         Read a file attached to a record (`index` from `data_get`'s files), fetched now from
@@ -3993,42 +4039,6 @@
         }),
         'required': list([
           'query',
-          'origin_context_id',
-        ]),
-        'type': 'object',
-      }),
-    }),
-    'data_personal_reads': dict({
-      'description': '''
-        Turn on or off Daimon reading your own `drive` (My Drive) or `calendar` as you in
-        this workspace; both stay on until you turn them off. Each call asks you on a card first.
-        Returns each part this workspace allows, and whether it is on.
-      ''',
-      'parameters': dict({
-        '$defs': dict({
-          'Part': dict({
-            'enum': list([
-              'drive',
-              'calendar',
-            ]),
-            'type': 'string',
-          }),
-        }),
-        'additionalProperties': False,
-        'properties': dict({
-          'on': dict({
-            'type': 'boolean',
-          }),
-          'origin_context_id': dict({
-            'type': 'string',
-          }),
-          'part': dict({
-            '$ref': '#/$defs/Part',
-          }),
-        }),
-        'required': list([
-          'part',
-          'on',
           'origin_context_id',
         ]),
         'type': 'object',

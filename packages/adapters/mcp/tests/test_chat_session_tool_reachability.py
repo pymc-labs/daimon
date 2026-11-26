@@ -44,6 +44,7 @@ from daimon.core.config import (
     Settings,
     TurnSettings,
 )
+from daimon.core.data_tools import PERSONAL_CALENDAR_TOOLS, PERSONAL_DRIVE_TOOLS
 from daimon.core.features.tool_gate import gated_tools, server_gate_key
 from daimon.core.mcp_auth import mint_chat_mcp_token, mint_jwt
 from daimon.core.tool_safety import (
@@ -380,6 +381,9 @@ async def test_chat_execution_identity_preserves_exact_tools_list(
             - (backend_switch_tools(enabled=True) - {"set_thread_model"})
             - microsoft_send_tools(enabled=True, tool_safety_on=True)
             - {"set_routine_sandbox_tools"}
+            # Personal Drive and calendar tools need a Google sign-in, unset here.
+            - PERSONAL_DRIVE_TOOLS
+            - PERSONAL_CALENDAR_TOOLS
             # Carded tools tagged admin stay hidden from a non-admin credential.
             - _ADMIN_CARDED_TOOLS
             # Posting tools are for platform-bound callers; this token has none.

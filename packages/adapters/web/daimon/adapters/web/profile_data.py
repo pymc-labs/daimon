@@ -133,10 +133,13 @@ def profile_data_router(runtime: WebRuntime) -> APIRouter:
     async def set_part(  # pyright: ignore[reportUnusedFunction]
         caller: Viewer, part: personal.Part, body: PartIn
     ) -> dict[personal.Part, bool]:
-        """Turn one personal part on or off for the signed-in person (`data_personal_reads`)."""
+        """Turn one personal part on or off for the signed-in person (the chat tools
+        `data_drive_reads` and `data_calendar_reads`)."""
         p = caller.person
         allowed = await workspace_parts(p.tenant_id)
         async with store(runtime) as conn:
+            if part not in await personal.parts(conn, schemas, p.tenant_id, p.account_id, allowed):
+                raise HTTPException(status_code=404, detail="Not offered in this workspace.")
             await personal.set_part(conn, schemas, p.tenant_id, p.account_id, part, body.on)
             return await personal.parts(conn, schemas, p.tenant_id, p.account_id, allowed)
 

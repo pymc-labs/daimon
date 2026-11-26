@@ -15,7 +15,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Final
 
-from daimon.core.data_tools import DATA_READS, DATA_SOURCES
+from daimon.core.data_tools import DATA_READS, DATA_SOURCES, PERSONAL_PARTS
 from daimon.core.features.session_identity import SessionIdentity
 from daimon.core.features.snapshot import FeatureSnapshot
 from daimon.core.mcp_identity import identity_relay_urls, relay_base
@@ -138,3 +138,16 @@ def without_data_sources(snapshot: FeatureSnapshot) -> FeatureSnapshot:
     forced = ResolvedFeature(DATA_SOURCES, "off", "workspace", locked=True)
     reads = without_data_reads(snapshot)
     return replace(reads, features={**reads.features, DATA_SOURCES: forced})
+
+
+def without_personal_google(snapshot: FeatureSnapshot) -> FeatureSnapshot:
+    """The snapshot with the personal part features Off and locked: a workspace with no Google
+    source has nothing to read a person's Drive or calendar through."""
+    from daimon.core.features.resolver import ResolvedFeature
+
+    forced = {
+        key: ResolvedFeature(key, "off", "workspace", locked=True)
+        for key in PERSONAL_PARTS.values()
+        if key in snapshot.features
+    }
+    return replace(snapshot, features={**snapshot.features, **forced})

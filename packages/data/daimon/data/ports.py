@@ -18,6 +18,7 @@ from daimon.core.ports.erasure import ErasureStatement, register_erasure
 from daimon.core.ports.tool_gate import register_gated_tools
 from daimon.data.audit import AUDIT_SOURCE
 from daimon.data.migrate import STORE_FILES
+from daimon.data.personal import GOOGLE_KINDS
 from daimon.data.schema import Schemas
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -110,8 +111,11 @@ def erasure(schemas: Schemas) -> tuple[ErasureStatement, ...]:
     )
 
 
-async def _has_sources(sessions: Sessions, settings: Settings, tenant_id: uuid.UUID) -> bool:
-    """A live source in a store with every file applied; a missing store reads as none."""
+async def _has_sources(
+    sessions: Sessions, settings: Settings, tenant_id: uuid.UUID, google: bool
+) -> bool:
+    """A live source in a store with every file applied; a missing store reads as none.
+    `google`: an active, published Drive or Calendar one."""
     d = Schemas.of(settings.data).data
     try:
         async with sessions() as session:
@@ -119,9 +123,16 @@ async def _has_sources(sessions: Sessions, settings: Settings, tenant_id: uuid.U
                 text(
                     f"select (select count(*) from {d}.schema_version where file = any(:files))"
                     f" = :count and exists (select 1 from {d}.sources where tenant_id = :tenant"
-                    " and publication <> 'retired')"
+                    " and publication <> 'retired' and (not :google or (kind = any(:kinds)"
+                    " and status = 'active' and publication = 'published')))"
                 ),
-                {"files": list(STORE_FILES), "count": len(STORE_FILES), "tenant": tenant_id},
+                {
+                    "files": list(STORE_FILES),
+                    "count": len(STORE_FILES),
+                    "tenant": tenant_id,
+                    "google": google,
+                    "kinds": list(GOOGLE_KINDS),
+                },
             )
     except SQLAlchemyError:
         return False

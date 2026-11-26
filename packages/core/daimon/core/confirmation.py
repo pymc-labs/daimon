@@ -528,8 +528,8 @@ def prompt_for_tool_call(
             requester_platform_user_id=requester_platform_user_id,
             expires_at=now + timeout,
         )
-    if call.tool_name == "data_personal_reads" and own_server:
-        part = "Google Drive" if data.get("part") == "drive" else "calendar"
+    if call.tool_name in ("data_drive_reads", "data_calendar_reads") and own_server:
+        part = "Google Drive" if call.tool_name == "data_drive_reads" else "calendar"
         try:  # as the tool parses it, so the card never says the opposite of the call
             on = TypeAdapter(bool).validate_python(data.get("on"))
         except ValidationError:

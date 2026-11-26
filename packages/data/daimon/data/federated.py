@@ -7,8 +7,10 @@ It is read-only and its results are never stored, but go through the source's re
 as a stored record's text does: `exclude_ids` drop a hit, and a set not approved leaves the
 source out. Each call is metered like a search arm through the caller's `meter`. It fails
 open: a source that errors or is still running when the search's time budget ends is left
-out, and the rest answer. A source that reads a personal part as each reader (Calendar) is
-not asked while any reader turned that part off (`daimon.data.personal`).
+out, and the rest answer. Calendars are not a source of their own: each reader's own calendar
+is read through the workspace's Google connection (`personal.google_connection`), unless the
+workspace or any reader turned the `calendar` part off (`daimon.data.personal`); with no source
+that can act as every reader, no calendar is searched.
 """
 
 from __future__ import annotations
@@ -92,8 +94,12 @@ async def search(
         (list(ctx.tenant_ids), [x for x in ctx.scopes if x != "restricted:acl"]),
     )
     rows = [
-        r for r in await cur.fetchall() if CONNECTORS.get(r["kind"]) and CONNECTORS[r["kind"]].live
+        r
+        for r in await cur.fetchall()
+        if r["kind"] != "gcal" and CONNECTORS.get(r["kind"]) and CONNECTORS[r["kind"]].live
     ]
+    if found := await personal.google_connection(conn, schemas, env, ctx.tenant_ids, ctx.readers):
+        rows.append({**found[0], "kind": "gcal"})  # calendars: the workspace's Google connection
     off = set(off_parts) | {
         part
         for r in rows

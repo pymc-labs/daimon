@@ -589,3 +589,89 @@ async def test_a_persons_own_drive_is_searched_as_them_and_never_stored(
     await personal.set_part(store.conn, store.schemas, store.tenant, alice, "drive", True)
     shown = await personal.parts(store.conn, store.schemas, store.tenant, alice, ["calendar"])
     assert shown == {"calendar": True}, "a part the workspace turned off is not offered"
+
+
+async def add_google(
+    store: Store, kind: str, name: str, domain: str = DOMAIN, status: str = "active"
+) -> uuid.UUID:
+    cur = await store.conn.execute(
+        f"insert into {store.d}.sources (tenant_id, kind, name, provider, config, credential,"
+        " default_scope, mode, publication, status) values (%s, %s, %s, 'google', %s::jsonb, %s,"
+        " 'internal', %s, 'published', %s) returning id".encode(),
+        (
+            store.tenant,
+            kind,
+            name,
+            Jsonb({"domain": domain, "admin": f"admin@{domain}"}),
+            seal((KEY,), {"service_account_key": KEY_FILE}),
+            "federated" if kind == "gcal" else "stored",
+            status,
+        ),
+    )
+    row = await cur.fetchone()
+    assert row
+    return row["id"]
+
+
+async def test_the_google_connection_is_the_first_active_source_that_can_act_as_the_person(
+    store: Store,
+) -> None:
+    alice = await link(store, "alice")
+    assert (
+        await personal.google_connection(
+            store.conn, store.schemas, store.env, [store.tenant], [alice]
+        )
+        is None
+    ), "no Google source, no connection"
+    await add_google(store, "gcal", "a-other-domain", domain="other.example")
+    await add_google(store, "gdrive", "a-retired", status="paused")
+    second = await add_google(store, "gcal", "c-calendar")
+    first = await add_google(store, "gdrive", "b-drive")
+    found = await personal.google_connection(
+        store.conn, store.schemas, store.env, [store.tenant], [alice]
+    )
+    assert found is not None and found[0]["id"] == first, (
+        "by name: not the unlinked domain, not a paused source, not the later one"
+    )
+    assert second != first
+
+
+async def test_calendar_and_drive_read_through_a_source_of_either_kind(
+    store: Store, google: FakeGoogle
+) -> None:
+    google.events = [
+        {
+            "id": "e1",
+            "summary": "Planning standup",
+            "start": {"dateTime": "2026-02-03T10:00:00Z"},
+            "attendees": [{"email": f"alice@{DOMAIN}"}],
+        }
+    ]
+    google.my("plan", f"alice@{DOMAIN}", [to("alice")], mime=DOC, body=b"budget plan")
+    alice_reader = await link(store, "alice")
+    alice = uuid.UUID(alice_reader.removeprefix("account:"))
+    ctx = ReadContext((store.tenant,), scopes=("internal",), readers=(alice_reader,))
+
+    async def calendar() -> set[str]:
+        found = await federated.search(
+            store.conn, store.schemas, store.env, ctx, "planning", seconds=5
+        )
+        return {h.title for r in found for h in r.hits}
+
+    async def drive() -> list[str]:
+        hits = await my_drive.search(
+            store.conn, store.schemas, store.env, store.tenant, alice, "budget"
+        )
+        return [h.ref for _, h in hits]
+
+    assert await calendar() == set() and await drive() == [], "no Google source"
+    assert await personal.parts(store.conn, store.schemas, store.tenant, alice) == {}
+    drive_source = await add_google(store, "gdrive", "drive")
+    assert await calendar() == {"Planning standup"}, "a Drive source serves the calendar"
+    await store.conn.execute(
+        f"update {store.d}.sources set status = 'paused' where id = %s".encode(), (drive_source,)
+    )
+    await add_google(store, "gcal", "calendar")
+    assert await drive() == ["file:plan"], "a Calendar source serves the person's Drive"
+    shown = await personal.parts(store.conn, store.schemas, store.tenant, alice)
+    assert shown == {"drive": True, "calendar": True}

@@ -236,21 +236,36 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             left = max(left - len(shown["text"]), 0)
         return _text({"files": files})
 
-    @mcp.tool()
-    async def data_personal_reads(  # pyright: ignore[reportUnusedFunction]
-        ctx: Context, part: personal.Part, on: bool, origin_context_id: str
+    async def switch_part(
+        ctx: Context, part: personal.Part, tool: str, on: bool, origin_context_id: str
     ) -> str:
-        """Turn on or off Daimon reading your own `drive` (My Drive) or `calendar` as you in
-        this workspace; both stay on until you turn them off. Each call asks you on a card first.
-        Returns each part this workspace allows, and whether it is on."""
         auth = await _auth(ctx)
         if auth.is_external_agent or auth.hold is not None or auth.client:
             raise ToolError("Only a person can change what Daimon reads as them.")
-        await require_card(
-            runtime, auth, tool_name="data_personal_reads", origin_context_id=origin_context_id
-        )
+        await require_card(runtime, auth, tool_name=tool, origin_context_id=origin_context_id)
         allowed = await workspace_parts(auth)
         async with pool.connection(settings) as conn:
+            offered = await personal.parts(conn, schemas, auth.tenant_id, auth.account_id, allowed)
+            if part not in offered:
+                raise ToolError(f"This workspace doesn't offer reading your {part}.")
             await personal.set_part(conn, schemas, auth.tenant_id, auth.account_id, part, on)
             parts = await personal.parts(conn, schemas, auth.tenant_id, auth.account_id, allowed)
         return json.dumps(parts)
+
+    @mcp.tool()
+    async def data_drive_reads(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, on: bool, origin_context_id: str
+    ) -> str:
+        """Turn on or off Daimon reading your own Google Drive (My Drive) as you in this
+        workspace; it stays on until you turn it off. Asks you on a card first. Returns each
+        part this workspace offers, and whether it is on."""
+        return await switch_part(ctx, "drive", "data_drive_reads", on, origin_context_id)
+
+    @mcp.tool()
+    async def data_calendar_reads(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, on: bool, origin_context_id: str
+    ) -> str:
+        """Turn on or off Daimon reading your own calendar as you in this workspace; it stays
+        on until you turn it off. Asks you on a card first. Returns each part this workspace
+        offers, and whether it is on."""
+        return await switch_part(ctx, "calendar", "data_calendar_reads", on, origin_context_id)
