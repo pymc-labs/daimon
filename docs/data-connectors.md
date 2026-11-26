@@ -167,9 +167,9 @@ now are searched, and those nearest to now come first.
 A source of kind `github` reads an organization's issues, pull requests, discussions and
 repository file paths. It signs in as Daimon's [GitHub App](github.md#permissions) and reads
 the repositories the workspace connected in that organization, needing no credential. Without
-the App, give the credential `{"token": "..."}`, a fine-grained token for the organization
-with read access to contents, issues, pull requests, discussions and metadata, to
-administration (to list collaborators) and to organization members.
+the App, give the credential `{"token": "..."}`: a fine-grained token for the organization,
+from an account with write access to its repositories, with read access to contents, issues,
+pull requests, discussions, metadata (which lists collaborators) and organization members.
 
 ```json
 {"org": "your-org", "content": ["issues", "pulls", "discussions", "files"],

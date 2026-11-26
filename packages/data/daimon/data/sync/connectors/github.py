@@ -19,9 +19,9 @@ transferred record is removed.
 
 Auth: Daimon's GitHub App reads the repositories the workspace connected in `org`, with a token
 minted per run (`github_api.app_token`). A credential `{"token": "..."}` is the fallback: a
-fine-grained token with read access to the organization's repositories (contents, issues, pull
-requests, discussions, metadata), administration read to list collaborators, and organization
-members read.
+fine-grained token, from an account with write access to the repositories, with read access to
+their contents, issues, pull requests, discussions and metadata (which lists collaborators), and
+organization members read.
 Configuration (`sources.config`): `org`, `repos` (names to read; empty: all), `content`,
 `file_paths`, `branch` (default: each repository's own), `relist_hours`.
 """
@@ -194,7 +194,7 @@ class GitHubConnector(Connector):
                 api = Api(client, source)
                 repos = await self._repos(api, cfg)
                 if repos and await self._readers(api, repos[0]) is None:
-                    return False, "the token cannot list collaborators (administration read)"
+                    return False, "the token cannot list collaborators (it needs write access)"
         except (ValueError, Upstream, httpx.HTTPError) as e:
             return False, str(e)
         return True, f"{len(repos)} repositories"
