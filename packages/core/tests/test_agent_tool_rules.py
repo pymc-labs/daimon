@@ -1167,26 +1167,9 @@ async def test_a_stored_row_with_a_bad_name_is_skipped_and_logged_not_sent_to_ma
         )
     await db_session.flush()
     with capture_logs() as logs:
-        ruled = await store.daimon_rule_set(db_session, tenant_id=tenant_id, agent_id="ma-1")
-    assert ruled.tools == {"get_session"} and not ruled.needs_driver
+        ruled = await store.daimon_rule_tools(db_session, tenant_id=tenant_id, agent_id="ma-1")
+    assert ruled == {"get_session"}
     assert len([row for row in logs if row["event"] == "tool_safety.rule_name_skipped"]) == 3
-
-
-async def test_which_daimon_rules_only_the_driver_can_apply(db_session: AsyncSession) -> None:
-    tenant_id = await _tenant(db_session)
-
-    async def needs(agent_id: str) -> bool:
-        ruled = await store.daimon_rule_set(db_session, tenant_id=tenant_id, agent_id=agent_id)
-        assert ruled.tools
-        return ruled.needs_driver
-
-    await _set(db_session, tenant_id, "get_session", "deny", agent_id="wide")
-    await _set(db_session, tenant_id, "*", "deny", agent_id="wide")
-    assert not await needs("wide"), "the server enforces an agent-wide deny, specific or *"
-    await _set(db_session, tenant_id, "get_session", "ask", agent_id="asks")
-    assert await needs("asks")
-    await _set(db_session, tenant_id, "get_session", "deny", agent_id="chan", channel_id="home")
-    assert await needs("chan"), "the server does not know the channel"
 
 
 async def test_a_channel_rule_on_a_publish_tool_cards_everywhere_and_denies_in_its_channel(

@@ -122,6 +122,12 @@ async def move_this_thread(
             generation=pinned.generation if pinned is not None else 0,
             now=datetime.datetime.now(datetime.UTC),
         )
+    if handed is not None and handed.kind == "handoff":
+        # A copy answers from the summary it was handed; the history doesn't move.
+        return (
+            f"This conversation moves to {provider} from the next message, and "
+            f"{agent_name} continues from the summary it was handed, not the earlier messages."
+        )
     return (
         f"This conversation moves to {provider} from the next message "
         "and keeps its earlier messages."

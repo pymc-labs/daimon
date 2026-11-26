@@ -18,6 +18,8 @@ InlineReuseId = Literal["gemini.inline_reuse"]
 INLINE_REUSE_ID: Final[InlineReuseId] = "gemini.inline_reuse"
 #: The extension config that carries a thread's session binding.
 SESSION_NAMESPACE: Final = "gemini.session"
+WITHHOLD_BUILTINS: Final = "withhold_builtins"
+"""A `gemini.session` key: True runs the session without its agent's built-in tools."""
 
 #: Opt-in models, defined once: each is its own single attempt, never the Flash
 #: fallback chain, and is selectable only while the host holds a current price.

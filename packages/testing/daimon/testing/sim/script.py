@@ -20,6 +20,9 @@ class Tool:
     input: dict[str, JsonValue] = field(default_factory=dict[str, JsonValue])
     server: str | None = None
     result: str = "done"
+    # The fake calls `server` itself, from the MCP servers the request names, and
+    # reports what it answered instead of `result` (Gemini only).
+    live: bool = False
 
 
 @dataclass(frozen=True)

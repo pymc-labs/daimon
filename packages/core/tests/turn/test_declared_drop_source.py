@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from daimon.core.caller_resources import APP_REPO_CREDENTIAL_PREFIX, APP_SESSION_VAULT_PREFIX
 from daimon.core.channel_backend import AgentSettings
 from daimon.core.stores.domain import SourceRepresentation
 from daimon.core.turn.runtime_manifest import (
@@ -203,6 +204,31 @@ def test_a_credentialed_repository_is_lost_only_as_declared_repository_and_crede
         update={"declared_drops": tuple(d for d in target.declared_drops if d != "credentials")}
     )
     assert "credentials" in classify_source_obligations(source, only_repository, environment=None)
+
+
+@pytest.mark.parametrize(
+    "provider,model", [("openai", "gpt-6-luna"), ("gemini", "gemini-3.8-flash")]
+)
+def test_github_app_repositories_lose_only_the_repository_off_claude(captured, provider, model):
+    """The App vault's shell tokens go with the repository; `github` MCP is relayed."""
+    source = captured.model_copy(
+        update={
+            "repository_sources": (
+                WorkspaceSource(
+                    kind="repository",
+                    target_path="/workspace/acme/app",
+                    repository_url="https://github.com/acme/app",
+                    credential_ref=f"{APP_REPO_CREDENTIAL_PREFIX}t:a:1:1:1",
+                ),
+            ),
+            "resource_requirements": (
+                ResourceBinding(id=f"{APP_SESSION_VAULT_PREFIX}t:a", kind="native"),
+            ),
+        }
+    )
+    target = preview_source_drops(source, ModelRef(provider=provider, id=model))
+    assert "repository" in target.declared_drops
+    assert "credentials" not in target.declared_drops
 
 
 @pytest.mark.parametrize("attachment", ["foreign_file", "opaque_file"])
@@ -915,3 +941,30 @@ def test_the_agents_own_line_names_a_lost_skill_not_its_id(captured):
     previewed = preview_source_drops(source, model)
     assert previewed.declared_drops == ("skill:skill_01a",), "the loss stays keyed by id"
     assert previewed.system.endswith("\n\nUnavailable capabilities: skill:pdf-tools.")
+
+
+@pytest.mark.parametrize("carried", [True, False])
+def test_the_keys_file_is_a_loss_only_where_the_representation_leaves_it(captured, carried):
+    ref = f"agent-env:{captured.tenant_id}:{captured.agent_id}:API_KEY"
+    key = ResourceBinding(id=ref, kind="credential", target_path=".env", credential_ref=ref)
+    base = captured.effective_spec
+    target = AgentSpec(
+        name=base.name,
+        description=base.description,
+        model=ModelRef(provider="openai", id="gpt-6-luna"),
+        system=base.system,
+        tools=(),
+        skills=(),
+        mcp_servers=(),
+        metadata=base.metadata,
+    )
+    source = captured.model_copy(update={"resource_requirements": (key,)})
+    represented = SourceRepresentation(
+        source_pin=source_preservation_pin(source),
+        target=target,
+        credential_refs=(ref,) if carried else (),
+        provider_execution=True,
+    )
+    source = source.model_copy(update={"representations": (represented,)})
+    missing = classify_source_obligations(source, target, environment=None)
+    assert {"files", "credentials"} & missing == (set() if carried else {"files", "credentials"})

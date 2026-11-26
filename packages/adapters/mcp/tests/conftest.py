@@ -16,6 +16,7 @@ from collections.abc import AsyncIterator, Iterator
 import pytest
 import pytest_asyncio
 from daimon.testing.db import (  # noqa: F401
+    add_background_drain,
     db_clean,
     db_committing_engine,
     db_committing_pool,
@@ -32,6 +33,10 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from .harness import stop_confirmation_workers
+
+# A worker reads through the test's connection; stopping it only in the autouse
+# fixture below, which tears down after the database, races the rollback.
+add_background_drain(stop_confirmation_workers)
 
 
 @pytest.fixture(autouse=True)

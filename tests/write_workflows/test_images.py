@@ -102,13 +102,14 @@ def test_retired_imagen_refused_without_key_or_request(workflow):
 def test_output_is_unique_and_rejects_symlink_directory(load_workflow, monkeypatch, tmp_path):
     runtime = load_workflow("image-workflow", "workflow_io")
     output = tmp_path / "outputs"
-    monkeypatch.setattr(runtime, "OUTPUT_DIR", output)
+    # Collected from the workspace when Claude's outputs mount is absent.
+    monkeypatch.setattr(runtime, "OUTPUT_DIRS", (tmp_path / "absent" / "outputs", output))
     first, second = runtime.save_png(png()), runtime.save_png(png())
     assert first != second
     assert output.joinpath(first.split("/")[-1]).read_bytes() == png()
     link = tmp_path / "link"
     link.symlink_to(output, target_is_directory=True)
-    monkeypatch.setattr(runtime, "OUTPUT_DIR", link)
+    monkeypatch.setattr(runtime, "OUTPUT_DIRS", (link,))
     with pytest.raises(runtime.Failure, match="symlink"):
         runtime.save_png(png())
 
@@ -116,7 +117,7 @@ def test_output_is_unique_and_rejects_symlink_directory(load_workflow, monkeypat
 def test_corrupt_image_never_creates_output(load_workflow, monkeypatch, tmp_path):
     runtime = load_workflow("image-workflow", "workflow_io")
     output = tmp_path / "outputs"
-    monkeypatch.setattr(runtime, "OUTPUT_DIR", output)
+    monkeypatch.setattr(runtime, "OUTPUT_DIRS", (output,))
     with pytest.raises(runtime.Failure, match="invalid"):
         runtime.save_png(b"corrupt image")
     assert not output.exists()
@@ -134,11 +135,26 @@ def test_reference_symlinks_and_oversized_inputs_refused(workflow, tmp_path):
         workflow.reference(str(path))
 
 
+def test_skill_paths_agree_with_the_guidance(load_workflow):
+    from pathlib import Path
+
+    from daimon.core.sandbox_paths import CLAUDE, WORKSPACE
+
+    runtime = load_workflow("image-workflow", "workflow_io")
+    keys, outputs = runtime.KEY_FILES, runtime.OUTPUT_DIRS
+    assert keys == (Path(CLAUDE.keys), Path(WORKSPACE.keys))
+    assert outputs == (Path(CLAUDE.outputs), Path(WORKSPACE.outputs))
+    skill = Path(runtime.__file__).parents[2] / "file-handling" / "SKILL.md"
+    text = skill.read_text()
+    assert f"`{CLAUDE.outputs}/`" in text and f"`{WORKSPACE.outputs}/`" in text
+
+
 def test_named_mounted_key_is_literal_not_executed(load_workflow, monkeypatch, tmp_path):
     runtime = load_workflow("image-workflow", "workflow_io")
     path = tmp_path / "synthetic-mount.txt"
     path.write_text("OTHER_KEY=ignore\nOPENAI_API_KEY='literal$(touch never)`cmd`#value'\n")
-    monkeypatch.setattr(runtime, "KEY_FILE", path)
+    # Found where OpenAI and Gemini put it when Claude's mount is absent.
+    monkeypatch.setattr(runtime, "KEY_FILES", (tmp_path / "absent", path))
     assert runtime.key("OPENAI_API_KEY") == "literal$(touch never)`cmd`#value"
     with pytest.raises(runtime.Failure, match="Missing GEMINI_API_KEY"):
         runtime.key("GEMINI_API_KEY")

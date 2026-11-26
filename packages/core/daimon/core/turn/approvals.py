@@ -42,7 +42,6 @@ from daimon.core.confirmation import (
 )
 from daimon.core.defaults.metadata import is_private_routine_stamp
 from daimon.core.stores import agent_tool_rules, server_skills
-from daimon.core.stores.agent_tool_rules import DaimonRuleSet
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
     WILDCARD_TOOL,
@@ -174,13 +173,13 @@ def agent_rule_lookup(
     return _lookup
 
 
-async def daimon_rule_set_for(
+async def daimon_rule_tools_for(
     factory: async_sessionmaker[AsyncSession],
     policy: ToolSafetyPolicy,
     *,
     tenant_id: uuid.UUID | None,
     agent_id: str,
-) -> DaimonRuleSet:
+) -> frozenset[str]:
     """The daimon tools this agent has an ask or deny rule on, for a session's tools.
 
     Empty, with no read, while rules are not applied (`tool_safety.enabled` and
@@ -192,24 +191,11 @@ async def daimon_rule_set_for(
         or not getattr(policy, "enabled", False)
         or not getattr(policy, "agent_rules", False)
     ):
-        return DaimonRuleSet(frozenset(), False)
+        return frozenset()
     async with factory() as session:
-        return await agent_tool_rules.daimon_rule_set(
+        return await agent_tool_rules.daimon_rule_tools(
             session, tenant_id=tenant_id, agent_id=agent_id
         )
-
-
-async def daimon_rule_tools_for(
-    factory: async_sessionmaker[AsyncSession],
-    policy: ToolSafetyPolicy,
-    *,
-    tenant_id: uuid.UUID | None,
-    agent_id: str,
-) -> frozenset[str]:
-    """`daimon_rule_set_for(...).tools`."""
-    return (
-        await daimon_rule_set_for(factory, policy, tenant_id=tenant_id, agent_id=agent_id)
-    ).tools
 
 
 async def rule_for(

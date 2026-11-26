@@ -24,12 +24,14 @@ from daimon.adapters.mcp.auth.verifier import CHAT_EXECUTION_CLAIM, TOKEN_JTI_CL
 from daimon.adapters.mcp.connector_relay import (
     CONNECTOR_ROUTE,
     FAILED_TEXT,
+    GITHUB_TEXT,
     RECONNECT_TEXT,
     REFUSED_TEXT,
     ConnectorRelay,
     RelayTurn,
     relay_token,
     relay_turn,
+    route_github,
 )
 from daimon.core import host_calls
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
@@ -45,6 +47,7 @@ from daimon.core.connector_relay import (
 from daimon.core.github_credentials import encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_hold import HOLD_CLAIM
+from daimon.core.mcp_server_url import GITHUB_COPILOT_MCP_URL, github_router_url
 from daimon.core.mcp_tool_call import (
     INTERACTIVE_LIMITS,
     McpCallError,
@@ -536,6 +539,29 @@ async def test_a_missing_token_asks_the_person_to_reconnect(rig: Rig) -> None:
     assert body["error"]["message"] == RECONNECT_TEXT, f"reconnect: {body}"
 
 
+async def test_github_goes_through_the_router_and_never_asks_to_reconnect(rig: Rig) -> None:
+    """With the App, `github` calls the router with the turn's own bearer (`TurnRouters`);
+    no repository access names GitHub, since a Reconnect cannot grant one."""
+    github = Connector("github", GITHUB_COPILOT_MCP_URL, "auto")
+    rig.connectors = route_github(
+        {"github": github, _KEY: rig.connectors[_KEY]}, _PUBLIC, carded=True
+    )
+    assert rig.connectors["github"].url == github_router_url(_PUBLIC)
+    assert rig.connectors[_KEY].url == _UP, "other connectors keep their own server"
+    rig.token[0] = None
+    body = (await rig.send("tools/list", key="github")).json()
+    assert body["error"]["message"] == GITHUB_TEXT, f"names GitHub: {body}"
+    body = (await rig.send("tools/list")).json()
+    assert body["error"]["message"] == RECONNECT_TEXT, f"others still reconnect: {body}"
+
+
+def test_a_self_hosted_harness_keeps_its_own_github_server() -> None:
+    """An uncarded turn has no router bearer, so the App never reroutes its `github`."""
+    github = Connector("github", GITHUB_COPILOT_MCP_URL, "auto")
+    routed = route_github({"github": github}, _PUBLIC, carded=False)
+    assert routed["github"].url == GITHUB_COPILOT_MCP_URL, "the harness keeps its own server"
+
+
 async def test_a_failing_connector_answers_a_plain_failure(rig: Rig) -> None:
     """A redirecting connector is never followed; the model gets the plain failure."""
     rig.upstream.handle = lambda _request: httpx.Response(302, headers={"location": _PUBLIC})  # type: ignore[method-assign]
@@ -585,9 +611,8 @@ async def test_a_self_hosted_harness_ask_is_refused_unattended(
 
 async def test_a_self_hosted_record_serves_only_its_daimon_signed_connectors(rig: Rig) -> None:
     """A record's relay connectors skip the operator's own credentials, fit the credential
-    kind and the record's own identity; Daimon refreshes its sign-ins."""
+    kind and the record's own identity."""
     from daimon.adapters.mcp.connector_relay import record_connectors
-    from daimon.core.mcp_oauth.connector_tokens import agent_refresh_owner
     from daimon.core.mux_backend import resource_scope
     from daimon.core.stores.domain import TurnOriginRow
     from daimon.core.stores.selfhosted_resources import SelfHostedAgents
@@ -622,22 +647,15 @@ async def test_a_self_hosted_record_serves_only_its_daimon_signed_connectors(rig
     assert await record_connectors(rig.sessions, carded, origin) == {}, "a card turn is not its own"
     other = replace(turn, agent_id=rig.agent_id)
     assert await record_connectors(rig.sessions, other, origin) == {}, "another identity gets none"
-    async with rig.sessions() as session:
-        owner = await agent_refresh_owner(
-            session, tenant_id=rig.tenant_id, agent_id=own, selection_enabled=False
-        )
-        legacy = await agent_refresh_owner(
-            session, tenant_id=rig.tenant_id, agent_id=rig.agent_id, selection_enabled=False
-        )
-    assert (owner, legacy) == ("daimon", "ma"), "a record has no vault; MA keeps its own"
 
 
-async def test_the_relay_stays_closed_until_turned_on(rig: Rig) -> None:
-    """Off by default and when turned off: the relay answers nothing."""
-    for features in ({}, {"mcp_connector_relay": "off"}):
-        rig.features = features
-        assert (await rig.send("tools/list")).status_code == 404, f"closed with {features}"
+async def test_the_relay_stays_closed_when_turned_off(rig: Rig) -> None:
+    """On by default; turned off, the relay answers nothing."""
+    rig.features = {"mcp_connector_relay": "off"}
+    assert (await rig.send("tools/list")).status_code == 404, "closed when turned off"
     assert rig.upstream.lists == 0, "and reaches no connector"
+    rig.features = {}
+    assert (await rig.send("tools/list")).status_code != 404, "open by default"
 
 
 # --- tokens ------------------------------------------------------------------------

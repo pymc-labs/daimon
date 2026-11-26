@@ -4,14 +4,15 @@ Mirrors `mcp_vault.add_external_mcp_credential`'s replace-by-URL shape for
 the `mcp_oauth` credential type. With a refresh token and the token endpoint
 Anthropic renews the access token itself; without one MA uses the access
 token until it expires and then reports `mcp_authentication_failed_error`,
-which the degraded-turn path names so the person can reconnect.
+which the degraded-turn path names so the person can reconnect. The per-turn
+grant mirror (`agent_mcp_credentials`) writes without one: Daimon refreshes.
 """
 
 from __future__ import annotations
 
 import contextlib
 import datetime as dt
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 
 from anthropic import AsyncAnthropic, ConflictError, NotFoundError
 from anthropic.types.beta.vaults.beta_managed_agents_environment_variable_auth_response import (
@@ -99,6 +100,7 @@ async def put_mcp_oauth_credential(
     now: dt.datetime,
     before_write: Callable[[], Awaitable[None]] | None = None,
     scope: Scope | None = None,
+    metadata: Mapping[str, str] | None = None,
 ) -> str:
     """Replace whatever credential the vault holds for the URL; return the new id.
 
@@ -153,7 +155,11 @@ async def put_mcp_oauth_credential(
             created = await create_credential(
                 anthropic,
                 vault_id,
-                {"auth": auth, "display_name": f"oauth:{mcp_server_url}"[:255]},
+                {
+                    "auth": auth,
+                    "display_name": f"oauth:{mcp_server_url}"[:255],
+                    **({"metadata": dict(metadata)} if metadata else {}),
+                },
                 scope=scope,
             )
         except ConflictError:

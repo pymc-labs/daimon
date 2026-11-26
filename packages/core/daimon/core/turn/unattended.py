@@ -137,6 +137,13 @@ async def unattended_provider_origin(
         yield origin
 
 
+def without_builtins(spec: AgentSpec) -> AgentSpec:
+    """`spec` with no built-in tool, as a routine fire without its opt-in runs."""
+    if spec.tools is None:
+        return spec
+    return spec.model_copy(update={"tools": tuple(t for t in spec.tools if t.kind != "builtin")})
+
+
 def require_native_unattended_capabilities(
     spec: AgentSpec | None, *, profile_id: str, gated: bool = False, sandbox: bool = False
 ) -> None:
