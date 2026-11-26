@@ -114,7 +114,11 @@ from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
 from daimon.core.permissions import any_agent_rules, any_own_readers
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.promo_settlement import settle_promo_credit
-from daimon.core.provider_routine import admit_provider_routine, run_provider_routine
+from daimon.core.provider_routine import (
+    SHELL_NEEDS_SANDBOX,
+    admit_provider_routine,
+    run_provider_routine,
+)
 from daimon.core.purge import sweep_privacy_session_deletes
 from daimon.core.routine_delivery import (
     OWNER_LACKS_ROLE_ERROR,
@@ -582,9 +586,10 @@ async def _build_fire(
                     sm,
                     row,
                     error.reason,
-                    # An OpenAI fire without the sandbox opt-in says who can help.
+                    # An OpenAI fire without the sandbox opt-in says who can help; any
+                    # other refusal records only its reason, never an internal detail.
                     error=str(error)
-                    if isinstance(error, AdmissionDenied) and error.detail
+                    if isinstance(error, AdmissionDenied) and error.detail == SHELL_NEEDS_SANDBOX
                     else None,
                     notify_owner=notify_owner,
                     expected_destination=("dm", owner_user_id),
