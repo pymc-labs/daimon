@@ -450,11 +450,11 @@ def test_a_call_through_an_aliased_op_is_classified(tmp_path: Path) -> None:
 
 def test_schema_marker_is_required_from_the_first_new_number_only(tmp_path: Path) -> None:
     source = VALID_SAFE
-    old, new = tmp_path / "0221_old.py", tmp_path / "0222_new.py"
+    old, new = tmp_path / "0232_old.py", tmp_path / "0233_new.py"
     old.write_text(source, encoding="utf-8")
     new.write_text(source, encoding="utf-8")
 
-    assert lint_migrations.lint_file(old) == [], "files up to 0221 need no schema marker"
+    assert lint_migrations.lint_file(old) == [], "files up to 0232 need no schema marker"
     assert [f.rule for f in lint_migrations.lint_file(new)] == ["migrations/missing-schema"]
     placeholder = _expand("    pass\n", "TODO-declare (expand|contract)")
     new.write_text(placeholder, encoding="utf-8")
