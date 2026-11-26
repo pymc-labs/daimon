@@ -140,7 +140,7 @@ def register_data_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ctx: Context, pending_id: str
     ) -> dict[str, Any]:
         """Whether the sign-in started by connect_my_data (pending_id) is finished. Where
-        the link opened a page on the web app, it finishes there and shows in list_my_data."""
+        the link opened a page, it finishes there and shows in list_my_data."""
         auth = await _auth(ctx)
         own(auth)
         actor = await person(runtime, auth)
@@ -158,7 +158,7 @@ def register_data_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool
     async def dismiss_data_notices(ctx: Context) -> dict[str, Literal[True]]:  # pyright: ignore[reportUnusedFunction]
         """Mark your notices about data-source links an admin changed as read. They show in
-        list_my_data until then, and on your web profile once."""
+        list_my_data until then."""
         auth = await _auth(ctx)
         own(auth)
         actor = await person(runtime, auth)

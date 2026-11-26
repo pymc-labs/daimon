@@ -285,8 +285,8 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
             for name in (
                 "add_server_skill",
                 "add_skill",
-                "approve_reach",
                 "approve_data_rule_set",
+                "approve_reach",
                 "approve_server_skill_update",
                 "change_data_access",
                 "change_data_links",

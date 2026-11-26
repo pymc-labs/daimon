@@ -123,8 +123,12 @@ class Rig:
             mp.setattr(module, name, self.record(name))
 
     def record(self, name: str) -> Callable[..., Any]:
-        async def call(*args: Any, **kwargs: Any) -> None:
+        async def call(*args: Any, **kwargs: Any) -> redaction.SetInfo | None:
             self.calls.append((name, [*args, *kwargs.values()]))
+            if name == "approve":
+                return redaction.SetInfo(
+                    "clients", None, None, None, "abc", "abc", False, True, None, None
+                )
 
         return call
 

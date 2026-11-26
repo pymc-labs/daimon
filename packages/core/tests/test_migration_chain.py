@@ -500,6 +500,14 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             )
         ):
             return False
+        # Added by the data memory migration (0244), the head.
+        if (
+            expected != HEAD
+            and kind == "column"
+            and name == "data_refs"
+            and getattr(getattr(obj, "table", None), "name", None) == "repo_memory"
+        ):
+            return False
         # Added by the invite files migration (0177).
         if (
             expected != HEAD

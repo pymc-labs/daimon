@@ -87,8 +87,8 @@ def register_data_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> dict[str, Any]:
         """Add a data source (create: kind, name, settings by the kind's fields) or pause,
         resume, retire, publish, unpublish or sync one (source_id). Runs on the asker's
-        Approve card. A source whose kind needs a credential is added in the web app, never
-        here. Admin-only."""
+        Approve card. A source whose kind needs a credential can't be added here, so a
+        credential never passes through chat. Admin-only."""
         auth = await _auth(ctx)
         actor = await manager(runtime, auth)
         await require_card(
