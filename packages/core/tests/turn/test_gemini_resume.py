@@ -9,6 +9,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from typing import cast
 
 import pytest
 from daimon.core.mux_backend import TurnBackendRequest
@@ -20,6 +21,7 @@ from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
+from mux.contracts.events import Event
 from mux.drivers.gemini.transport import Object, OwnedStream
 from mux.errors import ProviderError
 from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
@@ -188,7 +190,10 @@ def script(harness: Harness, streams: list[str | ProviderError | Refused]) -> li
     return opened
 
 
-async def turn(harness: Harness, *, deadline_s: float = 30) -> tuple[TurnState, RecordingLifecycle]:
+async def turn(
+    harness: Harness, *, deadline_s: float = 30, stream_read_timeout_s: float | None = 0.1
+) -> tuple[TurnState, RecordingLifecycle]:
+    """`stream_read_timeout_s=None` keeps the backend's own (15 min for Gemini)."""
     revision = ConfigRevision.create(
         CHANNEL,
         1,
@@ -214,9 +219,9 @@ async def turn(harness: Harness, *, deadline_s: float = 30) -> tuple[TurnState, 
                 session_id=harness.session.id,
                 session=harness.session,
                 config=revision,
-                read_timeout_s=0.1,
+                read_timeout_s=stream_read_timeout_s or 120.0,
             ),
-            stream_read_timeout_s=0.1,
+            stream_read_timeout_s=stream_read_timeout_s,
             deadline=datetime.now(UTC) + timedelta(seconds=deadline_s),
         )
     return state, lifecycle
@@ -471,3 +476,49 @@ async def test_a_silent_thinking_reply_keeps_its_stream_and_ends_on_a_status_che
     assert timeouts == [gemini_turn.STREAM_READ_TIMEOUT_S] == [900.0]
     assert len(opened) == 1, "the silent stream was never closed and reopened"
     assert harness.transport.cancelled == []
+
+
+@pytest.mark.asyncio
+async def test_a_silent_stream_still_checks_mid_run_usage_against_the_spend_limit(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Usage read by a status check reaches the spend limit while the stream stays open.
+
+    Gemini's stream never reports a running interaction's usage, and the stream is no
+    longer reopened every two minutes, so the idle status check replays stored
+    history (a new usage reading) into the open stream.
+    """
+    monkeypatch.setattr(GeminiTurnIO, "idle_check_s", 0.05)
+    opened = script(harness, ["stall"])
+    checked: list[str] = []
+    enforce = GeminiTurnIO.enforce_spend_limit
+
+    async def recorded(self: GeminiTurnIO, event: Event) -> None:
+        checked.append(event.type)
+        await enforce(self, event)
+
+    monkeypatch.setattr(GeminiTurnIO, "enforce_spend_limit", recorded)
+    before_end: list[int] = []
+
+    async def spend_then_finish() -> None:
+        await asyncio.sleep(0.2)
+        seen = checked.count("usage.observed")
+        running = interaction("in_progress")
+        running["usage"] = {
+            **cast("dict[str, JsonValue]", running["usage"]),
+            "total_output_tokens": 900,
+        }
+        harness.transport.saved["host"] = running
+        for _ in range(100):
+            await asyncio.sleep(0.05)
+            if checked.count("usage.observed") > seen:
+                break
+        before_end.append(checked.count("usage.observed") - seen)
+        harness.transport.saved["host"] = interaction("completed")
+
+    finishing = asyncio.create_task(spend_then_finish())
+    state, lifecycle = await turn(harness, stream_read_timeout_s=None)
+    await finishing
+    answered(state, lifecycle)
+    assert before_end == [1], "the mid-run usage reached the spend limit before the end"
+    assert len(opened) == 1, "the stream was never closed and reopened"

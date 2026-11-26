@@ -31,7 +31,10 @@ from mux.errors import ProviderError
 
 API_REVISION = "2026-05-20"
 STREAM_TIMEOUT = httpx.Timeout(60.0, read=1200.0)
-"""An event stream's HTTP timeouts: the clients' 60 s, but 20 min between bytes.
+"""An event stream's HTTP timeouts: 60 s to connect, 20 min between bytes.
+
+The SDK builds its interactions client with no timeout, so without this a stream had
+no HTTP read bound at all. Other interaction calls are unchanged.
 
 Google: "Set HTTP read timeouts to 15 to 20 minutes per stream"
 (https://aistudio.google.com/docs/long-decode). The turn's own idle clock is shorter

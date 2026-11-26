@@ -762,6 +762,11 @@ class GeminiTurnIO:
                 latest[observation.id] = observation
         return tuple(latest.values())
 
+    def idle_running(self) -> None:
+        """The driver's idle check read `running`: open streams catch up (see `wake`)."""
+        for stream in self._streams:
+            stream.wake()
+
     def forget_stream(self, stream: _LazyStream) -> None:
         if stream in self._streams:
             self._streams.remove(stream)
@@ -924,6 +929,10 @@ def _transient_stream_error(error: ProviderError) -> bool:
 NO_TOOLS_REPLY = "No tools are available here; answer directly."
 
 
+async def _next_event(source: AsyncIterator[Event]) -> Event:
+    return await source.__anext__()
+
+
 class _LazyStream(AsyncIterator[TurnEvent]):
     def __init__(self, io: GeminiTurnIO, timeout_s: float) -> None:
         self.io, self.timeout_s = io, timeout_s
@@ -935,9 +944,21 @@ class _LazyStream(AsyncIterator[TurnEvent]):
         self._root: str | None = None
         self._ended = False
         self._reader: asyncio.Task[object] | None = None
+        self._wake = asyncio.Event()
+        self._pull: asyncio.Task[Event] | None = None
 
     def ready(self) -> None:
         self._gate.set()
+
+    def wake(self) -> None:
+        """Catch up from stored history without closing the stream.
+
+        Gemini's stream only says when an interaction needs action or ends, so the
+        steps of a long silent run (tool calls, usage) reach the turn through stored
+        history. A status read stores them; this replays them into the stream so the
+        card, the transcript and the spend limit keep up while the stream stays open.
+        """
+        self._wake.set()
 
     def __aiter__(self) -> _LazyStream:
         return self
@@ -965,8 +986,22 @@ class _LazyStream(AsyncIterator[TurnEvent]):
                             raise StopAsyncIteration
                         # Opened above, or reopened by `_no_tools` on a continuation.
                         assert self._source is not None
+                        if self._pull is None:
+                            self._pull = asyncio.ensure_future(_next_event(self._source))
+                        waker = asyncio.ensure_future(self._wake.wait())
                         try:
-                            event = await self._source.__anext__()
+                            await asyncio.wait(
+                                {self._pull, waker}, return_when=asyncio.FIRST_COMPLETED
+                            )
+                        finally:
+                            waker.cancel()
+                        if not self._pull.done():
+                            self._wake.clear()
+                            await self._catch_up()
+                            continue
+                        pull, self._pull = self._pull, None
+                        try:
+                            event = pull.result()
                         except ProviderError as error:
                             raise _StreamFailure("read", error) from error
                         except StopAsyncIteration:
@@ -1054,21 +1089,19 @@ class _LazyStream(AsyncIterator[TurnEvent]):
             raise _StreamFailure("open", error) from error
         self.io.stream_opened(self._root)
         if self._closed:
-            source, self._source = self._source, None
-            close = getattr(source, "aclose", None)
-            if close is not None:
-                await close()
+            await self._drop_source()
             raise StopAsyncIteration
+        await self._catch_up()
+
+    async def _catch_up(self) -> None:
+        """Buffer this root's stored events; `_seen` drops the ones already sent."""
         answered = self.io.no_tools_answers
         frames = await self.io.replay_turn_events(reconcile=False)
         if self.io.no_tools_answers != answered:
             # The replay answered a pending sentinel call: this stream belongs to
             # the interaction that asked. Follow the continuation instead of
             # waiting out the read timeout on a stream that will never speak.
-            source, self._source = self._source, None
-            close = getattr(source, "aclose", None)
-            if close is not None:
-                await close()
+            await self._drop_source()
             self.io.status_since_open = None  # read before the continuation existed
             try:
                 self._source = await self.io.backend.events.open_stream(
@@ -1095,10 +1128,7 @@ class _LazyStream(AsyncIterator[TurnEvent]):
             # The answer continues as a new interaction of the same root turn;
             # a status read before it says nothing about that interaction.
             self.io.status_since_open = None
-            source, self._source = self._source, None
-            close = getattr(source, "aclose", None)
-            if close is not None:
-                await close()
+            await self._drop_source()
             await self._open()
         return True
 
@@ -1112,9 +1142,19 @@ class _LazyStream(AsyncIterator[TurnEvent]):
             reader.cancel()
             with suppress(asyncio.CancelledError, StopAsyncIteration):
                 await reader
+        await self._drop_source()
+        self.io.forget_stream(self)
+
+    async def _drop_source(self) -> None:
+        pull, self._pull = self._pull, None
+        if pull is not None and not pull.done():
+            pull.cancel()
+        if pull is not None:
+            await asyncio.wait({pull})  # never raises the read's own error
+            if not pull.cancelled():
+                pull.exception()  # retrieved: a closed stream's read error is moot
         source, self._source = self._source, None
         if source is not None:
             close = getattr(source, "aclose", None)
             if close is not None:
                 await close()
-        self.io.forget_stream(self)

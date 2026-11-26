@@ -2089,6 +2089,11 @@ async def _consume_with_reconnect(
                 if silence is not None:
                     silence.status = status
                 if status in {"running", "rescheduling"}:
+                    # A provider whose stream omits a run's steps replays them
+                    # from stored history into the same open stream.
+                    idle_running = getattr(io, "idle_running", None)
+                    if callable(idle_running):
+                        idle_running()
                     continue
                 log.info("turn.idle_check_ended", session_id=session_id, idle_check_s=idle_check_s)
                 raise _EventlessCycle(reason="read_timeout")

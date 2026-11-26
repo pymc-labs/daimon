@@ -742,4 +742,6 @@ async def test_an_event_stream_waits_twenty_minutes_between_bytes_a_plain_read_d
     assert timeouts["stream"]["read"] == 1200.0
     assert timeouts["stream"]["connect"] == 60.0
     # The SDK sends no timeout of its own, so without this a stream had no read bound.
-    assert timeouts["get"]["read"] != 1200.0, "only the stream is changed"
+    assert timeouts["get"] == {"connect": None, "read": None, "write": None, "pool": None}, (
+        "a plain read is unchanged"
+    )
