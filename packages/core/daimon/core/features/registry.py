@@ -583,6 +583,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         tiers=("agent",),
         binds="turn",
         doc="The name people see for an agent: up to 40 plain characters, never another agent's.",
+        page="features.md#display-name",
         max_length=40,
     ),
     FeatureSpec(
@@ -596,6 +597,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         binds="turn",
         doc="Sentence case up to 50 characters, or Title Case up to 100, for a thread opened "
         "to answer a mention.",
+        page="features.md#thread-title-style",
         platforms=_DISCORD,
         authority=_ADMIN,
     ),
@@ -609,6 +611,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         tiers=_AGENT_CHANNELS,
         binds="turn",
         doc="How long an idle thread opened to answer a mention stays open.",
+        page="features.md#thread-archive-time",
         platforms=_DISCORD,
         authority=_ADMIN,
     ),
@@ -617,6 +620,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         "Status reactions",
         "⏳ while the agent works, then ✅ first however it ended, and 📨 instead of a notice on a "
         "queued message. Off shows 👀, and ✅ only with Completion pings.",
+        page="features.md#status-reactions",
         tiers=_AGENT_CHANNELS,
         platforms=_DISCORD,
         authority=_ADMIN,
@@ -625,6 +629,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         "protected_notice_reaction",
         "Lock reaction",
         "A 🔒 on a mention the agent may not answer, besides the direct message saying why.",
+        page="features.md#lock-reaction",
         tiers=_AGENT_CHANNELS,
         default="on",
         platforms=_DISCORD,
@@ -635,6 +640,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         "Text before tool calls",
         "Text written before a tool call is posted as its own message. Off keeps it on the "
         "working card.",
+        page="features.md#text-before-tool-calls",
         default="on",
         platforms=_DISCORD,
     ),
@@ -642,12 +648,14 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         "card_timer",
         "Working card timer",
         "The card shows Working or Thinking with the time, and the model in its footer.",
+        page="features.md#working-card-timer",
         platforms=_DISCORD,
     ),
     _shown(
         "answer_bots",
         "Answer bots",
         "Answer a bot that mentions the agent, under people's access rules; never itself.",
+        page="features.md#answer-bots",
         tiers=("deployment", "workspace", "agent"),
         platforms=_DISCORD,
         authority=_ADMIN,
@@ -691,6 +699,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         "routine_result_header",
         "Routine result header",
         'Off drops the "Result from" line above a routine\'s result.',
+        page="routines.md#delivery",
         tiers=("deployment", "workspace", "agent", "channel", "routine"),
         default="on",
     ),
@@ -931,6 +940,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment",),
         binds="turn",
         doc="Sends the keys file to OpenAI and Gemini.",
+        page="providers.md#what-daimon-adds-on-openai-and-gemini",
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,
     ),
@@ -982,7 +992,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         doc=(
             "On gives an agent's or one routine's runs its built-in tools, for the agent and "
             "environment it was set with. A routine's value beats its agent's; Built-in tools "
-            "in routines set to Off still wins. Only a server admin can change it."
+            "in routines set to Off still wins. Only a server admin sets it."
         ),
         platforms=EVERY_PLATFORM,
         authority=_SERVER_ADMIN,
@@ -1005,7 +1015,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
             "Ask shows a card with the destination and duration before a watch is made "
             "or resumed. Skip makes it without the card, in the same thread for the "
             "default duration. Editing a watch, long jobs and key rotation keep asking. "
-            "Only a server admin can change it."
+            "Only a server admin sets it."
         ),
         platforms=EVERY_PLATFORM,
         authority=_SERVER_ADMIN,
@@ -1027,6 +1037,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
             "Ask shows a card to start or extend a cloud computer. Skip: no card, default time "
             "only; OpenAI and Gemini still ask. Only a server admin sets it."
         ),
+        page="compute.md#how-sessions-work",
         platforms=EVERY_PLATFORM,
         authority=_SERVER_ADMIN,
         # As `watch_approval`: Ask is the strict default, so the nearer tier decides.
@@ -1043,9 +1054,10 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         binds="turn",
         doc=(
             "After an unwatched command ends, the agent may run the next, up to a set number "
-            "in a row; then it waits for the owner to run a command or write a file (not a "
-            "message). Off: it only reports. Only a server admin sets it."
+            "in a row, then waits for the owner's next command or file, not a message. "
+            "Off: it only reports. Only a server admin sets it."
         ),
+        page="compute.md#how-sessions-work",
         platforms=EVERY_PLATFORM,
         depends_on=("compute",),
         authority=_SERVER_ADMIN,
@@ -1066,6 +1078,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
             "Agent chat may start cloud computers without a card and use them; it lists and "
             "stops all the person's. So may their keys driving it. Only a server admin sets it."
         ),
+        page="compute.md#use-it-from-agent-chat",
         platforms=EVERY_PLATFORM,
         depends_on=("compute",),
         authority=_SERVER_ADMIN,
@@ -1136,6 +1149,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         # Read when GitHub's repo list for the org is refreshed, at most an hour apart.
         binds="provision",
         doc=("Follows the whole org."),
+        page="features.md#follow-the-github-org",
         platforms=EVERY_PLATFORM,
         authority=_ADMIN_NOT_OWNER,
         connect_only=True,
@@ -1262,6 +1276,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
             "admin, its owner or its setter. They reveal it once, within a day. A server admin "
             "turns it on."
         ),
+        page="features.md#secret-sharing",
         platforms=_DISCORD,
         authority=_SERVER_ADMIN,
     ),
@@ -1277,6 +1292,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         doc=(
             "Work for a channel Daimon cannot reach waits, without failing, and runs once it can."
         ),
+        page="features.md#wait-for-bot-access",
         platforms=_DISCORD,
         authority=_SERVER_ADMIN,
     ),
@@ -1559,7 +1575,7 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         doc=(
             "Ask before an agent writes to an outside service in a chat reply. Allow writes "
             "covers chat replies only, not routines or watches. A coordinator's value decides "
-            "its callees' writes. Only a chat admin or the operator can change it."
+            "its callees' writes. Only a chat admin or the operator sets it."
         ),
         authority=Authority(native=True),
         combine_override="most_specific",

@@ -851,6 +851,7 @@ async def _build_fire(
                 platform=platform,
                 direct_post=direct_post,
                 web=await routine_links(sm, settings, row, platform),
+                knows=await routine_knows(sm, settings, row, platform),
                 held=hold is not None,
             )
             + "\n"
