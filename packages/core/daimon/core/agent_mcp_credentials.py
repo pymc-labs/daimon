@@ -421,8 +421,8 @@ async def sync_agent_mcp_credentials(
     *contents* are read at each turn's MCP init — so writing into the vault the
     session already mounts does reach it on the next turn.
 
-    Cheap for the common case: the DB read gates every MA call, so an agent with
-    no external MCP servers pays one indexed query and nothing else.
+    Runs even when the agent holds nothing, so a copy whose grant or token was
+    removed is deleted under the vault lock rather than kept until it expires.
 
     ``vault_ids`` remembers the vault ``ensure_agent_mcp_vault`` returned, so
     later turns skip its walk over every vault in the workspace. A cached
@@ -443,12 +443,6 @@ async def sync_agent_mcp_credentials(
             for credential in credentials
             if credential.mcp_server_url != GITHUB_COPILOT_MCP_URL
         )
-    if not credentials:
-        async with sessionmaker() as session:
-            if not await connector_tokens_store.list_connector_token_urls(
-                session, tenant_id=tenant_id, agent_id=agent_id, account_id=account_id
-            ):
-                return
     scope = resource_scope(tenant_id=str(tenant_id), account_id=str(account_id))
 
     async def ensure() -> str:

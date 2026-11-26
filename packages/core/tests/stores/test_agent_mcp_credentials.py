@@ -979,3 +979,38 @@ async def test_a_reused_held_session_is_mirrored_into_the_vault_it_mounts(
     )
     assert asked == [hold], f"the hold selects the vault, never the cache: {asked}"
     assert mirrored == ["vlt_held"], f"the mirror lands in the mounted vault: {mirrored}"
+
+
+async def test_a_reused_session_with_nothing_stored_still_clears_the_vault_copies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Removing a person's only grant leaves no tokens, yet the mirror must still run."""
+    from daimon.core import agent_mcp_credentials as module
+
+    mirrored: list[str] = []
+
+    async def ensure(*_: object, **__: object) -> str:
+        return "vlt_me"
+
+    async def mirror(*_: object, vault_id: str, **__: object) -> None:
+        mirrored.append(vault_id)
+
+    async def credentials(**_: object) -> tuple[object, ...]:
+        return ()
+
+    monkeypatch.setattr(module, "ensure_agent_mcp_vault", ensure)
+    monkeypatch.setattr(module, "mirror_stored_credentials", mirror)
+    monkeypatch.setattr(module, "resolve_agent_mcp_credentials", credentials)
+    await sync_agent_mcp_credentials(
+        build_fake_anthropic(MARouter().dispatch),
+        sessionmaker=object(),  # type: ignore[arg-type]
+        fernet=build_multifernet((Fernet.generate_key().decode(),)),
+        tenant_id=uuid.uuid4(),
+        agent_id=uuid.uuid4(),
+        account_id=uuid.uuid4(),
+        jwt_secret=b"x" * 32,
+        public_url="https://mcp.example.com/mcp",
+        now=dt.datetime(2026, 9, 15, tzinfo=dt.UTC),
+        vault_ids={},
+    )
+    assert mirrored == ["vlt_me"], f"the mirror runs with no stored credentials: {mirrored}"
