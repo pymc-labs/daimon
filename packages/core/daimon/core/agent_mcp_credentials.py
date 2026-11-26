@@ -689,18 +689,24 @@ async def mirror_grants_into_vault(
     Daimon held grants) or the agent's stamped shared token is replaced, since
     a sign-in outranks both; an unstamped static token is the person's own
     pasted one and stays. Callers hold the vault lock (`mirror_stored_credentials`).
+
+    A stamped copy whose grant is gone (a refused refresh, an erasure, a deleted
+    agent) is deleted, so it never outlives the grant it copied.
     """
     from daimon.core.mcp_oauth.models import ClientRegistration, TokenResponse  # import cycle
     from daimon.core.mcp_oauth.vault import build_mcp_oauth_auth, put_mcp_oauth_credential
 
-    if not grants:
-        return
+    granted = {_url_key(grant.server_url) for grant in grants}
     slots: dict[str, tuple[str, str, str | None]] = {}
     async for existing in list_credentials(client, vault_id, scope=scope):
         if existing.auth.type != "mcp_oauth" and existing.auth.type != "static_bearer":
             continue
         stamp = (existing.metadata or {}).get(METADATA_VERSION_KEY)
-        slots[_url_key(existing.auth.mcp_server_url)] = (existing.id, existing.auth.type, stamp)
+        url = _url_key(existing.auth.mcp_server_url)
+        if existing.auth.type == "mcp_oauth" and stamp is not None and url not in granted:
+            await delete_credential(client, vault_id, existing.id, scope=scope)
+            continue
+        slots[url] = (existing.id, existing.auth.type, stamp)
     now = dt.datetime.now(dt.UTC)
     for grant in grants:
         version = grant.updated_at.isoformat()

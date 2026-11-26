@@ -317,6 +317,23 @@ async def test_a_grant_mirror_writes_the_slot_by_what_holds_it(
         )
 
 
+async def test_a_grant_mirror_deletes_a_copy_whose_grant_is_gone() -> None:
+    """A stamped copy outlives no grant; a legacy sign-in and a pasted token stay."""
+    copy = _held("mcp_oauth", "2026-01-01T00:00:00+00:00")
+    legacy = _held("mcp_oauth", None) | {"id": "vcrd_legacy"}
+    legacy["auth"] = {**legacy["auth"], "mcp_server_url": "https://legacy.example/mcp"}
+    vault = FakeVault([copy, legacy])
+    await agent_mcp_credentials.mirror_grants_into_vault(
+        vault.client(),
+        vault_id=_VAULT,
+        grants=(),
+        fernet=make_fernet(),
+        scope=Scope.legacy_host_authorized(call_site="test"),
+    )
+    assert vault._holder(_URL) is None, "the copy of a deleted grant is gone"  # pyright: ignore[reportPrivateUsage]
+    assert vault._holder("https://legacy.example/mcp") is not None, "an unstamped sign-in stays"  # pyright: ignore[reportPrivateUsage]
+
+
 # ----- Three turns mirroring a new sign-in into one vault (real Postgres) -----
 
 _PUBLIC_URL = "https://daimon.example/mcp"
