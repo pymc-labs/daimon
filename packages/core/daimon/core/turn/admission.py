@@ -3313,6 +3313,7 @@ def backend_facts(admission: Admission) -> dict[str, Any]:
     return {
         "web": admission.web,
         "features": admission.features,
+        "daimon_tools": admission.toolset.daimon_tools,
         "running_on": running_on(admission),
         # A later hand-off summary (#1434) slots in here beside the move.
         "moved": None

@@ -132,8 +132,12 @@ The record does not cover what Daimon attaches to a run, such as the agent's
 keys, repository or channel skills. Review an opted-in routine after changing
 those. The setting is `routine_sandbox_tools` in the [features](features.md)
 table, and each change shows in the settings history with what it covers.
-`get_routine`, `list_routines`, the web Routines page and the Discord
+`get_routine`, `list_routines` and the Discord
 `/routines` panel show whether a routine is opted in.
+
+<!-- knowledge: web -->
+The web app's Routines page shows it too.
+<!-- /knowledge -->
 
 The `set_routine_sandbox_tools` MCP tool accepts only a live Discord server
 admin's own token, which no Daimon surface issues yet.

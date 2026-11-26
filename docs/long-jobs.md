@@ -7,7 +7,7 @@ report its outcome.
 
 Starting a job is currently supported only from Discord threads. `start_long_job`
 refuses Slack, Teams and other unsupported origins before registration, worker
-launch or spend: “long jobs report back only in Discord threads for now”.
+launch or spend: “long jobs report back only in Discord threads”.
 
 Jobs are off by default. A server admin turns on the `long_jobs` feature for a
 workspace or one agent; a channel or thread can turn it off again (see
@@ -27,8 +27,12 @@ need time to finish and publish their output before it expires.
 
 ## Administration
 
-Only a server admin can set the three features, in the web app, in chat or with
+Only a server admin can set the three features, in chat or with
 `daimon features set`. Workspace and agent owners and delegated admins cannot.
+
+<!-- knowledge: web -->
+A server admin can also set them in the web app.
+<!-- /knowledge -->
 
 Changes govern new registrations and are checked again at launch. A queued job waits
 while the feature is off and launches once it is on again.

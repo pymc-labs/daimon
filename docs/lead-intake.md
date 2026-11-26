@@ -181,7 +181,7 @@ narrow access, exactly as for the channel's own history.
 
 An unclassified discovery stores no message content (only an encrypted message
 ID, a digest and timestamps), so `lead_intake_read_source` and
-`lead_intake_health` are read under the sales channel configured now. Submitting
+`lead_intake_health` are read under the sales channel configured at the time of the read. Submitting
 a discovery fixes the readers of the new record to that channel.
 
 All tool access requires the configured agent, tenant and live Discord
@@ -216,7 +216,7 @@ denies the call.
 
 Details loads the live record after authorizing the clicker on every click and
 sends it privately in pages. The card caches no evidence. Erased, expired or
-missing records show “no longer available”. Resolution evidence is supplied with
+missing records show “not available”. Resolution evidence is supplied with
 the tool call; review the live record before approving the visible selections. The resolver must also be able to read the
 lead. The handler verifies the live gated session before committing the resolution.
 Routine submit/resume does not acquire a resolution grant through that card.

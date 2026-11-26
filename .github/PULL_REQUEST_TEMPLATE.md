@@ -12,4 +12,5 @@
 - [ ] `uv run pyright` passes locally (strict mode)
 - [ ] `uv run ruff check .` is clean
 - [ ] `uv run lint-imports` passes (package boundary contracts)
+- [ ] Docs: a changed fact, command, limit or feature page is fixed in `docs/` (web-app text inside `<!-- knowledge: web -->` markers); a new feature sets `page=`
 - [ ] A user-visible change has a `changes/` fragment

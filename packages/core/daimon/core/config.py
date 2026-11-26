@@ -466,8 +466,7 @@ class HubSettings(BaseModel):
         description=(
             "Slack OAuth app client ID for the /slack/mcp login mount. Register "
             "<hub origin>/slack/auth/callback as a redirect URL on the Slack app "
-            "(see public_url). Web app sign-in with Slack uses this app too: "
-            "also register <web public url>/auth/slack/callback."
+            "(see public_url)."
         ),
     )
     slack_client_secret: SecretStr | None = Field(
@@ -479,8 +478,7 @@ class HubSettings(BaseModel):
         description=(
             "Discord OAuth app client ID for the /discord/mcp login mount. "
             "Register <hub origin>/discord/auth/callback as a redirect URI on the "
-            "Discord app (see public_url). Web app sign-in with Discord uses this app too: "
-            "also register <web public url>/auth/discord/callback."
+            "Discord app (see public_url)."
         ),
     )
     discord_client_secret: SecretStr | None = Field(
@@ -1395,8 +1393,7 @@ class MicrosoftAccountsSettings(BaseModel):
         description=(
             "Application (client) ID of the Entra app registration people sign in to "
             "with Connect Microsoft. Its Web redirect URI is "
-            "`<public root>/oauth/microsoft/callback`; web app sign-in with Microsoft "
-            "also needs `<web public url>/auth/microsoft/callback`."
+            "`<public root>/oauth/microsoft/callback`."
         ),
     )
     client_secret: SecretStr | None = Field(
@@ -2439,8 +2436,8 @@ class McpIdentitySettings(BaseModel):
             "Ed25519 private key that signs caller identities for the servers in "
             "DAIMON_MCP_IDENTITY__SERVERS: an unencrypted PKCS#8 PEM or a base64url 32-byte "
             "seed. Generate one with `daimon mcp identity-keygen`, which also prints the "
-            "public key to register with each server. Read by the mcp service, and by the "
-            "web service when a DAIMON_WEB__NODES__* node names a server."
+            "public key to register with each server. Read by the mcp service and "
+            "by any service that connects to those servers."
         ),
     )
     servers: Annotated[list[SignedIdentityServer], NoDecode] = Field(
@@ -3170,6 +3167,31 @@ class ProviderLimitsSettings(BaseModel):
     )
 
 
+class SelfKnowledgeSettings(BaseModel):
+    """Where the `self_knowledge` tools read this release's docs and source, and the public
+    addresses their results name."""
+
+    docs_url: str = Field(
+        default="https://pymc-labs.github.io/daimon/",
+        description="The public docs site that results name as the place to read more.",
+    )
+    repo_url: str = Field(
+        default="https://github.com/pymc-labs/daimon",
+        description="The source repository that results name, to clone for tests and history.",
+    )
+    docs_root: Path = Field(
+        default_factory=lambda: Path("docs"),
+        description="The docs/ directory in the image, relative to the working directory.",
+    )
+    source_root: Path = Field(
+        default_factory=lambda: Path("."),
+        description=(
+            "The directory holding packages/, relative to the working directory. Only "
+            "packages/ is read."
+        ),
+    )
+
+
 class RepoMemorySettings(BaseModel):
     enabled: bool = Field(
         default=False,
@@ -3314,6 +3336,7 @@ class Settings(BaseSettings):
     github: GithubSettings = Field(default_factory=GithubSettings)
     github_app: GithubAppSettings = Field(default_factory=GithubAppSettings)
     repo_memory: RepoMemorySettings = Field(default_factory=RepoMemorySettings)
+    self_knowledge: SelfKnowledgeSettings = Field(default_factory=SelfKnowledgeSettings)
     microsoft_accounts: MicrosoftAccountsSettings = Field(default_factory=MicrosoftAccountsSettings)
     crypto: CryptoSettings = Field(default_factory=CryptoSettings)
     credentials: CredentialsSettings = Field(default_factory=CredentialsSettings)

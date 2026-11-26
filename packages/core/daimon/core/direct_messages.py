@@ -953,6 +953,7 @@ async def _run_admitted_dm_turn(
             effective_is_admin=prepared.admission.is_admin,
             web=prepared.admission.web,
             features=prepared.admission.features,
+            daimon_tools=prepared.admission.toolset.daimon_tools,
         )
         user_message = f"{controls}\n{prompt}"
 
