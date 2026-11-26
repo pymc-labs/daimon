@@ -93,7 +93,9 @@ async def source_mcp(switched_request):
         yield app
 
 
-async def _one_reading(request, quote, switched_request, *, relay: bool, finer=()):
+async def _one_reading(
+    request, quote, switched_request, *, relay: bool, finer=(), built_ins: bool = True
+):
     from daimon.core.channel_backend import switch_losses
     from daimon.core.confirmation import drop_words
     from daimon.core.stores.accounts import set_role
@@ -118,7 +120,9 @@ async def _one_reading(request, quote, switched_request, *, relay: bool, finer=(
     assert quote.unsupported_mcps == (() if relay else ("linear",))
     # Past the unseeded built-ins (shown by id), a skill past the provider's size limits is
     # the only skill named, each by itself: keyed by id in the drops, shown by its own name.
-    assert set(drops) >= UNSEEDED_BUILT_INS, drops
+    # A record holds no skills, so it has no built-in to lose.
+    assert (set(drops) >= UNSEEDED_BUILT_INS) is built_ins, drops
+    assert built_ins or not UNSEEDED_BUILT_INS & set(drops), drops
     ids = [d.removeprefix("skill:") for d in drops if d.startswith("skill:")]
     named = [i for i in ids if f"skill:{i}" not in UNSEEDED_BUILT_INS]
     assert set(named) <= set(quote.skill_names), f"each lost skill has its name: {named}"
@@ -221,4 +225,11 @@ async def test_a_record_names_its_connector_as_a_managed_agents_agent_would(
     request, quote, *_ = openai_template
     assert request.admission.agent.id.startswith("dm_agent_"), "the source is a Daimon record"
     assert "mcp_server:linear" in quote.declared_drops, quote.declared_drops
-    await _one_reading(request, quote, switched_request, relay=False, finer=("installed_packages",))
+    await _one_reading(
+        request,
+        quote,
+        switched_request,
+        relay=False,
+        finer=("installed_packages",),
+        built_ins=False,
+    )

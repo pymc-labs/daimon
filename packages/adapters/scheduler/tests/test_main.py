@@ -4305,7 +4305,8 @@ async def test_selfhosted_routine_refuses_before_any_anthropic_access(
         cron_expr="* * * * *",
         timezone_="UTC",
         trigger_message="private scheduled content",
-        channel_id="origin",
+        # The saved channel is the destination's own, where admission reads the backend.
+        channel_id="dest" if at_destination else "origin",
         destination_kind="channel",
         destination_id="dest",
     )
