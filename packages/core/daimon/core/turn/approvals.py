@@ -32,6 +32,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event
 from daimon.core.approval_gate import ApprovalGate
 from daimon.core.confirmation import (
     SHARED_CONNECTION_TOOLS,
+    SHARED_CONNECTION_UNREADABLE,
     ApprovedConfirmation,
     CardRefusal,
     ConfirmationHook,
@@ -43,7 +44,6 @@ from daimon.core.confirmation import (
     prompt_for_tool_call,
 )
 from daimon.core.defaults.metadata import is_private_routine_stamp
-from daimon.core.shared_connections import SHARED_CONNECTION_UNREADABLE
 from daimon.core.stores import agent_tool_rules, server_skills
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,

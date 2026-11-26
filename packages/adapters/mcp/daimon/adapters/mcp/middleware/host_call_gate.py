@@ -17,12 +17,16 @@ from typing import TYPE_CHECKING, Any, cast
 import structlog
 from daimon.adapters.mcp.confirmed_call import host_confirmed_call
 from daimon.core import host_calls
-from daimon.core.confirmation import SHARED_CONNECTION_TOOLS, prompt_for_tool_call
+from daimon.core.confirmation import (
+    SHARED_CONNECTION_TOOLS,
+    SHARED_CONNECTION_UNREADABLE,
+    prompt_for_tool_call,
+)
 from daimon.core.data_reading import reads_data
 from daimon.core.features.snapshot import FeaturePlace, deployment_on, place_guardrail
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.security_audit import record_denial
-from daimon.core.shared_connections import SHARED_CONNECTION_UNREADABLE, card_lookup
+from daimon.core.shared_connections import card_lookup
 from daimon.core.stores import host_call_cards as cards
 from daimon.core.stores.mcp_tokens import revoke_mcp_token
 from daimon.core.stores.thread_sessions import get_live_thread_session

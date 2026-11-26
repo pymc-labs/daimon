@@ -98,9 +98,7 @@ async def test_every_fixed_daimon_gate_still_asks(tool: str) -> None:
         skill_update_for=AsyncMock(
             return_value=ServerSkillUpdateCard(name="S", version="1", new_version="2", changes={})
         ),
-        shared_connection_for=AsyncMock(
-            return_value=SharedConnectionCard("crm", "https://crm.example/mcp", tool="send")
-        ),
+        shared_connection_for=AsyncMock(return_value=SharedConnectionCard("crm", tool="send")),
     )(
         ToolCall(
             tool_use_id="t1",

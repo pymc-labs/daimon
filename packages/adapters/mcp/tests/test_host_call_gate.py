@@ -408,7 +408,7 @@ async def skill_update(_: ToolCall) -> ServerSkillUpdateCard:
 
 
 async def shared_connection(_: ToolCall) -> SharedConnectionCard:
-    return SharedConnectionCard("crm", "https://crm.example/mcp", tool="send")
+    return SharedConnectionCard("crm", tool="send")
 
 
 _GATE_LOOKUP = "daimon.adapters.mcp.middleware.host_call_gate.card_lookup"
@@ -423,11 +423,9 @@ def _looking_up(lookup: _Lookup) -> Callable[..., _Lookup]:
 async def test_a_shared_connection_change_card_names_what_it_acts_on(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """As in chat, the card reads the store: the tool, its server, its words and parameters;
+    """As in chat, the card reads the store: the tool, its words and parameters;
     a target that is gone is refused with no card."""
-    found = [
-        SharedConnectionCard("crm", "https://crm.example/mcp", "send", "Sends.", True, ("id",))
-    ]
+    found = [SharedConnectionCard("crm", "send", "Sends.", True, ("id",))]
 
     async def lookup(_: ToolCall) -> SharedConnectionCard | None:
         return found[0] if found else None
@@ -442,7 +440,7 @@ async def test_a_shared_connection_change_card_names_what_it_acts_on(
     found.clear()
 
     assert "crm_send" in card.headline, card.headline
-    for shown in ("Server: https://crm.example/mcp", "Callers are told: Sends.", "Takes: id"):
+    for shown in ("Callers are told: Sends.", "Takes: id"):
         assert shown in card.facts, f"{shown}: {card.facts}"
     with pytest.raises(ToolError, match="List it again"):
         await _call(rig, rig.identity(), "change_shared_connection_tool", args)

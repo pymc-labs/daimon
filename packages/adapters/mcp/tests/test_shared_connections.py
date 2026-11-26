@@ -438,7 +438,12 @@ async def scoped(world: World, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator
         )
 
     async def holds(_: object, __: object, audience: DataAudience, scope: str) -> bool:
-        return scope == "sales" and audience == _people(world.account_id)
+        return (
+            scope == "sales"
+            and audience.people == {world.account_id}
+            and not audience.guests
+            and not audience.public_only
+        )
 
     monkeypatch.setattr("daimon.adapters.mcp.shared_connections.holds_scope", holds)
     register_scopes(world.runtime)  # pyright: ignore[reportArgumentType]

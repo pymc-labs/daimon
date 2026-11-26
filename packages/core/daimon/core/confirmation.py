@@ -74,6 +74,7 @@ __all__ = [
     "ToolRuleCardReference",
     "ServerSkillUpdateCard",
     "SHARED_CONNECTION_TOOLS",
+    "SHARED_CONNECTION_UNREADABLE",
     "SharedConnectionCard",
     "PendingConfirmations",
     "no_confirmation_surface",
@@ -218,17 +219,22 @@ class ServerSkillUpdateCard:
 @dataclass(frozen=True)
 class SharedConnectionCard:
     """What a shared connection change acts on, read from the store so the card never shows
-    what the call claims. `description` and `writes` are what a tool's callers get: for
-    turn_on, the upstream's words as listed."""
+    what the call claims. It never holds the connection's address: a room reads the card.
+    `description` and `writes` are what a tool's callers get: for turn_on, the upstream's
+    words as listed."""
 
     connection: str
-    url: str
     tool: str | None = None
     description: str | None = None
     writes: bool | None = None
     parameters: tuple[str, ...] = ()
     """For turn_on, the argument names the approved schema takes."""
 
+
+SHARED_CONNECTION_UNREADABLE: Final = (
+    "This connection or tool isn't here, or changed since it was listed. List it again."
+)
+"""Why a change is refused when its card can't name what it acts on."""
 
 #: The tools whose card is a `SharedConnectionCard`.
 SHARED_CONNECTION_TOOLS: Final = frozenset(
@@ -268,7 +274,6 @@ def _shared_connection_prompt(
     scope = _one_line(data.get("scope") or "", limit=64) or "everyone"
     details = (
         f"{'Tool' if card.tool else 'Connection'}: {name}",
-        f"Server: {_one_line(card.url)}",
         *((f"Does: {does}",) if does is not None else ()),
         *((f"Callers are told: {told}", f"Takes: {takes or 'nothing'}") if turn_on else ()),
         *((f"Scope: {scope}",) if data.get("action") in {"add", "rescope"} else ()),

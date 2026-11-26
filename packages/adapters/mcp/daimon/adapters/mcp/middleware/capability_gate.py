@@ -26,6 +26,7 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, list_running_origins
 from daimon.core.anthropic_guard import anthropic_disabled
+from daimon.core.capability_tools import KEPT_BY
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.snapshot import FeaturePlace, resolve_features, server_setup_met
@@ -243,19 +244,24 @@ class CapabilityGateMiddleware(Middleware):
             places = await caller_places(
                 self._runtime, auth, (context.message.arguments or {}).get("origin_context_id")
             )
+            keep = KEPT_BY.get(tool)
             found = [
-                (
-                    await resolve_features(
-                        self._runtime.session_factory, self._runtime.settings, place, keys=(key,)
-                    )
-                ).get(key)
+                await resolve_features(
+                    self._runtime.session_factory,
+                    self._runtime.settings,
+                    place,
+                    keys=(key,) if keep is None else (key, keep),
+                )
                 for place in places
             ]
         except Exception as exc:  # named boundary: an unreadable feature refuses the call
             log.warning("capability_gate.read_failed", tool=tool, exc_info=True)
             record_denial(DENIAL_REASON)
             raise ToolError(_UNREADABLE) from exc
-        if any(hides_tools(feature) for feature in found):
+        if any(
+            hides_tools(place.get(key)) and (keep is None or hides_tools(place.get(keep)))
+            for place in found
+        ):
             record_denial(DENIAL_REASON)
             raise ToolError(_refusal(tool, key))
         return await call_next(context)

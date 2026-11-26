@@ -3,8 +3,11 @@
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
-from daimon.core.confirmation import SharedConnectionCard, prompt_for_tool_call
-from daimon.core.shared_connections import SHARED_CONNECTION_UNREADABLE
+from daimon.core.confirmation import (
+    SHARED_CONNECTION_UNREADABLE,
+    SharedConnectionCard,
+    prompt_for_tool_call,
+)
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall, ToolSafetyPolicy
 from daimon.core.turn.approvals import interactive_decider
 
@@ -20,19 +23,20 @@ TURN_ON = ToolCall(
         "origin_context_id": "o",
     },
 )
-URL = "https://crm.example/mcp/" + "a" * 80
 CARD = SharedConnectionCard(
-    "crm", URL, tool="send", description="Sends a note.", writes=True, parameters=("id", "to")
+    "crm", tool="send", description="Sends a note.", writes=True, parameters=("id", "to")
 )
 
 
-def test_turn_on_names_the_tool_its_server_and_what_callers_are_told() -> None:
+def test_turn_on_names_the_tool_and_what_callers_are_told() -> None:
     prompt = prompt_for_tool_call(
         TURN_ON, requester_platform_user_id="u1", now=datetime.now(UTC), shared_connection=CARD
     )
     assert prompt.title == "Turn on crm_send?"
     assert prompt.consequence == "It changes things. Callers are told: Sends a note."
-    assert f"Server: {URL}" in prompt.detail_lines, "the whole address, not a cut one"
+    assert not any("Server" in line for line in prompt.detail_lines), (
+        "a room never sees the address"
+    )
     assert "Tool: crm_send" in prompt.detail_lines
     assert "Takes: id, to" in prompt.detail_lines, "the parameters the digest approves"
 

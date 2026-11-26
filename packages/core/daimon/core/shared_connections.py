@@ -35,7 +35,7 @@ from daimon.core.data_audience import DataAudience
 from daimon.core.features.snapshot import FeaturePlace, Sessions, place_feature_or_none
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_https_url
-from daimon.core.mcp_server_url import ascii_mcp_url, shown_mcp_url
+from daimon.core.mcp_server_url import ascii_mcp_url
 from daimon.core.mcp_tool_call import (
     INTERACTIVE_LIMITS,
     McpCallError,
@@ -68,7 +68,6 @@ __all__ = [
     "DAIMON_TOOL_NAMES",
     "FEATURE",
     "SERVED_TAG",
-    "SHARED_CONNECTION_UNREADABLE",
     "WRITE_NOTE",
     "NAME_PATTERN",
     "SCOPE_PATTERN",
@@ -99,10 +98,6 @@ ASK_FEATURE: Final = "shared_write_approval"
 #: The tag of every served tool: listed by name, not behind search, and open to agent keys.
 SERVED_TAG: Final = "shared-connection"
 """Whether a shared write asks on a card in chat: on (`ask`) by default."""
-SHARED_CONNECTION_UNREADABLE: Final = (
-    "This connection or tool isn't here, or changed since it was listed. List it again."
-)
-"""Why a change is refused when its card can't name what it acts on."""
 WRITE_NOTE: Final = "This tool changes things. Ask your user and get their yes before you call it."
 NAME_PATTERN: Final = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
 """A connection name carries no underscore: the first one in `<connection>_<tool>` ends it."""
@@ -563,14 +558,12 @@ def card_lookup(
     async def _lookup(call: ToolCall) -> SharedConnectionCard | None:
         data = call.input
         if call.tool_name == "change_shared_connection" and data.get("action") == "add":
-            return SharedConnectionCard(
-                str(data.get("name") or ""), shown_mcp_url(str(data.get("url") or ""))
-            )
+            return SharedConnectionCard(str(data.get("name") or ""))
         async with sessions() as db:
             row = await find_connection(db, tenant_id, str(data.get("connection") or ""))
             if row is None:
                 return None
-            card = SharedConnectionCard(row.name, shown_mcp_url(row.url))
+            card = SharedConnectionCard(row.name)
             if call.tool_name == "change_shared_connection":
                 return card
             tools = await store.list_tools(db, tenant_id=tenant_id, connection_id=row.id)
