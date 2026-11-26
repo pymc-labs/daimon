@@ -1280,8 +1280,8 @@
       'description': '''
         Add a shared connection (add: name, url, optional scope; its tools start off), or
         refresh, pause, resume, rescope (scope; empty clears it) or remove one (connection:
-        its id or name). Runs on the asker's Approve card, which names the connection and its
-        address. with_token, on add or refresh, posts the asker's private form for its token,
+        its id or name). Runs on the asker's Approve card, which names the connection.
+        with_token, on add or refresh, posts the asker's private form for its token,
         and saving it reads the server's tools; never ask for a token in chat or pass one here.
         Addresses and errors in the answer are [[private:...]] placeholders in a shared
         conversation: send them with send_private_details. Admin-only.
