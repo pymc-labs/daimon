@@ -163,11 +163,13 @@ async def readable(
     env: Env | None = None,
 ) -> bool:
     """Whether this reader may read every item in `refs` (`daimon.core.stores.data_memory`).
-    Only a stored record (`record:<id>`) can be told; anything else, or a record gone or
-    hidden, is not readable."""
+    A stored record (`record:<id>`) can be told, and a person's own data (`person:<account>`)
+    by that person alone; anything else, or a record gone or hidden, is not readable."""
     ids: set[UUID] = set()
     for ref in refs:
         kind, _, value = ref.partition(":")
+        if kind == "person" and ctx.readers == (f"account:{value}",):
+            continue
         if kind != "record":
             return False
         try:

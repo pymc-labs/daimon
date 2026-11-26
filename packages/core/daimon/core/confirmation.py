@@ -57,7 +57,7 @@ from daimon.core.tool_safety import backend_switch_tools as backend_switch_tools
 from mux.contracts.config import ThreadMode
 from mux.contracts.ids import ChannelRef
 from mux.contracts.profile import Capability, Effort
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
 if TYPE_CHECKING:
     from daimon.core.channel_backend import AgentBackendService, AgentSettings
@@ -530,7 +530,11 @@ def prompt_for_tool_call(
         )
     if call.tool_name == "data_personal_reads" and own_server:
         part = "Google Drive" if data.get("part") == "drive" else "calendar"
-        verb = "Let Daimon read" if data.get("on") is True else "Stop Daimon reading"
+        try:  # as the tool parses it, so the card never says the opposite of the call
+            on = TypeAdapter(bool).validate_python(data.get("on"))
+        except ValidationError:
+            on = False
+        verb = "Let Daimon read" if on else "Stop Daimon reading"
         return ConfirmationPrompt(
             title=f"{verb} your {part} as you?",
             action=verb,

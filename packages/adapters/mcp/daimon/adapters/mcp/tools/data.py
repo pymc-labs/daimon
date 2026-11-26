@@ -198,18 +198,24 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> str:
         """Search your own Google Drive (My Drive) as you for `query`, with the text of Docs,
         Slides and Sheets; never stored. Each call asks you on a card first, and everyone who
-        can see this conversation sees what it finds. Shared drives are in `data_search`."""
+        can see this conversation sees what it finds. Not in rooms people outside the team can
+        read. Shared drives are in `data_search`."""
         auth = await _auth(ctx)
         if auth.is_external_agent or auth.hold is not None or auth.client:
             raise ToolError("Only a person can have their own Drive read.")
+        await data_audience_for(runtime, auth)  # refuses before the card where none may read
         await require_card(
             runtime, auth, tool_name="data_my_drive", origin_context_id=origin_context_id
         )
-        async with pool.connection(settings) as conn:
+        async with reading(auth) as (conn, r):
+            if r.names_hidden(query):
+                return _text({"files": []})
             hits = await my_drive.search(
                 conn, schemas, env, auth.tenant_id, auth.account_id, query, min(max(limit, 1), 25)
             )
-        return _text({"files": [dataclasses.asdict(h) for h in hits]})
+        if hits:
+            await noted(auth, [f"person:{auth.account_id}"])
+        return _text(r.show({"files": [dataclasses.asdict(h) for h in hits]}))
 
     @mcp.tool()
     async def data_personal_reads(  # pyright: ignore[reportUnusedFunction]

@@ -606,5 +606,8 @@ async def test_a_memorys_data_is_readable_only_if_every_item_is(store: Store) ->
     assert not await readable(store.who(me, you), refs), "one item is hidden from someone"
     for unknown in ("live:" + str(src), "sql", "record:nope"):
         assert not await readable(store.who(me), [unknown]), f"{unknown} cannot be told"
+    own = ["person:" + me.removeprefix("account:"), *refs]
+    assert await readable(store.who(me), own), "a person's own data: by them alone"
+    assert not await readable(store.who(me, you), own), "never with anyone else"
     await store.conn.execute(f"delete from {store.d}.records where id = %s".encode(), (mine,))
     assert not await readable(store.who(me), refs), "a deleted item hides the memory"

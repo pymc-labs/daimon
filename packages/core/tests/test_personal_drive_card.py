@@ -3,9 +3,10 @@ conversation."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
-from daimon.core.confirmation import ConfirmationPrompt
+from daimon.core.confirmation import ConfirmationPrompt, prompt_for_tool_call
 from daimon.core.posted_controls.confirmation import (
     build_confirmation_blocks,
     build_confirmation_card,
@@ -61,3 +62,15 @@ async def test_each_read_asks_until_the_requester_allows_it_for_the_conversation
     assert card.await_count == 2, "allowed for the rest of this conversation: no card"
     assert (await decide("s2")).allow
     assert card.await_count == 3, "another conversation asks again"
+
+
+def test_the_opt_out_card_says_what_the_parsed_call_does() -> None:
+    for on, verb in (("true", "Let"), ("0", "Stop"), (True, "Let")):
+        call = ToolCall(
+            tool_use_id="t2",
+            server_name=DAIMON_SERVER_NAME,
+            tool_name="data_personal_reads",
+            input={"part": "drive", "on": on, "origin_context_id": "o1"},
+        )
+        prompt = prompt_for_tool_call(call, requester_platform_user_id="u1", now=datetime.now(UTC))
+        assert prompt.title.startswith(verb), on

@@ -2,13 +2,13 @@
 which asks them on a card each time): through each Drive source of their workspace that
 allows it (`personal_drive`), only as the directory person they are linked to, and never once
 they turned their `drive` part off (`daimon.data.personal`). Nothing is stored; a source's
-redaction rules apply as for any live read."""
+ingest redaction rules apply here, the answer's own redaction in the tool."""
 
 from __future__ import annotations
 
 import uuid
 from dataclasses import replace
-from typing import cast
+from typing import Final, cast
 
 from daimon.data import personal, redaction
 from daimon.data.recheck import reader_subjects
@@ -18,6 +18,9 @@ from daimon.data.sync.connectors.gdrive import GDriveConnector
 from daimon.data.sync.engine import Env, build_source, ready
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
+
+ANSWER_TEXT: Final = 60_000
+"""Characters of file text one search returns in all; later files keep their titles only."""
 
 
 async def search(
@@ -62,4 +65,8 @@ async def search(
                 if rules
                 else found
             )
-    return hits[:limit]
+    left, out = ANSWER_TEXT, list[LiveHit]()
+    for h in hits[:limit]:
+        out.append(replace(h, text=h.text[:left]))
+        left = max(left - len(h.text), 0)
+    return out

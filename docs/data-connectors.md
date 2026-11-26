@@ -133,9 +133,12 @@ Sheets. Every read shows a card only they can answer, saying that everyone in th
 conversation will see the result; **Allow for this conversation** stops asking for the rest
 of that conversation (kept in the running process: a restart asks again).
 
-It works in direct messages and rooms wherever data reads are on. `personal_drive: no` turns
-it off for the workspace's source; the `data_personal_drive` feature (on by default) turns it
-off for a workspace, agent or channel.
+It works in direct messages and team rooms wherever data reads are on, never in rooms people
+outside the team can read or on another agent's request. The answer's redaction rules apply,
+and a search returns 60,000 characters of text at most. A memory saved after it is recalled
+only in that person's direct messages. `personal_drive: no` turns it off for the workspace's
+source; the `data_personal_drive` feature (on by default) turns it off for a workspace, agent
+or channel.
 
 Each person can also turn off their own Drive and calendar reads, on their profile page or
 in chat (`data_personal_reads`, on a card). Their Drive is then never read as them, and no

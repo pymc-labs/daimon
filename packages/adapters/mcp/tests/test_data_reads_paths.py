@@ -25,6 +25,7 @@ from daimon.core.data_audience import user_subject
 from daimon.core.data_tools import (
     DATA_READS,
     DATA_TOOLS,
+    PERSONAL_DRIVE_TOOLS,
     PERSONAL_READS_TOOLS,
     REDACTED_DATA_RESULT,
     mark_data_result,
@@ -95,8 +96,9 @@ def _names(node: ast.AST) -> set[str]:
 
 def test_every_data_tool_reads_as_its_audience_and_marks_its_result() -> None:
     defs = _tool_defs()
-    assert set(defs) >= DATA_TOOLS, "every data tool registers in register_data_tools"
-    for name in DATA_TOOLS:
+    reading = DATA_TOOLS | PERSONAL_DRIVE_TOOLS
+    assert set(defs) >= reading, "every data tool registers in register_data_tools"
+    for name in reading:
         assert {"reading", "_text"} <= _names(defs[name]), f"{name} skips the audience or mark"
         if name != "data_sources":
             assert "noted" in _names(defs[name]), f"{name} leaves its reads out of memory"
