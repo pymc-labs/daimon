@@ -29,6 +29,8 @@ _TOOLS = {
     "change_data_links",
     "change_data_source",
     "connect_my_data",
+    "data_my_drive",
+    "data_personal_reads",
     "remove_my_data",
     "revoke_web_link",
     "delete_allowance",

@@ -312,6 +312,8 @@ EXEMPT: dict[str, str] = {
     "list_data_sources": _READS,
     "data_file": _READS,
     "data_get": _READS,
+    "data_my_drive": _READS,
+    "data_personal_reads": _OWN,
     "data_search": _READS,
     "data_sources": _READS,
     "data_sql": _READS,
