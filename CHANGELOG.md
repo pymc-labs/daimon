@@ -16,15 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replacement). Gemini being busy, a network failure, or a refusal of the read still fails
   only that message and keeps the session.
 
-- **The reply card names the model a reply runs on.** An agent copied onto Gemini showed
-  the Claude model it was copied from on its "Working on it" card. The card now shows the
-  model the conversation actually uses, the same one the model reactions show.
-
 - **Switching a conversation or an agent to OpenAI or Gemini now behaves like changing models
   within one provider.** A provider is on for a workspace as soon as the operator has set its
   key, with no per-workspace step, and choosing a model for one conversation is on by default,
   as is the connector relay (a provider receives what a connector returns). The "Working on
-  it" card names the model the reply runs on, and effort per conversation now works on OpenAI
+  it" card names the model the reply actually runs on (an agent copied onto
+  Gemini no longer shows its Claude model), and effort per conversation now works on OpenAI
   (low, medium, high). Refusing to switch the server's default agent also offers switching
   just that conversation. A copy made to switch continues from a summary, and says so.
   Word, PowerPoint, Excel and PDF skills, which run only on Anthropic, come as short open

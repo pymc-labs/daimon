@@ -36,6 +36,7 @@ from mux.state.lease import Slot
 from mux.state.store import (
     PREVIOUS_PREFIX,
     RELEASED_REF,
+    SESSION_REF,
     StateStore,
     is_released,
     released_successor,
@@ -157,7 +158,14 @@ async def _drop_keys(tenant_id: uuid.UUID, released: ProviderBinding) -> None:
     """The released session's keys file goes once the release commits: no turn mounts it again."""
     from daimon.core.provider_purge import delete_released_env_file
 
-    await delete_released_env_file(tenant_id, released)
+    try:
+        await delete_released_env_file(tenant_id, released)
+    except Exception:  # the release is committed; a stray keys file must not fail the turn
+        log.warning(
+            "thread_release.keys_file_delete_failed",
+            session_id=released.native_refs.get(SESSION_REF),
+            exc_info=True,
+        )
 
 
 async def _write_release(

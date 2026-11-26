@@ -247,9 +247,10 @@ def _fake_ma(
         router.add_agent_list()
 
     def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        # Every attach attempt, refused or not.
+        updates.append(json_body(req))
         if update_status != 200:
             return httpx.Response(update_status, json={"error": {"type": "api_error"}})
-        updates.append(json_body(req))
         return httpx.Response(200, json=agent.model_dump(mode="json"))
 
     router.add("POST", r"/v1/agents/ag_oauth", on_update)
@@ -570,7 +571,8 @@ async def test_callback_settles_the_card_when_managed_agents_refuses_the_attach(
         r = await client.get(f"/oauth/mcp/callback?code=code123&state={flow.state}")
 
     assert r.status_code == 502 and "did not complete" in r.text, r.text
-    assert created == [] and updates == [], "nothing was written to a vault or attached"
+    assert created == [], "nothing was written to a vault"
+    assert updates, "the attach was tried (and refused), not skipped"
     async with db_session_factory() as session:
         request = await requests_store.peek_credential_request(session, token=flow.request_token)
     assert request is not None and request.outcome == "write_failed", "the card is not left pending"
