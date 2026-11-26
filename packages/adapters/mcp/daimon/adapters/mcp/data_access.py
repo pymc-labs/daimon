@@ -15,7 +15,7 @@ import time
 import uuid
 from collections.abc import Collection, Sequence
 from datetime import UTC, datetime
-from typing import Any, Final, cast
+from typing import Any, Final, Literal, cast
 
 import psycopg
 import structlog
@@ -45,6 +45,7 @@ from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.identity import accounts_of
 from daimon.core.stores.room_viewers import read_viewers
 from daimon.core.stores.routines import get_routine
+from daimon.core.stores.shared_channels import mark_channel_shared
 from daimon.core.stores.turn_origins import get_active_origin, get_session_origin
 from daimon.core.teams_graph import GraphUnavailable
 from daimon.core.teams_threads import is_group_chat
@@ -67,6 +68,10 @@ _REFUSALS: Final[dict[RefusalReason, str]] = {
     ),
     "agent_request": "Only the agent's own conversations can read data sources. Nothing was read.",
 }
+_NO_TEAMS_CONSENT: Final = (
+    "Daimon may not read who is in this Teams conversation, so data sources stay closed here. "
+    "A team owner or chat member grants that consent by updating the app."
+)
 #: Members a Slack room may page through before its viewers count as unknown.
 _SLACK_PAGE_LIMIT: Final = 4 * CAP
 #: Slack lookups at once, and how long a member's bot or deactivated status is believed.
@@ -266,9 +271,21 @@ async def _room(
     if platform == "slack" and auth.external_id is not None:
         users = await _slack_viewers(runtime, auth.external_id, channel_id)
     if platform == "teams":
-        users, outside = await _teams_viewers(runtime, auth, channel_id)
-        if outside:
+        found = await _teams_viewers(runtime, auth, channel_id)
+        if found == "outsiders":  # held from the next turn on, so that session starts fresh
+            async with runtime.session_factory.begin() as session:
+                await mark_channel_shared(
+                    session,
+                    tenant_id=auth.tenant_id,
+                    platform=platform,
+                    channel_id=channel_id,
+                    source="platform",
+                )
+        if found == "no_consent":
+            raise ToolError(_NO_TEAMS_CONSENT)
+        if isinstance(found, str):
             return DataOrigin("room", asker, contained=True)
+        users = found
     if users is None:
         return DataOrigin("room", asker, None)
     async with runtime.session_factory() as session:
@@ -310,14 +327,13 @@ async def _slack_viewers(
 
 async def _teams_viewers(
     runtime: McpRuntime, auth: AuthIdentity, conversation_id: str
-) -> tuple[frozenset[str] | None, bool]:
-    """A Teams channel's or group chat's members by Entra id, read now, and whether anyone
-    outside the organisation may read it: a guest, another tenant's member, a shared channel,
-    or a channel that cannot be found. Members are None (public only) while the app lacks
-    the consent to read them, or on any other failure."""
+) -> frozenset[str] | Literal["outsiders", "unknown", "no_consent"]:
+    """A Teams channel's or group chat's members by Entra id, read now. "outsiders" when a
+    guest, another tenant's member or a shared channel may read it; "no_consent" when Graph
+    refuses for want of the app's consent; "unknown" on any other failure."""
     client = runtime.teams_client
     if client is None:
-        return None, False
+        return "unknown"
     graph = graph_for(client)
     channel, _ = split_thread(conversation_id)
     try:
@@ -327,17 +343,17 @@ async def _teams_viewers(
             try:
                 ref = await locate_channel(runtime, auth, client, channel)
             except ToolError:
-                return None, True  # its sharing cannot be told
+                return "unknown"
             if ref.channel_type == "shared":
-                return None, True
+                return "outsiders"
             members = await graph.list_channel_members(ref.group_id, ref.channel_id)
     except GraphUnavailable as e:
         log.info("data.teams_viewers_unknown", reason=e.reason, status=e.status)
-        return None, False
+        return "no_consent" if e.status == 403 else "unknown"
     home = (auth.external_id or "").lower()
     if any("guest" in m.roles or not home or (m.tenant_id or "").lower() != home for m in members):
-        return None, True
-    return frozenset(m.user_id.lower() for m in members if m.user_id), False
+        return "outsiders"
+    return frozenset(m.user_id.lower() for m in members if m.user_id)
 
 
 async def _slack_people(

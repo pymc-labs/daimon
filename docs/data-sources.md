@@ -110,9 +110,11 @@ connect their own accounts on their Profile.
 An answer shows only what everyone who will see it may read: the asker and, in a room, its
 members. Discord rooms keep their members; Slack and Teams rooms are read on each call.
 Teams needs the app's `ChannelMember.Read.Group` and `ChatMember.Read.Chat` consents, which
-a team owner or chat member grants when adding or updating the app. Until then, and in
-rooms whose members cannot be read, answers hold only what everyone may read. Teams rooms
-with a guest, another organisation's member, or a shared channel get no data.
+a team owner or chat member grants when adding or updating the app; until then data tools
+say so and read nothing in Teams. A Slack room whose members cannot be read gets answers
+that hold only what everyone may read. A Teams room with a guest, another organisation's
+member, a shared channel, or members that cannot be read gets no data. A Teams room found
+with outsiders is held from then on, so an agent that read data starts afresh there.
 
 After a data read, a conversation asks only agents that read data too, and their reads count
 as its own. A memory saved after a data read records what was read; recalling it counts as
