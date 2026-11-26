@@ -178,6 +178,8 @@ MAIN_BRANCH_COLUMNS = {
 
 # Columns added after the continuation migration; heads below HEAD skip them.
 AFTER_MERGE_COLUMNS = {
+    ("watches", "last_fired_at"),
+    ("direct_message_conversations", "updated_at"),
     ("turn_origins", "helper_of"),
     ("turn_origins", "serves_helpers"),
     ("mcp_tokens", "client"),
@@ -191,7 +193,30 @@ AFTER_MERGE_COLUMNS = {
     ("compute_tasks", "wait_until"),
     ("compute_sessions", "wake_turns"),
 }
-AFTER_MERGE_OBJECTS = {"ix_usage_observation_provider_observed_at"}
+AFTER_MERGE_OBJECTS = {
+    "ix_usage_observation_provider_observed_at",
+    "ix_thread_sessions_tenant_last_turn",
+    "ix_thread_sessions_tenant_session",
+    "ix_credential_requests_closed_at",
+    "ix_agent_posted_messages_tenant_posted",
+    "ix_message_feedback_created_at",
+    "ix_support_escalations_created_at",
+    "ix_task_continuations_closed_at",
+    "ix_long_job_finished_at",
+    "ix_compute_tasks_finished_at",
+    "ix_routines_last_finished_at",
+    "ix_github_access_requests_updated_at",
+    "ix_platform_channel_names_seen",
+    "ix_channel_changes_at",
+    "ix_web_audit_at",
+    "ix_web_logins_created_at",
+    "ix_web_threads_deleted_at",
+    "ix_web_threads_tenant_updated",
+    "ix_secret_shares_expires_at",
+    "ix_long_job_cancel_audit_requested_at",
+    "ix_dm_conversations_tenant_updated",
+    "long_job_cancel_audit_id_fkey",
+}
 
 
 MAIN_BRANCH_OBJECTS = {"ix_platform_principals_account_id", "usage_observation_binding_id_fkey"}
