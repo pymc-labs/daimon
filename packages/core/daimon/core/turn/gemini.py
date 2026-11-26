@@ -870,7 +870,8 @@ class _StreamFailure(Exception):
 
 
 def _refused_reopen(error: ProviderError) -> bool:
-    """A plain 4xx (not a rate limit, not one of the driver's own checks).
+    """A plain 4xx: not a rate limit, an auth or permission refusal, or one of
+    the driver's own checks (a native code).
 
     Gemini can refuse to re-open the event stream of an interaction that is
     still running. The stream only notifies, so such a refusal on a re-open
@@ -881,6 +882,7 @@ def _refused_reopen(error: ProviderError) -> bool:
     return (
         not error.retryable
         and error.native_code is None
+        and error.category not in ("auth", "permission", "rate_limited")
         and status.startswith("http_4")
         and status != "http_429"
     )
@@ -1052,6 +1054,7 @@ class _LazyStream(AsyncIterator[TurnEvent]):
             close = getattr(source, "aclose", None)
             if close is not None:
                 await close()
+            self.io.status_since_open = None  # read before the continuation existed
             try:
                 self._source = await self.io.backend.events.open_stream(
                     self.io.scope, self.io.session
@@ -1074,7 +1077,9 @@ class _LazyStream(AsyncIterator[TurnEvent]):
         self._seen.add(event.id)
         if kind == "pending":
             await self.io.answer_no_tools(event)
-            # The answer continues as a new interaction of the same root turn.
+            # The answer continues as a new interaction of the same root turn;
+            # a status read before it says nothing about that interaction.
+            self.io.status_since_open = None
             source, self._source = self._source, None
             close = getattr(source, "aclose", None)
             if close is not None:

@@ -478,8 +478,8 @@ REFUSED_REOPEN = {
     "error": {
         "code": 400,
         "status": "INVALID_ARGUMENT",
-        "message": 'Bad last_event_id "user prompt text" with key AIzaSyFAKEFAKEFAKEFAKEFAKEFAKE00'
-        " (see https://example.invalid/errors)",
+        "message": "Invalid value at 'last_event_id', \"user prompt text\" with key"
+        " AIzaSyFAKEFAKEFAKEFAKEFAKEFAKE00, see https://example.invalid/errors",
     }
 }
 
@@ -490,8 +490,8 @@ REFUSED_REOPEN = {
         (
             400,
             REFUSED_REOPEN,
-            'INVALID_ARGUMENT: Bad last_event_id "[redacted]" with key [redacted]'
-            " (see [redacted URL])",
+            "INVALID_ARGUMENT: Invalid value at 'last_event_id', \"[redacted]\" with key"
+            " [redacted], see [redacted URL]",
         ),
         (404, {"error": {"code": 404, "message": "not\nfound"}}, "not found"),
         (400, {"error": {"code": 400, "message": "x" * 1000}}, "x" * 300),
@@ -499,7 +499,7 @@ REFUSED_REOPEN = {
         (500, REFUSED_REOPEN, None),  # only a refusal (4xx) carries its reason
     ],
 )
-async def test_a_refused_stream_reopen_keeps_a_redacted_capped_reason(
+async def test_a_refused_stream_open_keeps_a_redacted_capped_reason(
     status: int, body: dict[str, JsonValue], reason: str | None
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -518,6 +518,58 @@ async def test_a_refused_stream_reopen_keeps_a_redacted_capped_reason(
         assert exc.value.native_message == reason
         # The exception text, which reaches user-facing paths, never carries it.
         assert str(exc.value) == f"provider error: {exc.value.category}"
+        await client.aio.aclose()
+
+
+@pytest.mark.parametrize("call", ["create", "get"])
+async def test_a_refused_request_with_a_body_or_a_plain_read_keeps_no_reason(call: str) -> None:
+    # Only a stream open keeps the reason: a create's refusal can echo its prompt.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json=REFUSED_REOPEN)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = genai.Client(
+            api_key="offline-fixture",
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
+        )
+        with pytest.raises(ProviderError) as exc:
+            if call == "create":
+                await SDKTransport(client).create(
+                    {"agent": "antigravity-preview-05-2026", "input": "user prompt text"}
+                )
+            else:
+                await SDKTransport(client).get("i1")
+        assert exc.value.native_error_code == "http_400"
+        assert exc.value.native_message is None
+        await client.aio.aclose()
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(400, text="raw body echoing user prompt text"),
+        httpx.Response(400, json=[{"error": {"message": "user prompt text"}}]),
+    ],
+)
+async def test_a_refused_stream_open_without_a_json_error_object_keeps_no_reason(
+    response: httpx.Response,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return response
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = genai.Client(
+            api_key="offline-fixture",
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
+        )
+        with pytest.raises(ProviderError) as exc:
+            await SDKTransport(client).open_stream("i1", after="7")
+        assert exc.value.native_error_code == "http_400"
+        assert exc.value.native_message is None
         await client.aio.aclose()
 
 

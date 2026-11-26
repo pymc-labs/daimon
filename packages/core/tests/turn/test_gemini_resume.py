@@ -314,7 +314,33 @@ async def test_a_refused_reopen_while_running_polls_until_the_interaction_ends(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        http_error("auth", 401, retryable=False),
+        http_error("permission", 403, retryable=False),
+        ProviderError("permission", retryable=False, native_code="gcs_token_echo"),
+        ProviderError(
+            "rate_limited", retryable=False, native_code="quota_daily", native_error_code="http_429"
+        ),
+    ],
+)
+async def test_a_definite_refusal_on_a_reopen_still_ends_the_turn(
+    harness: Harness, error: ProviderError
+) -> None:
+    # Only a plain 4xx is polled: auth, permission, the driver's own checks and
+    # rate limits keep their own ends even after a status read said running.
+    script(harness, ["stall", Refused(error)])
+    state, lifecycle = await turn(harness)
+    assert state.termination != TerminationReason.COMPLETED
+    assert len(lifecycle.terminal_failures) == 1
+
+
+@pytest.mark.asyncio
 async def test_a_refused_first_open_still_ends_the_turn(harness: Harness) -> None:
+    # Deliberate: a turn's first open in this process is never polled, including
+    # a turn resumed after a restart that re-attaches to a running interaction.
+    # No status read in this turn has said the interaction is running yet.
     script(harness, [Refused(http_error("invalid_request", 400, retryable=False))])
     state, lifecycle = await turn(harness)
     assert state.termination == TerminationReason.UPSTREAM

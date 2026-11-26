@@ -459,13 +459,19 @@ NATIVE_MESSAGE_LIMIT = 300
 def refusal_reason(error: Exception) -> str | None:
     """Why Google refused a request, safe to log: its status and message.
 
-    Keys, tokens, URLs and double-quoted request values are masked and the
-    text is capped at `NATIVE_MESSAGE_LIMIT`. None when the body has neither.
+    Used only where the request carried no body (opening an interaction's
+    stream), so the text cannot echo a prompt or a credential the request
+    sent. Keys, tokens, URLs and quoted values are masked anyway and the text
+    is capped at `NATIVE_MESSAGE_LIMIT`. None when the body has neither.
     """
     payload = _error_payload(error)
     if payload is None:
-        message: object = getattr(error, "message", None)
-        status: object = None
+        # Only google-genai's own error keeps a parsed message. Another SDK error's
+        # message can be the raw response body, which is never logged.
+        if not isinstance(error, genai_errors.APIError):
+            return None
+        message: object = error.message
+        status: object = error.status
     else:
         message, status = payload.get("message"), payload.get("status")
     parts = [p for p in (status, message) if isinstance(p, str) and p.strip()]
@@ -596,10 +602,6 @@ def normalize_error(error: Exception) -> ProviderError:
         category,
         retryable=status == 429 or (status is not None and status >= 500),
         native_code="503" if status == 503 else None,
-        # A refusal's reason, so the next unexpected 4xx names its cause in the logs.
-        native_message=refusal_reason(error)
-        if status is not None and 400 <= status < 500
-        else None,
         native_error_code=http,
         retry_after_s=bounded_retry_after(retry_delay(error)) if status == 429 else None,
     )
@@ -610,6 +612,17 @@ async def provider_call[T](call: Awaitable[T]) -> T:
         return await call
     except (APIError, genai_errors.APIError, httpx.HTTPError) as error:
         raise normalize_error(error) from None
+
+
+async def stream_open_call[T](call: Awaitable[T]) -> T:
+    """`provider_call` for opening a stream: a refusal (4xx) also keeps its reason."""
+    try:
+        return await call
+    except (APIError, genai_errors.APIError, httpx.HTTPError) as error:
+        normalized = normalize_error(error)
+        if (normalized.native_error_code or "").startswith("http_4"):
+            normalized.native_message = refusal_reason(error)
+        raise normalized from None
 
 
 class OwnedStream[T](AsyncIterator[T]):
@@ -906,7 +919,7 @@ class SDKTransport:
     ) -> AsyncIterator[Object]:
         from google.genai._interactions import omit
 
-        source = await provider_call(
+        source = await stream_open_call(
             self._interactions.get(
                 id=interaction_id,
                 stream=True,

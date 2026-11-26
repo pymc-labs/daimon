@@ -173,8 +173,29 @@ _TOKENS = re.compile(
     r"|AIza[A-Za-z0-9_-]{20,}|Bearer\s+[^\s\"']+",
     re.IGNORECASE,
 )
-# A double-quoted span in a provider's message usually echoes a request value.
-_QUOTED = re.compile(r'"[^"]*"')
+# A quoted span in a provider's message usually echoes a request value. An escaped
+# quote stays inside its span; an unclosed quote masks to the end. A single quote
+# opens a span only after a non-word character, so an apostrophe never does.
+_QUOTED = re.compile(r"""(?:"|(?<!\w)')""")
+_SPAN = {'"': re.compile(r'"(?:[^"\\]|\\.)*(?:"|$)', re.DOTALL)}
+_SPAN["'"] = re.compile(r"'(?:[^'\\]|\\.)*(?:'|$)", re.DOTALL)
+# A field name Google quotes (`'last_event_id'`) says where, never what: kept.
+_FIELD = re.compile(r"[A-Za-z0-9_.\[\]-]{1,64}")
+
+
+def _mask_quoted(value: str) -> str:
+    out: list[str] = []
+    at = 0
+    while (start := _QUOTED.search(value, at)) is not None:
+        quote = start.group()
+        span = _SPAN[quote].match(value, start.start())
+        assert span is not None  # the opening quote always matches
+        inner = span.group()[1:]
+        inner = inner[:-1] if inner.endswith(quote) and len(span.group()) > 1 else inner
+        kept = quote == "'" and _FIELD.fullmatch(inner) is not None
+        out += [value[at : start.start()], quote, inner if kept else "[redacted]", quote]
+        at = span.end()
+    return "".join(out) + value[at:]
 
 
 def redact_native_text(
@@ -188,9 +209,10 @@ def redact_native_text(
     """A provider's error text that is safe to log, or None.
 
     Masks known secrets, any 8+ character fragment of one, tokens, API keys and
-    URLs. `values` also masks double-quoted spans, which echo request values
-    (prompt text among them). `identifier` keeps only a bare identifier. The
-    result is one line of at most `limit` characters.
+    URLs. `values` also masks quoted spans, which echo request values
+    (prompt text among them), except a quoted field name. `identifier` keeps
+    only a bare identifier. The result is one line of at most `limit`
+    characters.
     """
     if not isinstance(value, str):
         return None
@@ -206,7 +228,7 @@ def redact_native_text(
     value = _TOKENS.sub("[redacted]", value)
     value = re.sub(r"https?://[^\s\"']+", "[redacted URL]", value)
     if values:
-        value = _QUOTED.sub('"[redacted]"', value)
+        value = _mask_quoted(value)
     if identifier and re.fullmatch(r"[A-Za-z0-9_.\[\]-]{1,128}", value) is None:
         return None
     return " ".join(value.split())[:limit]
