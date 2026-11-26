@@ -17,9 +17,12 @@ CI's `conventions` job enforces the Migrations, Changelog and Documentation
 rules below. When it fails, read its message and the section it names on
 latest main before changing anything.
 
-Staging deploys are automatic and debounced: merge freely. A burst of merges to
-`main` deploys once, from its last commit, after `STAGING_QUIET_MINUTES`
-(default 5) with no newer push. Production is still `promote.yml`.
+Staging deploys are automatic and debounced: merge freely. A SHA deploys once its
+CI passes and `STAGING_QUIET_MINUTES` (default 5, a floor for fast runs) have
+passed, unless `main` has moved past it by then; a burst deploys once, from its
+last commit. If that last commit fails CI, the green ones before it are skipped
+and staging stays put until the next green push, so fix forward. Production is
+still `promote.yml`.
 
 ## Make it dumb simple
 

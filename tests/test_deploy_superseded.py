@@ -178,6 +178,9 @@ def test_the_check_runs_first_and_only_once() -> None:
     # Once: after migrations and the MCP deploy, skipping would leave a half-deployed
     # staging. A queued older run starts only after the newer one finishes.
     assert sum("deploy_superseded.sh" in step.get("run", "") for step in steps) == 1
+    assert steps[first]["env"]["GH_TOKEN"] == "${{ github.token }}", (
+        "the API fallback needs the token"
+    )
     condition = steps[first]["if"]
     # Only a main CI push: promote.yml and a manual dispatch deploy what they name.
     assert "github.event_name == 'push'" in condition

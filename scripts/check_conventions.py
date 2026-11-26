@@ -24,7 +24,7 @@ _BLOB = "https://github.com/pymc-labs/daimon/blob/main"
 VERSIONS = "packages/core/alembic/versions/"
 HEAD_FILE = "packages/core/alembic/head.txt"
 _FRAGMENT = re.compile(r"^changes/(?!README\.md$)[^/]+\.md$")
-_REVISION = re.compile(r"^\d+[a-z]?_[^/]*\.py$")
+_REVISION = re.compile(r"^(\d+[a-z]?|[0-9a-f]{12})_[^/]*\.py$")
 GENERATED = ("docs/configuration.md", "docs/features.md", "docs/mcp-tools.md")
 
 

@@ -146,11 +146,18 @@ def test_a_fold_may_edit_the_changelog_but_a_stray_line_may_not(tmp_path: Path) 
 
 def test_only_numbered_base_migrations_are_protected(tmp_path: Path) -> None:
     repo = _history(tmp_path)
-    for name in ("0001_a.py", "helper.py"):
+    hexed = "14d362cce079_file_uploads.py"
+    (repo / "packages/core/alembic/versions" / hexed).write_text("x = 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "hex")
+    for name in ("0001_a.py", hexed, "helper.py"):
         (repo / "packages/core/alembic/versions" / name).write_text("x = 2\n")
     _commit(repo)
     found = _violations(repo)
-    assert [v.file for v in found] == ["packages/core/alembic/versions/0001_a.py"], f"got {found}"
+    assert [v.file for v in found] == [
+        "packages/core/alembic/versions/0001_a.py",
+        f"packages/core/alembic/versions/{hexed}",
+    ], f"got {found}"
     _assert_explains(found[0], "Migrations")
 
 

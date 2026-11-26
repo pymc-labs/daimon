@@ -793,11 +793,12 @@ jobs:
           cache-to: type=gha,mode=max,scope=report-host,ignore-error=true
 
   # Debounce for staging deploys. It starts with the push, in parallel with the
-  # tests, and deploy-gcp waits for it. Once it ends, deploy.yml's superseded
-  # check skips every SHA that main moved past in the meantime, so a burst of
-  # merges deploys once, from its last commit. Never cancel-in-progress here: a
-  # cancelled job would turn the older main runs "cancelled". Repository
-  # variable STAGING_QUIET_MINUTES sets the window (default 5, 0 = none, max 30).
+  # tests, and deploy-gcp waits for it, so a SHA deploys once its CI passes and
+  # this floor (STAGING_QUIET_MINUTES: default 5, 0 = none, max 30) has elapsed;
+  # the effective window is whichever is longer. deploy.yml's superseded check
+  # then skips every SHA main moved past meanwhile, so a burst of merges deploys
+  # once, from its last commit. Never cancel-in-progress here: a cancelled job
+  # would turn the older main runs "cancelled".
   staging-quiet:
     name: Staging quiet window
     if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.GCP_WIF_PROVIDER != ''
@@ -809,12 +810,12 @@ jobs:
           QUIET: ${{ vars.STAGING_QUIET_MINUTES }}
         run: |
           minutes="${QUIET:-5}"
-          if ! [[ "$minutes" =~ ^[0-9]+$ ]] || [ "$minutes" -gt 30 ]; then
+          if ! [[ "$minutes" =~ ^[0-9]+$ ]] || [ "$((10#$minutes))" -gt 30 ]; then
             echo "::error::STAGING_QUIET_MINUTES must be a whole number from 0 to 30, got '$minutes'."
             exit 1
           fi
           echo "Waiting $minutes minute(s) so a burst of merges deploys once."
-          sleep "$((minutes * 60))"
+          sleep "$((10#$minutes * 60))"
 
   deploy-gcp:
     name: Deploy to GCP (staging)
