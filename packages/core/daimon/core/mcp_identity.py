@@ -37,6 +37,7 @@ from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.turn_origin import origin_place
 
 if TYPE_CHECKING:
+    from daimon.core.signed_room import SignedRoom
     from daimon.core.stores.domain import RoutineRow, WatchRow
 
 #: Relay path under the app root; the server's configured name follows it.
@@ -251,6 +252,8 @@ class IdentityClaims:
     ws: str | None = None
     channel: str | None = None
     msg: str | None = None
+    #: What kind of place the answer goes to (`daimon.core.signed_room`); only with `channel`.
+    room: str | None = None
 
     def payload(self, *, now: datetime, ttl: timedelta = TOKEN_TTL) -> dict[str, str | int]:
         issued = int(now.timestamp())
@@ -267,6 +270,7 @@ class IdentityClaims:
             ("ws", self.ws),
             ("channel", self.channel),
             ("msg", self.msg),
+            ("room", self.room),
         ):
             if value:
                 claims[name] = value
@@ -283,6 +287,7 @@ def caller_claims(
     platform_user_id: str | None,
     agent_name: str,
     place: TurnPlace | None,
+    room: SignedRoom | None = None,
 ) -> IdentityClaims:
     """Claims for one relayed request.
 
@@ -290,9 +295,11 @@ def caller_claims(
     routine or other headless session, a session no longer the thread's live
     one, two turns at once in that session, or a sender from another
     organisation. The token then names no person and no message rather than
-    guess; it still names the agent.
+    guess; it still names the agent. `room` is the kind of place the turn's answer
+    goes to (`daimon.core.signed_room.turn_room`), sent only with the place's channel.
     """
     person = place is not None and bool(platform_user_id)
+    channel = place.channel_id if place is not None else None
     return IdentityClaims(
         iss=issuer,
         aud=audience,
@@ -300,8 +307,9 @@ def caller_claims(
         agent_name=agent_name,
         sub=f"{platform}:{platform_user_id}" if person else None,
         ws=f"{platform}:{workspace_id}" if workspace_id else None,
-        channel=place.channel_id if place is not None else None,
+        channel=channel,
         msg=place.message_id if person and place is not None else None,
+        room=room if channel else None,
     )
 
 
