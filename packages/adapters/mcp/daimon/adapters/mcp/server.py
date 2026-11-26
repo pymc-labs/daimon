@@ -727,7 +727,7 @@ def create_mcp_app(
             RELAY_ROUTE,
             build_identity_relay_route,
         )
-        from daimon.core.mcp_identity import IdentityTokenCache, load_signing_key
+        from daimon.core.mcp_identity import IdentitySigner, load_signing_key
 
         app.add_route(
             RELAY_ROUTE,
@@ -736,7 +736,7 @@ def create_mcp_app(
                 auth=effective_auth,
                 sessionmaker=effective_sessionmaker,
                 tokens=(
-                    IdentityTokenCache(load_signing_key(identity.signing_key.get_secret_value()))
+                    IdentitySigner(load_signing_key(identity.signing_key.get_secret_value()))
                     if identity.signing_key is not None
                     else None
                 ),
