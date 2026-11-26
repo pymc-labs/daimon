@@ -10,7 +10,17 @@ on:
       - "docs/**"
       - "mkdocs.yml"
       - "scripts/check_docs.py"
-      - "scripts/generate_llms_txt.py"
+      - "scripts/generate_*.py"
+      - "scripts/_settings_walk.py"
+      - "docker-compose.yml"
+      - "packages/core/daimon/core/features/**"
+      - "packages/core/daimon/core/config.py"
+      - "packages/core/daimon/core/billing.py"
+      - "packages/core/daimon/core/stores/domain.py"
+      - "packages/adapters/scheduler/daimon/adapters/scheduler/settings.py"
+      - "packages/adapters/sidecar/daimon/adapters/sidecar/settings.py"
+      - "packages/adapters/mcp/daimon/adapters/mcp/**"
+      - "apps/*/src/*/config.py"
       - ".github/workflows/docs.yml"
   # Repeated rather than shared: GitHub Actions does not support YAML anchors.
   pull_request:
@@ -18,7 +28,17 @@ on:
       - "docs/**"
       - "mkdocs.yml"
       - "scripts/check_docs.py"
-      - "scripts/generate_llms_txt.py"
+      - "scripts/generate_*.py"
+      - "scripts/_settings_walk.py"
+      - "docker-compose.yml"
+      - "packages/core/daimon/core/features/**"
+      - "packages/core/daimon/core/config.py"
+      - "packages/core/daimon/core/billing.py"
+      - "packages/core/daimon/core/stores/domain.py"
+      - "packages/adapters/scheduler/daimon/adapters/scheduler/settings.py"
+      - "packages/adapters/sidecar/daimon/adapters/sidecar/settings.py"
+      - "packages/adapters/mcp/daimon/adapters/mcp/**"
+      - "apps/*/src/*/config.py"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -38,11 +58,15 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-        with:
-          # Off: uv's GitHub cache keeps only wheels it built (~25 MB) and
-          # restoring it took longer than downloading the ~200 wheels (~3 s).
-          enable-cache: false
+      - uses: ./.github/actions/setup-daimon
+
+      # The configuration, features and MCP tools pages are built from the code
+      # and never committed, so two changes to their source cannot conflict.
+      - name: generate reference pages
+        run: |
+          uv run python scripts/generate_config_reference.py
+          uv run python scripts/generate_feature_reference.py
+          uv run python scripts/generate_mcp_tool_catalogue.py
 
       # Page, paragraph and sentence budgets for the hand-written pages.
       - name: readability

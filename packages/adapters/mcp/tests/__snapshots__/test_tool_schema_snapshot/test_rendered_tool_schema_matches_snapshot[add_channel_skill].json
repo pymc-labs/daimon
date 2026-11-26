@@ -1,0 +1,27 @@
+{
+  "description": [
+    "Add a skill to whatever agent answers in one channel, there only. Admin-only.",
+    "",
+    "``skill`` is a skill id, a workspace library skill's name, or",
+    "``agent/name`` for one uploaded to the agent that answers in this",
+    "channel; another agent's upload is refused. The latest version is",
+    "added; add it again to pick up a newer one. It applies from the next",
+    "message in each conversation there. A thread id resolves to its parent."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "channel_id": {
+        "type": "string"
+      },
+      "skill": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "channel_id",
+      "skill"
+    ],
+    "type": "object"
+  }
+}

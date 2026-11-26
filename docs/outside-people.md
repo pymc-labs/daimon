@@ -18,7 +18,9 @@ A room is narrow in these cases:
   internal person who cannot read it by any other route. This is seal by name;
 - it is a private thread;
 - Daimon does not know who can view it. An unknown room counts as contained
-  and narrow until the next check.
+  and narrow until the next check. A turn that arrives in the seconds after a
+  change or a restart waits about 20 seconds for that check, then goes on with
+  what it has.
 
 Admins and owners never count. A person with no internal role is an outsider,
 so a block on that person makes no room narrow. A public thread and a forum

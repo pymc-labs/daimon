@@ -1,0 +1,21 @@
+{
+  "description": [
+    "The caller's own use in billed dollars over ``period`` (``30d``, ``this`` month or",
+    "``last`` month), by agent, and their latest turns."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "period": {
+        "default": "30d",
+        "enum": [
+          "30d",
+          "this",
+          "last"
+        ],
+        "type": "string"
+      }
+    },
+    "type": "object"
+  }
+}

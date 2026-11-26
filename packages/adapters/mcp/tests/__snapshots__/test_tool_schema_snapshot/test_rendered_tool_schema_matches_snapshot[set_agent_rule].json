@@ -1,0 +1,39 @@
+{
+  "description": [
+    "Set where an agent runs: only in the ``runs_in`` channels and their threads,",
+    "or, with null, wherever it is set to answer; an empty list runs it nowhere.",
+    "Requires an admin.",
+    "",
+    "Outside its rule its turns are refused. An agent with a rule messages only",
+    "whoever asked, asks before publishing, and can't be copied. A channel's own",
+    "agent keeps its rule until that channel's readers change (``set_channel_rule``).",
+    "Naming a channel only its own agents read makes the agent one of them, so name",
+    "that channel alone."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_name": {
+        "type": "string"
+      },
+      "runs_in": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "agent_name",
+      "runs_in"
+    ],
+    "type": "object"
+  }
+}

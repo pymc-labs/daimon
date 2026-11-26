@@ -34,10 +34,11 @@ from daimon.core.mcp_identity import (
     RELAY_CLAIM,
     RELAY_PATH,
     REQUESTER_PLATFORMS,
-    IdentityTokenCache,
+    IdentitySigner,
     RelayBinding,
     RequesterBodyError,
     RequesterKind,
+    TurnPlace,
     called_tool,
     caller_claims,
     matching_turn,
@@ -47,12 +48,14 @@ from daimon.core.mcp_identity import (
     relay_url,
     requester_conversation,
     routine_conversation,
+    routine_destination_key,
     stamp_parsed,
     watch_conversation,
 )
 from daimon.core.mcp_server_url import same_ascii_mcp_url
 from daimon.core.ops_catalog import OpsCode
 from daimon.core.ops_events import OpsEvent, report_ops_event
+from daimon.core.signed_room import routine_room, turn_room
 from daimon.core.stores import watches
 from daimon.core.stores.agent_avatars import normalize_agent_name
 from daimon.core.stores.domain import ChatPlatform, RoutineRow, TurnOriginRow, WatchRow
@@ -438,7 +441,7 @@ def build_identity_relay_route(
     servers: Mapping[str, SignedIdentityServer],
     auth: TokenVerifier,
     sessionmaker: async_sessionmaker[AsyncSession],
-    tokens: IdentityTokenCache | None,
+    tokens: IdentitySigner | None,
     clients: Mapping[str, httpx.AsyncClient],
     clock: Callable[[], datetime],
     bearers: Mapping[str, SecretStr] | None = None,
@@ -588,6 +591,45 @@ def build_identity_relay_route(
             headers["authorization"] = f"Bearer {bearer.get_secret_value()}"
         else:
             assert tokens is not None
+            place = origin_turn_place(origin) if origin is not None else None
+            room = (
+                await turn_room(sessionmaker, origin, now=now)
+                if origin is not None and origin.platform_channel_id
+                else None
+            )
+            routine_id: str | None = None
+            if (
+                server.routine_claims
+                and origin is None
+                and binding.routine_id is not None
+                and FOREIGN_HOME_CLAIM not in claims
+            ):
+                # Only a run the routine check passes, still posting where it did when the
+                # run started, and only for that room: the channel comes from the routine's
+                # own row, never from the request. A credential minted before runs kept
+                # their destination names none, so it signs no routine claim.
+                routine = await _routine_run(
+                    sessionmaker, binding, tenant_id=tenant_id, agent_id=agent_id
+                )
+                if routine is not None and routine_destination_key(routine) != binding.destination:
+                    routine = None
+                destination = (
+                    await routine_room(
+                        sessionmaker,
+                        tenant_id=tenant_id,
+                        platform=platform,
+                        destination=routine_conversation(routine),
+                        now=now,
+                    )
+                    if routine is not None
+                    else None
+                )
+                if destination is not None:
+                    routine_id = str(binding.routine_id)
+                    place, room = (
+                        TurnPlace(channel_id=destination[0], message_id=None),
+                        destination[1],
+                    )
             identity = caller_claims(
                 issuer=server.issuer,
                 audience=server.audience,
@@ -596,7 +638,9 @@ def build_identity_relay_route(
                 workspace_id=workspace,
                 platform_user_id=person if isinstance(person, str) else None,
                 agent_name=origin.responder_name if origin is not None else binding.agent_name,
-                place=origin_turn_place(origin) if origin is not None else None,
+                place=place,
+                room=room,
+                routine=routine_id,
             )
             headers["authorization"] = f"Bearer {tokens.token(identity, now=now)}"
         if request.method in ("GET", "DELETE"):

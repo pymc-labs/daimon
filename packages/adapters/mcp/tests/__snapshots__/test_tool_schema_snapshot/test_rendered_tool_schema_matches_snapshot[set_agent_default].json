@@ -1,0 +1,55 @@
+{
+  "description": [
+    "Make an agent answer in a channel or become the whole workspace's default.",
+    "For example, make churn-explorer answer in #growth. Changes the agent that answers;",
+    "use ``clear_agent_default`` to stop that routing.",
+    "",
+    "When ``channel_id`` is provided the default is scoped to that channel;",
+    "omit it to set the workspace-wide default.  Any existing default at the",
+    "chosen scope is replaced (last-write-wins; an audit stamp is recorded by",
+    "core). Requires an admin.",
+    "",
+    "``channel_id`` MUST be the parent channel's id: ``parent_channel_id`` from",
+    "turn_controls, the same id your context gives on the ``<channel ...",
+    "role=\"parent_channel\">`` element where it has one. Never pass the current",
+    "thread's id here. A channel default is resolved from the parent;",
+    "setup threads keep their bound responder. A default",
+    "written against a thread id is a scope nothing ever reads: the write",
+    "succeeds, this tool reports success, and the channel keeps answering",
+    "with the old agent."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_name": {
+        "type": "string"
+      },
+      "channel_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "expected_ma_agent_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "agent_name"
+    ],
+    "type": "object"
+  }
+}

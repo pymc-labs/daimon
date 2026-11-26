@@ -1,0 +1,27 @@
+{
+  "description": [
+    "Start this conversation's work over with an empty workspace: \"let's start fresh\", \"start over\", \"clear the workspace and begin a new task\".",
+    "",
+    "Only when someone asks for a clean slate. A key, model, repo or instruction",
+    "change keeps the task; `hand_off_task` moves it to another agent. Neither needs",
+    "this.",
+    "",
+    "From the next message here, the agent works in a new empty workspace. It leaves",
+    "behind this task's working files and unfinished work. It keeps everything",
+    "already posted in this thread, and the agent's saved memory, keys and",
+    "connections. Nothing is removed until the new working files are ready. Who answers",
+    "here does not change."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

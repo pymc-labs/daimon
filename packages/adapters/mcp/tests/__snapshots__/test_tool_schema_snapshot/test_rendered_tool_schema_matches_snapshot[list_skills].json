@@ -1,0 +1,23 @@
+{
+  "description": [
+    "List visible custom skills. Pass turn_controls.origin_context_id so member",
+    "reads include skills belonging to this conversation's local responders."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

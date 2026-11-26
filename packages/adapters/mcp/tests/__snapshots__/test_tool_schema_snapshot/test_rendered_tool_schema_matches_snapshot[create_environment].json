@@ -1,0 +1,271 @@
+{
+  "description": [
+    "Create a sandbox environment a channel or the workspace can later run in.",
+    "",
+    "Packages are declared under ``spec.config.packages``, one list per",
+    "ecosystem: ``apt``, ``cargo``, ``gem``, ``go``, ``npm``, ``pip``. For",
+    "example, an environment with numpy, pandas, and pymc sets",
+    "``config.packages.pip = [\"numpy\", \"pandas\", \"pymc\"]``. Pin a version",
+    "with the ecosystem's own syntax — for ``pip``, ``package==1.0.0``.",
+    "",
+    "The package lists you send are the environment's complete package",
+    "set, not a delta: a later change to these packages replaces rather",
+    "than merges, so omitting a previously-installed package removes it.",
+    "Always send the full intended list for every ecosystem you care about.",
+    "",
+    "The new environment is inert until an admin picks it for a channel or",
+    "the workspace, or a channel's admin picks it for their channel, with",
+    "``set_channel_environment``; creating one here changes nothing yet."
+  ],
+  "parameters": {
+    "$defs": {
+      "BetaCloudConfigParams": {
+        "additionalProperties": false,
+        "description": "Request params for `cloud` environment configuration.\n\nFields default to null; on update, omitted fields preserve the\nexisting value.",
+        "properties": {
+          "networking": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BetaUnrestrictedNetworkParam"
+              },
+              {
+                "$ref": "#/$defs/BetaLimitedNetworkParams"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "packages": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BetaPackagesParams"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "type": {
+            "const": "cloud",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "BetaLimitedNetworkParams": {
+        "additionalProperties": false,
+        "description": "Limited network request params.\n\nFields default to null; on update, omitted fields preserve the\nexisting value.",
+        "properties": {
+          "allow_mcp_servers": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "allow_package_managers": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "allowed_hosts": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "type": {
+            "const": "limited",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "BetaPackagesParams": {
+        "additionalProperties": false,
+        "description": "Specify packages (and optionally their versions) available in this environment.\n\nWhen versioning, use the version semantics relevant for the package manager, e.g. for `pip` use `package==1.0.0`. You are responsible for validating the package and version exist. Unversioned installs the latest.",
+        "properties": {
+          "apt": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cargo": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "gem": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "go": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "npm": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pip": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "type": {
+            "const": "packages",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "BetaUnrestrictedNetworkParam": {
+        "additionalProperties": false,
+        "description": "Unrestricted network access.",
+        "properties": {
+          "type": {
+            "const": "unrestricted",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "EnvironmentSpec": {
+        "additionalProperties": false,
+        "description": "Authoring shape for an environment YAML file.\n\nMirrors `anthropic.types.beta.environment_create_params.EnvironmentCreateParams`\nwith `extra=\"forbid\"` so authoring typos fail before any MA write. The SDK's\n`BetaCloudConfigParams` TypedDict is the nested type for `config` — no\nre-declaration here. `metadata` is intentionally omitted: the upload call\nsynthesizes `{daimon_account, daimon_name}` at the SDK boundary.",
+        "properties": {
+          "config": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BetaCloudConfigParams"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "name": {
+            "type": "string"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "enum": [
+                  "organization",
+                  "account"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "spec": {
+        "$ref": "#/$defs/EnvironmentSpec"
+      }
+    },
+    "required": [
+      "spec"
+    ],
+    "type": "object"
+  }
+}

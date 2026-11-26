@@ -2356,6 +2356,10 @@ class SignedIdentityServer(BaseModel):
     # requester kind `agent_chat`. Off by default: a server that does not know the kind
     # may refuse every call that carries it.
     agent_chat_requester: bool = False
+    # Sign a routine run that posts to a Discord room with its routine, that room and the
+    # room's kind (`daimon.core.signed_room.routine_room`). Off by default: a server that
+    # does not know the `routine` claim would read such a call as a person's.
+    routine_claims: bool = False
 
     @model_validator(mode="after")
     def _wake_needs_requester(self) -> SignedIdentityServer:
@@ -2363,6 +2367,8 @@ class SignedIdentityServer(BaseModel):
             raise ValueError("wake_tools needs requester_meta")
         if self.agent_chat_requester and not self.requester_meta:
             raise ValueError("agent_chat_requester needs requester_meta")
+        if self.routine_claims and self.auth != "signed":
+            raise ValueError("routine_claims needs a signed server")
         return self
 
     @model_validator(mode="after")
@@ -2446,6 +2452,9 @@ class McpIdentitySettings(BaseModel):
             'requester_kind "agent_chat": a turn a person started through the MCP hub, '
             "signed in with their platform login, then names that person with no place. "
             "Turns started with an agent, coding or CLI key name nobody. "
+            "Set routine_claims to true for a signed server that accepts the routine claim: "
+            "a routine run that posts to a Discord room then names its routine, that room "
+            "and the room's kind, and no person. "
             "An agent using a server stays in its channel with no long-term memory, a fresh "
             "session per channel turn and no handoffs, because the server answers with what "
             "the channel's readers can read. Set channel_scoped to false for a server that "
@@ -2530,6 +2539,11 @@ class McpIdentitySettings(BaseModel):
     def names_requester(self) -> bool:
         """Whether any server is sent the requester's identity (`requester_meta`)."""
         return any(server.requester_meta for server in self.servers)
+
+    @property
+    def names_routine(self) -> bool:
+        """Whether any server is sent routine claims (`routine_claims`)."""
+        return any(server.routine_claims for server in self.servers)
 
     @property
     def names_agent_chat_requester(self) -> bool:
@@ -3277,7 +3291,7 @@ class Settings(BaseSettings):
             "Deployment defaults for features, one variable each: "
             "DAIMON_FEATURES__PROGRESS_PLANS=on. A value may end in :locked so no "
             "workspace, agent, channel or thread can change it; disabled is off:locked. "
-            "An unknown feature stops startup. docs/features.md lists them."
+            "An unknown feature stops startup. The docs site's features page lists them."
         ),
     )
     thread_participation: ThreadParticipationSettings = Field(

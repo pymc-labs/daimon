@@ -26,8 +26,6 @@ from typing import Any
 #: Files outside the code that tests read or lint regenerates and compares.
 FILES: dict[str, str] = {
     ".env.example": "generated",
-    "docs/configuration.md": "generated",
-    "docs/mcp-tools.md": "mcp-catalogue",
     "docs/slack-app-manifest.yaml": "slack-manifest",
     "docs/teams-app-manifest.yaml": "teams-manifest",
     "docker-compose.yml": "docs",
@@ -119,7 +117,6 @@ SUITES: dict[str, tuple[str, ...]] = {
     "repo": ("core", "lint", "shard-check"),
     "deploy-workflow": ("core", "lint", "shard-check"),
     "lanes": ("core", "lint", "shard-check"),
-    "mcp-catalogue": ("lint", "core", "mux"),
     "slack-manifest": ("slack", "parity"),
     "teams-manifest": ("teams", "parity"),
     # A script, so ruff and the public-repo scan run on it as well.

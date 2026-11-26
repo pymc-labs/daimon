@@ -1,11 +1,10 @@
 """Generate docs/features.md from the feature registry.
 
-Run: uv run python scripts/generate_feature_reference.py [--check]
+Run: uv run python scripts/generate_feature_reference.py
 """
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
@@ -173,13 +172,7 @@ def render() -> str:
 
 
 def main() -> int:
-    text = render()
-    if "--check" in sys.argv:
-        if not OUT.exists() or OUT.read_text() != text:
-            print(f"{OUT} is stale: run scripts/generate_feature_reference.py", file=sys.stderr)
-            return 1
-        return 0
-    OUT.write_text(text)
+    OUT.write_text(render())  # built by the docs workflow, never committed
     return 0
 
 

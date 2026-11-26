@@ -1,0 +1,32 @@
+{
+  "description": [
+    "List repository memories: shared entries and your own personal directives.",
+    "",
+    "Omit repo for the agent's bound working repository. Reading another",
+    "granted repo requires your linked GitHub account's read access.",
+    "Use this reply's origin_context_id. Routine callers cannot use this tool."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "type": "string"
+      },
+      "repo": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

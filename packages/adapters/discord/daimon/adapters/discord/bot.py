@@ -4971,6 +4971,7 @@ class DaimonBot(commands.Bot):
             parent_channel_id=row.parent_channel_id,
             thread_id=row.thread_id,
             platform_channel_id=row.thread_id,
+            public_thread=is_public_thread(thread),
             responder_ma_agent_id=str(agent.id),
             responder_name=admission.config.agent_name or agent.name,
             configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
@@ -5687,6 +5688,14 @@ class DaimonBot(commands.Bot):
 
         # --- Stage one: admission (identity, config cascade, missing-config
         # bail, MA resolve/retrieve, balance gate, cap gate) -- admit(). ---
+        async def show_typing_while_waiting() -> None:
+            # Admission waits for room facts: show activity once; a failure changes nothing.
+            try:
+                async with message.channel.typing():
+                    pass
+            except Exception as exc:
+                log.debug("discord.facts_wait_typing_failed", error=str(exc))
+
         try:
             admission = await admit(
                 self.runtime.turn_deps,
@@ -5706,6 +5715,7 @@ class DaimonBot(commands.Bot):
                 category_id=category_id,
                 category_unresolved=category_unresolved,
                 public_thread=is_public_thread(thread),
+                on_facts_wait=show_typing_while_waiting,
             )
         except MissingTurnConfigError as err:
             log.info(
@@ -6208,6 +6218,7 @@ class DaimonBot(commands.Bot):
             platform="discord",
             parent_channel_id=parent_channel_id,
             thread_id=str(thread.id),
+            public_thread=is_public_thread(thread),
             responder_ma_agent_id=str(agent.id),
             responder_name=admission.config.agent_name or agent.name,
             configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,

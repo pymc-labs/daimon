@@ -1,0 +1,55 @@
+{
+  "description": [
+    "The workspace's spend in billed dollars over ``period``, one row per ``person``,",
+    "``agent`` or ``channel``, biggest first. Person names show only in a direct message",
+    "with the admin; elsewhere ``private_details`` is ``direct_message`` and they read",
+    "``Person 1``, ``Person 2``. Pass this active turn's origin_context_id. Admin-only.",
+    "``next_page`` goes back as ``after``."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "after": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "by": {
+        "default": "person",
+        "enum": [
+          "person",
+          "agent",
+          "channel"
+        ],
+        "type": "string"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "period": {
+        "default": "30d",
+        "enum": [
+          "30d",
+          "this",
+          "last"
+        ],
+        "type": "string"
+      }
+    },
+    "type": "object"
+  }
+}

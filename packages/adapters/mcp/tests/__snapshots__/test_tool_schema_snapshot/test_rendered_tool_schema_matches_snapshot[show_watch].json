@@ -1,0 +1,18 @@
+{
+  "description": [
+    "Show your watch's immutable destination, source, status and expiry. Admins may inspect",
+    "within their workspace."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "watch_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "watch_id"
+    ],
+    "type": "object"
+  }
+}

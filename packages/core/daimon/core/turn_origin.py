@@ -224,6 +224,7 @@ async def turn_origin(
     helper_of: uuid.UUID | None = None,
     helper_key: str | None = None,
     own_dm_reach: bool = False,
+    public_thread: bool = False,
 ) -> AsyncIterator[TurnOriginRow]:
     """Commit a distinct origin for this execution and remove it after execution.
 
@@ -245,6 +246,7 @@ async def turn_origin(
     `own_dm_reach` is the admission's decision that the turn may read a limited room its
     person can read themselves: true only for an interactive owner DM turn and a routine the
     scheduler fires into its owner's DM. A helper's turn never has it.
+    `public_thread` is the platform's word that `thread_id` is a public thread.
     """
     now = datetime.now(UTC)
     async with sessionmaker.begin() as session:
@@ -272,6 +274,7 @@ async def turn_origin(
             helper_of=helper_of,
             helper_key=helper_key,
             own_dm_reach=own_dm_reach,
+            public_thread=public_thread,
             # A helper works inside the turn that asked it: never a wake's own turn.
             origin_id=None if helper_of is not None else _wake_origin_id(),
         )

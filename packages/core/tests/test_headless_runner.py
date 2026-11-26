@@ -1986,9 +1986,12 @@ async def test_routine_receives_shared_repo_memory_only(
     assert "Shared rule" in sent[0]["events"][0]["content"][0]["text"]
 
 
-@pytest.mark.parametrize("requester_meta", [True, False])
-async def test_routine_relay_claim_only_when_a_server_names_the_requester(
+@pytest.mark.parametrize(
+    ("requester_meta", "routine_claims"), [(True, False), (False, False), (False, True)]
+)
+async def test_routine_relay_claim_only_when_a_server_names_the_requester_or_the_routine(
     requester_meta: bool,
+    routine_claims: bool,
     run_turn: RunTurn,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2014,6 +2017,7 @@ async def test_routine_relay_claim_only_when_a_server_names_the_requester(
                 issuer="daimon-test",
                 audience="https://source.example.test",
                 requester_meta=requester_meta,
+                routine_claims=routine_claims,
             )
         ]
     )
@@ -2037,11 +2041,16 @@ async def test_routine_relay_claim_only_when_a_server_names_the_requester(
             origin="routine",
             routine_id=routine_id,
             runs_as_user="42",
+            routine_destination="channel:9:",
             feature_settings=settings,
             tool_safety=OPEN_TOOL_SAFETY,
         )
-    assert seen["relay_routine_id"] == (routine_id if requester_meta else None)
-    assert seen["relay_owner"] == ("42" if requester_meta else None)
+    named = requester_meta or routine_claims
+    assert seen["relay_routine_id"] == (routine_id if named else None)
+    assert seen["relay_owner"] == ("42" if named else None)
+    assert seen["relay_destination"] == ("channel:9:" if routine_claims else None), (
+        "only a routine-claims deployment adds the destination an older image would refuse"
+    )
 
 
 @pytest.mark.parametrize(

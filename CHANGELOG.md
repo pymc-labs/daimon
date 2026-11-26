@@ -7,22 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **Agents can read Daimon's own docs and source, and the docs say how it
-  works.** Turn on "Knows Daimon" (`self_knowledge`, Off by default) for a
-  workspace, agent, channel or thread, and the agent answers how Daimon works
-  from the docs and source code of the release it runs on, on every model
-  backend and every path. Four read-only tools (`read_daimon_docs`,
-  `search_daimon_docs`, `read_daimon_source`, `search_daimon_source`) read and
-  search the pages and the `packages/` code in the image, and
-  each result names the source repository and commit. Where Web app is Off,
-  the web app's pages and code (its adapter, core modules and chat tools) are
-  left out. The image ships `docs/`; `DAIMON_SELF_KNOWLEDGE__*` sets where
-  they are read. New pages cover
-  [how Daimon works](docs/how-daimon-works.md), [approvals](docs/approvals.md)
-  and [helpers and handoffs](docs/helpers.md); every feature names the page
-  that explains it, and `docs/llms.txt` indexes the site for language models.
-  CI fails on time words ("now", "new"), on names in the docs that no longer
-  exist in code, and on web text outside `<!-- knowledge: web -->` markers.
+- **A long job asked through agent chat runs to its end with one tool: `await_turn`.**
+  Call it after `start_turn`. It returns when the agent says something, when the turn
+  ends, or after about four minutes, and reports the tool call running now. Nothing is
+  polled: `ask`, `await_turn` and Daimon's own handling of tool confirmations wait on the
+  session's event stream. A turn that paused because the service restarted, or because it
+  reached the unattended run time limit, is resumed by the call that waits for it, so the
+  caller no longer needs `get_session` and `continue_turn`
+  ([Agent chat sessions](docs/unattended.md#agent-chat-sessions)).
+
+- **A turn asked through agent chat no longer stops when Discord is slow to answer.**
+  Daimon checks membership again before each tool call it lets through. A check Discord
+  did not answer used to count as a refusal and left the turn paused. It is now tried
+  again, and a call refused for that reason says "Discord didn't answer" instead of "You
+  aren't on this server's list of people".
+
+- **A signed-identity MCP server can learn which routine is calling, and for which room.**
+  With `"routine_claims": true` on the server, a routine run that posts to a Discord room
+  signs its routine, that room and the room's kind. It is off by default
+  ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).
+
+- **A signed-identity MCP server learns what kind of Discord place the answer goes to.**
+  The token's new `room` claim says `dm`, `team`, `narrow` or `contained`, so the server can
+  limit what it returns to what that place may read
+  ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).
+
+||||||| parent of de496c9a2 (feat(mcp): wait for a turn on its event stream, and add await_turn)
+- **Each request to a signed-identity MCP server carries a new token with its own `jti`.**
+  A server can accept each token once, so a copied token cannot be replayed
+  ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).
 
 - **The agent no longer tells a person to expect an approval card for a cloud computer.**
   Daimon shows the card itself when one is needed. The agent also sizes parallel work from
