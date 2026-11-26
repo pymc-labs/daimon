@@ -251,6 +251,7 @@ async def test_connection_invitation_names_clicker_and_preselects_notice(
                 client_secret="secret",
             ),
             mcp=SimpleNamespace(app_root_url="https://example.invalid"),
+            web=None,
             crypto=SimpleNamespace(keys=(key,)),
         ),
     )
