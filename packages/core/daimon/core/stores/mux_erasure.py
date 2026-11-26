@@ -66,8 +66,8 @@ fenced; neither is an account id that is not a UUID (synthetic and operator iden
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection, Iterable
-from dataclasses import dataclass, fields
+from collections.abc import Collection, Iterable, Mapping
+from dataclasses import dataclass, field, fields
 from typing import Any, cast
 
 from daimon.core._models import (
@@ -327,6 +327,8 @@ class ProviderSession:
     session_id: str
     account_scope_id: str | None
     profile: str
+    # The binding's refs, which name the session's keys file (`replace_binding.ENV_FILE_REF`).
+    native_refs: Mapping[str, str] = field(default_factory=dict, compare=False)
 
 
 async def provider_sessions(
@@ -350,7 +352,7 @@ async def provider_sessions(
         session_id = refs.get("session")
         if session_id:
             found[tenant_id, provider, session_id] = ProviderSession(
-                tenant_id, provider, session_id, refs.get("account_scope"), profile
+                tenant_id, provider, session_id, refs.get("account_scope"), profile, refs
             )
     return tuple(found.values())
 

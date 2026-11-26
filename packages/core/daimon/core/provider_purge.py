@@ -4,7 +4,8 @@ Runs after the erasure commits, so a failure is logged and never undoes it. Only
 OpenAI sessions can be deleted: the Gemini driver has no session delete, so its
 stored interactions stay for Google's own retention, which the privacy policy says.
 Each session is deleted with the key and project header it was created under
-(`usage_transport`); a session whose key cannot be resolved is left and logged.
+(`usage_transport`), with the keys file it mounted; a session whose key cannot be
+resolved is left and logged.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from collections.abc import Awaitable, Callable, Iterable
 import structlog
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.stores.mux_erasure import ProviderSession
+from daimon.core.turn.replace_binding import delete_env_file
 from mux.contracts.ids import ResourceRef, Scope
 from mux.drivers.openai import (
     MemoryRecoveryJournal,
@@ -80,12 +82,9 @@ async def delete_provider_sessions(sessions: Iterable[ProviderSession]) -> int:
             tenant_id=str(item.tenant_id),
             account_id=scope.account_id,
         )
+        key = f"privacy-delete:{uuid.uuid5(item.tenant_id, item.session_id)}"
         try:
-            await driver.sessions.delete(
-                scope,
-                ref,
-                key=f"privacy-delete:{uuid.uuid5(item.tenant_id, item.session_id)}",
-            )
+            await driver.sessions.delete(scope, ref, key=key)
         except MuxError as error:
             log.warning(
                 "purge.provider_session_failed",
@@ -95,5 +94,8 @@ async def delete_provider_sessions(sessions: Iterable[ProviderSession]) -> int:
                 causes=backend_refusal_causes(error),
             )
             continue
+        finally:
+            # No keys stay at the provider, whether or not the session went.
+            await delete_env_file(scope, driver, ref, item.native_refs, key=key)
         deleted += 1
     return deleted

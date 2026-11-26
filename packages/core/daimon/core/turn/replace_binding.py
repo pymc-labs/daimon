@@ -340,8 +340,21 @@ async def retire_session(
     *,
     key: str,
 ) -> bool:
-    """End a session, then delete the keys file it mounted (`ENV_FILE_REF`), if any."""
+    """End a session, then delete the keys file it mounted (`delete_env_file`)."""
     ended = await end_session(scope, backend, ref, key=key)
+    await delete_env_file(scope, backend, ref, refs, key=key)
+    return ended
+
+
+async def delete_env_file(
+    scope: Scope,
+    backend: ManagedAgents | None,
+    ref: ResourceRef | None,
+    refs: Mapping[str, str],
+    *,
+    key: str,
+) -> None:
+    """Delete the keys file (`ENV_FILE_REF`) the session `ref` mounted, if any."""
     if backend is not None and ref is not None and (file_id := refs.get(ENV_FILE_REF)):
         try:
             await backend.artifacts.delete(
@@ -350,7 +363,6 @@ async def retire_session(
         except MuxError as error:
             # Left at the provider; logged by category, never content.
             log.warning("binding.env_file_kept", error=type(error).__name__)
-    return ended
 
 
 async def _terminate(scope: Scope, old: OldSession, key: str) -> bool:
