@@ -1318,14 +1318,22 @@ async def _sweep_lead_intake(sm: async_sessionmaker[AsyncSession]) -> None:
         log.error("scheduler.lead_retention_failed")
 
 
+_last_data_reads_prune: dict[str, datetime] = {}
+
+
 @scheduler_step
 async def _sweep_data_reads(sm: async_sessionmaker[AsyncSession]) -> None:
-    """Forget what old, ended chat sessions read from data sources."""
+    """Forget what old, ended chat sessions read from data sources, hourly as ops events."""
     from daimon.core.stores.data_memory import READS_RETENTION, prune_reads
 
+    now = datetime.now(UTC)
+    last = _last_data_reads_prune.get("started")
+    if last is not None and now - last < _OPS_EVENTS_PRUNE_INTERVAL:
+        return
+    _last_data_reads_prune["started"] = now
     try:
         async with sm.begin() as session:
-            await prune_reads(session, cutoff=datetime.now(UTC) - READS_RETENTION)
+            await prune_reads(session, cutoff=now - READS_RETENTION)
     except SQLAlchemyError:
         log.exception("scheduler.data_reads_sweep.failed")
 
