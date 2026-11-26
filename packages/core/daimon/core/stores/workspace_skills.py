@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 
 from daimon.core._models import WorkspaceSkill, WorkspaceSkillFile, WorkspaceSkillVersion
 from daimon.core.stores.domain import WorkspaceSkillFileRow, WorkspaceSkillRow
@@ -87,6 +87,22 @@ async def list_skills(session: AsyncSession, *, tenant_id: uuid.UUID) -> list[Wo
         .order_by(WorkspaceSkill.name)
     )
     return [WorkspaceSkillRow.model_validate(row) for row in rows]
+
+
+async def scoped_among(
+    session: AsyncSession, *, tenant_id: uuid.UUID, skill_ids: Collection[str]
+) -> set[str]:
+    """Which of `skill_ids` are limited to a scope."""
+    if not skill_ids:
+        return set()
+    rows = await session.scalars(
+        select(WorkspaceSkill.skill_id).where(
+            WorkspaceSkill.tenant_id == tenant_id,
+            WorkspaceSkill.skill_id.in_(skill_ids),
+            WorkspaceSkill.scope.is_not(None),
+        )
+    )
+    return set(rows)
 
 
 async def list_files(

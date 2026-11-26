@@ -39,6 +39,7 @@ def runtime(monkeypatch):
     for module in (edits, library):
         monkeypatch.setattr(module, "require_card", confirmed)
     monkeypatch.setattr(web_url, "role_of_account", admin_role)
+    monkeypatch.setattr(library, "require_admin", lambda *_a: None)
 
     async def aware(_rt: Any, _auth: Any, links: Any) -> Any:
         return links
@@ -143,6 +144,29 @@ async def test_library_scope_when_set_then_card_first_and_read_back(runtime, mon
         "reads answer directly"
     )
     assert asked == ["set_skill_scope"], "the read asked for no card"
+
+
+async def test_library_card_tools_refuse_a_non_admin_before_asking_for_the_card(
+    runtime, monkeypatch
+):
+    asked: list[str] = []
+
+    async def card(*_a: Any, tool_name: str, **_k: Any) -> None:
+        asked.append(tool_name)
+
+    def refuse(*_a: Any) -> None:
+        raise AgentEditError("The skill library needs an admin.", kind="forbidden")
+
+    monkeypatch.setattr(library, "require_card", card)
+    monkeypatch.setattr(library, "require_admin", refuse)
+    for call in (
+        library._restore_impl(runtime, make_auth(), "notes", "3", "ctx"),
+        library._set_scope_impl(runtime, make_auth(), "notes", "team", "ctx"),
+        library._add_repo_impl(runtime, make_auth(), "acme/skills", "main", [], None, "ctx"),
+    ):
+        with pytest.raises(ToolError, match="needs an admin"):
+            await call
+    assert asked == [], "no card for someone who may not make the change"
 
 
 async def test_library_add_repo_when_confirmed_then_outcomes_and_unreadable_repo_is_a_tool_error(

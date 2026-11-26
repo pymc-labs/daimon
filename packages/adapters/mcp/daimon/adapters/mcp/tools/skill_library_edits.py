@@ -20,6 +20,7 @@ from daimon.adapters.mcp.tools.agents import (
     _edit_deps,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core import skill_library_files
+from daimon.core.agent_admin import require_admin
 from daimon.core.agent_editing import AgentEditError
 from daimon.core.server_skills.repo import valid_branch
 from daimon.core.server_skills.sync import UpstreamGone, UpstreamUnreachable
@@ -57,6 +58,14 @@ async def _shown(runtime: McpRuntime, auth: AuthIdentity, ref: SkillRef) -> Libr
     )
 
 
+def _require_admin(auth: AuthIdentity) -> None:
+    """Refuse a non-admin before a card is asked, which they could press for nothing."""
+    try:
+        require_admin(_edit_actor(auth), "The skill library")
+    except AgentEditError as err:
+        raise ToolError(str(err)) from err
+
+
 async def _save_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -85,6 +94,7 @@ async def _restore_impl(
     version: str,
     origin_context_id: str | None = None,
 ) -> LibrarySkillVersion:
+    _require_admin(auth)
     await require_card(
         runtime,
         auth,
@@ -141,6 +151,7 @@ async def _set_scope_impl(
     scope: str | None,
     origin_context_id: str,
 ) -> SkillScope:
+    _require_admin(auth)
     # A scope decides who reads the skill, so a person confirms it.
     await require_card(
         runtime, auth, tool_name="set_skill_scope", origin_context_id=origin_context_id
@@ -169,6 +180,7 @@ async def _add_repo_impl(
 ) -> SkillRepoAdded:
     if not valid_branch(branch):
         raise ToolError("That is not a branch name.")
+    _require_admin(auth)
     # Adding reaches the whole library, so a person confirms it.
     await require_card(
         runtime, auth, tool_name="add_library_repository", origin_context_id=origin_context_id
@@ -177,7 +189,7 @@ async def _add_repo_impl(
         tenant_id=auth.tenant_id, repo=repo, branch=branch, paths=tuple(paths), scope=scope
     )
     try:
-        async with httpx.AsyncClient() as http:
+        async with httpx.AsyncClient(timeout=30.0) as http:
             outcomes = await add_skill_repo(
                 _edit_deps(runtime),
                 runtime.settings.github,

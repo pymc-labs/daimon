@@ -230,11 +230,11 @@ limited channel keeps that channel's rule. The hub's data tools take a `workspac
 or id, among the workspaces the caller belongs to, and are listed only where `data_reads`
 is On in one of them.
 
-`library_skills` is On unless an admin turns it off, and idle until the library holds
-skills. `list_library_skills` and `read_library_skill` then serve it to coding keys, the hub
-(with a `workspace`) and outside clients. A scoped skill shows only to someone whose data
-reads include its scope; a caller who may read no data sees unscoped skills only. Chat's
-`list_skills` and `get_skill` apply the rule to everyone who can read the room.
+`library_skills` is On unless an admin turns it off. `list_library_skills` and
+`read_library_skill` serve it to coding keys, the hub (with a `workspace`) and outside
+clients. A scoped skill shows only to someone whose data reads include its scope; chat's
+`list_skills` and `get_skill` apply that to everyone who can read the room, and in a direct
+message to the agent's owner too. A scoped skill cannot be attached to an agent or channel.
 
 Admins add a repository's skills and set a scope on the web or in chat; chat changes wait
 for the asker's approval card.

@@ -40,7 +40,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.authz import Action, Decision, Place, Subject, authorize
 from daimon.core.channel_backend import backend_refusal_causes
-from daimon.core.constants import AGENT_SKILL_CAP
+from daimon.core.constants import AGENT_SKILL_CAP, SCOPED_SKILL_REFUSAL
 from daimon.core.defaults.ma_index import (
     find_agent_by_daimon_tag,
     list_skills_lenient,
@@ -60,6 +60,7 @@ from daimon.core.permissions import agent_permissions, ruled_agents
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.session_snapshot import MaSkill
 from daimon.core.specs import SkillRef
+from daimon.core.stores import workspace_skills
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_changes import record_change
 from daimon.core.stores.channel_skills import add_channel_skill, list_channel_skills
@@ -83,7 +84,9 @@ _LOGGED_MAX = 4096
 
 _TRUNCATED = re.compile(r"~[0-9a-f]{4}$")
 
-ChannelSkillRefusal = Literal["not_found", "not_usable", "no_version", "too_many", "mount_clash"]
+ChannelSkillRefusal = Literal[
+    "not_found", "not_usable", "no_version", "too_many", "mount_clash", "scoped"
+]
 
 REFUSALS: Final[dict[ChannelSkillRefusal, str]] = {
     "not_found": "No skill here has that name or id. Nothing changed.",
@@ -92,6 +95,7 @@ REFUSALS: Final[dict[ChannelSkillRefusal, str]] = {
         "channel can't add it. Nothing changed."
     ),
     "no_version": "That skill has no version to add yet. Nothing changed.",
+    "scoped": SCOPED_SKILL_REFUSAL + " Nothing changed.",
     "too_many": (
         f"The channel's agent would run with more than {AGENT_SKILL_CAP} skills, the most "
         "one conversation can have. Remove one first. Nothing changed."
@@ -308,6 +312,8 @@ async def choose_channel_skill(
     if found is None or found.id not in bodies:
         return "not_found"
     body = bodies[found.id]
+    if await workspace_skills.scoped_among(session, tenant_id=tenant_id, skill_ids=[found.id]):
+        return "scoped"
     policy = await load_access_policy(session, tenant_id=tenant_id)
     uploads = await list_user_skills_for_tenant(session, tenant_id=tenant_id)
     stored = next((u.agent_name for u in uploads if u.anthropic_id == found.id), None)
@@ -681,11 +687,17 @@ async def turn_channel_skills(
     oldest first), with a warning naming them, logged once per channel and
     process until the dropped set changes.
     """
-    if rows is None:
-        async with sessionmaker() as session:
+    async with sessionmaker() as session:
+        if rows is None:
             rows = await list_channel_skills(
                 session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
             )
+        # A scoped skill reaches people through the library tools, which check who may read
+        # it; a mount cannot, so one scoped after it was added is left out.
+        scoped = await workspace_skills.scoped_among(
+            session, tenant_id=tenant_id, skill_ids=[row.skill_id for row in rows]
+        )
+    rows = [row for row in rows if row.skill_id not in scoped]
     if not rows:
         return ()
     bodies: dict[str, str] | None

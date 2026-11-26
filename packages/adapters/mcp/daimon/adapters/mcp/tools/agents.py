@@ -69,6 +69,7 @@ from daimon.core.anthropic_guard import anthropic_configured
 from daimon.core.authz import Surface
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.confirmation import agent_loss_word
+from daimon.core.constants import SCOPED_SKILL_REFUSAL
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.mcp_merge import DAIMON_MCP_SERVER_NAME, get_reserved_mcp_rejection
@@ -95,6 +96,7 @@ from daimon.core.permissions import SEALED_REFUSAL
 from daimon.core.routing_facts import build_unrouted_note
 from daimon.core.skill_sync import SyncRepoFailure, sync_agent_skills, sync_report_failures
 from daimon.core.specs import AgentSpec, SkillRepo, merge_default_agent_toolset
+from daimon.core.stores import workspace_skills as workspace_skills_store
 from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, TurnOriginRow
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.tool_safety import get_mcp_server_name_rejection
@@ -1155,6 +1157,13 @@ async def _update_agent_impl(
             )
         except DefaultsError as exc:
             raise ToolError(str(exc)) from exc
+        async with runtime.session_factory() as session:
+            if await workspace_skills_store.scoped_among(
+                session,
+                tenant_id=auth.tenant_id,
+                skill_ids=[skill["skill_id"] for skill in resolved_skills],
+            ):
+                raise ToolError(SCOPED_SKILL_REFUSAL)
 
     if other is not None:
         await _change_agent_model(runtime, auth, name, agent, other)

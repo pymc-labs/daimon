@@ -57,14 +57,14 @@ from daimon.core.channel_backend import (
     backend_is_enabled,
     load_backend_agent,
 )
-from daimon.core.constants import MODEL_DISPLAY_NAMES
+from daimon.core.constants import MODEL_DISPLAY_NAMES, SCOPED_SKILL_REFUSAL
 from daimon.core.defaults.ma_index import list_skills_lenient
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, strip_tenant_prefix
 from daimon.core.model_presets import ModelConfig
 from daimon.core.models_catalog import is_priced_claude_model, list_model_choices
 from daimon.core.permissions import SEALED_REFUSAL, WEB_PLACE_ID
 from daimon.core.stores import agent_drafts as drafts_store
-from daimon.core.stores import agent_helpers, agent_tool_rules
+from daimon.core.stores import agent_helpers, agent_tool_rules, workspace_skills
 from daimon.core.stores.agent_tool_rules import Rule
 from daimon.core.stores.domain import (
     AgentBackendRevision,
@@ -1030,6 +1030,11 @@ async def _check_added_skills(
     foreign = {row.id for row in rows if row.source == "custom"} - own
     if any(s.skill_id in foreign or (s.type == "custom" and s.skill_id not in own) for s in added):
         raise AgentEditError("That skill isn't available here.", kind="invalid")
+    async with deps.edit.session_factory() as session:
+        if await workspace_skills.scoped_among(
+            session, tenant_id=actor.tenant_id, skill_ids=[s.skill_id for s in added]
+        ):
+            raise AgentEditError(SCOPED_SKILL_REFUSAL, kind="invalid")
 
 
 async def _check_added_helpers(

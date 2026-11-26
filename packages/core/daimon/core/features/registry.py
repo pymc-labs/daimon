@@ -1339,9 +1339,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         default="on",
         tiers=("workspace",),
         binds="turn",
-        doc=(
-            "Chat agents see a scoped skill only where everyone in the room holds its scope."
-        ),
+        doc=("Chat agents see a scoped skill only where everyone in the room holds its scope."),
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,
     ),

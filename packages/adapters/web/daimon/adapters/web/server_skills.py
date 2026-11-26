@@ -13,6 +13,7 @@ from typing import Final
 
 import httpx
 import structlog
+from anthropic.types.beta.skill_list_response import SkillListResponse
 from daimon.adapters.web.agent_access import Editor, Viewer, actor_of, change_deps, edit_refusal
 from daimon.adapters.web.agent_audit import recorded
 from daimon.adapters.web.caller import WebCaller
@@ -82,7 +83,7 @@ from daimon.core.skills.ingest import SkillIngestError
 from daimon.core.stores import server_skills as store
 from daimon.core.stores.domain import ServerSkillRow, WebPersonRow
 from daimon.core.stores.tenants import list_tenants_by_platform
-from daimon.core.workspace_skills_sync import record_library_skills
+from daimon.core.workspace_skills_sync import list_account_skills, record_library_skills
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.exc import SQLAlchemyError
@@ -157,13 +158,19 @@ def _mirror_deps(
     )
 
 
+#: Workspaces whose library the backfill has recorded since this process started. Later
+#: skills are recorded as they are published, so the backfill runs once for each.
+_backfilled: set[uuid.UUID] = set()
+
+
 async def _library_skills_tenants(runtime: WebRuntime) -> list[uuid.UUID]:
-    """The workspaces with `library_skills` On, whose library the backfill records."""
+    """The workspaces with `library_skills` On whose library is not yet recorded."""
     tenants = await list_tenants_by_platform(runtime.sessionmaker)
     return [
         t.id
         for t in tenants
-        if (
+        if t.id not in _backfilled
+        and (
             await resolve_features(
                 runtime.sessionmaker,
                 runtime.settings,
@@ -199,18 +206,29 @@ async def _declared_repos(runtime: WebRuntime, upstreams: Upstreams) -> None:
 
 
 async def sync_source_skills(runtime: WebRuntime) -> None:
-    """One pass: record library skills not yet kept, add declared repositories' skills (after
-    the backfill, so a declared scope lands on the kept record), then check every mirror whose
-    source runs in process, each repository downloaded once. A failing step is logged and
-    retried on the next pass."""
+    """One pass: record each workspace's library skills not yet kept (once per workspace, from
+    one listing), add declared repositories' skills (after the backfill, so a declared scope
+    lands on the kept record), then check every mirror whose source runs in process, each
+    repository downloaded once. A failing step is logged and retried on the next pass."""
     upstreams: Upstreams = {}
     edit = change_deps(runtime).edit
-    for tenant_id in await _library_skills_tenants(runtime):
+    if pending := await _library_skills_tenants(runtime):
+        listed: list[SkillListResponse] = []
         try:
-            await record_library_skills(edit, writer=SystemWriter(tenant_id))
-        # Boundary: one workspace's library must not stop the others or the loop.
+            listed = await list_account_skills(edit)
+        # Boundary: a failed listing is retried on the next pass.
         except Exception:
-            log.warning("workspace_skill.backfill_failed", tenant_id=str(tenant_id), exc_info=True)
+            log.warning("workspace_skill.backfill_failed", exc_info=True)
+            pending = []
+        for tenant_id in pending:
+            try:
+                await record_library_skills(edit, writer=SystemWriter(tenant_id), rows=listed)
+                _backfilled.add(tenant_id)
+            # Boundary: one workspace's library must not stop the others or the loop.
+            except Exception:
+                log.warning(
+                    "workspace_skill.backfill_failed", tenant_id=str(tenant_id), exc_info=True
+                )
     try:
         await _declared_repos(runtime, upstreams)
     # Boundary: the declared file must not stop the mirror checks.

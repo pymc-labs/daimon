@@ -2437,9 +2437,18 @@ async def test_update_agent_impl_accepts_skills_only_patch(
     assert captured.get("skills") == skills, "skills-only patch must reach MA"
 
 
+@pytest.mark.parametrize("scoped", [False, True], ids=["library", "scoped"])
 async def test_update_agent_impl_resolves_skill_names_to_skill_ids(
     db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    scoped: bool,
 ) -> None:
+    """A scoped skill is refused: an agent shows it to everyone in the room, not by scope."""
+
+    async def scoped_among(_session: Any, *, skill_ids: list[str], **_k: Any) -> set[str]:
+        return set(skill_ids) if scoped else set()
+
+    monkeypatch.setattr(agents_mod.workspace_skills_store, "scoped_among", scoped_among)
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
 
@@ -2494,7 +2503,7 @@ async def test_update_agent_impl_resolves_skill_names_to_skill_ids(
     client = build_fake_anthropic(router.dispatch)
 
     auth = auth_identity(account_id, tenant_id)
-    await _update_agent_impl(
+    attach = _update_agent_impl(
         _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
@@ -2505,6 +2514,12 @@ async def test_update_agent_impl_resolves_skill_names_to_skill_ids(
         mcp_servers=None,
         skills=["build-models"],
     )
+    if scoped:
+        with pytest.raises(ToolError, match="data scope"):
+            await attach
+        assert not captured, "nothing reached the provider"
+        return
+    await attach
     assert captured.get("skills") == [{"type": "custom", "skill_id": "skill_build"}], (
         "skill names must be resolved to {type:custom, skill_id:<MA id>} before reaching MA"
     )
