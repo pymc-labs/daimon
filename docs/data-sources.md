@@ -101,9 +101,8 @@ publish after a complete sync.
 
 With the feature on, the web app has a Data section for search and browsing, which shows each
 person only what they may read. Owners and admins add, pause, publish and retire sources under
-Integrations > Data sources. Workspace admins and data admins, named by the owner or another
-data admin, manage scopes, grants, identity links and redaction sets under Admin > Data
-access. Granting oneself a scope is allowed and marked in the audit trail. Declared sources show as bound and are read-only there. People link and
+Integrations > Data sources. Workspace admins manage scopes, grants, identity links and
+redaction sets under Admin > Data access, or from chat once a source exists. Granting oneself a scope is allowed and marked in the audit trail. Declared sources show as bound and are read-only there. People link and
 connect their own accounts on their Profile.
 
 ## Who sees an answer
@@ -115,8 +114,10 @@ a team owner or chat member grants when adding or updating the app. Until then, 
 rooms whose members cannot be read, answers hold only what everyone may read. Teams rooms
 with a guest, another organisation's member, or a shared channel get no data.
 
-A memory saved after a data read records what was read. It shows only where everyone could
-read all of it; a deleted item, a live result or SQL hides it.
+After a data read, a conversation asks only agents that read data too, and their reads count
+as its own. A memory saved after a data read records what was read; recalling it counts as
+reading that, and an update keeps what it recorded. It shows only where everyone could read
+all of it; a deleted item, a live result or SQL hides it.
 
 ## Redaction sets
 
@@ -124,6 +125,7 @@ A set's `at` says when it applies. Unset, as before, regex, aliases and removals
 at ingest, and entity names hide at read time. `storage` applies all of them at ingest,
 entity names becoming their label for everyone. `answer` stores text as the source has it
 and rewrites answers instead, entity names hiding as when unset. `exclude_ids` always keeps records out of the store.
+
 A set applies to the sources that name it. When its rules change, answers from those sources
 apply them too until each source syncs again. While any answer applies rules, SQL and file
 reads are refused.
