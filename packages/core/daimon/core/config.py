@@ -27,6 +27,7 @@ from daimon.core.features.registry import FEATURES, deployment_key, parse_deploy
 from daimon.core.features.removed import without_removed_features, without_removed_fields
 from daimon.core.mcp_server_url import ascii_mcp_url, canonical_mcp_url
 from daimon.core.outbound.reach import DEFAULT_MAX_PEOPLE
+from daimon.core.reaction_actions import ReactionAction, overlap_error
 from daimon.core.scope_cascade import CascadeMode
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolSafetyPolicy
 from pydantic import (
@@ -2479,18 +2480,39 @@ class McpIdentitySettings(BaseModel):
         ),
     )
 
+    reaction_actions: Annotated[list[ReactionAction], NoDecode] = Field(
+        default_factory=list[ReactionAction],
+        description=(
+            "Reaction actions, off by default: a custom emoji that marks a message and one "
+            "that confirms it, for a bearer server with requester_meta. A JSON array; each "
+            'entry has workspace (for example "discord:<guild id>"), server (a name in '
+            "DAIMON_MCP_IDENTITY__SERVERS), agent (a name in that server's agents), "
+            "mark_tool and mark_emoji, confirm_tool and confirm_emoji (emoji written "
+            '"name:id"), and optionally warning_emoji (a unicode emoji, default: the '
+            "warning sign). After a turn in which the agent's call of mark_tool finished "
+            "without error, on the server whose relay name is server, the bot adds "
+            "mark_emoji to the asker's message. A workspace uses each emoji once. When a person "
+            "adds confirm_emoji to a message that carries it, the bot calls confirm_tool "
+            "for that person with the message link, and swaps mark_emoji for confirm_emoji. "
+            'An error, or a result with status "attention", puts the warning emoji on '
+            "the message and sends that person a direct message. Also turn on the "
+            "reaction_actions feature. Discord only. Read by the Discord and MCP services; "
+            "only the MCP service holds the server's key. Default: [] (off)."
+        ),
+    )
+
     @property
     def unscoped_names(self) -> frozenset[str]:
         """Names of the servers that opted out of channel scoping."""
         return frozenset(s.name for s in self.servers if not s.channel_scoped)
 
-    @field_validator("servers", "bearers", mode="before")
+    @field_validator("servers", "bearers", "reaction_actions", mode="before")
     @classmethod
     def _parse_json(cls, value: object, info: ValidationInfo) -> object:
         if not isinstance(value, str):
             return value
         if not value.strip():
-            return [] if info.field_name == "servers" else {}
+            return {} if info.field_name == "bearers" else []
         try:
             return json.loads(value)
         except json.JSONDecodeError as err:
@@ -2514,6 +2536,28 @@ class McpIdentitySettings(BaseModel):
         if value is not None:
             load_signing_key(value.get_secret_value())
         return value
+
+    @model_validator(mode="after")
+    def _actions_match_servers(self) -> McpIdentitySettings:
+        """Each reaction action names a bearer server that stamps the requester, in its
+        workspaces and with an agent it allows."""
+        if (clash := overlap_error(self.reaction_actions)) is not None:
+            raise ValueError(clash)
+        by_name = {server.name: server for server in self.servers}
+        for action in self.reaction_actions:
+            server = by_name.get(action.server)
+            if (
+                server is None
+                or server.auth != "bearer"
+                or not server.requester_meta
+                or action.workspace not in (server.workspaces or ())
+                or action.agent not in server.agents
+            ):
+                raise ValueError(
+                    "a reaction action needs a bearer server with requester_meta that allows "
+                    "its workspace and agent"
+                )
+        return self
 
     @model_validator(mode="after")
     def _bearers_match_servers(self) -> McpIdentitySettings:

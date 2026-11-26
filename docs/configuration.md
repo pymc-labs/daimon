@@ -611,6 +611,25 @@ bearer server needs one; no other server may have one. A chat worker given one r
 that server's tool hints when DAIMON_TOOL_SAFETY__TRUSTED_ANNOTATIONS names it. Default:
 {} (none).
 
+### `DAIMON_MCP_IDENTITY__REACTION_ACTIONS`
+
+`list[ReactionAction]` · optional · default unset
+
+Reaction actions, off by default: a custom emoji that marks a message and one that
+confirms it, for a bearer server with requester_meta. A JSON array; each entry has
+workspace (for example "discord:&lt;guild id&gt;"), server (a name in
+DAIMON_MCP_IDENTITY__SERVERS), agent (a name in that server's agents), mark_tool and
+mark_emoji, confirm_tool and confirm_emoji (emoji written "name:id"), and optionally
+warning_emoji (a unicode emoji, default: the warning sign). After a turn in which the
+agent's call of mark_tool finished without error, on the server whose relay name is
+server, the bot adds mark_emoji to the asker's message. A workspace uses each emoji
+once. When a person adds confirm_emoji to a message that carries it, the bot calls
+confirm_tool for that person with the message link, and swaps mark_emoji for
+confirm_emoji. An error, or a result with status "attention", puts the warning emoji on
+the message and sends that person a direct message. Also turn on the reaction_actions
+feature. Discord only. Read by the Discord and MCP services; only the MCP service holds
+the server's key. Default: [] (off).
+
 ## Hub
 
 Read from `daimon.core.config.HubSettings`. Prefix `DAIMON_HUB__`.

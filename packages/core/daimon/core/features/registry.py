@@ -284,9 +284,9 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent", "channel", "thread"),
         binds="turn",
         doc=(
-            "The agent knows about the web app: messages, routine runs and tool results carry "
-            "its address and the pages it may link to, its invite and access tools are offered, "
-            "and Daimon's cards show buttons into it. Off leaves it out."
+            "The agent knows the web app: messages, routine runs and tool results carry "
+            "its address and linkable pages, its invite and access tools are offered, "
+            "and cards show buttons into it. Off leaves it out."
         ),
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
@@ -650,6 +650,21 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         "an emoji for the model and one for the effort it runs on.",
         tiers=("workspace", "agent"),
         platforms=frozenset({"discord"}),
+    ),
+    # A person's emoji confirms what the bot marked: the switch that lets an emoji act sits with
+    # the other guards. The chat and capabilities groups are full on Discord (25 options a select).
+    FeatureSpec(
+        key="reaction_actions",
+        name="Reaction actions",
+        category="guardrails",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("workspace",),
+        binds="turn",
+        doc="A person's emoji confirms a marked message.",
+        platforms=_DISCORD,
+        authority=_ADMIN,
     ),
     _shown(
         "routine_result_header",

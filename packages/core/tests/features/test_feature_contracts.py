@@ -126,6 +126,7 @@ _NARROWED: dict[str, str] = {
     "routine_result_header": "read when a routine posts, which has no thread; the routine sets its own",
     "github_follow_org": "an admin's choice for one agent, read by the GitHub repo refresh",
     "model_reactions": "a workspace or agent display choice, read when the turn starts",
+    "reaction_actions": "a workspace choice, read when a turn ends or a person reacts, with no agent",
     "tool_server_names": "a workspace or agent display choice, read when the turn starts",
     "turn_time_limit": "a workspace or agent limit, read once when the turn starts",
     "unattended_time_limit": "a workspace or agent limit, read once when the run starts",

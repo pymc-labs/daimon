@@ -1384,6 +1384,7 @@ class DaimonBot(commands.Bot):
             ShareSecretCog,
         )
         from daimon.adapters.discord.feedback_reactions import FeedbackReactionCog
+        from daimon.adapters.discord.reaction_actions import ReactionActionCog
 
         await self.add_cog(HelpCog(self))
         await self.add_cog(HereCog(self))
@@ -1400,6 +1401,7 @@ class DaimonBot(commands.Bot):
         await self.add_cog(ShareSecretCog(self))
         self.add_dynamic_items(SecretShareRevealButton, SecretShareConfirmButton)
         await self.add_cog(FeedbackReactionCog(self))
+        await self.add_cog(ReactionActionCog(self))
 
         # One-time CLASS registration (not per-button) for the chat-initiated
         # credential-request button. Imported here, not at module level, since
@@ -4910,6 +4912,7 @@ class DaimonBot(commands.Bot):
                 urgent_edit=_urgent_edit_message,
                 delete=_delete_message,
                 agent_name=admission.display_name(agent.name),
+                turn_agent=agent,
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
                 model_id=shown_model(admission).id,
@@ -5093,6 +5096,7 @@ class DaimonBot(commands.Bot):
                 urgent_edit=_urgent_edit_message,
                 delete=_delete_message,
                 agent_name=admission.display_name(agent.name),
+                turn_agent=agent,
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
                 model_id=shown_model(admission).id,
@@ -6059,6 +6063,7 @@ class DaimonBot(commands.Bot):
                 urgent_edit=_urgent_edit_message,
                 delete=_delete_message,
                 agent_name=admission.display_name(agent.name),
+                turn_agent=agent,
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
                 model_id=shown_model(admission).id,
@@ -6604,6 +6609,7 @@ class DaimonBot(commands.Bot):
                 urgent_edit=_urgent_edit_message,
                 delete=_delete_message,
                 agent_name=admission.display_name(agent.name),
+                turn_agent=agent,
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
                 model_id=shown_model(admission).id,

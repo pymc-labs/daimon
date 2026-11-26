@@ -2,7 +2,7 @@
 
 Every feature is set at one or more levels: Deployment, Workspace, Agent, Channel and
 Thread. Each level is On, Off or Default, or one of the feature's values. Default
-inherits from the level above, and at the top it is the feature's built-in default.
+inherits from the level above; at the top it is the built-in default.
 Settings show which level decided.
 
 An admin can lock a value at the Deployment, Workspace, Agent or Channel level. Levels
@@ -108,6 +108,7 @@ Where each feature can be set, and its default.
 | Post length elsewhere | `outbound_length` | Limit | 1500 characters | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Daily spend per model | `daily_model_cap` | Limit | $20 | ✓ | ✓ | ✓ |  |  |  |  |
 | Approvals | `approvals` | Guardrail | Ask |  | ✓ | ✓ | ✓ | ✓ |  |  |
+| Reaction actions | `reaction_actions` | Guardrail | Off |  | ✓ |  |  |  |  | Only Discord |
 | Read-only memory in direct messages | `dm_memory_read_only` | Guardrail | Writable | ✓ | ✓ |  |  |  |  |  |
 | Approvals in direct messages | `dm_approvals` | Guardrail | Off | ✓ | ✓ |  |  |  |  |  |
 | Rooms with outside people | `audience_hold` | Guardrail | Off | ✓ | ✓ |  |  |  |  | Only Discord |
@@ -361,7 +362,7 @@ The agent can search the web. Off removes it here; On never gives more than the 
 
 ## Web app
 
-The agent knows about the web app: messages, routine runs and tool results carry its address and the pages it may link to, its invite and access tools are offered, and Daimon's cards show buttons into it. Off leaves it out.
+The agent knows the web app: messages, routine runs and tool results carry its address and linkable pages, its invite and access tools are offered, and cards show buttons into it. Off leaves it out.
 
 | | |
 | --- | --- |
@@ -653,6 +654,18 @@ The first message in a thread, and the first after the model or effort changes, 
 | Default | `off` |
 | Levels | Workspace, Agent |
 | Combines | Most specific wins |
+
+## Reaction actions
+
+A person's emoji confirms a marked message.
+
+| | |
+| --- | --- |
+| Key | `reaction_actions` |
+| Values | `on` (On), `off` (Off) |
+| Default | `off` |
+| Levels | Workspace |
+| Combines | Off above is a ceiling |
 
 ## Routine result header
 

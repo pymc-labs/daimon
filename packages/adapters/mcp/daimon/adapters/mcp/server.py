@@ -752,6 +752,34 @@ def create_mcp_app(
             ),
             methods=RELAY_METHODS,
         )
+    if identity.reaction_actions and effective_settings.mcp.jwt_secret is not None:
+        from daimon.adapters.mcp import reaction_actions
+        from daimon.core.features.snapshot import FeaturePlace, place_feature
+        from daimon.core.ma_identity import derive_tenant_uuid
+
+        async def _reactions_on(workspace: str) -> bool:
+            place = FeaturePlace.of(
+                derive_tenant_uuid(platform="discord", workspace_id=workspace.partition(":")[2]),
+                "discord",
+                None,
+            )
+            resolved = await place_feature(
+                effective_sessionmaker, effective_settings, place, "reaction_actions"
+            )
+            return resolved.on
+
+        app.add_route(
+            reaction_actions.ROUTE,
+            reaction_actions.build_reaction_action_route(
+                actions=identity.reaction_actions,
+                servers={server.name: server for server in identity.servers},
+                bearers=identity.bearers,
+                secret=effective_settings.mcp.jwt_secret.get_secret_value().encode(),
+                clock=lambda: datetime.now(UTC),
+                enabled=_reactions_on,
+            ),
+            methods=reaction_actions.METHODS,
+        )
     if github_router_client is not None:
         assert fernet is not None
         from daimon.adapters.mcp.github_router import (

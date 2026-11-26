@@ -195,6 +195,31 @@ a tool call without object `params` is refused with a 400. GET and DELETE
 requests are forwarded without a body. Rotating
 the key means changing the secret and restarting the MCP service.
 
+### Mark a message and confirm it with a reaction
+
+A bearer server with `requester_meta` can be bound on Discord to two custom
+emoji with
+[`DAIMON_MCP_IDENTITY__REACTION_ACTIONS`](configuration.md#daimon_mcp_identity__reaction_actions)
+and the `reaction_actions` [feature](features.md), off by default. After a turn
+in which the bound agent's call of the mark tool finished without error, Daimon
+adds the mark emoji to the asker's message. The server must have the bound relay
+name, taken from its relay URL, not from the name the agent gave it.
+
+A person who adds the confirm emoji to a message that carries the mark emoji
+makes Daimon call the confirm tool for them, with no model turn. Its one
+argument is `message_url`. Daimon stamps the requester as it does for a turn. A reaction from a bot, in a direct message, or with another emoji does nothing.
+
+On success Daimon swaps the mark emoji for the confirm emoji. A tool result with
+`isError` true, or `"status": "attention"` in its structured content or its one
+text item parsed as JSON, is a problem. Daimon then removes that person's
+emoji if it can, adds the warning emoji, keeps the mark, and sends the person a
+direct message with the tool's `message` text. Nothing is posted in the channel.
+
+The Discord service never holds the server's key. It sends the MCP service a
+credential that lasts 15 seconds, works once and names one person, message and tool. The MCP service builds the argument and calls only an allowed tool. The used-credential store lives in one process. A restart in
+those 15 seconds, more than one worker or more than one replica each lose the
+guarantee, and sticky routing does not restore it.
+
 ## Add a skill a server serves
 
 A server that implements the MCP Skills extension (`io.modelcontextprotocol/skills`,

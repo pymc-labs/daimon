@@ -260,6 +260,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **An agent can follow its whole GitHub org.** An admin of the org ticks "Also give
   <agent> new repos added to <org>" on the agent's GitHub connect page. The agent then holds
   every repo of the org, new ones within an hour, except repos taken off it.
+- **A reaction can mark a message and confirm it with a tool call, on Discord.** Off by default
+  (`reaction_actions` feature and `DAIMON_MCP_IDENTITY__REACTION_ACTIONS`). After a turn in which
+  the agent's call of a bound tool finished, the bot adds a custom emoji to the asker's message;
+  a person's confirm emoji on it calls a second tool for them, without a model turn. A problem
+  puts a warning emoji on the message and sends that person a private card.
 - **Agents can hold up to 50 skills.** The per-agent skill limit was 20, left over from
   an earlier Managed Agents limit; the provider now accepts far more. 50 fits every
   backend, including OpenAI agents whose skills are pinned by content digest: a list

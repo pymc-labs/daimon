@@ -41,7 +41,7 @@ _INTRO = """# Features
 
 Every feature is set at one or more levels: Deployment, Workspace, Agent, Channel and
 Thread. Each level is On, Off or Default, or one of the feature's values. Default
-inherits from the level above, and at the top it is the feature's built-in default.
+inherits from the level above; at the top it is the built-in default.
 Settings show which level decided.
 
 An admin can lock a value at the Deployment, Workspace, Agent or Channel level. Levels

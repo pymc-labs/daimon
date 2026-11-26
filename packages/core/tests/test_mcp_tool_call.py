@@ -123,6 +123,26 @@ async def test_json_reply_prefers_structured_content_then_one_text_item():
             assert failure.value.kind == "protocol"
 
 
+async def test_a_call_can_carry_meta_and_is_otherwise_unchanged():
+    sent: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body.get("method") == "tools/call":
+            sent.append(body["params"])
+        return rpc_reply(request, {"protocolVersion": "2025-06-18", "capabilities": {}})
+
+    async with mcp_tool_session(
+        URL, None, resolve=pinned, transport=httpx.MockTransport(handler)
+    ) as source:
+        await source.call_tool_result("t", {"a": 1})
+        await source.call_tool_result("t", {"a": 1}, meta={"who": "9"})
+    assert sent == [
+        {"name": "t", "arguments": {"a": 1}},
+        {"name": "t", "arguments": {"a": 1}, "_meta": {"who": "9"}},
+    ]
+
+
 async def test_is_error_raises_a_class_without_the_servers_text():
     secret = "remote stack trace with secret-ish detail"
     result = {"isError": True, "content": [{"type": "text", "text": secret}]}
