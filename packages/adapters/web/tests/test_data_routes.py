@@ -215,9 +215,10 @@ async def test_no_answer_holds_a_credential(rig: Rig) -> None:
 
 def test_what_redaction_cannot_cover_is_refused_on_the_web() -> None:
     """While names hide, file bytes are refused and a query naming a hidden entity finds
-    nothing (`daimon.data.reading`), as in MCP (`test_data_reads_paths`)."""
+    nothing (`daimon.data.reading`), as in MCP (`test_data_reads_paths`); answer rules redact
+    text files and refuse the rest."""
     tree = ast.parse(inspect.getsource(data_pages))
     defs = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef)}
-    for name, guard in (("file", "redacted"), ("find", "names_hidden")):
+    for name, guard in (("file", "redacted"), ("file", "textual"), ("find", "names_hidden")):
         attrs = {n.attr for n in ast.walk(defs[name]) if isinstance(n, ast.Attribute)}
         assert guard in attrs, f"web {name} skips {guard}"

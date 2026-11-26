@@ -16,7 +16,7 @@ from typing import Literal
 from daimon.core.features.registry import TIER_ORDER, FeatureSpec, Tier
 
 Decider = Tier | Literal["default"]
-Unavailable = Literal["platform", "backend", "requires", "depends_on"]
+Unavailable = Literal["platform", "backend", "requires", "depends_on", "no_source"]
 
 
 @dataclass(frozen=True)

@@ -166,6 +166,28 @@ async def test_an_identity_linked_to_someone_else_is_refused(people: People) -> 
         )
 
 
+async def test_a_workspace_admin_links_an_account_to_themselves_with_a_marked_trail(
+    people: People,
+) -> None:
+    d, admin = people.schemas.data, uuid.uuid4()
+    key = IdentityKey("acme", "w", "u9")
+    await people.listing("acme", SourceAccount("u9"))
+    proof = await identity.admin_link(
+        people.conn, people.schemas, tenant_id=people.tenant, by=admin, key=key,
+        account_id=admin, admin=True,
+    )  # fmt: skip
+    assert proof == "admin", "no sign-in needed"
+    assert await people.reads(admin, await people.record_for(key.ref())), "they read as it"
+    trail = await people.one(
+        f"select detail from {d}.audit where kind = 'identity.admin_link' and account_id = %s",
+        admin,
+    )
+    assert trail is not None and trail["detail"].get("self") is True, "marked in the trail"
+    assert not await identity.unseen_notices(people.conn, people.schemas, people.tenant, admin), (
+        "no notice to oneself"
+    )
+
+
 async def test_candidates_need_two_verified_emails_and_auto_link_respects_every_decision(
     people: People,
 ) -> None:
@@ -229,8 +251,6 @@ async def test_a_workspace_admin_links_others_with_a_notice_and_a_trail_and_neve
 
     with pytest.raises(NotAllowed):
         await link(admin, you, admin=False)
-    with pytest.raises(NotAllowed):
-        await link(admin, admin)
     assert await link(admin, you) == "admin"
     with pytest.raises(Conflict):
         await link(admin, other)

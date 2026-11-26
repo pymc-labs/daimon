@@ -5,22 +5,21 @@ what happens when a run fails.
 
 A routine is a recurring [unattended](unattended.md) turn: a cron expression,
 a timezone, an agent and one prompt. The scheduler fires it, the agent runs
-with no human in the thread, and the tail of its final message is saved on the
-routine. An agent in GitHub App mode gets only its baseline repository grants.
+with no human present, and the tail of its final message is saved. An agent in GitHub App mode gets only its baseline repository grants.
 
 A routine runs as the person who last changed its message, agent or target.
 Such an edit moves the routine to that person and erases its saved output and
 pending delivery. Pausing, resuming and deleting move nothing.
 
-A routine may name a **destination**: a channel, a thread or its owner's
+A routine may name a **destination**: a channel, a thread or the owner's
 Discord DM. With one, Daimon posts the agent's full final reply and its
 [generated files](#generated-files) there, unless the agent posted there
 itself. Without one, the result is only recorded, and files stay in the
 workspace.
 
 For a one-off "remind me in two hours", use a timer (`create_timer`,
-[mcp-tools.md](mcp-tools.md#timers)). It fires once, runs in the conversation it
-was set in and needs no cleanup.
+[mcp-tools.md](mcp-tools.md#timers)). It fires once, in the conversation it
+was set in, and needs no cleanup.
 
 ## Create a routine
 
@@ -31,7 +30,7 @@ Five MCP tools manage routines: `create_routine`, `list_routines`,
 `get_routine` returns.
 
 Ask the agent in chat ("every weekday at 9am, post the sales
-numbers"). Each platform has a panel:
+numbers"), or use a panel:
 
 - **Slack** `/routines` and **Teams** `routines` (in a 1:1 chat): workspace
   admins create and delete. The form's schedule field takes cron, such as
@@ -48,12 +47,12 @@ The CLI creates routines for an owner (`daimon routines create`), sets
 [moves routines in from another system](routine-migration.md).
 
 `--destination dm|channel|thread` (with `--destination-id`) runs the checks
-below; `--dry-run` saves nothing. The operator may name any agent; it counts as the
+below; `--dry-run` saves nothing. The operator may name any agent, counted as the
 owner's own.
 
 `create_routine` refuses a caller with no platform identity (a CLI-only
 token), an unknown IANA timezone, an unparseable cron expression and an
-`agent_name` that is not an agent in the tenant. The tenant is the caller's.
+`agent_name` outside the caller's tenant.
 
 ### Set a destination
 
@@ -70,7 +69,7 @@ tool checks that:
 - the tenant's access policy does not protect it ([permissions.md](permissions.md)).
 
 For the owner's DM, set `destination_kind="dm"` and leave out the id. Daimon
-uses the caller's own Discord id; nobody can send another person's routine to
+uses the caller's own Discord id, so nobody can send another person's routine to
 their DM. Slack and Teams refuse it. A DM routine runs as a live DM turn, with
 the owner's personal memory, and needs the server's DMs on and the agent's
 [DM grant](direct-messages.md#choose-who-may-dm-which-agent) for the owner.
@@ -93,10 +92,11 @@ Slots that pass while the same routine is still running are skipped under both
 policies. `get_routine` and `list_routines` show the latest skipped range and
 reason (`stale` or `in_flight`), not a history.
 
-A routine whose agent, channel or thread is on another provider is not run. The
-self-hosted backend stops with `last_error=selfhosted_routines_unsupported`;
-OpenAI and Gemini stop with a message saying routines run only on Anthropic.
-Headless routines need Anthropic Managed Agents. A thread destination with an unknown parent
+On OpenAI or Gemini a routine runs as an unattended reply, a DM routine as
+the owner's private turn. On OpenAI it stops with `backend_unsupported` unless
+sandbox tools are on. A routine into a thread runs on the provider that thread
+kept. Self-hosted stops with
+`last_error=selfhosted_routines_unsupported`. A thread destination with an unknown parent
 channel stops with `routine_destination_parent_unknown`. Set the destination
 again to record the parent.
 
@@ -208,7 +208,7 @@ After a successful run, Daimon collects the session's output files and
 delivers up to ten with the reply. Discord and Slack attach them, and a Teams
 post says files are not supported there. A file over 200 MB or the
 destination's limit (10 MB in a Discord DM) is named in text and stays in the
-workspace.
+workspace. On OpenAI and Gemini the limit is 24 MB.
 
 Files share the result's at-most-once claim, and each send rechecks the
 destination and the owner's access. Changing the destination cancels pending

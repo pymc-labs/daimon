@@ -76,7 +76,6 @@ from daimon.adapters.discord.bot import (
     _channel_protection_state,  # pyright: ignore[reportPrivateUsage]  # the same may-post decision the mention path makes
     _resolve_category,  # pyright: ignore[reportPrivateUsage]  # the same category lookup the mention path passes to admit()
     admission_refusal_message,
-    turn_model_label,
 )
 from daimon.adapters.discord.checks import is_member_guild_admin, member_role_ids
 from daimon.adapters.discord.errors import (
@@ -134,6 +133,7 @@ from daimon.core.turn.outcomes import finish_with_error, observe_turn, record_re
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import ProtectionState
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
+from daimon.core.turn.shown_model import shown_model
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT, wait_for_ticket
 from daimon.core.turn_queue import TurnTicket
 from daimon.core.wizard.answers import format_answer_block
@@ -665,7 +665,7 @@ async def run_wizard_submit_turn_observed(
                 agent_name=admission.display_name(agent.name),
                 in_dm=isinstance(interaction.channel, discord.DMChannel),
                 fallback_active=lambda: transport.fallback_used,
-                model_id=turn_model_label(admission),
+                model_id=shown_model(admission).id,
                 markup=bot.runtime.turn_deps.markup,
                 cancel_view=CancelView(
                     allowed_user_id=interaction.user.id, cancel=cancel, turn_id=turn_id
@@ -785,7 +785,7 @@ async def run_wizard_submit_turn_observed(
                 edit=_edit_message,
                 agent_name=admission.display_name(agent.name),
                 in_dm=isinstance(interaction.channel, discord.DMChannel),
-                model_id=turn_model_label(admission),
+                model_id=shown_model(admission).id,
                 markup=bot.runtime.turn_deps.markup,
                 cancel_view=CancelView(
                     allowed_user_id=interaction.user.id,

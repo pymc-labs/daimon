@@ -86,6 +86,7 @@ CardKind = Literal[
     "repo",
     "skill_repo",
     "watch_credential",
+    "data_source",
     "switch",
     "call",
 ]
@@ -137,6 +138,7 @@ _BUTTON_LABEL: Final[dict[CardKind, str]] = {
     "repo": "🔐 Use my GitHub token",
     "skill_repo": "🔐 Use my GitHub token",
     "watch_credential": "🔐 Enter it privately",
+    "data_source": "🔐 Enter it privately",
 }
 
 # Leading emoji → state, for a reader (parity driver, QA script) holding only
@@ -240,6 +242,14 @@ def classify_card_state(headline: str) -> CardState | None:
     return None
 
 
+def data_source_content(source: str) -> tuple[str, tuple[str, ...]]:
+    """A data source credential form's headline and fact, on every platform."""
+    return (
+        f"🔑 The credential for data source {source}",
+        ("It goes straight onto the source and is never shown in chat.",),
+    )
+
+
 def _requested_content(
     kind: CardKind,
     *,
@@ -277,6 +287,8 @@ def _requested_content(
                 "It is never shown in chat.",
             ),
         )
+    if kind == "data_source":
+        return data_source_content(target)
     if kind == "mcp_oauth":
         if mcp_server_url is None:
             raise ValueError("kind='mcp_oauth' requires mcp_server_url")
@@ -331,6 +343,8 @@ def _expired_fact(
         phrase = f"connect {agent_name} to {target}"
     elif kind == "watch_credential":
         phrase = f"set up your watch key for {target}"
+    elif kind == "data_source":
+        phrase = f"take the credential for {target}"
     elif kind == "repo":
         phrase = f"give {agent_name} access to {repo_display}"
     else:

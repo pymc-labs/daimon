@@ -18,9 +18,9 @@ supplies authorization; do not add an approval loop. Do not run unattended.
 
 Write request JSON to a working file and run
 `python3 <this-skill>/scripts/toggl_edits.py <request.json>`.
-Python standard library only. It reads only the named key from
-`/mnt/session/uploads/.env`, without executing that file. Read
-[references/requests.md](references/requests.md) for schemas and API references.
+Python standard library only. It reads only the named key from the agent's
+keys file, wherever `scripts/workflow_io.py` finds it, without executing that
+file. Read [references/requests.md](references/requests.md) for schemas and API references.
 
 toggl-edits changes only stopped entries that the Reports API attributes to the
 explicitly named member in that workspace; running timers are out of scope.

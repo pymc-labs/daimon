@@ -1,10 +1,10 @@
 """What a chat session read from data sources, so a memory it saves carries that audience.
 
 The data tools note each item a session read (`record:<id>`; a live answer or caller SQL,
-which name no stored record, as `live:<source id>` and `sql`; a person's own data read as
-them as `person:<account id>`). A memory saved later in the
-session records them, and shows only where everyone the answer is for could read every one
-(`daimon.data.reads.readable`). Callers own transactions.
+which name no stored record, as an `audience_ref`: where and by whom). A memory saved later
+in the session records them, and shows only where everyone the answer is for could read every
+record (`daimon.data.reads.readable`) and was among each ref's readers there. Callers own
+transactions.
 """
 
 from __future__ import annotations
@@ -18,9 +18,6 @@ from daimon.core._models import SessionDataRead
 from sqlalchemy import CursorResult, literal, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
-
-UNKNOWN_READ: Final = "unknown"
-"""What a save records when it cannot tell what was read: readable by no one."""
 
 
 async def note_reads(

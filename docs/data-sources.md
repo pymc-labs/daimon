@@ -56,7 +56,7 @@ platform verified. That is a web app sign-in with Discord, Slack or Microsoft, a
 link, or the person signing in to the source (Bluedot and Notion). A person who only chats
 has no link until they sign in to the web app.
 
-A workspace admin can link someone else's account, never their own, and the
+A workspace admin can link any account by hand, their own included, and the
 audit trail records it. A link an admin ends or rejects stays ended when the person signs in again.
 
 Google sign-in for data sources needs a Google OAuth client in
@@ -86,8 +86,13 @@ publish after a complete sync.
 With the feature on, the web app has a Data section for search and browsing, which shows each
 person only what they may read. Owners and admins add, pause, publish and retire sources under
 Integrations > Data sources. Workspace admins manage scopes, grants, identity links and
-redaction sets under Admin > Data access, or from chat once a source exists. Granting oneself a scope is allowed and marked in the audit trail. Declared sources show as bound and are read-only there. People link and
+redaction sets under Admin > Data access, or from chat. Granting oneself a scope or linking an
+account to oneself is allowed and marked in the audit trail. Declared sources show as bound and are read-only there. People link and
 connect their own accounts on their Profile.
+
+From chat, admins can add a source, even the first, or refresh its credential. The value
+goes through a private form only the asker opens, straight onto the source. In a room, emails,
+sign-ins and redaction rules reach the agent sealed; it sends them to the asker by direct message.
 
 ## Who sees an answer
 
@@ -95,16 +100,18 @@ An answer shows only what everyone who will see it may read: the asker and, in a
 members. Discord rooms keep their members; Slack and Teams rooms are read on each call. A
 Slack room whose members cannot be read gets answers that hold only what everyone may read.
 
-Teams needs the app's `ChannelMember.Read.Group` and `ChatMember.Read.Chat` consents, which
-a team owner or chat member grants when adding or updating the app; until then data tools
-say so and read nothing in Teams. A Teams room with a guest, another organisation's member,
-a shared channel, or members that cannot be read gets no data. A Teams room found with
-outsiders is held from then on, so an agent that read data starts afresh there.
+Teams reads members with `ChannelMember.Read.Group` and `ChatMember.Read.Chat`, which a team
+owner or chat member grants when adding or updating the app, or `ChannelMember.Read.All` and
+`ChatMember.Read.All`, which a tenant admin grants once ([Teams](teams.md)). Where members
+cannot be read, answers hold only what everyone may read, and say when consent is missing.
+A Teams room with a guest, another organisation's member or a shared channel gets no data
+and is held from then on, so an agent that read data starts afresh there.
 
 After a data read, a conversation asks only agents that read data too, and their reads count
 as its own. A memory saved after a data read records what was read; recalling it counts as
-reading that, and an update keeps what it recorded. It shows only where everyone could read
-all of it; a deleted item, a live result or SQL hides it.
+reading that, and an update keeps it. It shows only where everyone could read all of it. After a live result or SQL, it shows only in that room or
+private chat, while everyone there was already a reader. Saved outside a chat (the CLI, a
+key) where an agent reads data, it shows only where its saver is the only person.
 
 ## Redaction sets
 
@@ -114,8 +121,8 @@ entity names becoming their label for everyone. `answer` stores text as the sour
 and rewrites answers instead, entity names hiding as when unset. `exclude_ids` always keeps records out of the store.
 
 A set applies to the sources that name it. When its rules change, answers from those sources
-apply them too until each source syncs again. While any answer applies rules, SQL and file
-reads are refused.
+apply them too until each source syncs again. Answer-time rules reach SQL values and file text
+best effort.
 
 ## Declared config
 

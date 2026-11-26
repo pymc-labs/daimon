@@ -36,6 +36,7 @@ TEXT_CHARS: Final = 12_000
 """Characters of a record's text one answer holds."""
 QUERY_CHARS: Final = 500
 REDACTED: Final = "Files aren't shown while some names are hidden from you."
+RULED: Final = "This file isn't shown: its source's redaction rules reach only text."
 
 
 class SourceOut(BaseModel):
@@ -220,10 +221,16 @@ def data_pages_router(runtime: WebRuntime) -> APIRouter:
             name = (
                 next((a.name for a in found.attachments if a.ord == index), None) if found else None
             )
-            got = await reads.read_file(conn, schemas, r.ctx, env, rid, index) if name else None
-        if got is None or name is None:
+            got = (
+                await reads.read_file(conn, schemas, r.ctx, env, rid, index, r.answer)
+                if name
+                else None
+            )
+        if got is None or name is None or found is None:
             raise HTTPException(status_code=404, detail=NOT_FOUND)
         data, content_type = got
+        if found.item.source_id in r.answer and not reads.textual(content_type):
+            raise HTTPException(status_code=403, detail=RULED)
         return Response(
             data,
             media_type="application/octet-stream",

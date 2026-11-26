@@ -80,7 +80,10 @@ when the file is genuinely small or you genuinely need all of it.
 
 ## Files you produce for the user
 
-Every new file written to `/mnt/session/outputs/` is attached to your reply after
+The outputs directory is `/mnt/session/outputs/`, or `/workspace/outputs/` on OpenAI
+or Gemini, which have no `/mnt/session`.
+
+Every new file written to the outputs directory is attached to your reply after
 the turn, then removed from outputs. Write only this turn's finished deliverables
 there — the chart, notebook or PDF. Never copy a whole working/run directory into
 outputs or re-copy files already delivered. Keep working files — sources such as

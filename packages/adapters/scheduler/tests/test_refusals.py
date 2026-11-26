@@ -59,6 +59,7 @@ REFUSALS = {
     "'restricted_source' if policy_error == RESTRICTED_SOURCE_ERROR else policy_error",
     "refusal",
     "'routine_changed'",
+    "error.reason",
 }
 
 

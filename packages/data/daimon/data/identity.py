@@ -7,8 +7,8 @@ A link makes a person read as that identity, so one is written only
 - on an exact match of emails both providers verified, in an auto-link domain the source
   names (`record_accounts`, for a connector that lists accounts; none in this package
   does), never for a subject or account an admin decided on there;
-- by a workspace admin for someone else (`admin_link`): never for themselves, with an audit
-  row and a notice row (`take_notices`) for the person.
+- by a workspace admin (`admin_link`), with an audit row (marked `self` for their own
+  account, which needs no sign-in) and a notice row (`take_notices`) for anyone else.
 An email Microsoft reports proves nothing (any directory user may set it), so it is never
 kept as verified.
 
@@ -494,10 +494,10 @@ async def admin_link(
     account_id: uuid.UUID,
     admin: bool = False,
 ) -> LinkProof:
-    """A workspace admin links a known identity to someone else: proof `email` when it is that
-    person's open candidate, else `admin`. The person gets a notice; the trail gets a row."""
-    if by == account_id:
-        raise NotAllowed("You can't link an account to yourself. Ask another admin.")
+    """A workspace admin links a known identity to a person, themselves included: proof
+    `email` when it is that person's open candidate, else `admin`. Another person gets a
+    notice; the trail gets a row, marked `self` for the admin's own account."""
+    own = by == account_id
     async with conn.transaction():
         await fence_account(conn, schemas, by, account_id)
         require_admin(admin)
@@ -527,9 +527,10 @@ async def admin_link(
             kind="identity.admin_link",
             account_id=by,
             target=key.ref(),
-            detail={"account": str(account_id), "proof": proof},
+            detail={"account": str(account_id), "proof": proof, **({"self": True} if own else {})},
         )
-        await _notify(conn, schemas, tenant_id, account_id, "linked", key, row["name"])
+        if not own:
+            await _notify(conn, schemas, tenant_id, account_id, "linked", key, row["name"])
     return proof
 
 

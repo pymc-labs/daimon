@@ -61,7 +61,7 @@ const sets: RedactionSet[] = [
   { name: "clients", repo: "example/redaction", path: "clients.yaml", ref: "main", approved_sha: "3f9a1c0d2b", pin_sha: "3f9a1c0d2b", pending: false, usable: true, checked_at: ago(3), error: null },
   { name: "people", repo: "example/redaction", path: "people.yaml", ref: "main", approved_sha: "11aa22bb33", pin_sha: "9c8d7e6f5a", pending: true, usable: true, checked_at: ago(3), error: null },
 ]
-const rules = { aliases: { Larkspur: "Client A" }, removals: ["internal-only"], regex: [{ pattern: "\\d{4}-\\d{4}", replace: "[number]" }], exclude_ids: [], entities: [{ name: "Larkspur", aliases: ["LKS"], scope: "client", label: "Client A" }] }
+const rules = { at: "answer" as const, aliases: { Larkspur: "Client A" }, removals: ["internal-only"], regex: [{ pattern: "\\d{4}-\\d{4}", replace: "[number]" }], exclude_ids: [], entities: [{ name: "Larkspur", aliases: ["LKS"], scope: "client", label: "Client A" }] }
 const connected: Connected = {
   notices: [{ kind: "linked", identity: "slack:T1:user:U1", provider: "slack", name: "maya" }],
   accounts: [{ provider: "slack", workspace: "T1", name: "maya", email: "maya@example.com", proof: "admin", linked_at: ago(400) }],

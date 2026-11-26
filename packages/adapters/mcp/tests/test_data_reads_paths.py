@@ -13,6 +13,7 @@ import textwrap
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
@@ -32,21 +33,26 @@ from daimon.adapters.mcp.tools import (
 )
 from daimon.core.capability_tools import CAPABILITY_TOOLS
 from daimon.core.channel_audience import channel_has_outsiders
-from daimon.core.data_audience import DataOrigin, Reader, user_subject
-from daimon.core.data_tools import (
-    DATA_READS,
-    DATA_TOOLS,
-    REDACTED_DATA_RESULT,
-    mark_data_result,
+from daimon.core.data_audience import (
+    UNKNOWN_READ,
+    DataAudience,
+    DataOrigin,
+    Reader,
+    audience_ref,
+    audience_ref_holds,
+    data_audience,
+    saver_ref,
+    user_subject,
 )
+from daimon.core.data_tools import DATA_READS, DATA_TOOLS, REDACTED_DATA_RESULT, mark_data_result
 from daimon.core.features import toolset
 from daimon.core.features.registry import FEATURES
-from daimon.core.stores.data_memory import UNKNOWN_READ
 from daimon.core.stores.domain import Role
 from daimon.core.stores.repo_memory import MemoryEntry
 from daimon.core.teams_graph import GraphMember, GraphUnavailable
 from daimon.core.turn import admission
 from daimon.core.turn_hold import TurnHold
+from daimon.data import pool, reads
 from daimon.data.identity import IdentityKey
 from daimon.testing.factories import make_tenant
 from fastmcp.exceptions import ToolError
@@ -232,7 +238,7 @@ def _teams_graph(monkeypatch: pytest.MonkeyPatch, conversation: str, case: objec
 @pytest.mark.parametrize(
     ("row", "conversation", "case", "want"), _ROOMS, ids=[r[0] for r in _ROOMS]
 )
-async def test_a_teams_room_with_outsiders_or_unknown_members_gets_no_data(
+async def test_a_teams_room_reads_its_members_outsiders_or_why_not(
     monkeypatch: pytest.MonkeyPatch, row: str, conversation: str, case: object, want: object
 ) -> None:
     _teams_graph(monkeypatch, conversation, case)
@@ -242,7 +248,7 @@ async def test_a_teams_room_with_outsiders_or_unknown_members_gets_no_data(
     assert got == want, row
 
 
-async def test_a_teams_room_found_with_a_guest_holds_its_next_turns(
+async def test_a_teams_room_with_a_guest_holds_its_next_turns_and_unread_ones_get_public(
     monkeypatch: pytest.MonkeyPatch, committing_sessionmaker: async_sessionmaker[AsyncSession]
 ) -> None:
     async with committing_sessionmaker.begin() as session:
@@ -262,9 +268,13 @@ async def test_a_teams_room_found_with_a_guest_holds_its_next_turns(
             session, tenant_id=tenant.id, platform="teams", channel_id="19:c@thread.v2"
         )
     assert audience.contained, "admission holds the room, so a data-reading session starts fresh"
-    _teams_graph(monkeypatch, "19:c@thread.v2", _NO_CONSENT)
-    with pytest.raises(ToolError, match="consent"):
-        await data_access._room(runtime, auth, asker, "19:d@thread.v2", None, now=now)  # pyright: ignore[reportPrivateUsage]
+    for case, notice in ((_NO_CONSENT, True), (_DOWN, False)):
+        _teams_graph(monkeypatch, "19:c@thread.v2", case)
+        got = await data_access._room(runtime, auth, asker, "19:d@thread.v2", None, now=now)  # pyright: ignore[reportPrivateUsage]
+        assert not got.contained and got.viewers is None, "unread members cap at public data"
+        assert (got.notice is not None and "consent" in got.notice) == notice, (
+            "only a missing consent is named"
+        )
 
 
 @pytest.mark.parametrize("own_read", [False, True])
@@ -283,6 +293,37 @@ async def test_own_drive_reads_in_a_contained_room_for_the_asker_public_only(
         return
     got = await data_access.data_audience_for(runtime, auth, own_read=True)
     assert got.public_only and got.redact, "the room's outsiders see only what anyone may"
+
+
+async def test_own_drive_read_is_remembered_by_its_audience_ref(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The note an own-Drive read leaves is recalled in the same place while everyone present
+    was a reader; a room outsiders may read leaves an unknown read, never recalled."""
+    me = uuid.uuid4()
+    assert "audience_ref" in _names(_tool_defs()["data_my_drive"])
+    runtime = cast(McpRuntime, SimpleNamespace(session_factory=_Sessions()))
+    auth = _auth(platform="discord", external_id="u")
+
+    async def private(*_: object, **__: object) -> DataOrigin:
+        return DataOrigin("private", Reader("discord:u", me), place="discord:D")
+
+    monkeypatch.setattr(data_access, "data_origin", private)
+    here = await data_access.data_audience_for(runtime, auth, own_read=True)
+    assert audience_ref(here) == f"audience:{me}@discord:D"
+    assert audience_ref_holds(audience_ref(here), here)
+    elsewhere = replace(here, place="discord:E")
+    assert not audience_ref_holds(audience_ref(here), elsewhere), "only in the same place"
+    assert not audience_ref_holds(
+        audience_ref(here), replace(here, people=frozenset({me, uuid.uuid4()}))
+    )
+
+    async def contained(*_: object, **__: object) -> DataOrigin:
+        return DataOrigin("room", Reader("discord:u", me), None, contained=True, place="discord:R")
+
+    monkeypatch.setattr(data_access, "data_origin", contained)
+    got = await data_access.data_audience_for(runtime, auth, own_read=True)
+    assert audience_ref(got) == UNKNOWN_READ
 
 
 async def test_own_drive_is_refused_on_another_agents_request(
@@ -367,12 +408,52 @@ async def _tx() -> AsyncIterator[object]:
     yield object()
 
 
-async def test_a_save_with_no_session_by_a_data_reader_shows_nowhere(
+async def test_a_save_with_no_session_by_a_data_reader_records_its_saver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With no session's reads to record, a caller that may read data records an unknown
-    item; one that may not records nothing."""
-    for reading, refs in ((True, [UNKNOWN_READ]), (False, None)):
+    """With no session's reads to record, a caller that may read data records its saver;
+    one that may not records nothing."""
+    auth = _auth(platform="discord")
+    for reading, refs in ((True, [saver_ref(auth.account_id)]), (False, None)):
         monkeypatch.setattr(repo_memory, "reads_data", AsyncMock(return_value=reading))
         runtime = cast(McpRuntime, SimpleNamespace(session_factory=None, settings=None))
-        assert await repo_memory._refs(runtime, _auth(platform="discord")) == refs  # pyright: ignore[reportPrivateUsage]
+        assert await repo_memory._refs(runtime, auth) == refs  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_a_memory_recalls_each_ref_by_its_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Records are re-checked by the store; audience refs by where and by whom they were read;
+    one unknown read hides the memory."""
+    me = uuid.uuid4()
+    here = data_audience(
+        DataOrigin("private", Reader("discord/1:user:7", me), place="discord:D"), agent_owner=None
+    )
+    assert isinstance(here, DataAudience)
+    checked: list[list[str]] = []
+
+    async def readable(_c: object, _s: object, _ctx: object, refs: list[str], _env: object) -> bool:
+        checked.append(refs)
+        return refs == ["record:a"]
+
+    @asynccontextmanager
+    async def connection(_settings: object) -> AsyncIterator[object]:
+        yield object()
+
+    def anything(_: object) -> object:
+        return True
+
+    monkeypatch.setattr(data_access, "data_sources_on", anything)
+    monkeypatch.setattr(data_access, "data_audience_for", AsyncMock(return_value=here))
+    monkeypatch.setattr(pool, "connection", connection)
+    monkeypatch.setattr(
+        data_access, "open_read", AsyncMock(return_value=SimpleNamespace(entities=None, ctx=None))
+    )
+    monkeypatch.setattr(data_access, "Schemas", SimpleNamespace(of=anything))
+    monkeypatch.setattr(data_access, "Env", SimpleNamespace(of=anything))
+    monkeypatch.setattr(reads, "readable", readable)
+    runtime = cast(McpRuntime, SimpleNamespace(settings=SimpleNamespace(data=None)))
+    got = await data_access.readable_by_audience(runtime, _auth(), [
+        ["record:a", audience_ref(here)], [saver_ref(me)], ["record:b"],
+        [saver_ref(uuid.uuid4())], ["record:a", UNKNOWN_READ],
+    ])  # fmt: skip
+    assert got == [True, True, False, False, False]
+    assert ["record:a"] in checked and [] not in checked, "audience refs never reach the store"

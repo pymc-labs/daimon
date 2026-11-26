@@ -129,6 +129,7 @@ from daimon.core.credential_requests import (
     split_skill_repo_target,
 )
 from daimon.core.credential_submit import (
+    apply_data_source_submit,
     apply_watch_credential_submit,
     consume_credential_submit,
     guard_credential_save,
@@ -164,10 +165,12 @@ from daimon.core.mcp_token_connect import (
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import update_agent
 from daimon.core.operation_policy import PolicyOutcome, decide_operation
+from daimon.core.ports.data_credentials import SourceCredentialRefused
 from daimon.core.posted_controls import (
     NO_LONGER_VALID_MESSAGE,
     CardState,
 )
+from daimon.core.posted_controls.cards import data_source_content
 from daimon.core.skills.pipeline import run_skill_sync
 from daimon.core.skills.sync import summarize_failed_imports
 from daimon.core.stores import credential_requests
@@ -751,6 +754,68 @@ class WatchCredentialModal(discord.ui.Modal):
             outcome=ConfigurationChange(
                 target_name=_agent_name(consumed),
                 kind="watch_key",
+                availability="saved",
+                detail=consumed.target,
+            ),
+        )
+
+
+class DataSourceCredentialModal(discord.ui.Modal):
+    """The credential for one data source, sealed straight onto it (`apply_data_source_submit`).
+
+    Requester-only like every form here; the value is never logged, echoed or put in a message.
+    """
+
+    def __init__(self, *, runtime: DiscordRuntime, request_row: CredentialRequestRow) -> None:
+        super().__init__(title=f"Credential for {request_row.target}"[:_MAX_TITLE_CHARS])
+        self._runtime = runtime
+        self._row = request_row
+        self.add_item(discord.ui.TextDisplay(f"-# {data_source_content(request_row.target)[1][0]}"))
+        label: discord.ui.Label[DataSourceCredentialModal] = discord.ui.Label(
+            text="Credential",
+            component=discord.ui.TextInput(required=True, max_length=4000),
+        )
+        self.value_input = _text_input_of(label)
+        self.add_item(label)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        if not is_credential_interaction_valid(interaction, self._row):
+            await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+            return
+        value = str(self.value_input.value or "").strip()
+        if not value or len(value.encode()) > MAX_SECRET_VALUE_BYTES:
+            await interaction.followup.send(
+                f"Paste the credential, at most {MAX_SECRET_VALUE_BYTES} bytes.", ephemeral=True
+            )
+            return
+        try:
+            consumed = await apply_data_source_submit(
+                self._runtime.sessionmaker,
+                self._runtime.settings,
+                row=self._row,
+                value=value,
+                now=datetime.now(UTC),
+            )
+        except SourceCredentialRefused as refused:
+            await interaction.followup.send(str(refused), ephemeral=True)
+            return
+        except Exception as err:
+            _log.warning("credential_modal.data_source_failed", err_type=type(err).__name__)
+            await interaction.followup.send(
+                "Something went wrong. Nothing was saved. Try again.", ephemeral=True
+            )
+            return
+        if consumed is None:
+            await interaction.followup.send(_NO_LONGER_VALID, ephemeral=True)
+            return
+        await edit_posted_card(
+            interaction.client,
+            row=consumed,
+            state="applied",
+            outcome=ConfigurationChange(
+                target_name=_agent_name(consumed),
+                kind="data_source_credential",
                 availability="saved",
                 detail=consumed.target,
             ),

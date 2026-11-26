@@ -35,6 +35,7 @@ from daimon.core.turn.prepare import (
     PreparedTurn,
     ProviderPreparationRequest,
 )
+from daimon.core.turn.provider_env import PATH, turn_env_file
 from daimon.core.turn.replace_binding import (
     BindingFacts,
     OldSession,
@@ -44,6 +45,7 @@ from daimon.core.turn.replace_binding import (
     replace_binding,
 )
 from daimon.core.turn.session_skills import SessionSkillFiles, tell_left_out, turn_session_skills
+from daimon.core.turn.unattended_capabilities import routine_builtins_withheld
 from daimon.core.usage_recording import record_provider_usage
 from mux.contracts.config import ConfigRevision
 from mux.contracts.extensions import ExtensionConfig
@@ -59,7 +61,7 @@ from mux.errors import (
     ScopeViolation,
     UnsupportedCapability,
 )
-from mux.profiles.gemini import INLINE_REUSE, SESSION_NAMESPACE
+from mux.profiles.gemini import INLINE_REUSE, SESSION_NAMESPACE, WITHHOLD_BUILTINS
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
 from mux.state.store import ERA_REF, StateStore, adopted_identity
@@ -108,10 +110,6 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         or request.session_account_id != (shared if shared is not None else admission.account_id)
     ):
         raise ScopeViolation(request.thread_id, "Gemini preparation differs from admission")
-    if admission.daimon_rules_need_driver:
-        # Daimon tool rules need an approval pause this backend does not have.
-        # Refused before any key, transport or journal is touched.
-        raise UnsupportedCapability(("daimon_tool_rules",), PROFILE)
     target = request.target_spec
     from daimon.core.turn.runtime_manifest import host_memory_represented
 
@@ -253,6 +251,15 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     )
     setup = "" if compiled in ({}, {"type": "remote", "sources": []}) else request_digest(compiled)
 
+    # A routine fire without its opt-in runs a session that leaves the agent's built-in
+    # tools out of every interaction, as Managed Agents disables them on its session.
+    request_origin = admission.request
+    withheld = routine_builtins_withheld(
+        request_origin.origin if request_origin is not None else None,
+        request_origin.attended if request_origin is not None else None,
+        admission.routine_sandbox_tools,
+    )
+
     async def created(era: str) -> ProviderBinding:
         agent = deployment.native_agent
         if agent is None:
@@ -296,7 +303,11 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
                     SESSION_NAMESPACE: ExtensionConfig(
                         namespace=SESSION_NAMESPACE,
                         version=1,
-                        value={"binding_id": binding_id, "thread": thread.model_dump(mode="json")},
+                        value={
+                            "binding_id": binding_id,
+                            "thread": thread.model_dump(mode="json"),
+                            **({WITHHOLD_BUILTINS: True} if withheld else {}),
+                        },
                     )
                 },
             ),
@@ -425,6 +436,11 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         or current.backend_revision != config
     ):
         raise UnsupportedCapability(("gemini_changed_admission",), PROFILE)
+    # The keys file each reply reads, placed (or emptied) by hash before the send.
+    env = await turn_env_file(request)
+    placed = await backend.sessions.place_file(
+        scope, session_ref, PATH.removeprefix("/workspace/"), env.body if env else None
+    )
 
     async def record(*, observation: UsageObservation) -> bool:
         if observation.session != session_ref or observation.model is None:
@@ -470,6 +486,8 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         # Revokes a per-turn MCP credential however the turn ends.
         _finalize=runtime.end_of_turn,
         continuity=continuity,
+        _builtins_withheld=withheld and not (prior is not None and binding is prior),
+        env_sha256=env.sha256 if env is not None and placed else None,
     )
 
 

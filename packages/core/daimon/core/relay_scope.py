@@ -132,10 +132,10 @@ def without_data_reads(snapshot: FeatureSnapshot) -> FeatureSnapshot:
 
 def without_data_sources(snapshot: FeatureSnapshot) -> FeatureSnapshot:
     """The snapshot with `data_sources` and `data_reads` Off: a workspace with no source, or
-    no ready store, is offered no data tool."""
+    no ready store, is offered no data tool but `DATA_SETUP_TOOLS` (`SessionToolset`)."""
     from daimon.core.features.resolver import ResolvedFeature
 
-    forced = ResolvedFeature(DATA_SOURCES, "off", "workspace", locked=True)
+    forced = ResolvedFeature(DATA_SOURCES, "off", "workspace", locked=True, unavailable="no_source")
     reads = without_data_reads(snapshot)
     return replace(reads, features={**reads.features, DATA_SOURCES: forced})
 

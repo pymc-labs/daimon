@@ -273,10 +273,11 @@ async def create_source(
     name: str,
     settings: dict[str, Any],
     group: str | None = None,
+    credential_later: bool = False,
 ) -> uuid.UUID:
     """Add a source. `settings` holds the kind's form fields: secret ones are sealed as the
     credential, the rest are its config; `group` is its source group. It starts in shadow,
-    unpublished."""
+    unpublished; with `credential_later`, paused and without its secret until `set_credential`."""
     connector = CONNECTORS.get(kind)
     if connector is None:
         raise Invalid("Pick a kind of source.")
@@ -293,7 +294,7 @@ async def create_source(
     for f in connector.fields:
         value = settings.get(f.name)
         if value in (None, "", []):
-            if f.required:
+            if f.required and not (credential_later and f.kind == "secret"):
                 raise Invalid(f"{f.label} is required.")
             continue
         if f.kind == "select" and value not in f.options:
@@ -309,11 +310,12 @@ async def create_source(
     scope = connector.default_scope or (ACL_SCOPE if connector.descriptor else "internal")
     cur = await conn.execute(
         f"insert into {schemas.data}.sources (tenant_id, kind, name, config, credential,"
-        " default_scope, mode, source_group, created_by)"
-        " values (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+        " default_scope, mode, source_group, created_by, status)"
+        " values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
         " returning id".encode(),
         (tenant_id, kind, name.strip(), Jsonb(config), sealed, scope,
-         "federated" if connector.live else "stored", group, by),
+         "federated" if connector.live else "stored", group, by,
+         "paused" if credential_later else "active"),
     )  # fmt: skip
     row = await cur.fetchone()
     assert row is not None, "an insert returns its row"
@@ -322,6 +324,56 @@ async def create_source(
         source_id=row["id"], detail={"kind": kind},
     )  # fmt: skip
     return row["id"]
+
+
+def secret_field(kind: str) -> str | None:
+    """The kind's one secret field, the one a private form fills; None with none or several."""
+    connector = CONNECTORS.get(kind)
+    secrets = [f.name for f in connector.fields if f.kind == "secret"] if connector else []
+    return secrets[0] if len(secrets) == 1 else None
+
+
+async def set_credential(
+    conn: AsyncConnection[DictRow],
+    schemas: Schemas,
+    keys: Sequence[str],
+    *,
+    tenant_id: uuid.UUID,
+    by: uuid.UUID,
+    source_id: uuid.UUID,
+    value: str,
+) -> None:
+    """Seal `value` as the source's credential, replacing the one it had. A source paused
+    while it waited for its first credential resumes."""
+    d = schemas.data
+    async with conn.transaction():
+        row = await _one(
+            conn,
+            f"select kind, status, publication, bound, credential is null as waiting"
+            f" from {d}.sources where id = %s and tenant_id = %s for update",
+            (source_id, tenant_id),
+            "That source isn't here.",
+        )
+        if row["bound"]:
+            raise Conflict(MANAGED)
+        if row["publication"] == "retired":
+            raise Conflict("That source is retired.")
+        field = secret_field(row["kind"])
+        if field is None:
+            raise Invalid("This source's credential is set in the web app.")
+        try:
+            sealed = seal(keys, {field: value})
+        except CredentialError:
+            raise Invalid("Credentials can't be stored on this server.") from None
+        resume = row["waiting"] and row["status"] == "paused"
+        await conn.execute(
+            f"update {d}.sources set credential = %s, status = %s where id = %s".encode(),
+            (sealed, "active" if resume else row["status"], source_id),
+        )
+        await record_audit(
+            conn, schemas, tenant_id=tenant_id, kind="source.credential", account_id=by,
+            source_id=source_id,
+        )  # fmt: skip
 
 
 async def act(

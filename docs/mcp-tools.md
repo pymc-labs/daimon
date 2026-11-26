@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 259 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 260 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -304,7 +304,7 @@ Chat tools for the data pages: sources, access, links and redaction rule sets.
 | `approve_data_rule_set` | admin only | Approve a redaction rule set's waiting version (sha, as listed). |
 | `change_data_access` | admin only | Change who may read what in the data sources. |
 | `change_data_links` | admin only | Link an account the data sources know to a person (link: provider, workspace, subject as listed, person), turn down a suggestion (reject: the same), unlink an account (unlink: provider, workspace, subject), or hide or show a person's name in what agents read (hide_names, show_names: person). |
-| `change_data_source` | admin only | Add a data source (create: kind, name, settings by the kind's fields, and its source group: sources of one workspace with the same group share group membership) or pause, resume, retire, publish, unpublish or sync one (source_id). |
+| `change_data_source` | admin only | Add a data source (create: kind, name, settings by the kind's non-secret fields, and its source group: sources of one workspace with the same group share group membership), post the asker's private form for a source's credential (set_credential: source_id), or pause, resume, retire, publish, unpublish or sync one (source_id). |
 | `list_data_access` | admin only | List who may read what in the data sources: each scope with its holders, and the workspace's people (names and account ids). |
 | `list_data_links` | admin only | List the accounts the data sources know, each linked to a person or not, and the open suggestions (an account whose verified email matches a person). |
 | `list_data_rule_sets` | admin only | List the redaction rule sets, or show one (name) with its approved and waiting rules. |
@@ -321,6 +321,7 @@ lists them; `remove_my_data` disconnects one).
 | `check_my_data_connection` | all callers | Whether the sign-in started by connect_my_data (pending_id) is finished. |
 | `connect_my_data` | all callers | Start your own sign-in at a data source; source_id is one list_my_data offers. |
 | `dismiss_data_notices` | all callers | Mark your notices about data-source links an admin changed as read. |
+| `send_private_details` | all callers | Send yourself (the asker) a direct message holding the [[private:...]] placeholders a data tool gave you this turn, written around them. |
 
 ## `environments`
 

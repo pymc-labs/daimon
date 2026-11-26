@@ -8,6 +8,7 @@ Discord's savepoint and Slack/Teams' rollback-and-consume sequence are retained.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager, suppress
 from contextvars import ContextVar
@@ -19,6 +20,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsAgent
 from cryptography.fernet import MultiFernet
 from daimon.core.agent_pins import consume_form_unless_pinned
+from daimon.core.config import Settings
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.credential_requests import CredentialRequestOutcome
@@ -33,6 +35,7 @@ from daimon.core.github_credentials import encrypt_token
 from daimon.core.mcp_attach import McpConnectDecision
 from daimon.core.mcp_oauth import begin_mcp_oauth_flow
 from daimon.core.mcp_token_connect import connect_mcp_server_with_token
+from daimon.core.ports.data_credentials import set_source_credential
 from daimon.core.posted_controls import CardState
 from daimon.core.stores import credential_requests
 from daimon.core.stores.agent_files import (
@@ -326,6 +329,42 @@ async def apply_watch_credential_submit(
             session, token=consumed.token, outcome="applied"
         )
         return consumed
+
+
+async def apply_data_source_submit(
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    *,
+    row: CredentialRequestRow,
+    value: str,
+    now: datetime,
+) -> CredentialRequestRow | None:
+    """Spend the form, then seal the requester's value onto the source the row names, as them.
+
+    None when the form is no longer usable. A refused or failed write is recorded on the row
+    and raised (`SourceCredentialRefused` says why); the value is never logged or kept here.
+    """
+    if row.kind != "data_source" or row.mcp_server_url is None:
+        raise ValueError("Not a data source form")
+    source_id = uuid.UUID(row.mcp_server_url)
+    async with session_factory() as session, session.begin():
+        consumed = await credential_requests.consume_credential_request(
+            session, token=row.token, now=now
+        )
+    if consumed is None:
+        return None
+    outcome: CredentialRequestOutcome = "write_failed"
+    try:
+        await set_source_credential(
+            settings, consumed.tenant_id, source_id, consumed.account_id, value
+        )
+        outcome = "applied"
+    finally:
+        async with session_factory() as session, session.begin():
+            await credential_requests.set_credential_request_outcome(
+                session, token=consumed.token, outcome=outcome
+            )
+    return consumed
 
 
 async def begin_oauth_submit(

@@ -393,10 +393,11 @@ async def test_policy_refusal_precedes_selected_key_and_transport(
     with pytest.raises(AdmissionDenied):
         await bind_session_impl(
             selected.deps,
+            # A shared thread on the agent's own Gemini copy is refused by policy.
             replace(
                 selected.admission,
-                daimon_rule_tools=frozenset({"get_session"}),
-                daimon_rules_need_driver=True,
+                shared_owner=selected.session_account_id,
+                backend_revision_origin="agent",
             ),
             tenant_id=selected.tenant_id,
             platform=selected.platform,

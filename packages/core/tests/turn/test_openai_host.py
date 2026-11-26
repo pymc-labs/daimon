@@ -118,6 +118,9 @@ class Wire:
         self.saved_delegation = False
         self.session_delegation = False
         self.expected_spend_limit = 4
+        # Uploaded files (`/files`) by id, holding the size each upload reports.
+        self.files: dict[str, int] = {}
+        self.upload_size = 0
 
     def session(self):
         return {
@@ -138,10 +141,26 @@ class Wire:
             "created_at": 0,
         }
 
+    def file(self, req: httpx.Request, path: str) -> httpx.Response:
+        if req.method == "POST":
+            file_id = f"file-{len(self.files) + 1}"
+            self.files[file_id] = self.upload_size
+        else:
+            file_id = path.removeprefix("/files/")
+            if file_id not in self.files:
+                return httpx.Response(404, json={"error": {"message": "no file"}})
+            if req.method == "DELETE":
+                del self.files[file_id]
+                return httpx.Response(200, json={"id": file_id, "deleted": True})
+        raw = {"id": file_id, "filename": ".env", "bytes": self.files[file_id], "created_at": 0}
+        return httpx.Response(200, json=raw)
+
     def handle(self, req: httpx.Request) -> httpx.Response:
         self.requests.append(req)
         assert req.headers["OpenAI-Beta"] == "agents=v1"
         path = req.url.path.removeprefix("/v1")
+        if path.startswith("/files"):
+            return self.file(req, path)
         if path == "/agents/sessions/" + self.session_id:
             if req.method == "DELETE":
                 self.deleted = True
@@ -610,6 +629,34 @@ async def test_changed_plan_replaces_and_foreign_plan_refuses(composed):
     with pytest.raises(ScopeViolation):
         await prepare_openai(next_request)
     assert len(wire.requests) == count
+
+
+async def test_keys_file_mounts_and_lives_until_its_session_is_replaced(composed, monkeypatch):
+    """The real preparation mounts the keys file, keeps it past the turn, deletes it on replace."""
+    from daimon.core.turn.provider_env import PATH, EnvFile
+
+    request, wire, store, _, runtime = composed
+    env = [EnvFile(body=b"API_KEY=one\n", sha256="h1")]
+    wire.upload_size = len(env[0].body)
+
+    async def keys(_request):
+        return env[-1]
+
+    monkeypatch.setattr(openai_host, "turn_env_file", keys)
+    prepared = await prepare_openai(request)
+    (create,) = [r for r in wire.requests if r.url.path.endswith("/agents/sessions")]
+    mount = {"type": "file_id", "file_id": "file-1", "path": PATH}
+    assert mount in json.loads(create.content)["environment"]["files"]
+    assert prepared.env_sha256 == "h1"
+    finalize = prepared._finalize  # pyright: ignore[reportPrivateUsage]
+    if finalize is not None:
+        await finalize()
+    assert "file-1" in wire.files, "the turn's end leaves the session's file in place"
+
+    env.append(EnvFile(body=b"API_KEY=two\n", sha256="h2"))
+    replaced = await prepare_openai(request)
+    assert replaced.continuity.state == "replaced" and replaced.env_sha256 == "h2"
+    assert list(wire.files) == ["file-2"], "the replaced session's file went with it"
 
 
 async def test_restart_replays_same_claim_without_second_post(composed):
@@ -1145,67 +1192,33 @@ async def test_origin_approval_has_separate_claim_and_native_response(composed):
 @pytest.mark.parametrize(
     ("policy", "value"),
     [
-        ("daimon_rules_need_driver", True),
-    ],
-)
-async def test_unimplemented_restricted_policy_refuses_before_transport(composed, policy, value):
-    from daimon.core.turn.errors import AdmissionDenied
-    from mux.errors import UnsupportedCapability
-
-    request, wire, _, _, _ = composed
-    request = replace(request, admission=replace(request.admission, **{policy: value}))
-    with pytest.raises(AdmissionDenied) as refused:
-        await prepare_openai(request)
-    assert refused.value.reason == "backend_unsupported"
-    if policy == "daimon_rules_need_driver":
-        assert isinstance(refused.value.__cause__, UnsupportedCapability)
-        assert refused.value.__cause__.missing == ("daimon_tool_rules",)
-    assert wire.requests == []
-
-
-@pytest.mark.parametrize("composed", ["postgres"], indirect=True)
-@pytest.mark.parametrize(
-    ("policy", "value"),
-    [
         ("memory_read_only", True),
         ("hold", TurnHold(platform="slack", channel_id="C-SYN-1", client=True)),
         ("source_sealed", True),
         ("origin_seal_ids", frozenset({"C-SYN-1"})),
         ("slack_turn_context_id", UUID("00000000-0000-4000-8000-000000000001")),
+        ("daimon_rule_tools", frozenset({"get_session"})),
     ],
 )
 async def test_held_and_read_only_turns_prepare(composed, policy, value):
-    """Held, sealed and Slack-context turns run on a per-turn credential carrying them."""
+    """Held, sealed, Slack-context and tool-rule turns run on a per-turn credential;
+    the MCP server's host call gate applies the rules (`needs_host_gate`)."""
     request, *_ = composed
     request = replace(request, admission=replace(request.admission, **{policy: value}))
     prepared = await prepare_openai(request)
     assert prepared.session_ref is not None, f"a {policy} turn prepares its session"
 
 
-@pytest.mark.parametrize("missing_runtime", [True, False])
-async def test_configured_channel_refuses_unavailable_runtime_before_io(composed, missing_runtime):
+async def test_configured_channel_refuses_unavailable_runtime_before_io(composed):
     from daimon.core.turn.errors import AdmissionDenied
     from daimon.core.turn.prepare import bind_session_impl
 
-    request, wire, _, _, runtime = composed
-
-    def forbidden_transport(revision, scope):
-        raise AssertionError("a refused channel must not access a key or transport")
-
-    async def forbidden_plan(request):
-        raise AssertionError("a refused channel must not resolve native resources")
-
-    runtime = replace(runtime, transport_factory=forbidden_transport, session_plan=forbidden_plan)
-    deps = replace(request.deps, turn_runtimes={} if missing_runtime else {PROFILE: runtime})
-    admission = (
-        request.admission
-        if missing_runtime
-        else replace(request.admission, daimon_rules_need_driver=True)
-    )
+    request, wire, *_ = composed
+    deps = replace(request.deps, turn_runtimes={})
     with pytest.raises(AdmissionDenied) as refused:
         await bind_session_impl(
             deps,
-            admission,
+            request.admission,
             tenant_id=TENANT,
             platform="slack",
             external_user_id="caller",
