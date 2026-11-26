@@ -15,6 +15,7 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 from cryptography.fernet import MultiFernet
+from daimon.core.agent_mcp_credentials import save_agent_mcp_credential
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.mcp_oauth.connector_tokens import (
     ConnectorScopeWidenedError,
@@ -265,6 +266,42 @@ async def test_a_vault_mirror_refreshes_only_a_grant_that_would_lapse_mid_turn(
             assert await tokens() == "old-at", "an outage keeps the current token"
     assert calls == [503, 200], "a token good for the next hour is not refreshed again"
     assert await tokens() == "new-at", "the refreshed token is stored"
+
+
+async def test_the_agents_stored_bearer_serves_a_relayed_turn_without_a_grant(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A token-form connector has no OAuth grant: the relay uses the agent's bearer,
+    in a shared thread too, as every Managed Agents vault does."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    fernet = make_fernet()
+    await save_agent_mcp_credential(
+        sessionmaker=db_session_factory,
+        fernet=fernet,
+        tenant_id=tenant.id,
+        agent_id=_AGENT,
+        mcp_server_url=_URL + "/",
+        plaintext_token="agent-bearer",
+    )
+
+    async def token(url: str, *, hide: bool) -> str | None:
+        return await connector_access_token(
+            db_session_factory,
+            tenant_id=tenant.id,
+            agent_id=_AGENT,
+            server_url=url,
+            requester_account_id=account.id,
+            hide_personal=hide,
+            fernet=fernet,
+        )
+
+    assert await token(_URL, hide=False) == "agent-bearer", "the bearer serves the server"
+    assert await token(_URL, hide=True) == "agent-bearer", "it is agent-wide, so shared too"
+    assert await token("https://other.example.com/mcp", hide=False) is None, (
+        "another server never gets it"
+    )
 
 
 def test_a_grant_without_a_daimon_token_reads_as_ungranted() -> None:

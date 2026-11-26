@@ -31,6 +31,8 @@ from daimon.core.mcp_oauth.flow import (
     refresh_access_token,
 )
 from daimon.core.mcp_oauth.models import ClientRegistration, TokenResponse
+from daimon.core.mcp_server_url import same_mcp_url
+from daimon.core.stores import agent_mcp_credentials as agent_tokens_store
 from daimon.core.stores import connector_tokens as store
 from daimon.core.stores.domain import ConnectorTokenRow, McpOAuthFlowRow
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -153,7 +155,12 @@ async def connector_access_token(
     http_factory: HttpFactory | None = None,
     sleep: Sleep = asyncio.sleep,
 ) -> str | None:
-    """The bearer token for this turn, refreshed first when near expiry; None to reconnect."""
+    """The bearer token for this turn, refreshed first when near expiry; None to reconnect.
+
+    With no OAuth grant, the agent's stored bearer for the server
+    (`agent_mcp_credentials`, the token form) serves it: it is agent-wide, as in
+    every caller's Managed Agents vault, so a shared thread gets it too.
+    """
     row = await connector_token_for_turn(
         session_factory,
         tenant_id=tenant_id,
@@ -163,7 +170,12 @@ async def connector_access_token(
         hide_personal=hide_personal,
     )
     if row is None:
-        return None
+        async with session_factory() as session:
+            stored = await agent_tokens_store.list_credentials(
+                session, tenant_id=tenant_id, agent_id=agent_id
+            )
+        bearer = next((c for c in stored if same_mcp_url(c.mcp_server_url, server_url)), None)
+        return None if bearer is None else decrypt_token(fernet, bearer.encrypted_token)
     if row.expires_at is not None and row.expires_at - clock() <= REFRESH_EARLY:
         try:
             row = await refresh_connector_token(
