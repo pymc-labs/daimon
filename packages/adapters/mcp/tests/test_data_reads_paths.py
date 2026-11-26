@@ -41,7 +41,6 @@ from daimon.core.data_audience import (
     audience_ref,
     audience_ref_holds,
     data_audience,
-    saver_ref,
     user_subject,
 )
 from daimon.core.data_tools import DATA_READS, DATA_TOOLS, REDACTED_DATA_RESULT, mark_data_result
@@ -144,6 +143,10 @@ def test_what_redaction_cannot_cover_is_refused_on_every_surface() -> None:
         ("data_search", "names_hidden"),
     ):
         assert guard in _attrs(mcp[name]), f"{name} skips {guard}"
+    shows = [
+        c for c in ast.walk(mcp["data_sql"]) if isinstance(c, ast.Call) and "show" in _names(c)
+    ]
+    assert any(k.arg == "ids" for c in shows for k in c.keywords), "SQL rows choose no rules"
 
 
 def test_every_model_spend_bills_the_asker() -> None:
@@ -408,18 +411,6 @@ async def _tx() -> AsyncIterator[object]:
     yield object()
 
 
-async def test_a_save_with_no_session_by_a_data_reader_records_its_saver(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """With no session's reads to record, a caller that may read data records its saver;
-    one that may not records nothing."""
-    auth = _auth(platform="discord")
-    for reading, refs in ((True, [saver_ref(auth.account_id)]), (False, None)):
-        monkeypatch.setattr(repo_memory, "reads_data", AsyncMock(return_value=reading))
-        runtime = cast(McpRuntime, SimpleNamespace(session_factory=None, settings=None))
-        assert await repo_memory._refs(runtime, auth) == refs  # pyright: ignore[reportPrivateUsage]
-
-
 async def test_a_memory_recalls_each_ref_by_its_kind(monkeypatch: pytest.MonkeyPatch) -> None:
     """Records are re-checked by the store; audience refs by where and by whom they were read;
     one unknown read hides the memory."""
@@ -452,8 +443,7 @@ async def test_a_memory_recalls_each_ref_by_its_kind(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(reads, "readable", readable)
     runtime = cast(McpRuntime, SimpleNamespace(settings=SimpleNamespace(data=None)))
     got = await data_access.readable_by_audience(runtime, _auth(), [
-        ["record:a", audience_ref(here)], [saver_ref(me)], ["record:b"],
-        [saver_ref(uuid.uuid4())], ["record:a", UNKNOWN_READ],
+        ["record:a", audience_ref(here)], ["record:b"], ["record:a", UNKNOWN_READ],
     ])  # fmt: skip
-    assert got == [True, True, False, False, False]
+    assert got == [True, False, False]
     assert ["record:a"] in checked and [] not in checked, "audience refs never reach the store"

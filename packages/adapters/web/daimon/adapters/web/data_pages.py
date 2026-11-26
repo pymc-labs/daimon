@@ -36,7 +36,7 @@ TEXT_CHARS: Final = 12_000
 """Characters of a record's text one answer holds."""
 QUERY_CHARS: Final = 500
 REDACTED: Final = "Files aren't shown while some names are hidden from you."
-RULED: Final = "This file isn't shown: its source's redaction rules reach only text."
+RULED: Final = "This file has no text to show through its source's redaction rules."
 
 
 class SourceOut(BaseModel):
@@ -228,16 +228,18 @@ def data_pages_router(runtime: WebRuntime) -> APIRouter:
             )
         if got is None or name is None or found is None:
             raise HTTPException(status_code=404, detail=NOT_FOUND)
-        data, content_type = got
-        if found.item.source_id in r.answer and not reads.textual(content_type):
+        if got.data is None and got.text is None:
             raise HTTPException(status_code=403, detail=RULED)
+        data = got.data
+        if data is None:  # answer rules reach only its text, best effort
+            data, name = (got.text or "").encode(), f"{name} (redacted best effort).txt"
         return Response(
             data,
             media_type="application/octet-stream",
             headers={
                 "Content-Disposition": f"attachment; filename*=UTF-8''{quote(name, safe='')}",
                 "X-Content-Type-Options": "nosniff",
-                "X-Original-Type": content_type,
+                "X-Original-Type": got.content_type,
             },
         )
 

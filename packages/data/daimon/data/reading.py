@@ -39,17 +39,18 @@ class Reading:
         """Whether names are hidden from this audience."""
         return self.entities is not None
 
-    def show[T](self, value: T, source_id: uuid.UUID | None = None) -> T:
+    def show[T](self, value: T, source_id: uuid.UUID | None = None, *, ids: bool = True) -> T:
         """`value` (JSON-like) as this audience may read it: the rules of `source_id`, or of
-        the source a mapping's `source_id` names; every source's, outside one."""
-        shown = self._answer(value, source_id)
+        the source a mapping's `source_id` names; every source's, outside one. `ids=False`
+        trusts no mapping's `source_id`, as for caller SQL, whose rows can name any source."""
+        shown = self._answer(value, source_id, ids)
         return shown if self.entities is None else self.entities(shown)
 
     def names_hidden(self, text: str) -> bool:
         """Whether `text` names a term this audience may not see."""
         return self.show(text) != text
 
-    def _answer[T](self, value: T, source_id: uuid.UUID | None) -> T:
+    def _answer[T](self, value: T, source_id: uuid.UUID | None, ids: bool = True) -> T:
         if not self.answer:
             return value
         if source_id is not None:
@@ -58,11 +59,11 @@ class Reading:
         out: object = value
         if isinstance(value, dict):
             items = cast("dict[object, object]", value)
-            if (source := _uuid(items.get("source_id"))) is not None:
+            if ids and (source := _uuid(items.get("source_id"))) is not None:
                 return self._answer(cast("T", items), source)
-            out = {k: self._answer(v, None) for k, v in items.items()}
+            out = {k: self._answer(v, None, ids) for k, v in items.items()}
         elif isinstance(value, list | tuple):
-            out = [self._answer(v, None) for v in cast("Iterable[object]", value)]
+            out = [self._answer(v, None, ids) for v in cast("Iterable[object]", value)]
         elif isinstance(value, str):
             for rules in dict.fromkeys(self.answer.values()):
                 out = rules(out)
