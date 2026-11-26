@@ -283,6 +283,7 @@ def render_routine_controls(
     web: TenantLinks | None = None,
     knows: bool = False,
     held: bool = False,
+    daimon_tools: bool = True,
 ) -> str:
     """Host-supplied facts that open a routine fire with a destination.
 
@@ -294,7 +295,8 @@ def render_routine_controls(
     or a thread, so the place is a channel. `web` (`routine_links`) adds the routine's own
     workspace on the web, as a chat turn's controls do; a `held` fire, into a channel shared
     with another organisation, gets none. `knows` (`routine_knows`) adds the Knows Daimon hint,
-    left out of a held fire as well (`controls_hint`).
+    left out of a held fire and of an agent without Daimon's tools (`daimon_tools`) as well
+    (`controls_hint`).
     """
     target = delivery_target(row, platform=platform)
     controls: dict[str, object] = {
@@ -326,7 +328,7 @@ def render_routine_controls(
     links = None if held else web
     if links is not None:
         controls["web"] = {"url": links.root()}
-    if hint := controls_hint(on=knows, held=held):
+    if hint := controls_hint(on=knows, held=held, daimon_tools=daimon_tools):
         controls["self_knowledge"] = hint
     if row.destination_kind == "dm":
         delivery = (

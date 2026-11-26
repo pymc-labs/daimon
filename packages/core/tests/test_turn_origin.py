@@ -738,6 +738,10 @@ def test_self_knowledge_on_points_the_agent_at_its_docs_tools() -> None:
             _origin(**held), effective_is_admin=False, features=_features(self_knowledge="on")
         )
         assert "self_knowledge" not in _controls(rendered), f"a held turn refuses the tools: {held}"
+    isolated = render_turn_origin(
+        _origin(), effective_is_admin=False, features=_features(), daimon_tools=False
+    )
+    assert "self_knowledge" not in _controls(isolated), "an isolated agent has no Daimon tools"
 
 
 def test_web_awareness_off_drops_the_web_links() -> None:

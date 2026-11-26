@@ -269,13 +269,17 @@ def agent_toolset(
     features: FeatureSnapshot | None, agent: BetaManagedAgentsAgent
 ) -> SessionToolset:
     """The toolset a session of `agent` runs with at the place `features` was resolved."""
+    if features is None:
+        return DEFAULT_TOOLSET
+    return SessionToolset.of(features, builtins_of(agent), isolated=is_isolated(agent))
+
+
+def is_isolated(agent: BetaManagedAgentsAgent) -> bool:
+    """Whether `agent` is isolated (`daimon_isolated`): it gets no Daimon tools."""
     # Imported here: `defaults` reaches the session snapshot, which imports this module.
     from daimon.core.defaults.metadata import MA_METADATA_KEY_ISOLATED
 
-    if features is None:
-        return DEFAULT_TOOLSET
-    isolated = (agent.metadata or {}).get(MA_METADATA_KEY_ISOLATED) == "true"
-    return SessionToolset.of(features, builtins_of(agent), isolated=isolated)
+    return (agent.metadata or {}).get(MA_METADATA_KEY_ISOLATED) == "true"
 
 
 DEFAULT_TOOLSET: Final = SessionToolset()

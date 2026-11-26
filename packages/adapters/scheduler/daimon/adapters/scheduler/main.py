@@ -76,6 +76,7 @@ from daimon.core.discord_membership import (
     send_discord_error_dm,
 )
 from daimon.core.dm_access import roles_by_membership, sender_admits
+from daimon.core.features.model_input import is_isolated
 from daimon.core.github_app_session import (
     GitHubTokenMintUnavailable,
     archive_app_vault,
@@ -100,6 +101,7 @@ from daimon.core.ma_resolver import (
     new_resolver_cache,
     resolve_agent,
     resolve_environment,
+    retrieve_agent_cached,
 )
 from daimon.core.mcp_identity import DmRoutineRelay, routine_destination_key
 from daimon.core.mcp_vault_janitor import archive_idle_relay_vaults
@@ -515,6 +517,18 @@ async def _build_fire(
         tell_owner(notify_owner, row, reason, channel_told=told)
         return True
 
+    async def _has_daimon_tools(row: RoutineRow, agent_id: str | None) -> bool:
+        """Whether the agent that runs this fire has Daimon's tools; an isolated one has none.
+        Unreadable: the fire's controls carry no hint about them."""
+        if agent_id is None:
+            return False
+        try:
+            agent = await retrieve_agent_cached(client, resolver_cache, row.tenant_id, agent_id)
+        except Exception:
+            log.warning("routine.agent_unreadable", routine_id=str(row.id), exc_info=True)
+            return False
+        return not is_isolated(agent)
+
     async def _fire_dm(row: RoutineRow, owner_user_id: str, *, direct_post: DirectPost) -> None:
         """Run an explicit owner-DM routine as a fresh private DM turn of its owner.
 
@@ -543,6 +557,7 @@ async def _build_fire(
                 direct_post=direct_post,
                 web=await routine_links(sm, settings, row, "discord"),
                 knows=await routine_knows(sm, settings, row, "discord"),
+                daimon_tools=await _has_daimon_tools(row, row.agent_id),
             )
             + "\n"
             + row.trigger_message
@@ -882,6 +897,7 @@ async def _build_fire(
                 web=await routine_links(sm, settings, row, platform),
                 knows=await routine_knows(sm, settings, row, platform),
                 held=hold is not None,
+                daimon_tools=await _has_daimon_tools(row, ran.id),
             )
             + "\n"
             + row.trigger_message
@@ -1248,6 +1264,7 @@ async def _build_fire(
                     web=await routine_links(sm, settings, row, platform),
                     knows=await routine_knows(sm, settings, row, platform),
                     held=fire_hold is not None,
+                    daimon_tools=await _has_daimon_tools(row, resolved_agent_id),
                 )
                 + "\n"
                 + row.trigger_message

@@ -27,11 +27,12 @@ SELF_KNOWLEDGE_HINT: Final = (
 """The turn controls' note where `self_knowledge` is On: the tools sit behind `search_tools`."""
 
 
-def controls_hint(*, on: bool, held: bool) -> str | None:
+def controls_hint(*, on: bool, held: bool, daimon_tools: bool) -> str | None:
     """`SELF_KNOWLEDGE_HINT` for a turn's controls where the feature is On, none for a held
-    turn: it refuses these tools (`mcp_hold.HELD_TOOL_ALLOWLIST`). Every renderer of a
+    turn (it refuses these tools, `mcp_hold.HELD_TOOL_ALLOWLIST`) or an agent without Daimon's
+    tools (an isolated one, `SessionToolset.daimon_tools`). Every renderer of a
     `<turn_controls>` element that opens a person's or a routine's turn calls this."""
-    return SELF_KNOWLEDGE_HINT if on and not held else None
+    return SELF_KNOWLEDGE_HINT if on and daimon_tools and not held else None
 
 
 OVERVIEW_PAGE: Final = "how-daimon-works.md"

@@ -344,6 +344,7 @@ def render_turn_origin(
     moved: Mapping[str, str | None] | None = None,
     web: TenantLinks | None = None,
     features: FeatureSnapshot | None = None,
+    daimon_tools: bool = True,
 ) -> str:
     """Render server-provided location and identity separately from user history.
 
@@ -388,7 +389,8 @@ def render_turn_origin(
     and JSON-encoded like everything else, never interpolated into the prose.
 
     `features` sets `web_awareness`, and `self_knowledge` adds its hint (`controls_hint`) where
-    it is On and the turn is not held; None renders everything but that hint.
+    it is On, the turn is not held and the agent has Daimon's tools (`daimon_tools`, from
+    `SessionToolset`); None renders everything but that hint.
     """
     if features is not None and not features.on("web_awareness"):
         web = None
@@ -438,7 +440,9 @@ def render_turn_origin(
         web = None
     knows = None if features is None else features.features.get("self_knowledge")
     held = origin.sender_foreign or origin.shared_channel
-    if hint := controls_hint(on=knows is not None and knows.on, held=held):
+    if hint := controls_hint(
+        on=knows is not None and knows.on, held=held, daimon_tools=daimon_tools
+    ):
         controls["self_knowledge"] = hint
     if handoff is not None:
         controls["handoff"] = {
