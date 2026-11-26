@@ -24,12 +24,14 @@ from daimon.adapters.mcp.auth.verifier import CHAT_EXECUTION_CLAIM, TOKEN_JTI_CL
 from daimon.adapters.mcp.connector_relay import (
     CONNECTOR_ROUTE,
     FAILED_TEXT,
+    GITHUB_TEXT,
     RECONNECT_TEXT,
     REFUSED_TEXT,
     ConnectorRelay,
     RelayTurn,
     relay_token,
     relay_turn,
+    route_github,
 )
 from daimon.core import host_calls
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
@@ -45,6 +47,7 @@ from daimon.core.connector_relay import (
 from daimon.core.github_credentials import encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_hold import HOLD_CLAIM
+from daimon.core.mcp_server_url import GITHUB_COPILOT_MCP_URL, github_router_url
 from daimon.core.mcp_tool_call import (
     INTERACTIVE_LIMITS,
     McpCallError,
@@ -534,6 +537,20 @@ async def test_a_missing_token_asks_the_person_to_reconnect(rig: Rig) -> None:
     rig.token[0] = None
     body = (await rig.send("tools/list")).json()
     assert body["error"]["message"] == RECONNECT_TEXT, f"reconnect: {body}"
+
+
+async def test_github_goes_through_the_router_and_never_asks_to_reconnect(rig: Rig) -> None:
+    """With the App, `github` calls the router with the turn's own bearer (`TurnRouters`);
+    no repository access names GitHub, since a Reconnect cannot grant one."""
+    github = Connector("github", GITHUB_COPILOT_MCP_URL, "auto")
+    rig.connectors = route_github({"github": github, _KEY: rig.connectors[_KEY]}, _PUBLIC)
+    assert rig.connectors["github"].url == github_router_url(_PUBLIC)
+    assert rig.connectors[_KEY].url == _UP, "other connectors keep their own server"
+    rig.token[0] = None
+    body = (await rig.send("tools/list", key="github")).json()
+    assert body["error"]["message"] == GITHUB_TEXT, f"names GitHub: {body}"
+    body = (await rig.send("tools/list")).json()
+    assert body["error"]["message"] == RECONNECT_TEXT, f"others still reconnect: {body}"
 
 
 async def test_a_failing_connector_answers_a_plain_failure(rig: Rig) -> None:

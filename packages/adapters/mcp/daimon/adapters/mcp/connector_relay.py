@@ -8,15 +8,17 @@ and calls the connector with a token the provider never sees. Only `initialize`,
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final, cast
 
+import httpx
 import structlog
 from daimon.adapters.mcp.auth.verifier import CHAT_EXECUTION_CLAIM, TOKEN_JTI_CLAIM
 from daimon.adapters.mcp.identity_relay import read_capped_body
@@ -32,6 +34,7 @@ from daimon.core.connector_relay import (
 from daimon.core.features.snapshot import deployment_on
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_hold import HOLD_CLAIM, held_connectors
+from daimon.core.mcp_server_url import GITHUB_COPILOT_MCP_URL, github_router_url, same_mcp_url
 from daimon.core.mcp_tool_call import (
     INTERACTIVE_LIMITS,
     PROTOCOL_VERSION,
@@ -67,6 +70,7 @@ log = structlog.get_logger(__name__)
 CONNECTOR_ROUTE: Final = RELAY_PATH + "/{server_key}"
 FEATURE: Final = "mcp_connector_relay"
 RECONNECT_TEXT: Final = "This connector needs signing in again: the person can press Reconnect."
+GITHUB_TEXT: Final = "This agent can't reach GitHub here. Ask an admin to check its repositories."
 REFUSED_TEXT: Final = "This connector tool can't run here."
 FAILED_TEXT: Final = "The connector didn't answer. Try again later."
 _OUTCOME_MAX: Final = 2000
@@ -88,6 +92,7 @@ class RelayTurn:
     carded: bool = True
     """A provider turn's credential, whose asks become cards; else a self-hosted
     harness's, which asks the person itself (`host_calls.gate_path`)."""
+    expires_at: datetime | None = None
 
     @property
     def requester(self) -> uuid.UUID:
@@ -121,7 +126,7 @@ def relay_turn(claims: Mapping[str, object]) -> RelayTurn | None:
     """The turn a provider-turn or self-hosted chat credential names; None for any other."""
     account, tenant = _uuid(claims.get("sub")), _uuid(claims.get("tenant_id"))
     agent, session = _uuid(claims.get("chat_agent_id")), claims.get("chat_session_id")
-    platform = claims.get("platform")
+    platform, exp = claims.get("platform"), claims.get("exp")
     if (
         account is None
         or tenant is None
@@ -154,6 +159,7 @@ def relay_turn(claims: Mapping[str, object]) -> RelayTurn | None:
         confirmed_call_id=_uuid(claims.get("confirmed_call")),
         token_jti=_uuid(claims.get(TOKEN_JTI_CLAIM)),
         carded=claims.get("no_confirmation_surface") is True,
+        expires_at=datetime.fromtimestamp(exp, UTC) if isinstance(exp, int) else None,
     )
 
 
@@ -258,7 +264,8 @@ class ConnectorRelay:
                 account_id=str(turn.requester),
             )
             self._report(turn, "connector.reconnect_needed", key, "no_token")
-            return _error(request_id, -32001, RECONNECT_TEXT)
+            github = is_github_connector(connector.url, self._public_url)
+            return _error(request_id, -32001, GITHUB_TEXT if github else RECONNECT_TEXT)
         try:
             if method == "tools/list":
                 listed = await self._list(turn, connector, token)
@@ -507,6 +514,76 @@ async def relay_token(
     )
 
 
+def is_github_connector(url: str, public_url: str) -> bool:
+    """GitHub's hosted MCP server, directly or through Daimon's router."""
+    return same_mcp_url(url, GITHUB_COPILOT_MCP_URL) or same_mcp_url(
+        url, github_router_url(public_url)
+    )
+
+
+def route_github(connectors: Mapping[str, Connector], public_url: str) -> dict[str, Connector]:
+    """Point the `github` connector at Daimon's router, which picks each call's App token."""
+    router = github_router_url(public_url)
+    return {
+        key: replace(c, url=router) if is_github_connector(c.url, public_url) else c
+        for key, c in connectors.items()
+    }
+
+
+class TurnRouters:
+    """Each provider turn's GitHub router bearer, opened once per turn credential.
+
+    Only Daimon holds a bearer: the provider sees the relay's tool results. The
+    turn's end closes its router (`TemplateMCPCredential.finalize`).
+    """
+
+    def __init__(self, sessionmaker: async_sessionmaker[AsyncSession], settings: Settings) -> None:
+        self._sessionmaker, self._config = sessionmaker, settings.github_app
+        self._bearers: dict[uuid.UUID, tuple[datetime, str | None]] = {}
+        self._locks: dict[uuid.UUID, asyncio.Lock] = {}
+
+    @property
+    def configured(self) -> bool:
+        return self._config.app_id is not None and self._config.private_key is not None
+
+    async def bearer(self, turn: RelayTurn, fernet: MultiFernet) -> str | None:
+        from daimon.core.github_app_session import GitHubTokenMintUnavailable
+        from daimon.core.github_turn_router import TURN_ROUTER_TTL, open_turn_router
+
+        jti, expires_at = turn.token_jti, turn.expires_at
+        # Only a provider turn's credential has an end that closes its router.
+        if not turn.carded or jti is None or expires_at is None:
+            return None
+        now = datetime.now(UTC)
+        until = min(expires_at, now + TURN_ROUTER_TTL)
+        for key in [k for k, (lapses, _) in self._bearers.items() if lapses <= now]:
+            del self._bearers[key]
+        for key, lock in list(self._locks.items()):
+            if key not in self._bearers and not lock.locked():
+                del self._locks[key]
+        async with self._locks.setdefault(jti, asyncio.Lock()):
+            if jti in self._bearers:
+                return self._bearers[jti][1]
+            try:
+                async with httpx.AsyncClient() as client:
+                    bearer = await open_turn_router(
+                        self._sessionmaker,
+                        client,
+                        tenant_id=turn.tenant_id,
+                        agent_id=turn.agent_id,
+                        account_id=turn.requester,
+                        turn_jti=jti,
+                        expires_at=until,
+                        config=self._config,
+                        fernet=fernet,
+                    )
+            except (GitHubTokenMintUnavailable, ValueError, httpx.HTTPError) as error:
+                log.warning("connector_relay.github_unavailable", error_type=type(error).__name__)
+                return None  # Retried by the turn's next call.
+            self._bearers[jti] = (until, bearer)
+            return bearer
+
+
 async def record_connectors(
     sessionmaker: async_sessionmaker[AsyncSession], turn: RelayTurn, origin: TurnOriginRow
 ) -> Mapping[str, Connector]:
@@ -547,8 +624,14 @@ def build_connector_relay(
     from daimon.core.stores.domain import Role
 
     sessionmaker = runtime.session_factory
+    routers = TurnRouters(sessionmaker, runtime.settings)
 
     async def load_connectors(turn: RelayTurn, origin: TurnOriginRow) -> Mapping[str, Connector]:
+        found = await _load_connectors(turn, origin)
+        # With the GitHub App, `github` reaches the agent's repos as on Claude.
+        return route_github(found, public_url) if routers.configured else found
+
+    async def _load_connectors(turn: RelayTurn, origin: TurnOriginRow) -> Mapping[str, Connector]:
         if origin.responder_ma_agent_id.startswith(DAIMON_ID_PREFIXES):
             return await record_connectors(sessionmaker, turn, origin)
         # Uncarded and not a record: a Managed Agents agent answering on its own
@@ -570,6 +653,8 @@ def build_connector_relay(
     async def token_for(turn: RelayTurn, connector: Connector) -> str | None:
         if runtime.fernet is None:
             return None
+        if connector.url == github_router_url(public_url):
+            return await routers.bearer(turn, runtime.fernet)
         return await relay_token(sessionmaker, runtime.fernet, turn, connector)
 
     async def post_card(turn: RelayTurn, origin: TurnOriginRow, row: HostCallCardRow) -> bool:
