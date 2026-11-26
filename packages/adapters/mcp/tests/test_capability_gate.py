@@ -489,15 +489,18 @@ async def _sent(
     grant: str | None = _GRANT,
     channel: str | None = None,
     session_id: str = "sesn_chat",
+    resumed_by_person: bool = False,
 ) -> None:
-    """A send on an agent-chat session, recorded as the send paths record it."""
+    """A send on an agent-chat session, or a signed-in person's resume of it, recorded as
+    the send paths record it."""
     await record_driver(
         sessionmaker,
         managed_session_id=session_id,
-        signed_in_person=False,
+        signed_in_person=resumed_by_person,
         session_status="idle",
         earlier=UNREAD,
         provenance=SessionProvenance(grant=grant, channel_id=channel, account_id=account_id),
+        resuming=resumed_by_person,
     )
 
 
@@ -627,6 +630,7 @@ _CALLERS = (
     "routine",
     "routine not found",
     "agent chat",
+    "agent chat resumed by a signed-in person",
     "agent chat without a platform",
     "agent chat with no send recorded",
     "agent chat recorded before its grant was",
@@ -671,13 +675,15 @@ async def test_each_caller_kind_reads_the_places_it_is_known_by(
     t = tenant.id
     recorded = {
         "agent chat": (account.id, _GRANT),
+        "agent chat resumed by a signed-in person": (account.id, _GRANT),
         "agent chat without a platform": (account.id, _GRANT),
         "agent chat recorded before its grant was": (account.id, None),
         "agent chat of another account": (other.id, _GRANT),
     }
     if caller in recorded:
         owner, grant = recorded[caller]
-        await _sent(sessionmaker, owner, grant=grant, channel="chan-k")
+        resumed = caller == "agent chat resumed by a signed-in person"
+        await _sent(sessionmaker, owner, grant=grant, channel="chan-k", resumed_by_person=resumed)
     agents = ("agent_key", "agent_hub", "agent_turn", "agent_routine", "agent_chat")
     runtime = _runtime(sessionmaker, t, *agents)
 
@@ -730,6 +736,8 @@ async def test_each_caller_kind_reads_the_places_it_is_known_by(
         ),
         "routine not found": (turn("agent_routine", routine_id=uuid.uuid4()), None, workspace),
         "agent chat": (chat, None, chat_place),
+        # A session made before this release is found once a person resumes it, too.
+        "agent chat resumed by a signed-in person": (chat, None, chat_place),
         # As its session's tools were chosen (`agent_chat.py`: `auth.platform or "mcp"`).
         "agent chat without a platform": (
             who(
