@@ -20,7 +20,11 @@ from daimon.core.model_switch import SwitchRefusal
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
-from daimon.core.stores.thread_models import get_thread_effort, get_thread_model
+from daimon.core.stores.thread_models import (
+    get_thread_effort,
+    get_thread_model,
+    set_thread_model,
+)
 from daimon.core.thread_models import ThreadModelChange
 from daimon.testing.factories import make_account, make_dm_conversation, make_tenant
 from daimon.testing.turn_fakes import deps_for
@@ -293,7 +297,7 @@ async def test_an_effort_the_model_refuses_keeps_the_model_unchanged(
     guild_id = 720000012
     await _registered_guild(db_session_factory, guild_id)
     _with_selection(monkeypatch)
-    monkeypatch.setattr(model_command, "_off_claude", AsyncMock(return_value=False))
+    monkeypatch.setattr(model_command, "_agent_provider", AsyncMock(return_value=None))
     monkeypatch.setattr(model_command, "model_efforts", lambda _model: ("low",))
     picked = AsyncMock()
     monkeypatch.setattr(model_command, "pick_thread", picked)
@@ -301,64 +305,106 @@ async def test_an_effort_the_model_refuses_keeps_the_model_unchanged(
 
     content = await _run(interaction, "haiku", "max")
 
-    assert "doesn't take an effort. Nothing changed." in content
+    assert content.startswith("Haiku 5.5 ") and "Nothing changed." in content
     picked.assert_not_awaited()
     assert await _stored(db_session_factory, guild_id) is None
 
 
-async def test_an_effort_with_a_pick_on_another_provider_is_noted_not_refused(
-    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("provider", "model", "effort", "expected"),
+    [
+        (
+            "openai",
+            "gpt-6-luna",
+            "high",
+            "This conversation runs on GPT-6 Luna at high effort from the next reply.",
+        ),
+        (
+            "openai",
+            "gpt-6-luna",
+            "max",
+            "Now on it. The effort was not set: OpenAI models take low, medium, high only.",
+        ),
+        (
+            "gemini",
+            "gemini-4-argon",
+            "low",
+            "Now on it. The effort was not set: Gemini models don't take an effort.",
+        ),
+    ],
+)
+async def test_an_effort_with_a_pick_on_another_provider_is_kept_where_it_is_taken(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    model: str,
+    effort: str,
+    expected: str,
 ) -> None:
+    """OpenAI takes low, medium and high per conversation; what a provider cannot take is noted."""
     guild_id = 720000013
     await _registered_guild(db_session_factory, guild_id)
     _with_selection(monkeypatch)
-    monkeypatch.setattr(model_command, "_off_claude", AsyncMock(return_value=False))
-    done = ThreadModelChange(model_id="openai:gpt-5", note="Now on GPT-5.")
-    monkeypatch.setattr(model_command, "pick_thread", AsyncMock(return_value=done))
+    monkeypatch.setattr(model_command, "_agent_provider", AsyncMock(return_value=None))
+    tenant_id = derive_tenant_uuid(platform="discord", workspace_id=str(guild_id))
+
+    async def kept(*_args: object, **_kwargs: object) -> ThreadModelChange:
+        async with db_session_factory.begin() as session:
+            await set_thread_model(
+                session,
+                tenant_id=tenant_id,
+                platform="discord",
+                thread_id=str(_THREAD_ID),
+                model=model,
+                provider=provider,  # pyright: ignore[reportArgumentType]
+            )
+        return ThreadModelChange(model_id=model, note="Now on it.")
+
+    monkeypatch.setattr(model_command, "pick_thread", kept)
     interaction = _interaction(_runtime(db_session_factory), guild_id=guild_id)
 
-    content = await _run(interaction, "openai:gpt-5", "high")
+    content = await _run(interaction, f"{provider}:{model}", effort)
 
-    assert content == "Now on GPT-5. The effort was not set: only Claude models take one."
+    assert content == expected
 
 
-async def test_an_effort_alone_is_refused_on_an_agent_off_claude(
+async def test_an_effort_alone_applies_to_an_agent_on_openai_and_gemini_takes_none(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     guild_id = 720000014
     await _registered_guild(db_session_factory, guild_id)
     _with_selection(monkeypatch)
-    monkeypatch.setattr(model_command, "_off_claude", AsyncMock(return_value=True))
+    which = AsyncMock(return_value="openai")
+    monkeypatch.setattr(model_command, "_agent_provider", which)
     interaction = _interaction(_runtime(db_session_factory), guild_id=guild_id)
 
     content = await _run(interaction, None, "high")
 
-    assert "this agent doesn't run on Anthropic. Nothing changed." in content
-    assert await _stored(db_session_factory, guild_id) is None
+    assert (
+        content
+        == "This conversation runs on the agent's own model at high effort from the next reply."
+    )
+    interaction = _interaction(_runtime(db_session_factory), guild_id=guild_id)
+    assert "OpenAI models take low, medium, high only." in await _run(interaction, None, "max")
+    which.return_value = "gemini"
+    interaction = _interaction(_runtime(db_session_factory), guild_id=guild_id)
+    assert "Gemini models don't take an effort." in await _run(interaction, None, "low")
 
 
-async def test_default_with_an_effort_on_an_agent_off_claude_clears_and_notes(
+async def test_a_claude_pick_with_an_effort_on_an_agent_off_claude_notes_it(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     guild_id = 720000015
     await _registered_guild(db_session_factory, guild_id)
     _with_selection(monkeypatch)
-    monkeypatch.setattr(model_command, "_off_claude", AsyncMock(return_value=True))
+    monkeypatch.setattr(model_command, "_agent_provider", AsyncMock(return_value="openai"))
+    done = ThreadModelChange(model_id="claude-opus-5-5", note="Now on Opus.")
+    monkeypatch.setattr(model_command, "pick_thread", AsyncMock(return_value=done))
     interaction = _interaction(_runtime(db_session_factory), guild_id=guild_id)
 
-    content = await _run(interaction, "default", "high")
+    content = await _run(interaction, "opus", "high")
 
     assert content.endswith("The effort was not set: this agent doesn't run on Anthropic.")
-    async with db_session_factory() as session:
-        assert (
-            await get_thread_effort(
-                session,
-                tenant_id=derive_tenant_uuid(platform="discord", workspace_id=str(guild_id)),
-                platform="discord",
-                thread_id=str(_THREAD_ID),
-            )
-            is None
-        )
 
 
 async def test_a_guild_off_the_lane_allowlist_changes_nothing(

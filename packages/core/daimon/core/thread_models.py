@@ -17,6 +17,7 @@ and the turn says so (`MODEL_FALLBACK_NOTICE`).
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -32,7 +33,9 @@ from daimon.core.errors import UserFacingError
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.models_catalog import is_priced_claude_model
+from daimon.core.stores import agent_backends
 from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.domain import AgentBackendRevision
 from daimon.core.stores.thread_models import (
     clear_thread_model,
     get_thread_choice,
@@ -41,7 +44,7 @@ from daimon.core.stores.thread_models import (
     set_thread_model,
 )
 from mux.contracts.config import DEFAULT_BACKEND
-from mux.contracts.ids import ModelRef
+from mux.contracts.ids import ModelRef, Provider
 from mux.profiles import backend_selection
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -56,7 +59,6 @@ THREAD_MODEL_CHOICES: Final[Mapping[str, str]] = {
 #: The efforts a conversation can pick, plus "default" for the agent's own.
 THREAD_EFFORTS: Final = ("low", "medium", "high", "xhigh", "max")
 
-EFFORT_NOT_CLAUDE: Final = "The effort was not set: only Claude models take one."
 EFFORT_OFF_CLAUDE: Final = "The effort was not set: this agent doesn't run on Anthropic."
 
 
@@ -90,6 +92,31 @@ _MODEL_EFFORTS: Final[Mapping[str, tuple[str, ...]]] = {
 def model_efforts(model_id: str) -> tuple[str, ...]:
     """The efforts a Claude model takes; none for a model not confirmed to take any."""
     return _MODEL_EFFORTS.get(model_id, ())
+
+
+def conversation_efforts(provider: Provider, model_id: str | None) -> tuple[str, ...]:
+    """The efforts a conversation on `provider` takes: a Claude model's own, else its profile's.
+
+    OpenAI takes low, medium and high; Gemini runs the agent as its own named agent
+    and takes none.
+    """
+    from daimon.core.agent_catalog import provider_efforts
+
+    if provider == DEFAULT_BACKEND:
+        return model_efforts(model_id or "")
+    return provider_efforts(provider)
+
+
+def effort_refusal(provider: Provider, model_id: str | None) -> str:
+    """Why `provider` takes no such effort, in words for the person; it names what it takes."""
+    from daimon.core.turn.notices import provider_name
+
+    claude = provider == DEFAULT_BACKEND and model_id is not None
+    takes = conversation_efforts(provider, model_id)
+    subject = model_label(model_id or "") if claude else f"{provider_name(provider)} models"
+    if not takes:
+        return f"{subject} {'doesn' if claude else 'don'}'t take an effort."
+    return f"{subject} take{'s' if claude else ''} {', '.join(takes)} only."
 
 
 MODEL_FALLBACK_NOTICE: Final = (
@@ -162,12 +189,14 @@ async def choose_thread_model(
     thread_id: str,
     choice: str | None = None,
     effort: str | None = None,
+    agent_provider: Provider | None = None,
 ) -> ThreadModelChange:
     """Keep `choice` and/or `effort` for this conversation; refuses before any write.
 
     A pick without a model keeps the one already chosen, and one without an effort
     keeps that. "default" returns the model (or, for the effort, the effort) to the
-    agent's own; "default" alone clears both.
+    agent's own; "default" alone clears both. `agent_provider` is where the agent runs
+    when the conversation chose no model: the effort must suit that provider.
     """
     if choice is None and effort is None:
         raise ThreadModelRefused("Pick a model, an effort, or both.")
@@ -175,14 +204,18 @@ async def choose_thread_model(
     chosen, reset = resolve_effort(effort)
     async with sessionmaker.begin() as session:
         if chosen is not None:
-            running = model_id
+            running = (
+                ModelRef(provider=DEFAULT_BACKEND, id=model_id) if model_id is not None else None
+            )
             if running is None and choice is None:
-                stored = await get_thread_choice(
+                running = await get_thread_choice(
                     session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
                 )
-                running = stored.id if stored is not None else None
-            if running is not None and chosen not in model_efforts(running):
-                raise ThreadModelRefused(f"{model_label(running)} doesn't take an effort.")
+            provider = running.provider if running is not None else agent_provider
+            if provider is not None and (
+                chosen not in conversation_efforts(provider, running.id if running else None)
+            ):
+                raise ThreadModelRefused(effort_refusal(provider, running.id if running else None))
         if choice is not None and model_id is None:
             await clear_thread_model(
                 session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
@@ -203,28 +236,34 @@ async def choose_thread_model(
         kept = await get_thread_effort(
             session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
         )
-    shown_model = current.id if current is not None else None
-    kept = _shown_effort(shown_model, kept)
+    kept = _shown_effort(current or _agent_ref(agent_provider), kept)
     return ThreadModelChange(
-        model_id=shown_model, note=_change_note(shown_model, kept), effort=kept
+        model_id=current.id if current is not None else None,
+        note=_change_note(current, kept),
+        effort=kept,
     )
 
 
-def _shown_effort(model_id: str | None, effort: str | None) -> str | None:
+def _agent_ref(provider: Provider | None) -> ModelRef | None:
+    """The agent's provider with no model named, for the effort it takes."""
+    return None if provider is None else ModelRef(provider=provider, id="")
+
+
+def _shown_effort(model: ModelRef | None, effort: str | None) -> str | None:
     """The stored effort, only where the model it runs on takes it."""
-    if effort is None or model_id is None:
+    if effort is None or model is None:
         return effort
-    return effort if effort in model_efforts(model_id) else None
+    return effort if effort in conversation_efforts(model.provider, model.id) else None
 
 
-def _change_note(model_id: str | None, effort: str | None) -> str:
-    if model_id is None and effort is None:
+def _change_note(model: ModelRef | None, effort: str | None) -> str:
+    if model is None and effort is None:
         return "This conversation is back on the agent's own model from the next reply."
-    return f"This conversation runs on {_running(model_id, effort)} from the next reply."
+    return f"This conversation runs on {_running(model, effort)} from the next reply."
 
 
-def _running(model_id: str | None, effort: str | None) -> str:
-    name = model_label(model_id) if model_id is not None else "the agent's own model"
+def _running(model: ModelRef | None, effort: str | None) -> str:
+    name = chosen_label(model) if model is not None and model.id else "the agent's own model"
     return name if effort is None else f"{name} at {effort} effort"
 
 
@@ -242,8 +281,7 @@ async def describe_thread_model(
         effort = await get_thread_effort(
             session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
         )
-    if choice is not None and choice.provider == DEFAULT_BACKEND:
-        effort = _shown_effort(choice.id, effort)
+    effort = _shown_effort(choice, effort)
     if choice is None and effort is None:
         return "This conversation runs on the agent's own model."
     name = chosen_label(choice) if choice is not None else "the agent's own model"
@@ -360,22 +398,20 @@ async def thread_backend(
 
     A pick off the agent's provider runs only with this agent's consent for it, so a
     Claude pick moves a non-Claude agent only when one was confirmed. Without one the
-    turn runs the agent's own provider and says so.
+    turn runs the agent's own provider and says so. A conversation's effort on a
+    provider that takes one (OpenAI) replaces the revision's own: it is a thread
+    revision of its own, so the session is selected afresh.
     """
     if conversation_id is None:
         return None
-    choice = await get_thread_choice(
-        session, tenant_id=tenant_id, platform=platform, thread_id=conversation_id
-    )
+    key = {"tenant_id": tenant_id, "platform": platform, "thread_id": conversation_id}
+    choice = await get_thread_choice(session, **key)
+    effort = await get_thread_effort(session, **key)
     if choice is None:
-        return None
-    consent = await get_thread_consent(
-        session,
-        tenant_id=tenant_id,
-        platform=platform,
-        thread_id=conversation_id,
-        agent_id=agent_id,
-    )
+        # No pick: an effort alone still reaches an agent that runs on another provider.
+        own = await agent_backends.current(session, tenant_id, agent_id) if effort else None
+        return _with_effort(conversation_id, own, effort)
+    consent = await get_thread_consent(session, agent_id=agent_id, **key)
     if consent is None:
         return None
     if choice.provider == DEFAULT_BACKEND:
@@ -383,7 +419,25 @@ async def thread_backend(
         return ThreadBackend(conversation_id, None) if claude else None
     if not _consented(choice, consent.backend, consent.model):
         return None
-    return ThreadBackend(conversation_id, consent)
+    return _with_effort(conversation_id, consent, effort) or ThreadBackend(conversation_id, consent)
+
+
+def _with_effort(
+    conversation_id: str, revision: AgentBackendRevision | None, effort: str | None
+) -> ThreadBackend | None:
+    """The conversation's own run of `revision` at `effort`; None when it changes nothing."""
+    if (
+        revision is None
+        or effort is None
+        or revision.backend in (None, DEFAULT_BACKEND)
+        or effort not in conversation_efforts(revision.backend, revision.model)
+        or effort == revision.effort
+    ):
+        return None
+    digest = hashlib.sha256(f"{revision.digest}:effort={effort}".encode()).hexdigest()
+    return ThreadBackend(
+        conversation_id, revision.model_copy(update={"effort": effort, "digest": digest})
+    )
 
 
 async def apply_thread_model(
