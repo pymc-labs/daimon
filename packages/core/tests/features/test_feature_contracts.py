@@ -106,6 +106,7 @@ _NARROWED: dict[str, str] = {
     "tool_safety": "operator-only security switch",
     "host_call_gate": "operator-only rollback switch",
     "mcp_connector_relay": "operator-only: sends connector data to another provider",
+    "provider_keys_file": "operator-only: sends an agent's keys to another provider",
     "unattended_capabilities": "read for unattended runs, which have no channel or thread",
     "require_routine_destination": "read when a routine is created, at the workspace",
     "compute_wake_runs": "a server admin's choice for the team or one agent, read by a wake turn",
@@ -511,6 +512,7 @@ _KEY_READERS = {
     "_chosen": 2,
     "_card_skipped": 4,
     "deployment_on": 1,
+    "deployment_on_everywhere": 1,
 }
 """Calls that read a feature key, and the position of the key among their arguments."""
 _SNAPSHOT_READS = {"on", "value", "get"}

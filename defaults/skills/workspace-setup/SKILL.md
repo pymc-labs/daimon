@@ -304,9 +304,8 @@ does not — never promise otherwise.
 A move to a new workspace carries working files across as an archive the old
 workspace builds for itself, so where a file was written decides whether it
 survives. Keep working files in `/root/work`, and put only files the person
-should receive in `/mnt/session/outputs` (daimon attaches those to the reply);
-both travel, and so does the working repo
-checkout. Say this plainly when someone asks where their file went
+should receive in the outputs directory (see `file-handling`; daimon attaches
+those to the reply); both travel, and so does the working repo checkout. Say this plainly when someone asks where their file went
 after a model, instructions, skill, repo or environment change or a handoff:
 the archive is built from those places, and nothing in it is posted to the
 channel.

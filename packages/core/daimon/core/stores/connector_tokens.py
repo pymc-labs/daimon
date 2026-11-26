@@ -136,6 +136,25 @@ async def list_connector_token_urls(
     return frozenset(rows)
 
 
+async def list_connector_tokens(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: uuid.UUID,
+    account_id: uuid.UUID,
+) -> tuple[ConnectorTokenRow, ...]:
+    """This person's Daimon-refreshed grants on this agent."""
+    rows = await session.scalars(
+        select(ConnectorToken).where(
+            ConnectorToken.tenant_id == tenant_id,
+            ConnectorToken.agent_id == agent_id,
+            ConnectorToken.account_id == account_id,
+            ConnectorToken.refresh_owner == "daimon",
+        )
+    )
+    return tuple(ConnectorTokenRow.model_validate(row) for row in rows)
+
+
 async def claim_refresh(
     session: AsyncSession,
     *,

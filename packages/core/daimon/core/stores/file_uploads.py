@@ -272,3 +272,56 @@ async def delete_unreferenced_web_uploads(
         conditions.append(FileUpload.created_at < created_before)
     result = await session.execute(delete(FileUpload).where(and_(*conditions)))
     return cast(CursorResult[Any], result).rowcount
+
+
+#: The title of a provider routine's output staged for delivery (`routine_files`).
+ROUTINE_OUTPUT_TITLE = "routine-output"
+
+
+async def stage_upload(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    title: str,
+    display_filename: str,
+    content_type: str,
+    content: bytes,
+    now: datetime,
+) -> str:
+    """Store bytes the host already holds as a landed agent upload; return its handle."""
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise UploadTooLargeError(
+            f"upload is {len(content)} bytes, over the {MAX_UPLOAD_BYTES} byte limit"
+        )
+    row = FileUpload(
+        id=secrets.token_urlsafe(_HANDLE_BYTES),
+        tenant_id=tenant_id,
+        title=title,
+        display_filename=display_filename,
+        content_type=content_type,
+        content=content,
+        created_at=now,
+    )
+    session.add(row)
+    await session.flush()
+    return row.id
+
+
+async def delete_uploads(
+    session: AsyncSession,
+    *,
+    title: str,
+    tenant_id: uuid.UUID | None = None,
+    handle_ids: Collection[str] | None = None,
+    created_before: datetime | None = None,
+) -> int:
+    """Delete agent uploads with `title`, narrowed to a tenant's handles or an age; how many."""
+    conditions = [FileUpload.title == title, FileUpload.person_id.is_(None)]
+    if tenant_id is not None:
+        conditions.append(FileUpload.tenant_id == tenant_id)
+    if handle_ids is not None:
+        conditions.append(FileUpload.id.in_(list(handle_ids)))
+    if created_before is not None:
+        conditions.append(FileUpload.created_at < created_before)
+    result = await session.execute(delete(FileUpload).where(and_(*conditions)))
+    return cast(CursorResult[Any], result).rowcount
