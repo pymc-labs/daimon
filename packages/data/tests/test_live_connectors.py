@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 from cryptography.fernet import Fernet
-from daimon.data import federated, identity
+from daimon.data import federated, identity, reads
 from daimon.data.access import ReadContext, scoped, subject
 from daimon.data.identity import IdentityKey, Proof
 from daimon.data.schema import Schemas
@@ -252,7 +252,7 @@ async def test_toggl_live_shows_each_person_what_toggl_shows_them(
     assert await store.live(("public",), "item", admin) == [], "not without the source's scope"
 
 
-async def test_toggl_rates_reach_only_an_admin_live_and_are_never_stored(
+async def test_toggl_rates_reach_only_an_admin_live_or_stored_and_are_never_stored(
     store: Store, fake_toggl: FakeToggl
 ) -> None:
     await store.add("toggl", "internal", "federated", {"workspace": WS})
@@ -279,6 +279,24 @@ async def test_toggl_rates_reach_only_an_admin_live_and_are_never_stored(
         (stored,),
     )
     assert all("99" not in r["body"] + r["p"] for r in await cur.fetchall()), "never stored"
+    cur = await store.conn.execute(
+        f"select id from {store.d}.records where source_id = %s and external_id = %s".encode(),
+        (stored, day_of(fake_toggl, 3)),
+    )
+    [row] = await cur.fetchall()
+
+    async def body(*readers: str) -> str:
+        got = await reads.get(
+            store.conn, store.schemas, ReadContext((store.tenant,), readers=readers), row["id"],
+            store.env,
+        )  # fmt: skip
+        assert got is not None, "every reader may read the entry"
+        return got.body
+
+    assert (await body(admin)).endswith("Billing: rate 99.00 EUR/h, billable 99.00 EUR."), (
+        "an admin reads a stored entry's rate, fetched now"
+    )
+    assert "EUR" not in await body(member) + await body(admin, member), "not a member or a room"
 
 
 # ---- Linear and HubSpot ----

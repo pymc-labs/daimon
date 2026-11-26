@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from daimon.data import access, recheck, redaction
+from daimon.data import access, extras, recheck, redaction
 from daimon.data.access import ReadContext
 from daimon.data.schema import Schemas
 from daimon.data.sync.connector import CONNECTORS
@@ -163,7 +163,7 @@ async def get(
 ) -> Record | None:
     """One record with its text and attached files; None when it does not exist or this
     reader may not see it (the two look alike). With `env`, a source that re-checks reads is
-    asked again (`recheck`)."""
+    asked again (`recheck`) and the text gains what its source adds live (`extras`)."""
     d = schemas.data
     async with access.scoped(conn, schemas, ctx):
         cur = await conn.execute(
@@ -183,9 +183,12 @@ async def get(
             for a in await cur.fetchall()
         ]
     ref = (row["source_id"], row["external_id"])
-    if env is not None and ref not in await recheck.allowed(conn, schemas, env, ctx.readers, [ref]):
+    if env is None:
+        return Record(_item(row), row["body"], files)
+    if ref not in await recheck.allowed(conn, schemas, env, ctx.readers, [ref]):
         return None
-    return Record(_item(row), row["body"], files)
+    more = await extras.added(conn, schemas, env, ctx.readers, [ref])
+    return Record(_item(row), row["body"] + more.get(ref, ""), files)
 
 
 async def read_file(

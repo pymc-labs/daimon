@@ -77,9 +77,11 @@ the last, a daily pass re-reads the last year and a weekly one everything from
 Created with mode `federated`, the same kind is read live: nothing is stored and a search
 reads the last 90 days from Toggl, showing each reader only what they may read. A reader who
 is not linked, or whose account is inactive, gets nothing; with several readers an entry
-shows only if every one may read it. A reader whose linked account is a Toggl admin of the
-workspace also sees each entry's hourly rate, billable amount and labor cost, read live and
-never stored; with several readers, only when every one is an admin.
+shows only if every one may read it.
+
+A reader whose linked account is a Toggl admin of the workspace also sees each entry's hourly
+rate, billable amount and labor cost, stored or live. They are read from Toggl when shown and
+never stored. With several readers, they show only when every one is an admin.
 
 ## Linear
 

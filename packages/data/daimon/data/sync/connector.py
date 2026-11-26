@@ -298,6 +298,17 @@ class Connector:
     def has_can_open(cls) -> bool:
         return cls.can_open is not Connector.can_open
 
+    async def live_extra(
+        self, source: Source, external_ids: Sequence[str], subjects: Sequence[tuple[str, ...]]
+    ) -> dict[str, str]:
+        """Text a read of these stored records adds, read from the source now and never
+        stored, by `external_id`: only what every reader (one subject tuple each) may see."""
+        return {}
+
+    @classmethod
+    def has_live_extra(cls) -> bool:
+        return cls.live_extra is not Connector.live_extra
+
     def scan_key(self, source: Source) -> str | None:
         """A sync that reads an external database returns that database's key (`dsn_key`): runs
         of sources with the same key never overlap. HTTP APIs return None and run side by side."""

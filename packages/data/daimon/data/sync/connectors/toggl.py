@@ -7,9 +7,9 @@ changed since the last run, newest edit first. A full pass reads every entry in 
 `RANGE_DAYS` calendar days (each fetched a day wider at both ends, since a report's days are
 its authors' own) and removes the entries of a range it no longer lists: a daily pass over
 the last year, and a weekly one back to `config.history_from`. A pass continues over runs.
-Rates, amounts, costs and currency are never read into a record. A live read adds them to the
-answer of a person whose linked Toggl account is an admin of the workspace (as Toggl lists it
-for that question), and only when everyone the answer is for is one.
+Rates, amounts, costs and currency are never read into a record. A read, live or of stored
+entries, adds them from Toggl at that moment when the person's linked Toggl account is an
+admin of the workspace (as Toggl lists it then), and only when everyone the answer is for is one.
 
 Credential `{"token": "..."}`: a workspace admin's API token. Configuration: `workspace` (the
 numeric id), `history_from` (YYYY-MM-DD).
@@ -494,3 +494,43 @@ class TogglConnector(Connector):
                     )
         hits.sort(key=lambda h: h.occurred_at or EPOCH, reverse=True)
         return hits[:limit]
+
+    async def live_extra(
+        self, source: Source, external_ids: Sequence[str], subjects: Sequence[tuple[str, ...]]
+    ) -> dict[str, str]:
+        """The rates, amounts and costs of these stored entries, read from Toggl now, when
+        every reader's linked account is an active admin of the workspace; never stored."""
+        entries: dict[int, tuple[str, date]] = {}
+        for ext in external_ids:
+            kind, _, rest = ext.partition(":")
+            day, _, eid = rest.partition(":")
+            if kind == "time_entry" and eid.isdigit():
+                entries[int(eid)] = (ext, date.fromisoformat(day))
+        if not entries or not subjects:
+            return {}
+        cfg = Config(source.config)
+        async with client_of(source, self.transport) as client:
+            api = Api(client, source, cfg.workspace, live=True)
+            users = {str(u["uid"]): u for u in await api.users()}
+            if not all(
+                any(i in users and is_active(users[i]) and users[i].get("admin") is True for i in s)
+                for s in subjects
+            ):
+                return {}
+            days = [d for _, d in entries.values()]
+            lines, _ = await api.report(
+                {
+                    "grouped": False,
+                    "page_size": PAGE_ROWS,
+                    "time_entry_ids": sorted(entries),
+                    "start_date": (min(days) - MARGIN).isoformat(),
+                    "end_date": (max(days) + MARGIN).isoformat(),
+                },
+                None,
+            )
+        return {
+            entries[e["id"]][0]: text
+            for line in lines
+            for e in rows(line.get("time_entries"))
+            if e.get("id") in entries and (text := rates_text(line, e))
+        }
