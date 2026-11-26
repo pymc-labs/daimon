@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 
 from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX
 from daimon.core.authz import Subject, Surface
+from daimon.core.routine_provider import routine_thread_id
 from daimon.core.routine_sandbox import RoutineSandbox, builtins_allowed, provider_run_matches_pin
 from daimon.core.rule_views import routine_destination_channel
 from daimon.core.stores.domain import Role, RoutineRow
@@ -78,7 +79,8 @@ async def admit_provider_routine(
     subject: Subject,
     sandbox: RoutineSandbox | None,
 ) -> Admission:
-    """Admit the fire as its owner, for the routine's agent, on the place's provider.
+    """Admit the fire as its owner, for the routine's agent, on the place's provider:
+    a thread destination's kept one, else its channel's or agent's.
 
     Refused unless it runs on another provider: a place that now answers on Claude
     takes its routine through Managed Agents on the next fire, never through here.
@@ -100,6 +102,8 @@ async def admit_provider_routine(
         attended=False,
         surface=Surface.ROUTINE,
         routine_agent_name=row.agent_name,
+        # A thread destination keeps its own provider, as `routine_provider` routes it.
+        routine_thread_id=routine_thread_id(row, platform=platform),
     )
     revision = admission.backend_revision
     if revision is None or not is_provider_turn(admission):

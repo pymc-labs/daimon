@@ -155,7 +155,12 @@ from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.stores.shared_channels import mark_channel_shared
 from daimon.core.stores.thread_sessions import get_thread_session_at
 from daimon.core.thread_models import apply_thread_model, conversation_key, thread_backend
-from daimon.core.thread_release import apply_thread_release, release_due, release_now
+from daimon.core.thread_release import (
+    apply_thread_release,
+    release_due,
+    release_now,
+    release_pending,
+)
 from daimon.core.turn.approvals import daimon_rule_tools_for
 from daimon.core.turn.ceiling import limit_ceiling_s
 from daimon.core.turn.deps import TurnDeps
@@ -720,6 +725,7 @@ async def admit(
     dm_source_channel_id: str | None = None,
     dm_agent_name: str | None = None,
     routine_agent_name: str | None = None,
+    routine_thread_id: str | None = None,
     dm_no_source: bool = False,
     cold_dm: bool = False,
     category_id: str | None = None,
@@ -749,7 +755,8 @@ async def admit(
     `principal_platform` names the platform `external_user_id` belongs to when it
     is not the one the turn runs on (a web person linked to a platform account).
     `helper` admits a helper's turn as its agent (`admit_helper`), and
-    `routine_agent_name` a routine's fire as the routine's own agent.
+    `routine_agent_name` a routine's fire as the routine's own agent, and
+    `routine_thread_id` the thread it posts to, whose kept provider it runs on.
     """
     observation = current_outcome.get() or TurnObservation(
         deps.sessionmaker, tenant_id, platform, channel_id, thread_id
@@ -773,6 +780,7 @@ async def admit(
                 dm_source_channel_id=dm_source_channel_id,
                 dm_agent_name=dm_agent_name,
                 routine_agent_name=routine_agent_name,
+                routine_thread_id=routine_thread_id,
                 dm_no_source=dm_no_source,
                 cold_dm=cold_dm,
                 category_id=category_id,
@@ -911,6 +919,7 @@ async def admit_impl(
     dm_source_channel_id: str | None = None,
     dm_agent_name: str | None = None,
     routine_agent_name: str | None = None,
+    routine_thread_id: str | None = None,
     dm_no_source: bool = False,
     cold_dm: bool = False,
     category_id: str | None = None,
@@ -951,6 +960,7 @@ async def admit_impl(
         dm_source_channel_id=dm_source_channel_id,
         dm_agent_name=dm_agent_name,
         routine_agent_name=routine_agent_name,
+        routine_thread_id=routine_thread_id,
         dm_no_source=dm_no_source,
         cold_dm=cold_dm,
         category_id=category_id,
@@ -993,6 +1003,7 @@ async def _admit_gates(
     dm_source_channel_id: str | None = None,
     dm_agent_name: str | None = None,
     routine_agent_name: str | None = None,
+    routine_thread_id: str | None = None,
     dm_no_source: bool = False,
     cold_dm: bool = False,
     category_id: str | None = None,
@@ -1246,15 +1257,15 @@ async def _admit_gates(
             """
             nonlocal retained_revision, retained_binding, retained_shared
             nonlocal backend_revision, backend_revision_origin, backend_footer_profile
-            assert channel is not None and slot_thread_id is not None
-            thread = ThreadRef(channel=channel, thread_id=slot_thread_id)
+            assert channel is not None and provider_thread_id is not None
+            thread = ThreadRef(channel=channel, thread_id=provider_thread_id)
             slots = [Slot(thread=thread, account_id=str(principal.account_id))]
             if backend_ever_shared:
                 slots.insert(0, Slot(thread=thread))
             for slot in slots:
                 if slot.account_id is None and not shared_ok:
                     continue
-                if released and slot.account_id is not None:
+                if own_released and slot.account_id is not None:
                     continue  # A due release: this caller's slot selects afresh.
                 binding = (
                     await deps.state_store.get_binding(slot)
@@ -1296,14 +1307,14 @@ async def _admit_gates(
                 backend_revision_origin = source if source != "default" else None
                 backend_footer_profile = retained.profile
                 break
-            if retained_revision is None and not released:
+            if retained_revision is None and not own_released:
                 # A caller's older session remains on its original default
                 # backend even if neutral thread bindings did not yet exist.
                 previous = await get_thread_session_at(
                     db,
                     tenant_id=tenant_id,
                     platform=platform,
-                    thread_id=slot_thread_id,
+                    thread_id=provider_thread_id,
                     account_id=principal.account_id,
                     at=now,
                 )
@@ -1317,10 +1328,22 @@ async def _admit_gates(
                     backend_revision = None
                     backend_revision_origin = None
 
+        # A routine binds its own fresh scope but runs on the provider its thread kept,
+        # read as `routine_provider` routes it (`effective_thread_backend`).
+        provider_thread_id = slot_thread_id if routine_thread_id is None else routine_thread_id
+        own_released = released
+        if routine_thread_id is not None and channel is not None:
+            own_released = await release_pending(
+                session,
+                Slot(
+                    thread=ThreadRef(channel=channel, thread_id=routine_thread_id),
+                    account_id=str(principal.account_id),
+                ),
+            )
         if (
             selection_enabled
             and channel is not None
-            and slot_thread_id is not None
+            and provider_thread_id is not None
             and not is_dm
             and config.thread_binding_kind != "setup"
         ):
