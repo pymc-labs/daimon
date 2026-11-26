@@ -32,7 +32,7 @@ from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_chat_mcp_token
 from daimon.core.mcp_identity import (
-    IdentityTokenCache,
+    IdentitySigner,
     RelayBinding,
     SigningKey,
     generate_signing_key,
@@ -208,7 +208,7 @@ def _relay(
             servers={server.name: server},
             auth=DaimonJWTVerifier(secret=SECRET, sessionmaker=factory),
             sessionmaker=factory,
-            tokens=IdentityTokenCache(key) if key is not None else None,
+            tokens=IdentitySigner(key) if key is not None else None,
             bearers=bearers,
             anthropic=anthropic,
             clients={
@@ -295,7 +295,7 @@ async def test_person_turn_is_signed_and_forwarded(
     assert token not in json.dumps(dict(sent.headers)), "Daimon's own credential stays here"
 
 
-async def test_two_live_turns_of_one_person_each_get_their_own_message(
+async def test_two_live_turns_each_get_their_own_message_and_each_call_its_own_jti(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     person = await _person(db_session_factory)
@@ -305,8 +305,11 @@ async def test_two_live_turns_of_one_person_each_get_their_own_message(
     async with _relay(db_session_factory, upstream, key) as client:
         await _call(client, second)
         await _call(client, first)
+        await _call(client, first)
     named = [_identity(request, key)["msg"] for request in upstream.requests]
-    assert named == ["msg-thread-2", "msg-thread-1"], "each session names its own turn"
+    assert named == ["msg-thread-2", "msg-thread-1", "msg-thread-1"], "each session, its turn"
+    ids = {_identity(request, key)["jti"] for request in upstream.requests}
+    assert len(ids) == 3, "every request gets its own token, even the same turn's next call"
 
 
 async def test_routine_beside_a_live_turn_names_no_person(
