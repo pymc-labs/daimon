@@ -7,7 +7,9 @@ changed since the last run, newest edit first. A full pass reads every entry in 
 `RANGE_DAYS` calendar days (each fetched a day wider at both ends, since a report's days are
 its authors' own) and removes the entries of a range it no longer lists: a daily pass over
 the last year, and a weekly one back to `config.history_from`. A pass continues over runs.
-Rates, amounts, costs and currency are never read into a record.
+Rates, amounts, costs and currency are never read into a record. A live read adds them to the
+answer of a person whose linked Toggl account is an admin of the workspace (as Toggl lists it
+for that question), and only when everyone the answer is for is one.
 
 Credential `{"token": "..."}`: a workspace admin's API token. Configuration: `workspace` (the
 numeric id), `history_from` (YYYY-MM-DD).
@@ -167,6 +169,23 @@ def entry_record(
         },
         acl=entry_acl(workspace, line["user_id"], pid),
     )
+
+
+def rates_text(line: Json, e: Json) -> str:
+    """An entry's hourly rate, billable amount and labor cost, for a Toggl admin; never stored."""
+    rate, cur = line.get("hourly_rate_in_cents"), str(line.get("currency") or "")
+    seconds = e.get("seconds")
+    seconds = seconds if isinstance(seconds, int) else 0
+    parts: list[str] = []
+    if isinstance(rate, int | float):
+        billed = e.get(
+            "billable_amount_in_cents", rate * seconds / 3600 if line.get("billable") else 0
+        )
+        parts += [f"rate {rate / 100:.2f} {cur}/h", f"billable {float(billed) / 100:.2f} {cur}"]
+    cost = e.get("labor_cost_in_cents", line.get("labor_cost_in_cents"))
+    if isinstance(cost, int | float):
+        parts.append(f"labor cost {cost / 100:.2f} {cur}")
+    return f" Billing: {', '.join(parts)}." if parts else ""
 
 
 def terms(query: str) -> tuple[list[str], list[str]]:
@@ -440,6 +459,7 @@ class TogglConnector(Connector):
         if not mine:
             return []
         everything = any(sees_all(users[i]) for i in mine)
+        admin = any(users[i].get("admin") is True for i in mine)
         managed: set[str] = (
             set()
             if everything
@@ -469,6 +489,7 @@ class TogglConnector(Connector):
                             None,
                             who or None,
                             at(e["start"]).astimezone(UTC),
+                            rates_text(line, e) if admin else "",
                         )
                     )
         hits.sort(key=lambda h: h.occurred_at or EPOCH, reverse=True)

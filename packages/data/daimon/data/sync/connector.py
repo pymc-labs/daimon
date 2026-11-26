@@ -204,6 +204,8 @@ class LiveHit:
     url: str | None = None
     author: str | None = None
     occurred_at: datetime | None = None
+    detail: str = ""
+    """More text, kept only when every reader's hit carries the same (a Toggl admin's rates)."""
 
 
 class Connector:

@@ -114,7 +114,14 @@ class FakeToggl:
         day = (NOW - timedelta(days=2)).date().isoformat()
         self.start = f"{day}T09:00:00+00:00"
         self.users = [
-            {"uid": ADMIN, "name": "Ada", "email": "a@example.com", "role_id": 1, "active": True},
+            {
+                "uid": ADMIN,
+                "name": "Ada",
+                "email": "a@example.com",
+                "role_id": 1,
+                "active": True,
+                "admin": True,
+            },
             {"uid": LEAD, "name": "Lee", "email": "l@example.com", "role_id": 3, "active": True},
             {"uid": MEMBER, "name": "Max", "email": "m@example.com", "role_id": 3, "active": True},
             {"uid": GONE, "name": "Gus", "email": "g@example.com", "role_id": 3, "active": False},
@@ -132,7 +139,8 @@ class FakeToggl:
             "project_id": project,
             "description": f"work item {i}",
             "billable": True,
-            "rate": 99,
+            "hourly_rate_in_cents": 9900,
+            "currency": "EUR",
             "time_entries": [
                 {
                     "id": i,
@@ -242,6 +250,35 @@ async def test_toggl_live_shows_each_person_what_toggl_shows_them(
     assert await store.live(scopes, "item", stranger) == [], "an unlinked person sees nothing"
     assert await store.live(scopes, "item", lead, member) == ["work item 3"], "what both may read"
     assert await store.live(("public",), "item", admin) == [], "not without the source's scope"
+
+
+async def test_toggl_rates_reach_only_an_admin_live_and_are_never_stored(
+    store: Store, fake_toggl: FakeToggl
+) -> None:
+    await store.add("toggl", "internal", "federated", {"workspace": WS})
+    admin = await store.link("toggl", WS, str(ADMIN))
+    member = await store.link("toggl", WS, str(MEMBER))
+
+    async def texts(*readers: str) -> list[str]:
+        ctx = ReadContext((store.tenant,), scopes=("internal",), readers=readers)
+        found = await federated.search(
+            store.conn, store.schemas, store.env, ctx, "item 3", seconds=5
+        )
+        return [h.text for r in found for h in r.hits]
+
+    [mine] = await texts(admin)
+    assert mine.endswith("Billing: rate 99.00 EUR/h, billable 99.00 EUR."), (
+        "an admin reads the rate"
+    )
+    assert all("EUR" not in t for t in await texts(member)), "a member does not"
+    assert all("EUR" not in t for t in await texts(admin, member)), "nor a room with a member"
+    stored = await store.add("toggl", "restricted:acl", "stored", {"workspace": WS})
+    await store.ok(stored)
+    cur = await store.conn.execute(
+        f"select body, payload::text p from {store.d}.records where source_id = %s".encode(),
+        (stored,),
+    )
+    assert all("99" not in r["body"] + r["p"] for r in await cur.fetchall()), "never stored"
 
 
 # ---- Linear and HubSpot ----

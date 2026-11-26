@@ -113,9 +113,13 @@ async def search(
             async with gate:
                 return await connector.live_search_as(source, query, limit, subjects)
 
-        found = await asyncio.gather(*(ask(s) for s in who))
-        shared = {h.ref for h in found[0]}.intersection(*({h.ref for h in x} for x in found[1:]))
-        return [h for h in found[0] if h.ref in shared]
+        found = [{h.ref: h for h in x} for x in await asyncio.gather(*(ask(s) for s in who))]
+        return [
+            replace(h, text=h.text + h.detail if same else h.text, detail="")
+            for ref, h in found[0].items()
+            if all(ref in x for x in found[1:])
+            for same in [all(x[ref].detail == h.detail for x in found[1:])]
+        ]
 
     async def one(row: DictRow) -> LiveResult:
         try:
