@@ -41,7 +41,13 @@ from mux.errors import ScopeViolation
 from ..test_agent_backend import owned as owned
 from .test_declared_drop_preparation import switched_request as switched_request
 from .test_gemini_codec import interaction
-from .test_gemini_full_source import CUSTOM, PARAMS, default_skill_bundles, serve_source_skill
+from .test_gemini_full_source import (
+    CUSTOM,
+    PARAMS,
+    UNSEEDED_BUILT_INS,
+    default_skill_bundles,
+    serve_source_skill,
+)
 from .test_gemini_full_source import source_mcp as source_mcp
 from .test_gemini_runtime_transport import clients_for
 
@@ -268,8 +274,10 @@ async def test_consent_keeps_daimon_tools_and_drops_only_what_gemini_lacks(templ
     _, quote, *_ = template
     assert "mcp" not in quote.declared_drops
     assert "memory" in quote.declared_drops
-    # Its custom skills attach per session; the large one uploads, so none is a loss.
-    assert not any(d == "skills" or d.startswith("skill:") for d in quote.declared_drops)
+    # Its custom skills attach per session; the large one uploads. Only the unseeded
+    # built-ins are lost.
+    assert "skills" not in quote.declared_drops
+    assert {d for d in quote.declared_drops if d.startswith("skill:")} == UNSEEDED_BUILT_INS
     # J6b: its execution tools map to code_execution and web search to Google
     # Search; only web fetch is a named loss, never all of its tools.
     assert "tools" not in quote.declared_drops

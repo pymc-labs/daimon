@@ -70,6 +70,8 @@ DEFAULT = yaml.safe_load((ROOT / "defaults/agents/default.yaml").read_text())
 # A platform-limited custom skill (microsoft-365) is not on the seeded agent.
 CUSTOM = [s for s in DEFAULT["skills"] if s["type"] == "custom" and "platforms" not in s]
 BUILT_IN = [s for s in DEFAULT["skills"] if s["type"] == "anthropic"]
+#: A test tenant has no open copies seeded, so off Claude each built-in is a named loss.
+UNSEEDED_BUILT_INS = frozenset(f"skill:{s['skill_id']}" for s in BUILT_IN)
 PARAMS = {
     "backend": "gemini",
     "caller_mcp": True,
