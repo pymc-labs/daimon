@@ -106,12 +106,3 @@ def test_a_changed_keys_file_replaces_an_openai_session() -> None:
     assert not isinstance(binding_decision(facts, facts), ReplaceSession)
     changed = binding_decision(facts, replace(facts, env_sha256="new"))
     assert isinstance(changed, ReplaceSession)
-
-
-@pytest.mark.asyncio
-def test_the_guidance_names_where_the_provider_file_is() -> None:
-    from daimon.core.agent_guidance import CREDENTIAL_GUIDANCE_BLOCK
-
-    assert (
-        f"On OpenAI or Gemini the same file is at {provider_env.PATH}" in CREDENTIAL_GUIDANCE_BLOCK
-    )

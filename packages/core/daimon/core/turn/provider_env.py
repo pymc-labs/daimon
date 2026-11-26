@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from daimon.core.credential_env import assemble_env_bytes, session_env_key
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.sandbox_paths import WORKSPACE
 from daimon.core.self_helpers import is_self_helper_thread
 from daimon.core.session_snapshot import hash_env_bytes
 from daimon.core.stores.agent_files import list_agent_files
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
     from daimon.core.turn.prepare import ProviderPreparationRequest
 
 #: Where an OpenAI or Gemini sandbox holds the keys file.
-PATH = "/workspace/.daimon/.env"
+PATH = WORKSPACE.keys
 
 
 @dataclass(frozen=True)

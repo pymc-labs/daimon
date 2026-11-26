@@ -135,6 +135,20 @@ def test_reference_symlinks_and_oversized_inputs_refused(workflow, tmp_path):
         workflow.reference(str(path))
 
 
+def test_skill_paths_agree_with_the_guidance(load_workflow):
+    from pathlib import Path
+
+    from daimon.core.sandbox_paths import CLAUDE, WORKSPACE
+
+    runtime = load_workflow("image-workflow", "workflow_io")
+    keys, outputs = runtime.KEY_FILES, runtime.OUTPUT_DIRS
+    assert keys == (Path(CLAUDE.keys), Path(WORKSPACE.keys))
+    assert outputs == (Path(CLAUDE.outputs), Path(WORKSPACE.outputs))
+    skill = Path(runtime.__file__).parents[2] / "file-handling" / "SKILL.md"
+    text = skill.read_text()
+    assert f"`{CLAUDE.outputs}/`" in text and f"`{WORKSPACE.outputs}/`" in text
+
+
 def test_named_mounted_key_is_literal_not_executed(load_workflow, monkeypatch, tmp_path):
     runtime = load_workflow("image-workflow", "workflow_io")
     path = tmp_path / "synthetic-mount.txt"

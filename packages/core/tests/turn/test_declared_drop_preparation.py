@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.channel_backend import (
     AgentBackendRefused,
     AgentBackendService,
@@ -84,7 +85,10 @@ async def switched_request(owned, request):
     now = datetime(2026, 10, 14, tzinfo=UTC)
     native = ma_agent(
         tenant_id=identity.tenant_id,
-        system="Authoritative source instructions",
+        # `guided`: under the shipped guidance, as a default agent's prompt is.
+        system=apply_credential_guidance("Authoritative source instructions")
+        if params.get("guided")
+        else "Authoritative source instructions",
         tools=params.get("tools", ()),
         mcp_servers=params.get("mcp_servers", ()),
         skills=params.get("skills", ()),
