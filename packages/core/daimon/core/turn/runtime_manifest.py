@@ -24,6 +24,7 @@ from daimon.core.caller_resources import (
 from daimon.core.config import get_repo_memory_settings
 from daimon.core.connector_relay import relay_key
 from daimon.core.constants import DEFAULT_AGENT_MODEL
+from daimon.core.credential_env import ENV_REQUIREMENT_PREFIX
 from daimon.core.errors import DaimonError
 from daimon.core.finer_drops import FINER_DROPS, kept_environment, sandbox_losses
 from daimon.core.host_web_fetch import WEB_FETCH_TOOL
@@ -32,6 +33,7 @@ from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.ceiling import remaining_s, turn_deadline
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.provider_env import carries_keys
 from daimon.core.turn.stage_timing import stage_timer
 from mux.contracts.config import CapabilityRequirement, ConfigRevision, ThreadMode
 from mux.contracts.extensions import ExtensionConfig
@@ -639,6 +641,15 @@ async def _capture_source_capabilities(
         # skills once, not once per model the preview offers.
         source_catalogue: frozenset[str] | None = None
         measured: tuple[tuple[SkillRef, ...], dict[tuple[str, str], SkillSizeRow]] | None = None
+        env_refs = (
+            tuple(
+                requirement.credential_ref
+                for requirement in source.resource_requirements
+                if requirement.id.startswith(ENV_REQUIREMENT_PREFIX) and requirement.credential_ref
+            )
+            if carries_keys(request)
+            else ()
+        )
         for row, inputs in candidates:
             template = isinstance(inputs, _TemplateInputs)
             profile_id = row.get("profile")
@@ -1109,11 +1120,17 @@ async def _capture_source_capabilities(
                 skills=tuple(item.target for item in inputs.skills),
                 mcp_servers=(connection, *relayed),
             )
+            # The agent's keys go as a file in the provider's sandbox (`provider_env`).
+            keys = (
+                env_refs
+                if profile.provider in (PERSISTENT_WORKSPACE.provider, INLINE_REUSE.provider)
+                else ()
+            )
             represented.append(
                 SourceRepresentation(
                     source_pin=pin,
                     target=target,
-                    credential_refs=(reference,),
+                    credential_refs=(reference, *keys),
                     unavailable_mcp_tools=unavailable_mcp_tools,
                     unavailable_builtin_tools=unavailable_builtin_tools,
                     environment=kept if template else inputs.environment,
@@ -1580,10 +1597,11 @@ def classify_source_obligations(
             and resource.resource is None
         ):
             continue
+        # A credential the representation carries (Daimon's own, the agent's keys file).
+        if represented and resource.credential_ref in represented.credential_refs:
+            continue
         paired = _mcp_credential_servers(source, resource)
         if paired:
-            if represented and resource.credential_ref in represented.credential_refs:
-                continue
             if paired <= lost_servers:
                 continue
             if paired & retained_mcp or resource.credential_ref in retained_credentials:

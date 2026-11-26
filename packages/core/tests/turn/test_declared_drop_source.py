@@ -941,3 +941,30 @@ def test_the_agents_own_line_names_a_lost_skill_not_its_id(captured):
     previewed = preview_source_drops(source, model)
     assert previewed.declared_drops == ("skill:skill_01a",), "the loss stays keyed by id"
     assert previewed.system.endswith("\n\nUnavailable capabilities: skill:pdf-tools.")
+
+
+@pytest.mark.parametrize("carried", [True, False])
+def test_the_keys_file_is_a_loss_only_where_the_representation_leaves_it(captured, carried):
+    ref = f"agent-env:{captured.tenant_id}:{captured.agent_id}:API_KEY"
+    key = ResourceBinding(id=ref, kind="credential", target_path=".env", credential_ref=ref)
+    base = captured.effective_spec
+    target = AgentSpec(
+        name=base.name,
+        description=base.description,
+        model=ModelRef(provider="openai", id="gpt-6-luna"),
+        system=base.system,
+        tools=(),
+        skills=(),
+        mcp_servers=(),
+        metadata=base.metadata,
+    )
+    source = captured.model_copy(update={"resource_requirements": (key,)})
+    represented = SourceRepresentation(
+        source_pin=source_preservation_pin(source),
+        target=target,
+        credential_refs=(ref,) if carried else (),
+        provider_execution=True,
+    )
+    source = source.model_copy(update={"representations": (represented,)})
+    missing = classify_source_obligations(source, target, environment=None)
+    assert {"files", "credentials"} & missing == (set() if carried else {"files", "credentials"})

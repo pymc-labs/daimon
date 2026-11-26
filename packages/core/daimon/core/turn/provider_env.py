@@ -50,21 +50,26 @@ async def agent_env_file(
     return EnvFile(body=body, sha256=hash_env_bytes(body))
 
 
-async def turn_env_file(request: ProviderPreparationRequest) -> EnvFile | None:
-    """The keys file this provider reply's sandbox holds, or None for none."""
+def carries_keys(request: ProviderPreparationRequest) -> bool:
+    """Whether this reply's OpenAI or Gemini sandbox holds the agent's keys file."""
     from daimon.core.features.snapshot import deployment_on_everywhere
 
     settings = request.deps.settings
-    if (
-        not request.admission.toolset.env_file
-        or is_self_helper_thread(request.thread_id)
-        or (
-            settings is not None
-            and not deployment_on_everywhere(
+    return (
+        request.admission.toolset.env_file
+        and not is_self_helper_thread(request.thread_id)
+        and (
+            settings is None
+            or deployment_on_everywhere(
                 settings, "provider_keys_file", request.answers_on or (request.platform,)
             )
         )
-    ):
+    )
+
+
+async def turn_env_file(request: ProviderPreparationRequest) -> EnvFile | None:
+    """The keys file this provider reply's sandbox holds, or None for none."""
+    if not carries_keys(request):
         return None
     tenant_id = request.tenant_id
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=request.admission.agent.id)
