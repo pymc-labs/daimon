@@ -9,6 +9,7 @@ or after a restart. The deciders, reducer and gate are the real ones.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import re
 import uuid
@@ -39,6 +40,7 @@ from daimon.core.config import McpSettings
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
     MA_METADATA_KEY_CHANNEL,
+    MA_METADATA_KEY_CHAT_SESSION,
     MA_METADATA_KEY_PRIVATE_DM,
 )
 from daimon.core.ma_identity import derive_agent_uuid
@@ -1539,3 +1541,37 @@ async def test_the_worker_runs_to_the_unattended_run_limit_at_its_place(
     )
     assert await asyncio.wait_for(worker, timeout=5) is False, "the worker stops at its limit"
     assert read == [30 * 60.0], "the worker reads the tenant's unattended run limit"
+
+
+async def test_a_signed_in_resume_records_where_an_older_session_came_from(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A session made before provenance was kept has no record of it. A person's resume,
+    with no message, copies it from the session's stamp and changes nothing else the
+    driver record holds."""
+    fake = FakeSession().with_daimon()
+    fake.metadata[MA_METADATA_KEY_CHAT_SESSION] = "grant-older"
+    await _record(factory, fake.pause())
+
+    async def stored() -> tuple[object, bool, object]:
+        async with factory() as db:
+            return (
+                await session_settle_state.count_agent_chat_sends(db, managed_session_id=_SESSION),
+                await session_settle_state.is_agent_chat_signed_in(db, managed_session_id=_SESSION),
+                await session_settle_state.find_agent_chat_session(
+                    db, grant="grant-older", account_id=_OWNER
+                ),
+            )
+
+    sends, signed_in, found = await stored()
+    assert found is None, "no send of this release recorded it"
+    runtime = _runtime(fake, factory, _ENABLED, public_url=_PUBLIC)
+    _restart()
+    person = dataclasses.replace(_auth(), signed_in_person=True)
+    await _continue_turn_impl(runtime, person, _SESSION, None)
+    await _settle(runtime)
+    assert await stored() == (
+        sends,
+        signed_in,
+        session_settle_state.AgentChatSession(managed_session_id=_SESSION, channel_id=None),
+    )

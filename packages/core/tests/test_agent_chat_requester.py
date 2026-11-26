@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from daimon.core.agent_chat_requester import (
     UNREAD,
@@ -11,7 +13,8 @@ from daimon.core.agent_chat_requester import (
     record_driver,
 )
 from daimon.core.stores import session_settle_state
-from daimon.core.stores.session_settle_state import SessionProvenance
+from daimon.core.stores.session_settle_state import AgentChatSession, SessionProvenance
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 #: A send whose session carries no provenance stamp.
@@ -178,3 +181,75 @@ async def test_the_store_names_nobody_on_a_resume(
             sends_read=await _sends(db_session_factory, SESSION),
         )
     assert not await driver_signed_in(db_session_factory, managed_session_id=SESSION)
+
+
+async def _decided(
+    factory: async_sessionmaker[AsyncSession], session_id: str
+) -> tuple[int | None, int | None, str | None, bool]:
+    """What the driver record decides from: the sends begun and recorded, the recorded turn
+    and the driver. No row reads as an empty one."""
+    async with factory() as db:
+        sends = await session_settle_state.count_agent_chat_sends(db, managed_session_id=session_id)
+        signed_in = await session_settle_state.is_agent_chat_signed_in(
+            db, managed_session_id=session_id
+        )
+    if sends is None:
+        return None, None, None, signed_in
+    return sends.begun, sends.recorded, sends.turn_event_id, signed_in
+
+
+@pytest.mark.parametrize("before", ["no_record", "signed_in_send"])
+async def test_a_signed_in_resume_records_only_where_the_session_came_from(
+    db_session_factory: async_sessionmaker[AsyncSession], before: str
+) -> None:
+    """A session made before provenance was kept is found after a person's resume too,
+    and the resume changes nothing the driver record decides."""
+    account = uuid.uuid4()
+    if before == "signed_in_send":
+        assert await _start(db_session_factory, SESSION)
+        async with db_session_factory.begin() as db:
+            await session_settle_state.record_unattended_turn(
+                db, managed_session_id=SESSION, turn_event_id="sevt_1", rules_channel_id=None,
+                send=1,
+            )  # fmt: skip
+    decided = await _decided(db_session_factory, SESSION)
+    await record_driver(
+        db_session_factory,
+        managed_session_id=SESSION,
+        provenance=SessionProvenance(grant="grant-r", channel_id="chan-r", account_id=account),
+        signed_in_person=True,
+        session_status="idle",
+        earlier=UNREAD,
+        resuming=True,
+    )
+    async with db_session_factory() as db:
+        found = await session_settle_state.find_agent_chat_session(
+            db, grant="grant-r", account_id=account
+        )
+    assert found == AgentChatSession(managed_session_id=SESSION, channel_id="chan-r")
+    assert await _decided(db_session_factory, SESSION) == decided
+
+
+async def test_a_grant_another_session_holds_refuses_the_write(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Each session's grant is a fresh uuid4, so a shared one is a bug: the write raises, so
+    the send it precedes is not made, and the first session keeps its grant."""
+    account = uuid.uuid4()
+    shared = SessionProvenance(grant="grant-shared", channel_id=None, account_id=account)
+
+    async def recorded(session_id: str, *, person: bool = False) -> None:
+        await record_driver(
+            db_session_factory, managed_session_id=session_id, provenance=shared,
+            signed_in_person=person, session_status="idle", earlier=UNREAD, resuming=person,
+        )  # fmt: skip
+
+    await recorded("sesn-a")
+    for person in (False, True):
+        with pytest.raises(IntegrityError):
+            await recorded("sesn-b", person=person)
+    async with db_session_factory() as db:
+        found = await session_settle_state.find_agent_chat_session(
+            db, grant="grant-shared", account_id=account
+        )
+    assert found == AgentChatSession(managed_session_id="sesn-a", channel_id=None)

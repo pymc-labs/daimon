@@ -258,7 +258,11 @@ def test_the_state_that_names_a_driver_is_written_only_under_the_session_fence()
         assert "delete" not in calls, f"{fn.name} deletes a settle-state row"
         if fn.name not in _DRIVER_STATE_READERS and _names_driver_state(fn):
             writers.add(fn.name)
-    assert writers == {"record_agent_chat_driver", "record_unattended_turn"}
+    assert writers == {
+        "record_agent_chat_driver",
+        "record_agent_chat_provenance",
+        "record_unattended_turn",
+    }
 
     functions = _source_functions()
 
@@ -269,9 +273,10 @@ def test_the_state_that_names_a_driver_is_written_only_under_the_session_fence()
             if any(isinstance(n, ast.Call) and _called(n) == name for n in ast.walk(fn))
         }
 
-    assert callers("record_agent_chat_driver") == {
-        "packages/core/daimon/core/agent_chat_requester.py:record_driver"
-    }
+    for writer in ("record_agent_chat_driver", "record_agent_chat_provenance"):
+        assert callers(writer) == {
+            "packages/core/daimon/core/agent_chat_requester.py:record_driver"
+        }, writer
     assert callers("record_unattended_turn") == {
         "packages/adapters/mcp/daimon/adapters/mcp/tools/_agent_chat_safety.py:record_turn"
     }
