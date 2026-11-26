@@ -11,10 +11,10 @@ import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.tools._admin import current_admin
 from daimon.adapters.mcp.tools._authz_facts import mcp_place, mcp_subject
-from daimon.adapters.mcp.tools._words import admin_noun, space_noun
+from daimon.adapters.mcp.tools._words import admin_noun, app_noun, space_noun
 from daimon.core.access_policy import agent_invoker_roles
 from daimon.core.admin_actions import DelegatedAction
-from daimon.core.authz import Action, AgentRef, Surface, authorize
+from daimon.core.authz import Action, AgentRef, Subject, Surface, authorize
 from daimon.core.billing import BillingConfig
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
@@ -64,6 +64,37 @@ def _require_admin(auth: AuthIdentity, *, action: DelegatedAction | None = None)
             "the requested action and target from the conversation. They are not available "
             "to this permission check; do not invent missing details. Do not retry the mutation."
         )
+
+
+class MembershipUnknown(ToolError):
+    """A fresh membership check got no answer from the platform, so nothing was decided.
+
+    Not a refusal of the person: the same call may pass a moment later. A caller
+    that acts for a turn already running (the agent-chat confirmation worker)
+    tries again instead of leaving that turn paused.
+    """
+
+
+def _membership_unanswered(
+    auth: AuthIdentity, resolver: MembershipResolver | None, subject: Subject
+) -> bool:
+    """Whether Discord was asked about `subject` and did not say member or not.
+
+    A key that names no person is never looked up, so it is never unanswered.
+    """
+    return (
+        auth.platform == "discord"
+        and auth.platform_user_id is not None
+        and resolver is not None
+        and subject.verified_membership is None
+    )
+
+
+def _unanswered(auth: AuthIdentity) -> MembershipUnknown:
+    return MembershipUnknown(
+        f"{app_noun(auth.platform)} didn't answer when Daimon checked that you are in this "
+        f"{space_noun(auth.platform)}, so nothing was done. Try again in a minute."
+    )
 
 
 def _refused(
@@ -220,9 +251,12 @@ async def _policy_gate(
             platform_user_id=auth.platform_user_id,
             tool=tool_name,
             gate="channel_rule" if decision.reason == "own_agents_only" else "agent_rule",
+            membership_unanswered=_membership_unanswered(auth, membership_resolver, subject),
         )
         refused(denial_termination_reason(decision.reason))
         if decision.reason == "invoker_not_allowed":
+            if _membership_unanswered(auth, membership_resolver, subject):
+                raise _unanswered(auth)
             raise ToolError(
                 f"TERMINAL ERROR: You aren't on this {space_noun(auth.platform)}'s list of "
                 f"people who can use daimon. {admin_noun(auth.platform).capitalize()} can add you."
@@ -254,8 +288,11 @@ async def _policy_gate(
             platform_user_id=auth.platform_user_id,
             tool=tool_name,
             gate="invoker_policy",
+            membership_unanswered=_membership_unanswered(auth, membership_resolver, subject),
         )
         refused(TerminationReason.ADMISSION_DENIED)
+        if _membership_unanswered(auth, membership_resolver, subject):
+            raise _unanswered(auth)
         raise ToolError(
             f"TERMINAL ERROR: You aren't on this {space_noun(auth.platform)}'s list of "
             f"people who can use daimon. {admin_noun(auth.platform).capitalize()} can add you."

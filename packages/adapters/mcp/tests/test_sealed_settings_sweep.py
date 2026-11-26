@@ -267,6 +267,7 @@ EXEMPT: dict[str, str] = {
     "archive_thread": _LIVE,
     "ask": _TURN,
     "ask_helper": _TURN,
+    "await_turn": _TURN,
     "cancel_long_job": _SCHEDULED,
     "cancel_timer": _SCHEDULED,
     "cancel_turn": _TURN,
@@ -484,6 +485,7 @@ EXEMPT: dict[str, str] = {
 _HUB = "forwards a turn or reads a session of a Daimon; changes no channel or agent setting"
 HUB_EXEMPT: dict[str, str] = {
     "ask": _HUB,
+    "await_turn": _HUB,
     "continue_turn": _HUB,
     "describe_daimon": _HUB,
     "get_session": _HUB,
