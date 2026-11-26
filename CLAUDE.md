@@ -190,10 +190,10 @@ docs lack is a docs bug. It grew to 120k words by every PR appending a
 paragraph; these rules stop that.
 `scripts/check_docs.py` enforces the budgets in CI.
 
-**Generated pages.** `docs/configuration.md`, `docs/mcp-tools.md` and
-`docs/features.md` are built by the docs workflow from `scripts/generate_*.py`
-(a setting's `description=`, a tool's docstring, the feature registry); never
-commit them. `.env.example` is committed: re-run
+**Generated pages.** `docs/configuration.md`, `docs/mcp-tools.md`,
+`docs/features.md` and `docs/llms.txt` are built by the docs workflow and the
+image build from `scripts/generate_*.py` (a setting's `description=`, a tool's
+docstring, the feature registry, the nav); never commit them. `.env.example` is committed: re-run
 `scripts/generate_env_example.py`, and on a merge conflict take either side and
 re-run it. Keep descriptions to one short paragraph.
 
@@ -223,8 +223,8 @@ docstrings and comments; history goes in a changelog fragment and the PR.
   inside a table); a page that is all web gets front matter `knowledge: web`.
   An agent with the web app off is not shown it, and a test fails on web-app
   text outside markers. Names in prose (`DAIMON_*`, `daimon ...`, slash
-  commands, tools, feature keys) must exist in code, and `docs/llms.txt` is
-  generated (`scripts/generate_llms_txt.py`, CI runs it with `--check`).
+  commands, tools, feature keys) must exist in code. `docs/llms.txt` is
+  generated with the reference pages (`scripts/generate_llms_txt.py`).
 - The site stands alone: never send a reader to the repo README. The README's
   quickstart mirrors `docs/quickstart.md`; change both together.
 - A new page needs a nav entry in `mkdocs.yml` and a line in `docs/README.md`.

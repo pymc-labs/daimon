@@ -61,20 +61,18 @@ jobs:
       - uses: ./.github/actions/setup-daimon
 
       # The configuration, features and MCP tools pages are built from the code
-      # and never committed, so two changes to their source cannot conflict.
+      # and never committed, so two changes to their source cannot conflict;
+      # llms.txt, the index for language models, describes them.
       - name: generate reference pages
         run: |
           uv run python scripts/generate_config_reference.py
           uv run python scripts/generate_feature_reference.py
           uv run python scripts/generate_mcp_tool_catalogue.py
+          uv run python scripts/generate_llms_txt.py
 
       # Page, paragraph and sentence budgets for the hand-written pages.
       - name: readability
         run: uv run --no-project python scripts/check_docs.py
-
-      # The index for language models, generated from the nav.
-      - name: llms.txt check
-        run: uv run --no-project python scripts/generate_llms_txt.py --check
 
       # Deliberately not a dependency group: the site needs none of the
       # project's own packages, and keeping it out of the lockfile means a

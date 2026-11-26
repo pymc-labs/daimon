@@ -2,18 +2,18 @@
 """Write docs/llms.txt, the site's index for language models, from the mkdocs nav.
 
     generate_llms_txt.py            write docs/llms.txt
-    generate_llms_txt.py --check    fail when the committed file differs (CI)
     generate_llms_txt.py --full OUT write every nav page into OUT (llms-full.txt)
 
-Stdlib only. The description of a page is the first sentence of its first
-paragraph outside web-only markers.
+Stdlib only. Never committed: it describes the generated reference pages, so run
+scripts/generate_*.py first (the docs workflow and the image build do). The
+description of a page is the first sentence of its first paragraph outside
+web-only markers.
 """
 
 from __future__ import annotations
 
 import argparse
 import re
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -49,6 +49,8 @@ def _nav() -> list[tuple[str, list[tuple[str, str]]]]:
 
 
 def _body(path: Path) -> str:
+    if not path.is_file():
+        raise SystemExit(f"docs/{path.name} is missing: run scripts/generate_*.py first")
     text = path.read_text()
     return re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.S)
 
@@ -81,20 +83,12 @@ def render_full() -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--check", action="store_true", help="fail when docs/llms.txt is stale")
     parser.add_argument("--full", metavar="OUT", help="write all nav pages to OUT")
     args = parser.parse_args(argv)
     if args.full:
         Path(args.full).write_text(render_full())
         return 0
-    target = DOCS / "llms.txt"
-    generated = render()
-    if args.check:
-        if not target.exists() or target.read_text() != generated:
-            print("docs/llms.txt is stale; run scripts/generate_llms_txt.py", file=sys.stderr)
-            return 1
-        return 0
-    target.write_text(generated)
+    (DOCS / "llms.txt").write_text(render())
     return 0
 
 
