@@ -1,6 +1,6 @@
 ---
 name: open-xlsx
-description: Create, read and edit Excel (.xlsx) spreadsheets with openpyxl and pandas. Use for any .xlsx or spreadsheet file request: a workbook to produce, or an existing one to read, fix or extend.
+description: Create, read and edit Excel (.xlsx) spreadsheets with openpyxl and pandas. Use for any .xlsx or spreadsheet file request, for example a workbook to produce, or an existing one to read, fix or extend.
 ---
 
 # Excel workbooks

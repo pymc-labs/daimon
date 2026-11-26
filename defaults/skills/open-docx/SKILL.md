@@ -1,6 +1,6 @@
 ---
 name: open-docx
-description: Create, read and edit Word (.docx) files with python-docx. Use for any .docx request: a report, letter or memo to produce, or an existing document to read or change.
+description: Create, read and edit Word (.docx) files with python-docx. Use for any .docx request, for example a report, letter or memo to produce, or an existing document to read or change.
 ---
 
 # Word documents

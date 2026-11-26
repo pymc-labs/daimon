@@ -1,6 +1,6 @@
 ---
 name: open-pdf
-description: Read, merge, split, fill and create PDF files with pypdf, pdfplumber and reportlab. Use for any .pdf request: text or tables to extract, pages to combine or split, a form to fill, or a PDF to produce.
+description: Read, merge, split, fill and create PDF files with pypdf, pdfplumber and reportlab. Use for any .pdf request, for example text or tables to extract, pages to combine or split, a form to fill, or a PDF to produce.
 ---
 
 # PDF files

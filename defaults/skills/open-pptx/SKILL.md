@@ -1,6 +1,6 @@
 ---
 name: open-pptx
-description: Create, read and edit PowerPoint (.pptx) files with python-pptx. Use for any .pptx request: a deck to build, or an existing presentation to read or change.
+description: Create, read and edit PowerPoint (.pptx) files with python-pptx. Use for any .pptx request, for example a deck to build, or an existing presentation to read or change.
 ---
 
 # PowerPoint decks
