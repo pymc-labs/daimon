@@ -46,6 +46,8 @@ def refusal_text(error: AdmissionDenied) -> str | None:
     """What a refused routine shows its owner: a person-facing detail, else None (its reason)."""
     return str(error) if error.detail in _PERSON_FACING else None
 
+_ROUTINE_SCOPE = f"{CHANNEL_SCOPE_PREFIX}routine:"
+
 
 class _Unrendered(TurnLifecycle):
     """Nothing renders a routine turn: the scheduler delivers its final text."""
@@ -76,7 +78,17 @@ def routine_scope_channel(row: RoutineRow) -> str:
 
 def routine_scope_thread(routine_id: uuid.UUID) -> str:
     """The one thread a routine's provider fires bind, a fresh session each time."""
-    return f"{CHANNEL_SCOPE_PREFIX}routine:{routine_id}"
+    return f"{_ROUTINE_SCOPE}{routine_id}"
+
+
+def routine_of_scope(thread_id: str) -> uuid.UUID | None:
+    """The routine whose provider fire runs in this scope (`routine_scope_thread`), if any."""
+    if not thread_id.startswith(_ROUTINE_SCOPE):
+        return None
+    try:
+        return uuid.UUID(thread_id.removeprefix(_ROUTINE_SCOPE))
+    except ValueError:
+        return None
 
 
 async def admit_provider_routine(
