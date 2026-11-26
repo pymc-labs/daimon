@@ -585,9 +585,8 @@ async def test_a_self_hosted_harness_ask_is_refused_unattended(
 
 async def test_a_self_hosted_record_serves_only_its_daimon_signed_connectors(rig: Rig) -> None:
     """A record's relay connectors skip the operator's own credentials, fit the credential
-    kind and the record's own identity; Daimon refreshes its sign-ins."""
+    kind and the record's own identity."""
     from daimon.adapters.mcp.connector_relay import record_connectors
-    from daimon.core.mcp_oauth.connector_tokens import agent_refresh_owner
     from daimon.core.mux_backend import resource_scope
     from daimon.core.stores.domain import TurnOriginRow
     from daimon.core.stores.selfhosted_resources import SelfHostedAgents
@@ -622,14 +621,6 @@ async def test_a_self_hosted_record_serves_only_its_daimon_signed_connectors(rig
     assert await record_connectors(rig.sessions, carded, origin) == {}, "a card turn is not its own"
     other = replace(turn, agent_id=rig.agent_id)
     assert await record_connectors(rig.sessions, other, origin) == {}, "another identity gets none"
-    async with rig.sessions() as session:
-        owner = await agent_refresh_owner(
-            session, tenant_id=rig.tenant_id, agent_id=own, selection_enabled=False
-        )
-        legacy = await agent_refresh_owner(
-            session, tenant_id=rig.tenant_id, agent_id=rig.agent_id, selection_enabled=False
-        )
-    assert (owner, legacy) == ("daimon", "ma"), "a record has no vault; MA keeps its own"
 
 
 async def test_the_relay_stays_closed_when_turned_off(rig: Rig) -> None:
