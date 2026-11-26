@@ -137,8 +137,8 @@ On a server with `"wake_claims": true`, Daimon signs `wake` only for these turns
 | A queued turn that runs in its own thread | its reason: `timer`, `watch_fired`, `watch_report`, `job_finished`, `task_handoff`, `private_input_applied`, `github_access_ready` or `confirmed_call` | that thread as `channel`, its `room` judged as for a routine, no `sub` or `msg` |
 | A helper, a watch report into a new thread, a timer in a DM or channel, a sender from another organisation | none | what it signs without the setting |
 
-The two settings are independent, so `wake_claims` lets a server answer calls with no new
-message even where `routine_claims` is off:
+The settings are independent: `wake_claims` allows calls with no new message even with
+`routine_claims` off:
 
 | `routine_claims` | `wake_claims` | Calls with no new message the server can tell apart |
 | --- | --- | --- |
@@ -146,6 +146,9 @@ message even where `routine_claims` is off:
 | on | off | routine runs |
 | off | on | running turns and queued turns in their thread |
 | on | on | all three |
+
+Update the server first, then all Daimon processes together, then turn `wake_claims` on;
+turn it off before rolling the server back. A call with `wake` never writes.
 
 Without `workspaces`, every workspace's agents reach the server. Request bodies over 4 MiB
 are refused.

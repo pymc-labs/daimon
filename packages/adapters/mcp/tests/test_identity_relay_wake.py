@@ -230,14 +230,14 @@ async def test_a_continuation_in_a_public_thread_with_no_fact_reads_narrow_like_
     )
 
 
-async def test_a_continuation_in_the_channel_itself_reads_the_channels_kind(
+async def test_a_continuation_in_the_channel_itself_signs_no_wake(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     person = await _person(db_session_factory)
     await _facts(db_session_factory, person, {"chan-1": TEAM})
     token = await _continuation(db_session_factory, person, thread="chan-1")
-    claims = await _claims(db_session_factory, token, WAKE_SERVER)
-    assert (claims["wake"], claims["channel"], claims["room"]) == ("timer", "chan-1", "team")
+    on, off = await _today(db_session_factory, token, WAKE_SERVER)
+    assert "wake" not in on and on == off, "only a thread, never its channel"
 
 
 _ROW_CHANGES = {
@@ -340,7 +340,7 @@ async def test_the_two_settings_are_independent_and_never_combine(
     person = await _person(db_session_factory)
     await _facts(db_session_factory, person, {"chan-1": TEAM})
     turn, _ = await _chat_session(db_session_factory, person, "chan-1", grant="g-1")
-    wake = await _continuation(db_session_factory, person, thread="chan-1")
+    wake = await _continuation(db_session_factory, person)
     routine_fields: dict[str, object] = {"destination_kind": "channel", "destination_id": "chan-1"}
     for server, wakes, routines in (
         (SERVER, False, False),

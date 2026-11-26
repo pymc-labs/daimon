@@ -263,8 +263,9 @@ async def _thread_wake(
     the row is found from the turn alone: claimed by that owner, started and inside its
     lease, for this workspace, platform, requester and agent. Its origin and signed channel
     must be the row's own thread under the same parent, so a watch report into a new
-    thread, a DM or channel scope and a helper find none. The room is judged as a routine
-    posting there judges it (`routine_room`), never as the turn's own. Reads only.
+    thread, a turn in the channel itself, a DM or channel scope and a helper find none.
+    The room is judged as a routine posting there judges it (`routine_room`), never as the
+    turn's own. Reads only.
     """
     thread = origin.thread_id
     if (
@@ -272,6 +273,7 @@ async def _thread_wake(
         or origin_place(origin) == "dm"
         or thread.startswith((DM_SCOPE_PREFIX, CHANNEL_SCOPE_PREFIX))
         or origin.platform_channel_id != thread
+        or thread == origin.parent_channel_id
     ):
         return None
     async with sessionmaker() as session:
@@ -292,9 +294,9 @@ async def _thread_wake(
     ):
         return None
     destination = {
-        "place_type": "channel" if thread == row.parent_channel_id else "thread",
+        "place_type": "thread",
         "channel_id": thread,
-        "parent_channel_id": None if thread == row.parent_channel_id else row.parent_channel_id,
+        "parent_channel_id": row.parent_channel_id,
     }
     found = await routine_room(
         sessionmaker, tenant_id=tenant_id, platform=platform, destination=destination, now=now
