@@ -15,6 +15,7 @@ import io
 import json
 import os
 import tarfile
+import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -378,7 +379,12 @@ async def test_a_catalogue_blip_at_a_preview_records_no_loss(
 
 @pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_a_template_turn_mints_one_registered_credential_and_revokes_it(template):
+    from daimon.core.github_turn_router import turn_session_id
+    from daimon.core.stores import github_router_sessions
+    from daimon.testing.crypto import make_fernet
+
     request, _, native, calls, _ = template
+    request = replace(request, deps=replace(request.deps, fernet=make_fernet()))
     selected, runtime = await _prepared(request)
     assert native["tools"] and native["tools"][-1]["type"] == "mcp_server"
     assert "headers" not in native["tools"][-1], "the stored agent holds no credential"
@@ -399,7 +405,19 @@ async def test_a_template_turn_mints_one_registered_credential_and_revokes_it(te
     assert str(row.account_id) == request.scope.account_id
     assert row.expires_at <= datetime.now(UTC) + timedelta(seconds=30 + 60 + 5)
     assert row.expires_at <= datetime.now(UTC) + timedelta(seconds=900)
+    # The relay's GitHub router for this credential (`github_turn_router`) ends with it.
+    async with request.deps.sessionmaker.begin() as db:
+        _, bearer = await github_router_sessions.create(
+            db,
+            tenant_id=row.tenant_id,
+            agent_id=uuid.uuid4(),
+            account_id=row.account_id,
+            expires_at=row.expires_at,
+            ma_session_id=turn_session_id(row.jti),
+        )
     await runtime.end_of_turn()
+    async with request.deps.sessionmaker() as db:
+        assert await github_router_sessions.verify(db, bearer=bearer) is None
     async with request.deps.sessionmaker() as db:
         revoked = await get_mcp_token(db, jti=token_jti(token))
     assert revoked is not None and revoked.revoked_at is not None
