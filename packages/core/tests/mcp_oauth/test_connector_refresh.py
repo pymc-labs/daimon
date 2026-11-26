@@ -438,6 +438,6 @@ def test_a_vault_copy_is_refreshed_early_enough_to_outlive_the_longest_turn() ->
     from daimon.core.mcp_oauth.connector_tokens import VAULT_REFRESH_EARLY
     from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S
 
-    assert VAULT_REFRESH_EARLY > timedelta(seconds=LONGEST_TURN_CEILING_S), (
+    assert timedelta(seconds=LONGEST_TURN_CEILING_S) < VAULT_REFRESH_EARLY, (
         f"{VAULT_REFRESH_EARLY} must exceed the {LONGEST_TURN_CEILING_S}s turn ceiling"
     )
