@@ -178,6 +178,23 @@ native turns that need MCP, sandbox, bash or custom tools are refused before
 the first message. A self-hosted harness inspects every tool at the host, so
 allowed reads continue while sandbox calls and unapproved writes are refused.
 
+## Reads from a signed server
+
+A [signed server](mcp-servers.md#let-a-server-verify-who-is-calling) decides what
+each call may read from the claims Daimon signs. Two server settings say which turns
+with no new message it can recognise:
+
+| Turn | Signed as | Setting |
+| --- | --- | --- |
+| A routine that posts to a channel or thread | that routine and room | `routine_claims` |
+| A timer, watch report, finished long job, hand-off or resumed form that runs in its own thread | its reason, read as a routine posting there | `wake_claims` |
+| A person's turn, on each call while it runs | `wake: turn`, beside the person and message | `wake_claims` |
+
+Other turns sign neither claim, so the settings do not change what they read. These
+include a routine that posts to a DM, a timer in a DM or channel, and a watch report to
+a DM or a new thread. Watch polls, helpers, agent chat, `daimon run` and checkpoints
+are the same.
+
 ## Origins
 
 A tool that acts on a conversation needs its `origin_context_id` and the

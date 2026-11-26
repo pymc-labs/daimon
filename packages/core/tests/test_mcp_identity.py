@@ -329,6 +329,8 @@ def test_bearer_server_needs_workspaces_agents_and_a_matching_key() -> None:
         {k: v for k, v in _BEARER.items() if k != "agents"},
         {**_BEARER, "agents": []},
         {**_BEARER, "issuer": "x", "audience": "https://tools.example.com"},
+        {**_BEARER, "routine_claims": True},
+        {**_BEARER, "wake_claims": True},
     ):
         with pytest.raises(ValidationError):
             _settings([weaker], bearers={"internal": "k-1"})
