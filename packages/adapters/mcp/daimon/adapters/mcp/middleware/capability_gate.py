@@ -90,11 +90,13 @@ async def caller_places(
     runtime: McpRuntime, auth: AuthIdentity, origin_context_id: object
 ) -> list[FeaturePlace]:
     """Where the call may run, from verified facts only: its turn origin, its routine, an
-    agent key's agent and channel, or else the workspace.
+    agent-chat session's agent, an agent key's agent and channel, or else the workspace.
 
     Several running turns of one session, when none is named, cannot be told apart. Turns
     in one channel and thread are one place; otherwise each place is returned and a gate
-    treats the feature as Off if any of them has it Off."""
+    treats the feature as Off if any of them has it Off.
+
+    Raises when an agent-chat session's agent can't be found: a gate then refuses."""
     named = origin_context_id if isinstance(origin_context_id, str) else None
     origin = await get_verified_origin(runtime, auth, named)
     if origin is None:
@@ -110,36 +112,65 @@ async def caller_places(
         if routine is not None and tenant is not None:
             # As its session's toolset reads it (`headless_runner.py`).
             return [routine_feature_place(routine, platform=tenant.platform)]
+    if (chat_agent := _agent_chat_agent(auth)) is not None:
+        # As its session's tools were chosen (`agent_chat.py`, `place_session`).
+        agent_id = await _chat_agent_id(runtime, auth, chat_agent)
+        return [FeaturePlace(auth.tenant_id, auth.platform or "mcp", agent_id=agent_id)]
     agent_id = None if auth.agent_id is None else await _key_agent_id(runtime, auth, auth.agent_id)
     return [
         FeaturePlace(auth.tenant_id, auth.platform or "", token_channel_id(auth), agent_id=agent_id)
     ]
 
 
+def _agent_chat_agent(auth: AuthIdentity) -> uuid.UUID | None:
+    """The derived agent of a chat execution with no agent key and no routine, else None.
+    With no turn origin found, it is an agent-chat session's own agent: such a session has
+    no origin (`tools/agent_chat.py`)."""
+    own = auth.agent_id is None and auth.routine_id is None and auth.execution_id is None
+    return auth.chat_agent_id if auth.is_chat_execution and own else None
+
+
+async def _chat_agent_id(runtime: McpRuntime, auth: AuthIdentity, derived: uuid.UUID) -> str:
+    """The agent an agent-chat session runs. Unlike an agent key's, a failed or empty lookup
+    raises: its session's tools were chosen with that agent's tier, and leaving it out would
+    drop an agent-tier Off without a word."""
+    found = await _derived_agent_id(runtime, auth, derived)
+    if found is None:
+        raise LookupError("the agent of this agent-chat session wasn't found")
+    return found
+
+
 async def _key_agent_id(runtime: McpRuntime, auth: AuthIdentity, derived: uuid.UUID) -> str | None:
     """An agent key's own agent id, so its agent-tier values apply rather than the channel's.
-    Cached; a failed lookup is logged and leaves the agent tier out, never refusing."""
-    key = (auth.tenant_id, derived)
-    if (cached := runtime.resolver_cache.derived_agent_ids.get(key)) is not None:
-        return cached
+    A failed lookup is logged and leaves the agent tier out, never refusing."""
     try:
-        if auth.anthropic_disabled or anthropic_disabled():
-            record = await SelfHostedAgents(runtime.session_factory).find_by_derived_uuid(
-                resource_scope(tenant_id=str(auth.tenant_id)), derived
-            )
-            found = None if record is None else record.ref.id
-        else:
-            agent = await find_agent_by_derived_uuid_cached(
-                runtime.client,
-                runtime.resolver_cache,
-                tenant_id=auth.tenant_id,
-                agent_id=derived,
-                records=runtime.session_factory,
-            )
-            found = None if agent is None else agent.id
+        return await _derived_agent_id(runtime, auth, derived)
     except Exception:  # named boundary: the agent tier is extra; its lookup never refuses
         log.warning("capability_gate.key_agent_lookup_failed", exc_info=True)
         return None
+
+
+async def _derived_agent_id(
+    runtime: McpRuntime, auth: AuthIdentity, derived: uuid.UUID
+) -> str | None:
+    """The provider agent id behind a derived agent uuid, or None when there is none. Cached."""
+    key = (auth.tenant_id, derived)
+    if (cached := runtime.resolver_cache.derived_agent_ids.get(key)) is not None:
+        return cached
+    if auth.anthropic_disabled or anthropic_disabled():
+        record = await SelfHostedAgents(runtime.session_factory).find_by_derived_uuid(
+            resource_scope(tenant_id=str(auth.tenant_id)), derived
+        )
+        found = None if record is None else record.ref.id
+    else:
+        agent = await find_agent_by_derived_uuid_cached(
+            runtime.client,
+            runtime.resolver_cache,
+            tenant_id=auth.tenant_id,
+            agent_id=derived,
+            records=runtime.session_factory,
+        )
+        found = None if agent is None else agent.id
     if found is not None:
         runtime.resolver_cache.derived_agent_ids[key] = found
     return found
