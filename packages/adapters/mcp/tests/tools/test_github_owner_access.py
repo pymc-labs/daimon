@@ -15,6 +15,7 @@ from daimon.adapters.mcp.tools import github_remove_repo as remove_tool
 from daimon.adapters.mcp.tools import github_working_repo as working_tool
 from daimon.core.config import (
     AnthropicSettings,
+    CryptoSettings,
     DatabaseSettings,
     GithubAppSettings,
     McpSettings,
@@ -105,6 +106,7 @@ async def world(committing_sessionmaker: async_sessionmaker[AsyncSession]) -> Wo
 
 
 def _runtime(sessions: async_sessionmaker[AsyncSession]) -> McpRuntime:
+    key = Fernet.generate_key().decode()
     return McpRuntime(
         session_factory=sessions,
         client=AsyncMock(),  # type: ignore[arg-type]
@@ -112,6 +114,7 @@ def _runtime(sessions: async_sessionmaker[AsyncSession]) -> McpRuntime:
             database=DatabaseSettings(url=PostgresDsn("postgresql+asyncpg://test/test")),
             anthropic=AnthropicSettings(api_key=SecretStr("test")),
             mcp=McpSettings(public_url=HttpUrl("https://mcp.test/mcp")),
+            crypto=CryptoSettings(keys=(SecretStr(key),)),
             github_app=GithubAppSettings(
                 app_id="42",
                 app_slug="sample-app",
@@ -121,7 +124,7 @@ def _runtime(sessions: async_sessionmaker[AsyncSession]) -> McpRuntime:
             ),
         ),
         deployment_default=DeploymentDefault(),
-        fernet=build_multifernet((Fernet.generate_key().decode(),)),
+        fernet=build_multifernet((key,)),
     )
 
 
