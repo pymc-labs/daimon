@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **The agent no longer tells a person to expect an approval card for a cloud computer.**
+  Daimon shows the card itself when one is needed. The agent also sizes parallel work from
+  the machine's own CPUs, not from what `nproc` reports.
+
 - **A Gemini reply that thinks quietly for minutes is no longer reconnected every two
   minutes.** Google says pauses between chunks are normal, that the connection should stay
   open, and to allow 15 to 20 minutes between chunks
