@@ -137,11 +137,21 @@ begin
   return new_id;
 end $$;
 
+-- `shares_evidence` inlined, so a tenant without groups pays only the same-source join.
 create or replace view {{data}}.acl_grant_truth as
   select m.subject as holder, r.acl_id, m.unit_id
     from {{data}}.group_members m join {{data}}.acl_refs r on r.is_group and r.ref = m.group_ref
     join {{data}}.acls a on a.id = r.acl_id join {{data}}.evidence_units u on u.id = m.unit_id
-    where {{data}}.shares_evidence(u.source_id, a.source_id)
+    where u.source_id = a.source_id
+  union
+  select m.subject, r.acl_id, m.unit_id
+    from {{data}}.sources su join {{data}}.sources sa on sa.id <> su.id and sa.tenant_id = su.tenant_id
+      and coalesce(sa.provider, sa.kind) = coalesce(su.provider, su.kind)
+      and sa.config->>'group' = su.config->>'group'
+    join {{data}}.evidence_units u on u.source_id = su.id join {{data}}.acls a on a.source_id = sa.id
+    join {{data}}.group_members m on m.unit_id = u.id
+    join {{data}}.acl_refs r on r.acl_id = a.id and r.is_group and r.ref = m.group_ref
+    where coalesce(su.config->>'group', '') <> ''
   union
   select r.ref, r.acl_id, r.unit_id from {{data}}.acl_refs r where not r.is_group;
 
