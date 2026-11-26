@@ -102,6 +102,7 @@ RUN --mount=type=bind,from=builder,source=/app/uv.lock,target=/app/uv.lock \
 # never committed: build them, and the llms.txt index that describes them.
 RUN --mount=type=bind,source=scripts,target=/app/scripts \
     --mount=type=bind,source=apps,target=/app/apps \
+    --mount=type=bind,source=mkdocs.yml,target=/app/mkdocs.yml \
     python scripts/generate_config_reference.py \
     && python scripts/generate_feature_reference.py \
     && python scripts/generate_mcp_tool_catalogue.py \
