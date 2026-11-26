@@ -92,7 +92,7 @@ def test_every_data_tool_reads_as_its_audience_and_marks_its_result() -> None:
     assert set(defs) >= DATA_TOOLS, "every data tool registers in register_data_tools"
     for name in DATA_TOOLS:
         assert {"reading", "_text"} <= _names(defs[name]), f"{name} skips the audience or mark"
-        if name != "data_sources":
+        if name not in ("data_sources", "data_context"):  # they list what is readable
             assert "noted" in _names(defs[name]), f"{name} leaves its reads out of memory"
     assert {"data_audience_for", "open_read"} <= _names(defs["reading"])
 

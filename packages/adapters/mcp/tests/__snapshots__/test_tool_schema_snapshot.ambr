@@ -771,6 +771,68 @@
         'type': 'object',
       }),
     }),
+    'add_skill_repository': dict({
+      'description': '''
+        Add the skills of a GitHub repository (``owner/name``) to the library: each folder
+        holding a SKILL.md, limited to ``paths`` when given, takes ``scope`` as who may read
+        it. Skills already added are kept. A person confirms on a card first. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'branch': dict({
+            'default': 'main',
+            'maxLength': 200,
+            'minLength': 1,
+            'type': 'string',
+          }),
+          'origin_context_id': dict({
+            'maxLength': 200,
+            'minLength': 1,
+            'type': 'string',
+          }),
+          'paths': dict({
+            'anyOf': list([
+              dict({
+                'items': dict({
+                  'type': 'string',
+                }),
+                'maxItems': 50,
+                'type': 'array',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'repo': dict({
+            'maxLength': 200,
+            'minLength': 3,
+            'pattern': '^[\\w.-]+/[\\w.-]+$',
+            'type': 'string',
+          }),
+          'scope': dict({
+            'anyOf': list([
+              dict({
+                'maxLength': 200,
+                'minLength': 1,
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'required': list([
+          'repo',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'apply_server_skill_update': dict({
       'description': 'Give an agent the server skill update its model provider check held back.',
       'parameters': dict({
@@ -5470,6 +5532,26 @@
         }),
         'required': list([
           'name',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'get_skill_scope': dict({
+      'description': '''
+        Who may read a library skill: a data scope name, or none for everyone who may use
+        the library. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'skill_id': dict({
+            'maxLength': 200,
+            'minLength': 1,
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'skill_id',
         ]),
         'type': 'object',
       }),
@@ -11269,6 +11351,45 @@
         'required': list([
           'origin_context_id',
           'agent_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'set_skill_scope': dict({
+      'description': '''
+        Set who may read a library skill: a data scope name, or null for everyone who may
+        use the library. A person confirms on a card first. Admin-only.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'maxLength': 200,
+            'minLength': 1,
+            'type': 'string',
+          }),
+          'scope': dict({
+            'anyOf': list([
+              dict({
+                'maxLength': 200,
+                'minLength': 1,
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+          }),
+          'skill_id': dict({
+            'maxLength': 200,
+            'minLength': 1,
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'skill_id',
+          'scope',
+          'origin_context_id',
         ]),
         'type': 'object',
       }),
