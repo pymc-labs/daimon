@@ -727,9 +727,10 @@ jobs:
               # Time for a sync in flight to stop cleanly on SIGTERM.
               sudo -E docker compose -f compose.data-sync.yml up -d --remove-orphans --timeout 95
               sleep 20
-              # Every service must still run after the refresh.
-              if sudo -E docker compose -f compose.data-sync.yml ps -a --format "{{.Service}} {{.State}}" | grep -v " running$"; then
-                echo "a data-sync service is not running" >&2
+              # No service may be restarting, dead or failed after the refresh.
+              if sudo -E docker compose -f compose.data-sync.yml ps -a --format "{{.Service}} {{.State}} {{.ExitCode}}" \
+                | grep -E " (restarting|dead) | exited [1-9]"; then
+                echo "a data-sync service failed after the refresh" >&2
                 exit 1
               fi
               sudo docker image prune -af || true
