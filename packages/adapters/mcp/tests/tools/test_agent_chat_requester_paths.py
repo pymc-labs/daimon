@@ -54,6 +54,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
+from ..harness import stop_confirmation_workers
 from ..hub.test_turn_parity import _call_tool, _runtime
 
 #: A send whose session carries no provenance stamp.
@@ -589,6 +590,9 @@ async def test_every_send_records_where_its_session_came_from(
             name=tool,
             arguments=arguments,
         )
+    # The send's confirmation worker reads through this test's connection: stop it before
+    # the database fixture rolls the connection back (`stop_confirmation_workers`).
+    await stop_confirmation_workers()
     assert not result["result"].get("isError"), result
     async with db_session_factory() as db:
         found = await session_settle_state.find_agent_chat_session(
