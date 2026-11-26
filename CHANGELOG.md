@@ -37,8 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeps and refreshes every connector sign-in itself, and gives an agent on Claude a fresh
   short-lived copy for each reply, so a switch no longer needs a Reconnect. A connector added
   with a pasted token now works on OpenAI and Gemini too. A sign-in made before this release
-  for an agent on Claude needs one last Reconnect before it works off Claude. GitHub
-  repository access and the agent's keys still stay on Claude
+  for an agent on Claude needs one last Reconnect before it works off Claude. An agent
+  with GitHub repositories can switch too: its `github` connector reaches them with
+  App tokens that end with the reply. The repository checkout, `gh` in the sandbox
+  and the agent's keys still stay on Claude
   ([Providers](docs/providers.md#what-daimon-adds-on-openai-and-gemini)).
 
 - **A finished command no longer sends a second message when the conversation already has its
