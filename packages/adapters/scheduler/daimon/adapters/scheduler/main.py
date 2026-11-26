@@ -130,7 +130,7 @@ from daimon.core.routine_delivery import (
     routine_links,
     split_run_text,
 )
-from daimon.core.routine_files import collect_routine_files, plain_payload
+from daimon.core.routine_files import collect_routine_files, stage_routine_files
 from daimon.core.routine_hold import delivery_hold_value, routine_hold
 from daimon.core.routine_provider import routine_provider
 from daimon.core.routine_sandbox import routine_sandbox
@@ -169,6 +169,7 @@ from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import Role, RoutineRow, ThreadSessionRow
+from daimon.core.stores.file_uploads import ROUTINE_OUTPUT_TITLE, delete_uploads
 from daimon.core.stores.github_connect import delete_expired_flows
 from daimon.core.stores.github_issued_tokens import (
     LiveMcpAppSession,
@@ -594,7 +595,9 @@ async def _build_fire(
         payload = (
             await collect_routine_files(client, session_id=reply.session_id, text=run_text.post)
             if reply.on_managed_agents
-            else plain_payload(run_text.post) or ""
+            else await stage_routine_files(
+                sm, reply.outputs, tenant_id=row.tenant_id, text=run_text.post
+            )
         )
         async with sm() as s, s.begin():
             await record_result(
@@ -743,10 +746,13 @@ async def _build_fire(
         result: str,
         state: TurnState | None,
         *,
-        files_session: str | None,
+        files: Callable[[str], Awaitable[str]] | None,
         hold: TurnHold | None,
     ) -> None:
-        """Record a finished fire and queue its delivery, on every provider alike."""
+        """Record a finished fire and queue its delivery, on every provider alike.
+
+        `files` turns the text to post into the outbox payload with the fire's files.
+        """
         if row.destination_kind is None:
             async with sm() as s, s.begin():
                 await record_result(s, row.id, tail=result, error=None, expected_row=row)
@@ -757,10 +763,8 @@ async def _build_fire(
         run_text = split_run_text(result)
         payload = run_text.post
         needs_delivery = not posted
-        if files_session is not None:
-            payload = await collect_routine_files(
-                client, session_id=files_session, text="" if posted else run_text.post
-            )
+        if files is not None:
+            payload = await files("" if posted else run_text.post)
             # A messaging tool can have posted the text while leaving generated
             # outputs behind. Deliver those without repeating the final reply.
             needs_delivery = needs_delivery or bool(payload)
@@ -866,7 +870,11 @@ async def _build_fire(
             async with sm() as s, s.begin():
                 await _refuse(s, row, error.reason, error=str(error))
             return
-        await _record_run(row, run.text, run.state, files_session=None, hold=hold)
+
+        async def files(text: str) -> str:
+            return await stage_routine_files(sm, run.outputs, tenant_id=row.tenant_id, text=text)
+
+        await _record_run(row, run.text, run.state, files=files, hold=hold)
 
     async def _fire(row: RoutineRow) -> None:
         if row.created_by_user_id is None:
@@ -1262,7 +1270,13 @@ async def _build_fire(
             row,
             result,
             final_state[0] if final_state else None,
-            files_session=output_sessions[-1] if output_sessions else None,
+            files=(
+                lambda text, sid=output_sessions[-1]: collect_routine_files(
+                    client, session_id=sid, text=text
+                )
+            )
+            if output_sessions
+            else None,
             hold=fire_hold,
         )
 
@@ -1460,6 +1474,25 @@ async def _sweep_github_connect_flows(sm: async_sessionmaker[AsyncSession]) -> N
             await delete_expired_flows(session, now=datetime.now(UTC))
     except SQLAlchemyError:
         log.exception("scheduler.github_connect_flow_sweep.failed")
+
+
+# A provider routine's staged files outlive a missed delivery by this much:
+# a later fire replaces the outbox entry and leaves its files behind.
+_ROUTINE_OUTPUT_RETENTION = timedelta(days=7)
+
+
+@scheduler_step
+async def _sweep_routine_outputs(sm: async_sessionmaker[AsyncSession]) -> None:
+    """Drop provider routine files that no delivery took."""
+    try:
+        async with sm.begin() as session:
+            await delete_uploads(
+                session,
+                title=ROUTINE_OUTPUT_TITLE,
+                created_before=datetime.now(UTC) - _ROUTINE_OUTPUT_RETENTION,
+            )
+    except SQLAlchemyError:
+        log.exception("scheduler.routine_output_sweep.failed")
 
 
 # How often to look for closed GitHub token rows. Each run scans the table, and
@@ -2479,6 +2512,7 @@ async def run(
             await _sweep_mcp_tokens(sm)
             await _sweep_lead_intake(sm)
             await _sweep_github_connect_flows(sm)
+            await _sweep_routine_outputs(sm)
             await _sweep_github_issued_tokens(sm)
             await _sweep_monitored_events(sm, retention_days=settings.monitoring.retention_days)
             await _sweep_ops_events(sm, retention_days=settings.ops_events.retention_days)
@@ -2525,6 +2559,7 @@ async def run(
             await _sweep_mcp_tokens(sm)
             await _sweep_lead_intake(sm)
             await _sweep_github_connect_flows(sm)
+            await _sweep_routine_outputs(sm)
             await _sweep_github_issued_tokens(sm)
             await _sweep_monitored_events(sm, retention_days=settings.monitoring.retention_days)
             await _sweep_ops_events(sm, retention_days=settings.ops_events.retention_days)
