@@ -8,16 +8,20 @@ administer an agent's repositories.
 
 Register one GitHub App for the deployment. `<root>` below is
 [`DAIMON_MCP__PUBLIC_URL`](configuration.md#daimon_mcp__public_url) without the
-trailing `/mcp`, and `<web>` is
-[`DAIMON_WEB__PUBLIC_URL`](configuration.md#daimon_web__public_url). GitHub must
-reach them, so `localhost` works only through a tunnel.
+trailing `/mcp`. GitHub must reach it, so `localhost` works only through a tunnel.
 
-The connect pages open on one host. With the web app, set `DAIMON_WEB__PUBLIC_URL`
-on every service, the MCP server included, and give the web app the App values and
-crypto keys below. Add `<web>/oauth/github/callback` to the App's callback URLs, keep
-`<root>/oauth/github/callback` for personal account links, and set the setup URL to
-`<web>/oauth/github/setup`. Without the web app, the pages open at `<root>`: set the
-callback and setup URLs to `<root>/oauth/github/callback` and `<root>/oauth/github/setup`.
+By default the connect pages open at `<root>`: set the App's callback and setup
+URLs to `<root>/oauth/github/callback` and `<root>/oauth/github/setup`.
+
+<!-- knowledge: web -->
+With the web app, the pages open on `<web>`,
+[`DAIMON_WEB__PUBLIC_URL`](configuration.md#daimon_web__public_url). Set it on
+every service, the MCP server included, and give the web app the App values and
+crypto keys below. Add `<web>/oauth/github/callback` to the callback URLs, keep
+`<root>/oauth/github/callback` for personal account links, and set the setup URL
+to `<web>/oauth/github/setup`. The MCP host then sends old links and its setup
+URL on to the web app.
+<!-- /knowledge -->
 
 1. Copy the App's values into `.env`: `DAIMON_GITHUB_APP__APP_ID`, `APP_SLUG`,
    `PRIVATE_KEY`, `CLIENT_ID` and `CLIENT_SECRET`. See
@@ -31,8 +35,7 @@ callback and setup URLs to `<root>/oauth/github/callback` and `<root>/oauth/gith
    The route mounts only when it is set, and boot fails without the App ID,
    private key and `DAIMON_CRYPTO__KEYS`.
 4. Restart the services. The MCP connect routes mount only when these values and
-   its public URL are present. With the web app on, the MCP host sends old
-   links and its setup URL on to the web app.
+   its public URL are present.
 5. Keep the scheduler running. It removes expired connection flows and their
    encrypted tokens.
 
