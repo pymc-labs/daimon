@@ -2096,8 +2096,9 @@
     'connect_my_data': dict({
       'description': '''
         Start your own sign-in at a data source; source_id is one list_my_data offers.
-        Runs on your Approve card. The link or code comes by direct message, never shown
-        here; after you approve it there, check_my_data_connection finishes it.
+        Runs on your Approve card. In a shared conversation (a channel or group) the link and code
+        are [[private:...]] placeholders: send them with send_private_details and say here
+        that they went by direct message. Once signed in, check_my_data_connection finishes it.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -6333,9 +6334,10 @@
     'list_data_links': dict({
       'description': '''
         List the accounts the data sources know, each linked to a person or not, and the
-        open suggestions (an account whose verified email matches a person). Emails show only
-        in a direct message with the admin. Pass this active turn's origin_context_id.
-        Admin-only.
+        open suggestions (an account whose verified email matches a person). Pass this active
+        turn's origin_context_id. In a shared conversation (a channel or group), emails are
+        [[private:...]] placeholders: answer here without them, and send any the admin needs
+        with send_private_details. Admin-only.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -6369,8 +6371,9 @@
     'list_data_rule_sets': dict({
       'description': '''
         List the redaction rule sets, or show one (name) with its approved and waiting
-        rules. The rules name what is hidden, so they show only in a direct message with the
-        admin. Pass this active turn's origin_context_id. Admin-only.
+        rules. Pass this active turn's origin_context_id. The rules name what is hidden, so
+        in a shared conversation (a channel or group) they are [[private:...]] placeholders:
+        answer here without them, and send them with send_private_details. Admin-only.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -10112,6 +10115,26 @@
         'required': list([
           'channel_id',
           'content',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'send_private_details': dict({
+      'description': '''
+        Send yourself (the asker) a direct message holding the [[private:...]] placeholders
+        a data tool gave you this turn, written around them. Each opens there, only for the
+        person it was fetched for. Keep answering in this conversation and say what went by
+        direct message.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'message': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'message',
         ]),
         'type': 'object',
       }),

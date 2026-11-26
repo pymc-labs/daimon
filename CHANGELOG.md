@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first, and a memory saved after a data read shows only to people who could read that data.
   Workspace admins manage data access, and may grant themselves a scope or link an account
   to themselves (audited). Chat adds a source or refreshes its credential through a private
-  form only the asker opens. Redaction sets take `at: storage` or `at: answer`, reach SQL and
+  form only the asker opens, and in a room sends emails, sign-ins and rules by direct message. Redaction sets take `at: storage` or `at: answer`, reach SQL and
   file text best effort, and apply to their own sources. Teams rooms with a guest, another
   organisation's member or a shared channel get no data; others get public data until the
   app (0.6.3) may read their members, per team or for the whole tenant

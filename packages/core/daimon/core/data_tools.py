@@ -30,6 +30,7 @@ DATA_SOURCE_TOOLS: Final[frozenset[str]] = frozenset(
         "connect_my_data",
         "check_my_data_connection",
         "dismiss_data_notices",
+        "send_private_details",
     }
 )
 """The data management and sign-in tools: hidden with `data_sources`, and until a workspace has a

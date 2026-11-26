@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 256 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 257 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -318,6 +318,7 @@ lists them; `remove_my_data` disconnects one).
 | `check_my_data_connection` | all callers | Whether the sign-in started by connect_my_data (pending_id) is finished. |
 | `connect_my_data` | all callers | Start your own sign-in at a data source; source_id is one list_my_data offers. |
 | `dismiss_data_notices` | all callers | Mark your notices about data-source links an admin changed as read. |
+| `send_private_details` | all callers | Send yourself (the asker) a direct message holding the [[private:...]] placeholders a data tool gave you this turn, written around them. |
 
 ## `environments`
 

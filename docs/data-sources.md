@@ -106,9 +106,9 @@ redaction sets under Admin > Data access, or from chat. Granting oneself a scope
 account to oneself is allowed and marked in the audit trail. Declared sources show as bound and are read-only there. People link and
 connect their own accounts on their Profile.
 
-Admins can also add a source or refresh its credential from chat, even before the first
-source. The credential goes through a private form only the asker can open, straight onto
-the source, never into chat.
+From chat, admins can add a source, even the first, or refresh its credential. The value
+goes through a private form only the asker opens, straight onto the source. In a room, emails,
+sign-ins and redaction rules reach the agent sealed; it sends them to the asker by direct message.
 
 ## Who sees an answer
 
