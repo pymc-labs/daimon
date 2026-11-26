@@ -53,6 +53,7 @@ from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange, render_env_import_rejected
 from daimon.core.credential_flow import CardEdit, refuse_spent, submit_env, submit_env_file
 from daimon.core.credential_requests import (
+    DATA_FORM_KINDS,
     split_skill_repo_target,
 )
 from daimon.core.credential_submit import (
@@ -151,7 +152,7 @@ SUBMIT = "credential_submit"
 Dispatch = Callable[[uuid.UUID, str, str | None], Awaitable[None]]
 Refusal = Literal["invalid", "wrong_org", "wrong_requester", "expired", "used"]
 
-_FORM_KINDS = ("env", "env_file", "mcp", "repo", "skill_repo", "data_source")
+_FORM_KINDS = ("env", "env_file", "mcp", "repo", "skill_repo", *DATA_FORM_KINDS)
 _REPO_KINDS = ("repo", "skill_repo")
 #: Slack's cap: a GitHub token is short.
 _MAX_GITHUB_TOKEN_CHARS = 255
@@ -209,7 +210,7 @@ def refusal(
 
 def _secret_input(kind: str) -> TextInput:
     """The one input a kind collects, sized as on Slack."""
-    if kind in ("env", "data_source"):
+    if kind == "env" or kind in DATA_FORM_KINDS:
         return TextInput(
             id="secret",
             label="Value",
@@ -245,7 +246,7 @@ def _title(row: CredentialRequestRow) -> str:
         return f"{row.target} for {row.target_name or 'the agent'}"
     if row.kind == "mcp":
         return f"{row.target} token"
-    if row.kind == "data_source":
+    if row.kind in DATA_FORM_KINDS:
         return f"Credential for {row.target}"
     return "Keys from a file" if row.kind == "env_file" else "Your GitHub token"
 
@@ -430,7 +431,7 @@ class TeamsCredentialRequests:
             return credential_form(row, f"That is too big. Max {MAX_ENV_FILE_BYTES // 1024} KB.")
         if row.kind != "env_file" and len(secret.encode()) > MAX_SECRET_VALUE_BYTES:
             return credential_form(row, f"Value is too large. Max {MAX_SECRET_VALUE_BYTES} bytes.")
-        if row.kind == "data_source":
+        if row.kind in DATA_FORM_KINDS:
             return await self._save_data_source(row, secret.strip(), activity.service_url)
         mcp = self._runtime.settings.mcp
         if row.kind == "mcp" and (mcp.public_url is None or mcp.jwt_secret is None):
@@ -511,7 +512,7 @@ class TeamsCredentialRequests:
     async def _save_data_source(
         self, row: CredentialRequestRow, secret: str, service_url: str | None
     ) -> TaskModuleResponse:
-        """Seal the value onto the row's data source as the requester; the dialog says how."""
+        """Seal the value onto the row's data source or connection as the requester."""
         try:
             consumed = await apply_data_source_submit(
                 self._runtime.sessionmaker, self._runtime.settings, row=row, value=secret,

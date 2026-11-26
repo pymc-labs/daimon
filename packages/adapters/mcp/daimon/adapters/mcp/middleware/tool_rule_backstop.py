@@ -155,7 +155,7 @@ async def needs_host_gate(
         or not policy.enabled
         or not policy.agent_rules
         or not public_url
-        or not _enforced_for(identity)
+        or _agent_of(identity, agent_keys=False) is None
         or tool_name in SEARCH_PROXY_TOOLS
     ):
         return False

@@ -23,7 +23,7 @@ from daimon.core.agent_pins import consume_form_unless_pinned
 from daimon.core.config import Settings
 from daimon.core.continuity.continuation import record_input_continuation
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
-from daimon.core.credential_requests import CredentialRequestOutcome
+from daimon.core.credential_requests import DATA_FORM_KINDS, CredentialRequestOutcome
 from daimon.core.env_file import (
     MEMBER_SECRET_SUFFIX_HINT,
     EnvEntry,
@@ -31,11 +31,11 @@ from daimon.core.env_file import (
     env_import_collisions,
     env_related_held,
 )
-from daimon.core.github_credentials import encrypt_token
+from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.mcp_attach import McpConnectDecision
 from daimon.core.mcp_oauth import begin_mcp_oauth_flow
 from daimon.core.mcp_token_connect import connect_mcp_server_with_token
-from daimon.core.ports.data_credentials import set_source_credential
+from daimon.core.ports.data_credentials import SourceCredentialRefused, set_source_credential
 from daimon.core.posted_controls import CardState
 from daimon.core.stores import credential_requests
 from daimon.core.stores.agent_files import (
@@ -331,6 +331,34 @@ async def apply_watch_credential_submit(
         return consumed
 
 
+async def _set_connection_token(
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    row: CredentialRequestRow,
+    connection_id: uuid.UUID,
+    value: str,
+    now: datetime,
+) -> None:
+    """Seal `value` onto the shared connection, then read its tools again with it."""
+    # Imported here: `shared_connections` and `turn.approvals` import each other at load.
+    from daimon.core import shared_connection_admin
+    from daimon.core.shared_connections import SharedConnectionError
+
+    fernet = build_multifernet(tuple(k.get_secret_value() for k in settings.crypto.keys))
+    try:
+        await shared_connection_admin.edit(
+            session_factory, fernet, tenant_id=row.tenant_id, actor=row.account_id,
+            connection_id=connection_id, status=None, scope=None, scope_set=False,
+            token=value, now=now,
+        )  # fmt: skip
+        await shared_connection_admin.refresh(
+            session_factory, fernet, settings.tool_safety,
+            tenant_id=row.tenant_id, connection_id=connection_id,
+        )  # fmt: skip
+    except SharedConnectionError as err:
+        raise SourceCredentialRefused(f"{err} Nothing was saved.") from None
+
+
 async def apply_data_source_submit(
     session_factory: async_sessionmaker[AsyncSession],
     settings: Settings,
@@ -339,13 +367,14 @@ async def apply_data_source_submit(
     value: str,
     now: datetime,
 ) -> CredentialRequestRow | None:
-    """Spend the form, then seal the requester's value onto the source the row names, as them.
+    """Spend the form, then seal the requester's value onto the source or shared connection the
+    row names, as them.
 
     None when the form is no longer usable. A refused or failed write is recorded on the row
     and raised (`SourceCredentialRefused` says why); the value is never logged or kept here.
     """
-    if row.kind != "data_source" or row.mcp_server_url is None:
-        raise ValueError("Not a data source form")
+    if row.kind not in DATA_FORM_KINDS or row.mcp_server_url is None:
+        raise ValueError("Not a data source or connection form")
     source_id = uuid.UUID(row.mcp_server_url)
     async with session_factory() as session, session.begin():
         consumed = await credential_requests.consume_credential_request(
@@ -355,9 +384,12 @@ async def apply_data_source_submit(
         return None
     outcome: CredentialRequestOutcome = "write_failed"
     try:
-        await set_source_credential(
-            settings, consumed.tenant_id, source_id, consumed.account_id, value
-        )
+        if consumed.kind == "data_connection":
+            await _set_connection_token(session_factory, settings, consumed, source_id, value, now)
+        else:
+            await set_source_credential(
+                settings, consumed.tenant_id, source_id, consumed.account_id, value
+            )
         outcome = "applied"
     finally:
         async with session_factory() as session, session.begin():

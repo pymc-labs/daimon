@@ -87,6 +87,7 @@ CardKind = Literal[
     "skill_repo",
     "watch_credential",
     "data_source",
+    "data_connection",
     "switch",
     "call",
 ]
@@ -139,6 +140,7 @@ _BUTTON_LABEL: Final[dict[CardKind, str]] = {
     "skill_repo": "🔐 Use my GitHub token",
     "watch_credential": "🔐 Enter it privately",
     "data_source": "🔐 Enter it privately",
+    "data_connection": "🔐 Enter it privately",
 }
 
 # Leading emoji → state, for a reader (parity driver, QA script) holding only
@@ -250,6 +252,16 @@ def data_source_content(source: str) -> tuple[str, tuple[str, ...]]:
     )
 
 
+def data_form_content(kind: str, target: str) -> tuple[str, tuple[str, ...]]:
+    """The headline and fact of a form whose value goes onto a source or a shared connection."""
+    if kind == "data_connection":
+        return (
+            f"🔑 The token for shared connection {target}",
+            ("It goes straight onto the connection and is never shown in chat.",),
+        )
+    return data_source_content(target)
+
+
 def _requested_content(
     kind: CardKind,
     *,
@@ -287,8 +299,8 @@ def _requested_content(
                 "It is never shown in chat.",
             ),
         )
-    if kind == "data_source":
-        return data_source_content(target)
+    if kind in ("data_source", "data_connection"):
+        return data_form_content(kind, target)
     if kind == "mcp_oauth":
         if mcp_server_url is None:
             raise ValueError("kind='mcp_oauth' requires mcp_server_url")
@@ -345,6 +357,8 @@ def _expired_fact(
         phrase = f"set up your watch key for {target}"
     elif kind == "data_source":
         phrase = f"take the credential for {target}"
+    elif kind == "data_connection":
+        phrase = f"take the token for {target}"
     elif kind == "repo":
         phrase = f"give {agent_name} access to {repo_display}"
     else:

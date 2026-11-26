@@ -61,6 +61,7 @@ from daimon.core.credential_flow import (
     submit_mcp,
 )
 from daimon.core.credential_requests import (
+    DATA_FORM_KINDS,
     CredentialRequestKind,
     split_skill_repo_target,
 )
@@ -1403,7 +1404,7 @@ async def run_data_source_credential_submission(
         row = await credential_requests_store.peek_credential_request(session, token=token)
     if (
         row is None
-        or row.kind != "data_source"
+        or row.kind not in DATA_FORM_KINDS
         or row.tenant_id != derive_tenant_uuid(platform="slack", workspace_id=team_id)
         or row.platform not in (None, "slack")
         or row.requester_platform_user_id != user_id

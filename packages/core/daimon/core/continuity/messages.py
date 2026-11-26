@@ -352,7 +352,7 @@ def render_change_confirmation(change: ConfigurationChange) -> str:
     if kind == "watch_key":
         return _render_watch_key_saved(change.detail)
     if kind == "data_source_credential":
-        return f"The credential for {change.detail or 'the source'} is saved on the source."
+        return f"The credential for {change.detail or 'the source'} is saved."
     raise ValueError(f"unknown ChangeKind: {kind!r}")
 
 

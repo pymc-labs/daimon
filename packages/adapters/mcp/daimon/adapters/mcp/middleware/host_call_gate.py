@@ -210,7 +210,8 @@ class HostCallGate:
         # With the gate off a gated tool is refused as before; a tool only a rule sent
         # here still runs where its rule allows it, and so does a shared-connection tool.
         off = self.off_for(identity)
-        if off and name in confirmation_gated_tools() and not isinstance(tool, SharedConnectionTool):
+        shared_tool = isinstance(tool, SharedConnectionTool)
+        if off and name in confirmation_gated_tools() and not shared_tool:
             raise _refuse("off")
         # A held turn gets here only with a held-allowlisted tool, as Claude's card asks.
         if (

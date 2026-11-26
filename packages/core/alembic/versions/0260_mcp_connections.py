@@ -4,7 +4,8 @@ Two new tables, empty on upgrade and unread until the `shared_connections` featu
 nothing changes for an existing workspace. A connection holds an upstream MCP server's address,
 its bearer token encrypted, and an optional data scope; each tool holds the description and
 schema an admin approved beside the ones the server last sent. Downgrading drops both tables
-and with them every shared connection.
+and with them every shared connection. Credential forms gain the `data_connection` kind, which
+carries a connection's token from the asker's private form.
 
 downgrade: destructive
 """
@@ -19,6 +20,18 @@ revision: str = "0260_mcp_connections"
 down_revision: str | None = "0244_data_memory"
 branch_labels: str | None = None
 depends_on: str | None = None
+
+_KINDS = (
+    "'env', 'env_file', 'mcp', 'mcp_oauth', 'repo', 'skill_repo', 'watch_credential', 'data_source'"
+)
+
+
+def _kinds(kinds: str) -> None:
+    op.execute("ALTER TABLE credential_requests DROP CONSTRAINT ck_credential_requests_kind")
+    op.execute(
+        "ALTER TABLE credential_requests ADD CONSTRAINT ck_credential_requests_kind "
+        f"CHECK (kind IN ({kinds}))"
+    )
 
 
 def upgrade() -> None:
@@ -76,8 +89,11 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("connection_id", "name"),
     )
     op.create_index("ix_mcp_connection_tools_tenant", "mcp_connection_tools", ["tenant_id"])
+    _kinds(f"{_KINDS}, 'data_connection'")
 
 
 def downgrade() -> None:
+    op.execute("DELETE FROM credential_requests WHERE kind = 'data_connection'")
+    _kinds(_KINDS)
     op.drop_table("mcp_connection_tools")
     op.drop_table("mcp_connections")

@@ -1,11 +1,12 @@
 """Chat tools for the shared connections page: list, and change on the asker's card.
 
 The list answers directly, with approved words only: an upstream's text waiting for review
-shows on the turn_on card, never in the model's context. Outside a private conversation the
-addresses and errors go to the asker by direct message. Each change runs only on the asker's
-Approve card (`CARDED_TOOLS`), which names what it acts on
-(`shared_connections.card_lookup`), through the same `daimon.core.shared_connection_admin`
-functions and checks as the web routes. A token never passes through chat.
+shows on the turn_on card, never in the model's context. In a shared conversation the addresses
+and errors are placeholders (`_private_values`) that `send_private_details` opens in the asker's
+direct message. Each change runs only on the asker's Approve card (`CARDED_TOOLS`), which names
+what it acts on (`shared_connections.card_lookup`), through the same
+`daimon.core.shared_connection_admin` functions and checks as the web routes. A token never
+passes through chat: add and refresh post the asker's private form for it.
 """
 
 from __future__ import annotations
@@ -18,13 +19,9 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._card import require_card
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
-from daimon.adapters.mcp.tools._web_admin import (
-    PrivateDetails,
-    now,
-    private_details,
-    send_privately,
-    web_admin_of,
-)
+from daimon.adapters.mcp.tools._private_values import Privately, privately
+from daimon.adapters.mcp.tools._web_admin import now, web_admin_of
+from daimon.adapters.mcp.tools.credential_requests import request_data_source_credential
 from daimon.core import shared_connection_admin as admin_ops
 from daimon.core import shared_connections as shared
 from daimon.core.shared_connection_admin import NO_CONNECTION, OFF, Connection
@@ -37,18 +34,16 @@ from fastmcp.exceptions import ToolError
 ConnectionAction = Literal["add", "refresh", "pause", "resume", "rescope", "remove"]
 _STATUS: dict[str, Literal["active", "paused"]] = {"pause": "paused", "resume": "active"}
 ToolAction = Literal["turn_on", "turn_off", "mark_writes", "mark_reads", "rescope"]
-_NOT_SENT = "The address and errors couldn't be sent to you privately."
 _NOT_ADMIN = "Only an admin or an owner manages shared connections."
 #: An upstream's words waiting for review: only the turn_on card shows them.
 _UNREVIEWED = frozenset({"seen_description", "seen_schema"})
 
 
-def _view(connection: Connection, details: PrivateDetails) -> dict[str, Any]:
-    """Approved words only; outside a private conversation, no address or error."""
+def _view(connection: Connection, hide: Privately) -> dict[str, Any]:
+    """Approved words only; the address and error as the room may read them."""
     hidden: dict[str, Any] = {"tools": {"__all__": _UNREVIEWED}}
-    if details != "shown":
-        hidden.update(url=True, error=True)
-    return connection.model_dump(mode="json", exclude=hidden)
+    shown = connection.model_dump(mode="json", exclude=hidden)
+    return {**shown, "url": hide(connection.url), "error": hide(connection.error)}
 
 
 def register_shared_connection_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
@@ -81,20 +76,21 @@ def register_shared_connection_admin_tools(mcp: FastMCP, runtime: McpRuntime) ->
 
     async def answer(
         auth: AuthIdentity, origin_context_id: str | None, connections: list[Connection]
-    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        """The connections as the room may read them; addresses and errors to the asker. A
-        change already made stays reported as made when that message fails."""
-        details = await private_details(runtime, auth, origin_context_id)
-        head: dict[str, Any] = {"private_details": details}
-        if details != "shown" and connections:
-            lines = (
-                f"{c.name}: {c.url}" + (f" ({c.error})" if c.error else "") for c in connections
-            )
-            try:
-                await send_privately(runtime, auth, "\n".join(lines))
-            except ToolError:
-                head["details_not_sent"] = _NOT_SENT
-        return head, [_view(c, details) for c in connections]
+    ) -> list[dict[str, Any]]:
+        hide = await privately(runtime, auth, origin_context_id)
+        return [_view(c, hide) for c in connections]
+
+    async def token_form(
+        auth: AuthIdentity, origin_context_id: str, found: Connection
+    ) -> dict[str, Any]:
+        """The asker's private form for the connection's token; saving it reads its tools."""
+        if found.declared:
+            raise ToolError(f"{admin_ops.READ_ONLY} Nothing changed.")
+        form = await request_data_source_credential(
+            runtime, auth, source_id=uuid.UUID(found.id), name=found.name,
+            origin_context_id=origin_context_id, kind="data_connection",
+        )  # fmt: skip
+        return {"credential_form": form.instruction}
 
     @mcp.tool(name="list_shared_connections", tags={"admin"})
     async def list_connections(  # pyright: ignore[reportUnusedFunction]
@@ -103,13 +99,16 @@ def register_shared_connection_admin_tools(mcp: FastMCP, runtime: McpRuntime) ->
         """List the workspace's shared connections: each server's state and its tools, with
         what each does, whether it is on, whether the upstream changed it and the ``seen``
         fingerprint to turn it on as shown (the card shows its words). Addresses and errors
-        show only in a direct message with the admin. Pass this active turn's
-        origin_context_id. Admin-only."""
+        are [[private:...]] placeholders in a shared conversation (a channel or group): answer
+        without them and send any the admin needs with send_private_details. Pass this active
+        turn's origin_context_id. Admin-only."""
         auth = await _auth(ctx)
         actor, on = await manager(auth, on=False)
         found = await admin_ops.listing(sessions, actor.tenant_id, on=on)
-        head, shown = await answer(auth, origin_context_id, found.connections)
-        return {**head, "enabled": on, "connections": shown}
+        return {
+            "enabled": on,
+            "connections": await answer(auth, origin_context_id, found.connections),
+        }
 
     @mcp.tool(name="change_shared_connection", tags={"admin"})
     async def change_connection(  # pyright: ignore[reportUnusedFunction]
@@ -120,12 +119,15 @@ def register_shared_connection_admin_tools(mcp: FastMCP, runtime: McpRuntime) ->
         name: str = "",
         url: str = "",
         scope: str = "",
+        with_token: bool = False,
     ) -> dict[str, Any]:
         """Add a shared connection (add: name, url, optional scope; its tools start off), or
         refresh, pause, resume, rescope (scope; empty clears it) or remove one (connection:
         its id or name). Runs on the asker's Approve card, which names the connection and its
-        address. A token is added or replaced under Integrations, Shared connections, never
-        here. Admin-only."""
+        address. with_token, on add or refresh, posts the asker's private form for its token,
+        and saving it reads the server's tools; never ask for a token in chat or pass one here.
+        Addresses and errors in the answer are [[private:...]] placeholders in a shared
+        conversation: send them with send_private_details. Admin-only."""
         auth = await _auth(ctx)
         # As on the web, a connection can be removed with the feature off.
         actor, _ = await manager(auth, on=action != "remove")
@@ -141,9 +143,13 @@ def register_shared_connection_admin_tools(mcp: FastMCP, runtime: McpRuntime) ->
                     scope=scope or None, now=now(),
                 )  # fmt: skip
             elif action == "refresh":
+                found_id = await connection_id(actor, connection)
+                if with_token:
+                    current = await admin_ops.view(sessions, actor.tenant_id, found_id)
+                    return await token_form(auth, origin_context_id, current)
                 changed = await admin_ops.refresh(
                     sessions, fernet(), policy, tenant_id=actor.tenant_id,
-                    connection_id=await connection_id(actor, connection),
+                    connection_id=found_id,
                 )  # fmt: skip
             elif action == "remove":
                 await admin_ops.remove(
@@ -160,8 +166,10 @@ def register_shared_connection_admin_tools(mcp: FastMCP, runtime: McpRuntime) ->
                 )  # fmt: skip
         except SharedConnectionError as exc:
             raise ToolError(f"{exc} Nothing changed.") from exc
-        head, shown = await answer(auth, origin_context_id, [changed])
-        return {**head, **shown[0]}
+        (shown,) = await answer(auth, origin_context_id, [changed])
+        if action == "add" and with_token:
+            shown.update(await token_form(auth, origin_context_id, changed))
+        return shown
 
     @mcp.tool(name="change_shared_connection_tool", tags={"admin"})
     async def change_tool(  # pyright: ignore[reportUnusedFunction]
@@ -198,8 +206,7 @@ def register_shared_connection_admin_tools(mcp: FastMCP, runtime: McpRuntime) ->
             )  # fmt: skip
         except SharedConnectionError as exc:
             raise ToolError(f"{exc} Nothing changed.") from exc
-        head, shown = await answer(auth, origin_context_id, [changed])
-        return {**head, **shown[0]}
+        return (await answer(auth, origin_context_id, [changed]))[0]
 
 
 __all__ = ["register_shared_connection_admin_tools"]

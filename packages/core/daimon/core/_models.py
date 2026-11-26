@@ -1932,7 +1932,7 @@ class CredentialRequest(Base):
     __table_args__ = (
         CheckConstraint(
             "kind IN ('env', 'env_file', 'mcp', 'mcp_oauth', 'repo', 'skill_repo', "
-            "'watch_credential', 'data_source')",
+            "'watch_credential', 'data_source', 'data_connection')",
             name="ck_credential_requests_kind",
         ),
         UniqueConstraint("idempotency_key", name="uq_credential_requests_idempotency_key"),

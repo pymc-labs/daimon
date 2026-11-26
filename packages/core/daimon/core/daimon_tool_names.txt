@@ -212,6 +212,7 @@ self_read_file
 self_write_file
 send_direct_message
 send_message
+send_private_details
 set_agent_backend
 set_agent_builtin_tool
 set_agent_default

@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated, Final
+from typing import Annotated, Final, Literal
 from urllib.parse import urlparse, urlsplit
 
 from anthropic.types.beta import BetaManagedAgentsAgent
@@ -59,6 +59,7 @@ from daimon.core.agent_pins import agent_pin_names
 from daimon.core.config import PollableTool, load_watches_settings
 from daimon.core.continuity.continuation import MAX_REQUESTED_WORK, sanitize_requested_work
 from daimon.core.credential_requests import (
+    DATA_FORM_KINDS,
     DEFAULT_TTL,
     ENV_FILE_TARGET,
     CredentialRequestKind,
@@ -112,7 +113,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 _POSIX_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-_NOT_AGENT_KINDS: Final = ("watch_credential", "data_source")
+_NOT_AGENT_KINDS: Final = ("watch_credential", *DATA_FORM_KINDS)
 
 
 def _caller_is_admin(auth: AuthIdentity) -> bool:
@@ -450,7 +451,7 @@ async def _mint_and_post(
     changes_agent: bool = True,
 ) -> RequestCredentialResult:
     on_web = origin.platform == "web"
-    if on_web and kind not in ("env", "data_source"):
+    if on_web and kind not in ("env", *DATA_FORM_KINDS):
         # The web chat's card holds one named key; files and connections need a chat app.
         raise ToolError(
             "This can't be set up from the web app. Ask for one named key, "
@@ -914,9 +915,11 @@ async def request_data_source_credential(
     source_id: uuid.UUID,
     name: str,
     origin_context_id: str | None,
+    kind: Literal["data_source", "data_connection"] = "data_source",
 ) -> RequestCredentialResult:
-    """Post the private form whose value goes straight onto the data source `source_id`, for
-    the asker only: the value never reaches the tool's arguments or the chat."""
+    """Post the private form whose value goes straight onto the data source (or, as
+    `data_connection`, the shared connection) `source_id`, for the asker only: the value never
+    reaches the tool's arguments or the chat."""
     requester = _require_requestable_platform(auth)
     if not runtime.settings.crypto.keys:
         raise ToolError("This Daimon cannot store credentials yet. Nothing was posted.")
@@ -932,14 +935,18 @@ async def request_data_source_credential(
     return await _mint_and_post(
         runtime,
         auth,
-        kind="data_source",
+        kind=kind,
         target=name,
         mcp_server_url=str(source_id),
         agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=str(ma_agent.id)),
         ma_agent=ma_agent,
         requester_platform_user_id=requester,
         agent_name=ma_agent.name,
-        purpose=f"the credential for data source {name}",
+        purpose=(
+            f"the token for shared connection {name}"
+            if kind == "data_connection"
+            else f"the credential for data source {name}"
+        ),
         channel_id=origin.thread_id,
         origin=origin,
         requested_work=None,

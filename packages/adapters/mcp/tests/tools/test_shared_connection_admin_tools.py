@@ -11,6 +11,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from cryptography.fernet import Fernet, MultiFernet
+from daimon.adapters.mcp.tools import _private_values
 from daimon.adapters.mcp.tools import shared_connection_admin as tools
 from daimon.core import shared_connection_admin as admin_ops
 from daimon.core import shared_connections
@@ -21,11 +23,13 @@ from fastmcp.exceptions import ToolError
 from .parity_fakes import fake_runtime, make_auth
 
 _ID = str(uuid.uuid4())
+KEYS = MultiFernet([Fernet(Fernet.generate_key())])
+ASKER = make_auth()
 
 
 class _Ctx:
     async def get_state(self, key: str) -> object:
-        return make_auth() if key == "auth" else None
+        return ASKER if key == "auth" else None
 
 
 class Rig:
@@ -34,8 +38,8 @@ class Rig:
         self.card_ok = True
         self.on = True
         self.details = "shown"
-        self.sent: list[str] = []
-        self.dm_ok = True
+        self.forms: list[dict[str, Any]] = []
+        self.found: admin_ops.Connection | None = None
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
         async def actor(*_: object) -> WebAdmin:
@@ -51,10 +55,9 @@ class Rig:
         async def details(*_: object) -> str:
             return self.details
 
-        async def send(_runtime: object, _auth: object, text: str) -> None:
-            if not self.dm_ok:
-                raise ToolError("No direct message here.")
-            self.sent.append(text)
+        async def form(*_: object, **kwargs: Any) -> SimpleNamespace:
+            self.forms.append(kwargs)
+            return SimpleNamespace(instruction="Tell them to fill in the form.")
 
         monkeypatch.setattr(tools, "web_admin_of", actor)
         monkeypatch.setattr(tools, "require_card", card)
@@ -63,23 +66,23 @@ class Rig:
             return SimpleNamespace(id=uuid.UUID(_ID))
 
         monkeypatch.setattr(shared_connections, "find_connection", found)
-        monkeypatch.setattr(tools, "private_details", details)
-        monkeypatch.setattr(tools, "send_privately", send)
+        monkeypatch.setattr(_private_values, "private_details", details)
+        monkeypatch.setattr(tools, "request_data_source_credential", form)
         monkeypatch.setattr(admin_ops, "is_on", on)
-        for name in ("listing", "change_tool", "edit", "remove"):
+        for name in ("listing", "change_tool", "edit", "remove", "add", "refresh", "view"):
             monkeypatch.setattr(admin_ops, name, self.record(name))
 
     def record(self, name: str) -> Any:
         async def call(*_: object, **kwargs: Any) -> object:
             self.calls.append((name, kwargs))
-            return _LISTED if name == "listing" else _CONNECTION
+            return _LISTED if name == "listing" else self.found or _CONNECTION
 
         return call
 
     async def call(self, name: str, /, **args: Any) -> Any:
         mcp = FastMCP("t")
         runtime = fake_runtime()
-        runtime.fernet = object()  # pyright: ignore[reportAttributeAccessIssue]
+        runtime.fernet = KEYS  # pyright: ignore[reportAttributeAccessIssue]
         tools.register_shared_connection_admin_tools(mcp, runtime)
         found: dict[str, Any] = {t.name: t for t in await mcp.local_provider.list_tools()}
         return await found[name].fn(ctx=_Ctx(), **args)
@@ -132,27 +135,66 @@ async def test_the_list_answers_without_a_card(rig: Rig) -> None:
     assert listed["enabled"] and [n for n, _ in rig.calls] == ["listing"], "a read needs no card"
 
 
-async def test_a_room_gets_approved_words_and_the_asker_the_address(rig: Rig) -> None:
+async def test_a_room_gets_placeholders_and_the_askers_dm_opens_them(rig: Rig) -> None:
     rig.details = "direct_message"
     listed = await rig.call("list_shared_connections", origin_context_id="o")
     [shown] = listed["connections"]
-    assert "url" not in shown and "error" not in shown, f"a room sees no address: {shown}"
-    assert rig.sent == ["crm: https://crm.example/mcp (upstream said no)"], rig.sent
+    assert "crm.example" not in str(listed) and "upstream said no" not in str(listed), (
+        f"a room's model sees no address or error: {shown}"
+    )
+    text, opened = _private_values.open_placeholders(
+        f"{shown['url']} ({shown['error']})", ASKER, KEYS
+    )
+    assert (text, opened) == ("https://crm.example/mcp (upstream said no)", 2), (
+        "send_private_details opens both for the asker"
+    )
+    assert _private_values.open_placeholders(shown["url"], make_auth(), KEYS)[1] == 0, (
+        "and for no one else"
+    )
     assert shown["tools"][0]["description"] == "Sends a note."
 
-    rig.details, rig.sent = "shown", []
+    rig.details = "shown"
     [shown] = (await rig.call("list_shared_connections", origin_context_id="o"))["connections"]
-    assert shown["url"] == _CONNECTION.url and not rig.sent, "a private chat shows the address"
+    assert shown["url"] == _CONNECTION.url, "a private chat shows the address"
     assert not {"seen_description", "seen_schema"} & set(shown["tools"][0]), (
         "words waiting for review show only on the turn_on card"
     )
 
 
-async def test_an_applied_change_says_so_when_the_direct_message_fails(rig: Rig) -> None:
-    rig.details, rig.dm_ok = "direct_message", False
+async def test_a_change_in_a_room_answers_with_placeholders(rig: Rig) -> None:
+    rig.details = "direct_message"
     changed = await rig.call("change_shared_connection_tool", **_TURN_OFF)
     assert [n for n, _ in rig.calls] == ["change_tool"], "the change was made"
-    assert changed["name"] == "crm" and changed["details_not_sent"], changed
+    assert changed["name"] == "crm" and "crm.example" not in str(changed), changed
+
+
+async def test_a_token_goes_only_through_the_askers_private_form(rig: Rig) -> None:
+    added = await rig.call(
+        "change_shared_connection", action="add", name="crm", url="https://crm.example/mcp",
+        origin_context_id="o", with_token=True,
+    )  # fmt: skip
+    assert [n for n, _ in rig.calls] == ["add"] and not rig.calls[0][1]["token"], (
+        "the connection is stored with no token"
+    )
+    assert added["credential_form"] and rig.forms[0]["kind"] == "data_connection"
+    assert rig.forms[0]["source_id"] == uuid.UUID(_ID), "the form names the new connection"
+
+    rig.calls.clear()
+    again = await rig.call(
+        "change_shared_connection", action="refresh", connection="crm", origin_context_id="o",
+        with_token=True,
+    )  # fmt: skip
+    assert again == {"credential_form": "Tell them to fill in the form."}
+    assert [n for n, _ in rig.calls] == ["view"], "the form's submit reads the tools, not this call"
+
+    declared = _CONNECTION.model_copy(update={"declared": True})
+    rig.found = declared
+    with pytest.raises(ToolError, match="configuration"):
+        await rig.call(
+            "change_shared_connection", action="refresh", connection="crm",
+            origin_context_id="o", with_token=True,
+        )  # fmt: skip
+    assert len(rig.forms) == 2, "a connection from configuration takes no token form"
 
 
 async def test_removal_works_with_the_feature_off(rig: Rig) -> None:

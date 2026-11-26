@@ -170,7 +170,7 @@ from daimon.core.posted_controls import (
     NO_LONGER_VALID_MESSAGE,
     CardState,
 )
-from daimon.core.posted_controls.cards import data_source_content
+from daimon.core.posted_controls.cards import data_form_content
 from daimon.core.skills.pipeline import run_skill_sync
 from daimon.core.skills.sync import summarize_failed_imports
 from daimon.core.stores import credential_requests
@@ -761,7 +761,8 @@ class WatchCredentialModal(discord.ui.Modal):
 
 
 class DataSourceCredentialModal(discord.ui.Modal):
-    """The credential for one data source, sealed straight onto it (`apply_data_source_submit`).
+    """The credential of a data source or shared connection, sealed onto it
+    (`apply_data_source_submit`).
 
     Requester-only like every form here; the value is never logged, echoed or put in a message.
     """
@@ -770,7 +771,8 @@ class DataSourceCredentialModal(discord.ui.Modal):
         super().__init__(title=f"Credential for {request_row.target}"[:_MAX_TITLE_CHARS])
         self._runtime = runtime
         self._row = request_row
-        self.add_item(discord.ui.TextDisplay(f"-# {data_source_content(request_row.target)[1][0]}"))
+        fact = data_form_content(request_row.kind, request_row.target)[1][0]
+        self.add_item(discord.ui.TextDisplay(f"-# {fact}"))
         label: discord.ui.Label[DataSourceCredentialModal] = discord.ui.Label(
             text="Credential",
             component=discord.ui.TextInput(required=True, max_length=4000),

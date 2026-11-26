@@ -1281,8 +1281,10 @@
         Add a shared connection (add: name, url, optional scope; its tools start off), or
         refresh, pause, resume, rescope (scope; empty clears it) or remove one (connection:
         its id or name). Runs on the asker's Approve card, which names the connection and its
-        address. A token is added or replaced under Integrations, Shared connections, never
-        here. Admin-only.
+        address. with_token, on add or refresh, posts the asker's private form for its token,
+        and saving it reads the server's tools; never ask for a token in chat or pass one here.
+        Addresses and errors in the answer are [[private:...]] placeholders in a shared
+        conversation: send them with send_private_details. Admin-only.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -1316,6 +1318,10 @@
           'url': dict({
             'default': '',
             'type': 'string',
+          }),
+          'with_token': dict({
+            'default': False,
+            'type': 'boolean',
           }),
         }),
         'required': list([
@@ -7091,8 +7097,9 @@
         List the workspace's shared connections: each server's state and its tools, with
         what each does, whether it is on, whether the upstream changed it and the ``seen``
         fingerprint to turn it on as shown (the card shows its words). Addresses and errors
-        show only in a direct message with the admin. Pass this active turn's
-        origin_context_id. Admin-only.
+        are [[private:...]] placeholders in a shared conversation (a channel or group): answer
+        without them and send any the admin needs with send_private_details. Pass this active
+        turn's origin_context_id. Admin-only.
       ''',
       'parameters': dict({
         'additionalProperties': False,

@@ -89,6 +89,7 @@ from daimon.adapters.discord.posted_controls import edit_posted_card
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.credential_requests import (
     CUSTOM_ID_TEMPLATE,
+    DATA_FORM_KINDS,
     CredentialRequestKind,
     build_button_label,
     build_custom_id,
@@ -319,7 +320,7 @@ class CredentialRequestButton(
                 await interaction.response.send_modal(
                     SkillRepoModal(runtime=bot.runtime, request_row=request_row)
                 )
-            elif request_row.kind == "data_source":
+            elif request_row.kind in DATA_FORM_KINDS:
                 await interaction.response.send_modal(
                     DataSourceCredentialModal(runtime=bot.runtime, request_row=request_row)
                 )

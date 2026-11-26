@@ -23,6 +23,7 @@ from daimon.core.agent_ownership import owns_agent
 from daimon.core.agent_pins import FormPinRefused, request_pin_refusal
 from daimon.core.config import Settings
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
+from daimon.core.credential_requests import DATA_FORM_KINDS
 from daimon.core.credential_submit import (
     apply_data_source_submit,
     apply_env_submit,
@@ -38,7 +39,7 @@ from daimon.core.posted_controls.cards import (
     ALREADY_USED_MESSAGE,
     NO_LONGER_VALID_MESSAGE,
     WRONG_REQUESTER_MESSAGE,
-    data_source_content,
+    data_form_content,
 )
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import web_chat as chat_store
@@ -76,8 +77,8 @@ class CredentialAnswered:
 def card_for(
     row: CredentialRequestRow, *, state: Literal["pending", "saved", "skipped"] = "pending"
 ) -> WebCredentialCard:
-    if row.kind == "data_source":
-        headline, facts = data_source_content(row.target)
+    if row.kind in DATA_FORM_KINDS:
+        headline, facts = data_form_content(row.kind, row.target)
         return WebCredentialCard(
             id=str(row.idempotency_key), state=state, headline=headline.removeprefix("🔑 "),
             fact=facts[0], key=row.target,
@@ -142,7 +143,7 @@ class WebCredentialCards:
         row = await self._open_request(thread, card_id, clicker)
         if value is None:
             return CredentialAnswered(await self._skip(row), None)
-        if row.kind == "data_source":
+        if row.kind in DATA_FORM_KINDS:
             return CredentialAnswered(await self._save_data_source(row, value), None)
         message = await self._save(row, value, clicker, clicker_platform, is_admin)
         follow_up = f"[form] {row.target} was saved.\n\n{row.requested_work}"
@@ -162,7 +163,7 @@ class WebCredentialCards:
         if (
             row is None
             or row.platform != "web"
-            or row.kind not in ("env", "data_source")
+            or row.kind not in ("env", *DATA_FORM_KINDS)
             or row.tenant_id != thread.tenant_id
             or row.origin_thread_id != f"web:{thread.id}"
         ):

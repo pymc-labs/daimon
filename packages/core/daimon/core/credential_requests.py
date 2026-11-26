@@ -30,6 +30,7 @@ column is NOT NULL), for `mcp` it is the MCP server name, and for `repo` and
 `mcp`, but its click starts a per-person browser authorization instead of
 opening a token form. `data_source` names a data source in `target` and carries its id in
 `mcp_server_url`: the value goes onto that source only (`daimon.core.ports.data_credentials`).
+`data_connection` does the same for a shared connection's token.
 """
 
 from __future__ import annotations
@@ -53,8 +54,18 @@ CUSTOM_ID_TEMPLATE: Final[str] = r"ztc:(?P<token>[A-Za-z0-9_-]{16,64})"
 CUSTOM_ID_PATTERN: Final[re.Pattern[str]] = re.compile(CUSTOM_ID_TEMPLATE)
 
 CredentialRequestKind = Literal[
-    "env", "env_file", "mcp", "mcp_oauth", "repo", "skill_repo", "watch_credential", "data_source"
+    "env",
+    "env_file",
+    "mcp",
+    "mcp_oauth",
+    "repo",
+    "skill_repo",
+    "watch_credential",
+    "data_source",
+    "data_connection",
 ]
+DATA_FORM_KINDS: Final[tuple[CredentialRequestKind, ...]] = ("data_source", "data_connection")
+"""The forms whose value goes straight onto a source or a shared connection, never an agent."""
 
 # How a request actually ended, recorded on the row once it is spent.
 # "applied" — the write landed. "stale_replacement" — the compare-and-set
@@ -118,6 +129,7 @@ _KIND_LABEL_PREFIX: Final[dict[CredentialRequestKind, str]] = {
     "skill_repo": "Import skills from: ",
     "watch_credential": "Your watch key for: ",
     "data_source": "Source credential: ",
+    "data_connection": "Connection token: ",
 }
 
 
