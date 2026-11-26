@@ -264,9 +264,11 @@ async def test_a_data_admin_links_others_with_a_notice_and_a_trail_and_never_a_p
         )
         == you
     )
-    assert [
-        n.kind for n in await identity.take_notices(people.conn, people.schemas, people.tenant, you)
-    ] == ["linked", "unlinked"]
+    peeked = await identity.unseen_notices(people.conn, people.schemas, people.tenant, you)
+    taken = await identity.take_notices(people.conn, people.schemas, people.tenant, you)
+    assert peeked == taken, "looking leaves notices unseen; taking returns the same ones"
+    assert [n.kind for n in taken] == ["linked", "unlinked"]
+    assert {n.provider for n in taken} == {"acme"}, "a notice says which source it was"
     assert not await identity.take_notices(people.conn, people.schemas, people.tenant, you), (
         "seen twice"
     )
