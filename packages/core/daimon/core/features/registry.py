@@ -1322,9 +1322,9 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         binds="session_mutable",
         doc=(
             "The agent can search the team's data sources, showing only what everyone "
-            "who will see the answer may read. It then starts fresh for each message in a "
-            "channel, keeps no memory, and other agents cannot ask it. Not in rooms people "
-            "outside the team can read."
+            "who will see the answer may read. Other agents cannot ask it, writes out ask "
+            "first, and a memory it saves shows only to people who could read that data. "
+            "Not in rooms people outside the team can read."
         ),
         platforms=EVERY_PLATFORM,
         # Writes after a data read must wait for a card: tool safety is what cards them.

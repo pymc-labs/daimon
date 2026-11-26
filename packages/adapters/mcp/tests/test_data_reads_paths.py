@@ -1,7 +1,7 @@
 """Every entry point of a data read, and the guard each one goes through.
 
 One row per path of the data read rule (`daimon.core.data_audience`): who a call answers
-for, where data tools are offered, and how a data-reading agent is sealed. A row names a
+for, where data tools are offered, and what guards a data-reading agent. A row names a
 guard found in the code, or a test of it; a path that is missing fails here.
 """
 
@@ -45,9 +45,9 @@ def _calls(function: Callable[..., Any]) -> set[str]:
 # (path, function, guard it must call). Each is an entry point into a data-reading agent
 # or a place its results could leave the conversation they were for.
 _GUARDS: list[tuple[str, Callable[..., Any], str]] = [
-    ("channel, DM and helper turns are sealed", admission._admit_gates, "reads_data"),  # pyright: ignore[reportPrivateUsage]
+    ("helper asks into a data-reading agent are refused", admission._admit_gates, "reads_data"),  # pyright: ignore[reportPrivateUsage]
     ("contained, held and Teams rooms offer no data tool", admission._admit_gates, "without_data_reads"),  # pyright: ignore[reportPrivateUsage]
-    ("routine, agent chat and CLI sessions keep no memory", toolset.place_session, "without_long_term_memory"),
+    ("routine, agent chat and CLI sessions card writes out", toolset.place_session, "replace"),
     ("handoff into a data-reading agent", task_continuity._hand_off_task_impl, "reads_data"),  # pyright: ignore[reportPrivateUsage]
     ("agent chat start", agent_chat._start_turn_impl, "_refuse_data_agent"),  # pyright: ignore[reportPrivateUsage]
     ("agent chat follow-up", agent_chat._continue_turn_impl, "_refuse_data_agent"),  # pyright: ignore[reportPrivateUsage]
@@ -123,12 +123,12 @@ def test_every_model_spend_bills_the_asker() -> None:
             ), f"search without a {key}"
 
 
-def test_relay_rule_and_tool_safety_cover_the_rest() -> None:
-    """Paths sealed by the relay rule, not by a guard of their own: the button handoff and
-    carry-over (a relay turn hands nothing and carries nothing), Daimon's own posts (held to
-    the room), and writes after a data read (tool safety cards them)."""
-    source = inspect.getsource(admission)
-    assert "or data_reading" in source, "a data-reading agent must be a relay agent"
+def test_a_data_reading_agent_is_unsealed_and_guarded() -> None:
+    """A data-reading agent is no relay agent: it keeps its session and memory. Its provider
+    memory mounts read-only, and writes after a data read are carded."""
+    assert "or data_reading" not in inspect.getsource(admission), "no seal on data agents"
+    assert admission.Admission.stores_read_only.fget is not None
+    assert "data_reading" in inspect.getsource(admission.Admission.stores_read_only.fget)
     assert "tool_safety" in FEATURES[DATA_READS].depends_on, "writes after a data read are carded"
     assert CAPABILITY_TOOLS[DATA_READS] == DATA_TOOLS, "the data tools hide with data_reads"
 

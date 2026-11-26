@@ -33,7 +33,7 @@ from daimon.core.data_audience import (
     data_audience,
     user_subject,
 )
-from daimon.core.data_seal import reads_data
+from daimon.core.data_reading import reads_data
 from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.mcp_identity import matching_turn
 from daimon.core.ports.gate import data_sources_on
