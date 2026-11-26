@@ -1,9 +1,8 @@
 """`/api/admin/data/*`: who may read what, and who is who, in the workspace's data sources.
 
-Scopes, grants, source identities, data admins and redaction sets, for owners and admins.
-Link, reject, unlink, redaction and data-admin changes need the caller to be a data admin
-(the owner may name the first); the store refuses anyone else with a message. Every write
-leaves a row in the workspace's audit trail through the data package.
+Scopes, grants, source identities, data admins and redaction sets, for owners and admins,
+who manage them as data admins do (`workspace_admin`); the store refuses anyone else with a
+message. Every write leaves a row in the workspace's audit trail through the data package.
 """
 
 from __future__ import annotations
@@ -19,6 +18,7 @@ from daimon.adapters.web.data_common import (
     refused,
     schemas_of,
     store,
+    workspace_admin,
 )
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.data import identity, manage, redaction
@@ -98,9 +98,9 @@ class AdminOut(BaseModel):
 class Admins(BaseModel):
     admins: list[AdminOut]
     you: bool
-    """Whether the caller is a data admin."""
+    """Whether the caller manages data access: a workspace admin or a data admin."""
     can_grant: bool
-    """Whether the caller may name data admins: the owner, or a data admin."""
+    """Whether the caller may name data admins: the same people."""
 
 
 class Account(BaseModel):
@@ -207,6 +207,7 @@ def admin_data_router(runtime: WebRuntime) -> APIRouter:
                 await manage.create_scope(
                     conn, schemas, tenant_id=p.tenant_id, by=p.account_id, id=body.id,
                     kind=body.kind, name=body.name, description=body.description,
+                    admin=workspace_admin(caller),
                 )  # fmt: skip
             except IdentityError as e:
                 raise refused(e) from None
@@ -217,7 +218,12 @@ def admin_data_router(runtime: WebRuntime) -> APIRouter:
         async with store(runtime) as conn:
             try:
                 await manage.delete_scope(
-                    conn, schemas, tenant_id=p.tenant_id, by=p.account_id, id=scope_id
+                    conn,
+                    schemas,
+                    tenant_id=p.tenant_id,
+                    by=p.account_id,
+                    id=scope_id,
+                    admin=workspace_admin(caller),
                 )
             except IdentityError as e:
                 raise refused(e) from None
@@ -230,7 +236,7 @@ def admin_data_router(runtime: WebRuntime) -> APIRouter:
             try:
                 await manage.grant(
                     conn, schemas, tenant_id=p.tenant_id, by=p.account_id, scope=scope_id,
-                    holder=body.holder,
+                    holder=body.holder, admin=workspace_admin(caller),
                 )  # fmt: skip
             except IdentityError as e:
                 raise refused(e) from None
@@ -244,7 +250,7 @@ def admin_data_router(runtime: WebRuntime) -> APIRouter:
             try:
                 await manage.revoke(
                     conn, schemas, tenant_id=p.tenant_id, by=p.account_id, scope=scope_id,
-                    holder=holder,
+                    holder=holder, admin=workspace_admin(caller),
                 )  # fmt: skip
             except IdentityError as e:
                 raise refused(e) from None
@@ -312,7 +318,7 @@ def admin_data_router(runtime: WebRuntime) -> APIRouter:
                 await identity.admin_link(
                     conn, schemas, tenant_id=p.tenant_id, by=p.account_id,
                     key=IdentityKey(body.provider, body.workspace, body.subject),
-                    account_id=body.account_id,
+                    account_id=body.account_id, admin=workspace_admin(caller),
                 )  # fmt: skip
             except IdentityError as e:
                 raise refused(e) from None
@@ -325,7 +331,7 @@ def admin_data_router(runtime: WebRuntime) -> APIRouter:
                 await identity.reject_candidate(
                     conn, schemas, tenant_id=p.tenant_id, by=p.account_id,
                     key=IdentityKey(body.provider, body.workspace, body.subject),
-                    account_id=body.account_id,
+                    account_id=body.account_id, admin=workspace_admin(caller),
                 )  # fmt: skip
             except IdentityError as e:
                 raise refused(e) from None
@@ -338,6 +344,7 @@ def admin_data_router(runtime: WebRuntime) -> APIRouter:
                 await identity.unlink(
                     conn, schemas, tenant_id=p.tenant_id, by=p.account_id,
                     key=IdentityKey(body.provider, body.workspace, body.subject),
+                    admin=workspace_admin(caller),
                 )  # fmt: skip
             except IdentityError as e:
                 raise refused(e) from None
@@ -351,7 +358,13 @@ def admin_data_router(runtime: WebRuntime) -> APIRouter:
         async with store(runtime) as conn:
             try:
                 await redaction.set_redacted(
-                    conn, schemas, p.tenant_id, account_id, body.redacted, by=p.account_id
+                    conn,
+                    schemas,
+                    p.tenant_id,
+                    account_id,
+                    body.redacted,
+                    by=p.account_id,
+                    admin=workspace_admin(caller),
                 )
             except IdentityError as e:
                 raise refused(e) from None
@@ -364,12 +377,12 @@ def admin_data_router(runtime: WebRuntime) -> APIRouter:
         who = await names(caller)
         async with store(runtime) as conn:
             found = await manage.data_admins(conn, schemas, p.tenant_id)
-        you = any(a.account_id == p.account_id for a in found)
+        you = workspace_admin(caller) or any(a.account_id == p.account_id for a in found)
         return Admins(
             admins=[AdminOut(account_id=a.account_id, name=who.get(a.account_id),
                              created_at=a.created_at) for a in found],
             you=you,
-            can_grant=you or caller.role == "owner",
+            can_grant=you,
         )  # fmt: skip
 
     @router.post("/admins", status_code=204)
@@ -380,7 +393,7 @@ def admin_data_router(runtime: WebRuntime) -> APIRouter:
             try:
                 await identity.grant_data_admin(
                     conn, schemas, tenant_id=p.tenant_id, by=p.account_id,
-                    account_id=body.account_id, by_owner=caller.role == "owner",
+                    account_id=body.account_id, admin=workspace_admin(caller),
                 )  # fmt: skip
             except IdentityError as e:
                 raise refused(e) from None
@@ -392,7 +405,7 @@ def admin_data_router(runtime: WebRuntime) -> APIRouter:
             try:
                 await identity.revoke_data_admin(
                     conn, schemas, tenant_id=p.tenant_id, by=p.account_id,
-                    account_id=account_id, by_owner=caller.role == "owner",
+                    account_id=account_id, admin=workspace_admin(caller),
                 )  # fmt: skip
             except IdentityError as e:
                 raise refused(e) from None
@@ -404,7 +417,9 @@ def admin_data_router(runtime: WebRuntime) -> APIRouter:
         p = caller.person
         async with store(runtime) as conn:
             try:
-                found = await redaction.list_sets(conn, schemas, p.tenant_id, by=p.account_id)
+                found = await redaction.list_sets(
+                    conn, schemas, p.tenant_id, by=p.account_id, admin=workspace_admin(caller)
+                )
             except IdentityError as e:
                 raise refused(e) from None
         return [_set(s) for s in found]
@@ -414,7 +429,9 @@ def admin_data_router(runtime: WebRuntime) -> APIRouter:
         p = caller.person
         async with store(runtime) as conn:
             try:
-                found = await redaction.show_set(conn, schemas, p.tenant_id, name, by=p.account_id)
+                found = await redaction.show_set(
+                    conn, schemas, p.tenant_id, name, by=p.account_id, admin=workspace_admin(caller)
+                )
             except IdentityError as e:
                 raise refused(e) from None
         return SetDetailOut(
@@ -427,7 +444,13 @@ def admin_data_router(runtime: WebRuntime) -> APIRouter:
         async with store(runtime) as conn:
             try:
                 done = await redaction.approve(
-                    conn, schemas, p.tenant_id, name, body.sha, by=p.account_id
+                    conn,
+                    schemas,
+                    p.tenant_id,
+                    name,
+                    body.sha,
+                    by=p.account_id,
+                    admin=workspace_admin(caller),
                 )
             except IdentityError as e:
                 raise refused(e) from None
