@@ -1,0 +1,206 @@
+{
+  "description": [
+    "Verify and durably register one classified Gmail or own explicit Discord lead.",
+    "",
+    "Classify spam and out-of-scope messages as other. Capture has no external",
+    "effects. The service posts a title and threaded dossier, writes only a",
+    "draft reply, conservatively reuses/creates CRM records, then archives",
+    "Gmail after dossier delivery. Replay the same immutable source on timeout.",
+    "The record keeps the sales channel configured now: only people who can",
+    "read that channel's history, and its dossier thread, can read it later."
+  ],
+  "parameters": {
+    "$defs": {
+      "LeadClassification": {
+        "enum": [
+          "consulting",
+          "project",
+          "other"
+        ],
+        "type": "string"
+      },
+      "LeadDraft": {
+        "additionalProperties": false,
+        "description": "Model proposal; original text and verification flags are fetched server-side.",
+        "properties": {
+          "attribution_evidence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Verbatim quote from the enquiry containing the attribution value."
+          },
+          "attribution_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Exact HubSpot option value of the configured attribution property."
+          },
+          "classification": {
+            "$ref": "#/$defs/LeadClassification"
+          },
+          "company_domain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "company_evidence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "company_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "enquirer_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "enquirer_evidence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "enquirer_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "opportunity_description": {
+            "maxLength": 100000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/$defs/LeadSource"
+          },
+          "thread_content": {
+            "maxLength": 100000,
+            "minLength": 1,
+            "type": "string"
+          },
+          "thread_title": {
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "classification",
+          "opportunity_description",
+          "thread_title",
+          "thread_content"
+        ],
+        "type": "object"
+      },
+      "LeadSource": {
+        "description": "Immutable Gmail message or explicitly registered Discord message.",
+        "properties": {
+          "channel_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "kind": {
+            "$ref": "#/$defs/LeadSourceKind"
+          },
+          "mailbox": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "message_id": {
+            "maxLength": 100000,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "message_id"
+        ],
+        "type": "object"
+      },
+      "LeadSourceKind": {
+        "enum": [
+          "gmail",
+          "manual"
+        ],
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "draft": {
+        "$ref": "#/$defs/LeadDraft"
+      }
+    },
+    "required": [
+      "draft"
+    ],
+    "type": "object"
+  }
+}

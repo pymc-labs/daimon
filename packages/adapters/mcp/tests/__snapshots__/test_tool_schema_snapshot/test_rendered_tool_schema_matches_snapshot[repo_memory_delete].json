@@ -1,0 +1,25 @@
+{
+  "description": [
+    "Forget a memory by slug only when the person explicitly asks.",
+    "",
+    "Deletes from the bound working repo. Anyone using the repo can delete",
+    "shared entries; only the creator can delete a personal directive.",
+    "Restricted conversations and routines refuse. Use this reply's origin_context_id."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "name": {
+        "type": "string"
+      },
+      "origin_context_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "name",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

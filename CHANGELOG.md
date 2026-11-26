@@ -7,52 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **Daimon deletes old records on a schedule.** Once a day the scheduler removes audit events, admin history, finished
-  jobs and their output, closed requests, deleted web threads, feedback, expired secret share records and stale
-  channel names past their lifetime, and blanks old support notes (the request and its credit stay), each set under
-  `DAIMON_RETENTION__*` (0 keeps forever). Each rule runs on its own, a restart does not repeat the day's run, and the
-  sweep never holds up usage settlement or routines. The hourly sweeps of monitored events, Issues page events and
-  idle Gemini conversations run as rules of the same sweep, with their own settings.
-  **Behaviour change for existing deployments:** the Conversation history kept feature is on at one year, which a
-  workspace admin may shorten. A channel thread, private chat or web thread idle longer than that loses its stored
-  history, and the turn records that go with it (including those of the CLI and routines) are removed; the
-  conversation starts a fresh session on its next message. To keep conversations, set the feature to 0 for the
-  deployment: `DAIMON_FEATURES__CONVERSATION_RETENTION=0`, or the same in `/settings`.
-  A workspace uninstalled for 30 days is retired in short batches, so a large one holds no long lock and an
-  interrupted run resumes at the next sweep: its data, provider sessions, environments, memory, vaults, skills, reports
-  and notebooks are deleted and its provider agents archived, while billing records and the balance stay, so a reinstall gets no second trial. A reinstall
-  during a retirement stops it and keeps what was not yet deleted. A workspace whose usage has not settled yet is
-  retired once it has. `daimon tenants retire` retires one at once and shows the
-  balance it keeps; it and `daimon tenants delete` refuse while usage is still settling unless `--force` is given,
-  which leaves that usage unbilled. Retirement and tenant deletion also remove that workspace's Slack tokens and settlement progress, and erasing a person also
-  removes their follow-up tasks, turn records, conversation links, model-switch cards and credential requests in every
-  workspace. Job cancel records age with the audit events, not with their job; a watch keeps its last-fired time; a
-  GitHub access request is kept until it has finished and its expiry notice has gone out.
-  `DAIMON_SECURITY_AUDIT_RETENTION_DAYS` still works.
+- **A long job asked through agent chat runs to its end with one tool: `await_turn`.**
+  Call it after `start_turn`. It returns when the agent says something, when the turn
+  ends, or after about four minutes, and reports the tool call running now. Nothing is
+  polled: `ask`, `await_turn` and Daimon's own handling of tool confirmations wait on the
+  session's event stream. A turn that paused because the service restarted, or because it
+  reached the unattended run time limit, is resumed by the call that waits for it, so the
+  caller no longer needs `get_session` and `continue_turn`
+  ([Agent chat sessions](docs/unattended.md#agent-chat-sessions)).
 
-- **A Teams organisation is uninstalled only when no team or chat still has the app.** Removing the app from its last
-  team, with no 1:1 or group chat left either, archives the tenant like a removed Discord server or Slack workspace;
-  adding the app again, or any message from the organisation, restores it.
+- **A turn asked through agent chat no longer stops when Discord is slow to answer.**
+  Daimon checks membership again before each tool call it lets through. A check Discord
+  did not answer used to count as a refusal and left the turn paused. It is now tried
+  again, and a call refused for that reason says "Discord didn't answer" instead of "You
+  aren't on this server's list of people".
 
-- **The report and notebook hosts keep less, and send fewer details out.** Reports are deleted 365 days after their
-  last update (`DAIMON_REPORT__RETENTION_DAYS`, `0` keeps them); the sweep takes the same per-report lock as a publish,
-  so it cannot delete a report being updated. Both hosts take an admin call that deletes one workspace's reports or
-  notebooks. Notebooks keep their expiry of at most 365 days; blogs are public pages that stay until deleted. The
-  report viewer serves pdf.js from the host with its licence instead of loading it from a public CDN, and the report
-  pages carry a content security policy. Both hosts send `Referrer-Policy: no-referrer`. Access logs no longer record
-  the client address, and a logged error is cut at 500 characters.
-
-- **Privacy and Terms links appear on the web app and in each chat privacy panel.** Set `DAIMON_TERMS_URL` to show a
-  Terms link beside the privacy policy on the sign-in page, in the account menu, and in the Discord, Slack and Teams
-  privacy panels; unset, no Terms link appears. The privacy page is now "How Daimon handles data": it lists how long
-  each record is kept and the setting that changes it, says plainly that per-turn context goes to connected tools by
-  default, and names what stays after an account is deleted.
+- **A signed-identity MCP server can learn which routine is calling, and for which room.**
+  With `"routine_claims": true` on the server, a routine run that posts to a Discord room
+  signs its routine, that room and the room's kind. It is off by default
+  ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).
 
 - **A signed-identity MCP server learns what kind of Discord place the answer goes to.**
   The token's new `room` claim says `dm`, `team`, `narrow` or `contained`, so the server can
   limit what it returns to what that place may read
   ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).
 
+||||||| parent of de496c9a2 (feat(mcp): wait for a turn on its event stream, and add await_turn)
 - **Each request to a signed-identity MCP server carries a new token with its own `jti`.**
   A server can accept each token once, so a copied token cannot be replayed
   ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).

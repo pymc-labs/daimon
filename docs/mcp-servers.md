@@ -109,8 +109,9 @@ The token carries these claims:
 | `agent`, `agent_name` | the calling agent's id and name |
 | `ws` | `<platform>:<workspace id>` |
 | `sub` | `<platform>:<user id>` of the person who asked |
-| `channel`, `msg` | the channel, thread or DM of the turn, and the message that asked |
+| `channel`, `msg` | the channel, thread or DM the asking message is in, and that message |
 | `room` | on Discord, with `channel`: the kind of place the answer goes to |
+| `routine` | with `"routine_claims": true`: the routine whose run posts to `channel` |
 
 `room` is `dm` for a direct message. In a room it is `contained` or `narrow` as
 [Rooms with outside people](outside-people.md#contained-and-narrow-rooms) defines them,
@@ -118,9 +119,17 @@ and `team` for any other room. Contained wins over narrow, and a room Daimon can
 is `contained`. Daimon judges the room again on every request, whatever that feature is
 set to.
 
-Routines, agent chat, the web app's tool list and senders from another organisation name
-no person. Without `workspaces`, every workspace's agents reach the server. Request bodies
-over 4 MiB are refused.
+When Daimon opens a thread for its answer, `room` judges that thread while `channel` stays
+the message's channel; a new public thread reads as its channel. A routine that posts to a
+thread Daimon has not sorted yet, such as an archived one, signs `narrow`.
+
+A routine run names no person. On a server with `"routine_claims": true`, a run that posts
+to a Discord room carries `routine`, that room as `channel` and its `room`. A run that
+posts to a DM, or nowhere, carries none of them. Agent chat, the web app's tool list and
+senders from another organisation name no person either.
+
+Without `workspaces`, every workspace's agents reach the server. Request bodies over 4 MiB
+are refused.
 
 A channel turn of an agent with a relay server runs held: it posts only in its
 channel and its threads, sends no DMs and has no admin tools. The agent keeps no

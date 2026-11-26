@@ -100,6 +100,7 @@ from daimon.core.ma_resolver import (
     resolve_agent,
     resolve_environment,
 )
+from daimon.core.mcp_identity import routine_destination_key
 from daimon.core.mcp_vault_janitor import archive_idle_relay_vaults
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
@@ -1264,6 +1265,9 @@ async def _build_fire(
             runs_as_user=row.created_by_user_id,
             membership_resolver=membership_resolver,
             routine_id=row.id,
+            # Where this run posts, fixed now: a later edit of the routine moves no claim
+            # its relay calls sign (`daimon.core.mcp_identity.routine_destination_key`).
+            routine_destination=routine_destination_key(row),
             **held_fire,
         )
 

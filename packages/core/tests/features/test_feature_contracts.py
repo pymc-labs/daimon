@@ -471,7 +471,7 @@ def test_every_session_creation_gets_the_place_toolset() -> None:
     } - {_TURN_PATH}
     assert as_built == _KEPT_AS_BUILT.keys(), (
         "a session reused outside the turn path's drift check (`session_compat`) keeps its "
-        "tools as built: list it with a reason and say so in docs/features.md"
+        "tools as built: list it with a reason and say so in its spec in features/registry.py"
     )
     for path, call in calls:
         assert any(k.arg == "toolset" for k in call.keywords), (
@@ -604,6 +604,7 @@ _CONFIG_SWITCHES: dict[str, str] = {
     "HarnessAuthBinding.auth_mode": _SHAPE,
     "SignedIdentityServer.requester_meta": _SHAPE,
     "SignedIdentityServer.agent_chat_requester": _SHAPE,
+    "SignedIdentityServer.routine_claims": _SHAPE,
     "SignedIdentityServer.channel_scoped": _OPS,  # how a server scopes its answers, a per-server trust setting
     "SelfHostedSettings.admission_enabled": _OPS,
     "SelfHostedSettings.single_tenant": _OPS,

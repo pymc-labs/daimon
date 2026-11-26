@@ -1,0 +1,22 @@
+{
+  "description": [
+    "Read attachment-free original Gmail text for an unexpired discovered message.",
+    "",
+    "Run resume to discover mail, read each source here, then classify and",
+    "submit its immutable source ID. Uses the configured tenant mailbox;",
+    "credentials never enter the result. Does not post, archive or change CRM.",
+    "Readers are those of the sales channel configured now."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "message_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "message_id"
+    ],
+    "type": "object"
+  }
+}

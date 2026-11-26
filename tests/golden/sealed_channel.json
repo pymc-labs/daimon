@@ -60,6 +60,7 @@
           },
           "personal_memory": false,
           "platform": "discord",
+          "routine_destination": "thread:555000555:room",
           "routine_id": "00000000-0000-0000-0000-000000000004",
           "runs_as_user": "u3",
           "sandbox": null,

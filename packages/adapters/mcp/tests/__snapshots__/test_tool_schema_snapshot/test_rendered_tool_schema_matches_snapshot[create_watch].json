@@ -1,0 +1,168 @@
+{
+  "description": [
+    "Watch a listed read tool from this conversation, or wake on posts to a secret link.",
+    "",
+    "With source \"callback\" nothing is polled: Daimon DMs the owner a private link, and",
+    "each POST to it (UTF-8 text, 4 KiB unless the deployment allows more) wakes the agent",
+    "with that text as evidence. The link is never shown in chat or in this result and",
+    "cannot be shown again; delete the watch and make a new one to change it. A callback",
+    "watch needs a deployment that has set a callback address. It lasts as long as whoever runs",
+    "Daimon allows (30 days unless they changed it, or permanent), so",
+    "`lifetime_days` and `permanent` do not apply to it.",
+    "The tool, server, arguments, projection, rule, interval and key fields are for polls.",
+    "",
+    "Binds the current human owner, tenant, agent and exact Discord thread.",
+    "`delivery` says where each report goes: \"thread\" (this thread, the default),",
+    "\"dm\" (the owner's DM, never anyone else's) or \"new_thread\" (a new public thread",
+    "under this thread's channel for each report). A watch made in a DM reports there,",
+    "and one made in a private thread cannot use \"new_thread\". With \"dm\" each report",
+    "stops, and the watch pauses, when Daimon may no longer DM its owner.",
+    "Requires an attended turn origin and verified owner card approval.",
+    "Backends without tool confirmation refuse enrollment.",
+    "Polls run without an AI turn; firings",
+    "use unattended read-and-report turns and current access/spend checks.",
+    "Only tools on this deployment's watch list (set by whoever runs Daimon) can be",
+    "checked; by default that is read_thread and read_channel on daimon-mcp. An",
+    "unlisted tool is refused, and a watch whose tool is taken off the list pauses",
+    "and its owner is told. For read_thread and read_channel the arguments must name",
+    "a source different from the reporting thread.",
+    "`server` is \"daimon-mcp\" (the default) or, for a tool on another MCP server this",
+    "agent attaches, that server's https URL; pass the URL so the approval card shows",
+    "its host. A server name on this agent is also accepted and resolved to its URL,",
+    "which is what is stored. Such a tool must be listed for that URL, enabled on",
+    "this agent, and its server must say it only reads (readOnlyHint true, not",
+    "destructive); that hint can only refuse, never allow. Its listing is read when",
+    "the watch is made and on every poll, and a change pauses the watch. Servers",
+    "that need each person's own browser sign-in are refused. A tool listed to read",
+    "with the owner's own key needs that key first: if none is saved, call",
+    "request_watch_credential so they send it privately, never in chat.",
+    "Projection supports `.`, `.field.nested`, `.rows[0].field` and one `[]` step",
+    "such as `.rows[].content`; other jq expressions are refused. Polls start with a",
+    "saved baseline and compare change, added array elements, or updated object keys,",
+    "no more often than the tool's listed shortest interval (at most every 86400 s).",
+    "With rule `added`, `key` (such as `.rows[].id`) compares items by that field and",
+    "keeps only short fingerprints of the keys, and `evidence` lists up to 8 fields",
+    "(such as `.content`) to report for each new item. One report holds at most 20",
+    "items and counts the rest as omitted.",
+    "Lifetime is 1–30 days. `permanent=true` has no end date and needs the owner",
+    "to be a freshly checked admin; a permanent watch paused for 30 days expires,",
+    "and an owner has at most 5. `max_turns_per_day` (default 24) is how many",
+    "reports a day this watch may make, up to the ceiling whoever runs Daimon sets;",
+    "above 24 also needs an admin. Producers remain disabled until both operator",
+    "gates are enabled. Page-event watches are refused until a producer exists."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "arguments": {
+        "anyOf": [
+          {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "delivery": {
+        "default": "thread",
+        "enum": [
+          "thread",
+          "dm",
+          "new_thread"
+        ],
+        "type": "string"
+      },
+      "evidence": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "instructions": {
+        "type": "string"
+      },
+      "interval": {
+        "default": 300,
+        "type": "integer"
+      },
+      "key": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "lifetime_days": {
+        "default": 7,
+        "type": "integer"
+      },
+      "max_turns_per_day": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "origin_context_id": {
+        "type": "string"
+      },
+      "permanent": {
+        "default": false,
+        "type": "boolean"
+      },
+      "projection": {
+        "default": ".",
+        "type": "string"
+      },
+      "rule": {
+        "default": "change",
+        "enum": [
+          "change",
+          "added",
+          "updated"
+        ],
+        "type": "string"
+      },
+      "server": {
+        "default": "daimon-mcp",
+        "type": "string"
+      },
+      "source": {
+        "enum": [
+          "poll",
+          "callback"
+        ],
+        "type": "string"
+      },
+      "tool": {
+        "default": "read_thread",
+        "type": "string"
+      }
+    },
+    "required": [
+      "origin_context_id",
+      "instructions",
+      "source"
+    ],
+    "type": "object"
+  }
+}

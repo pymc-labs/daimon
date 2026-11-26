@@ -1,0 +1,19 @@
+{
+  "description": [
+    "Unavailable over MCP: revoke deployment-wide promos with the human operator CLI.",
+    "",
+    "Credit already redeemed stays, including timed credit that has not started."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "promo_code_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "promo_code_id"
+    ],
+    "type": "object"
+  }
+}

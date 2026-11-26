@@ -13,6 +13,17 @@ Keep one logical change per PR, fill in the `## Summary` and `## Checklist`
 sections of the PR template, and make `pytest`, `pyright`, `ruff` and
 `lint-imports` pass locally before asking for review.
 
+CI's `conventions` job enforces the Migrations, Changelog and Documentation
+rules below. When it fails, read its message and the section it names on
+latest main before changing anything.
+
+Staging deploys are automatic and debounced: merge freely. A SHA deploys once its
+CI passes and `STAGING_QUIET_MINUTES` (default 5, a floor for fast runs) have
+passed, unless `main` has moved past it by then; a burst deploys once, from its
+last commit. If that last commit fails CI, the green ones before it are skipped
+and staging stays put until the next green push, so fix forward. Production is
+still `promote.yml`.
+
 ## Make it dumb simple
 
 The people who use Daimon are members of a team in a chat app. Most are not
@@ -133,6 +144,25 @@ copy of a rule that was left behind. Before you change a behaviour:
    its reason. A comment alone is not enough. Example:
    `tests/parity/test_teams_deliberate_gaps.py`.
 
+## Migrations
+
+Migrations form one linear chain in `packages/core/alembic/versions/`, and
+`packages/core/alembic/head.txt` names its head, so two branches that add a
+migration conflict there instead of breaking `main`.
+
+1. Put a schema change in its own small PR, merged before the code that uses
+   it. Reverting a feature then leaves the schema alone; never revert a migration.
+2. Declare `downgrade:` and `schema: expand|contract`. `expand` only adds
+   (tables, nullable or defaulted columns, non-unique indexes, new functions),
+   so old and new code both run on it. Anything else is `contract`: it ships alone,
+   after the release that stopped using the old shape.
+3. After merging or rebasing `main`, run `scripts/rechain_migrations.py`. It
+   renumbers only your new migrations and rewrites `head.txt`. If `head.txt`
+   conflicts, take `main`'s copy, finish the merge, then run it.
+4. Never rename or edit a migration that is on `main`.
+5. Tests load a migration with `load_migration("<slug>")` and never assert its
+   `down_revision`. `test_migration_chain.py` reads the chain from the files.
+
 ## Features
 
 Anything a person or operator may want on or off is a feature in
@@ -141,9 +171,15 @@ Declare its effect, tiers (per backend), binding, `requires` and `depends_on`.
 Read it from the `FeatureSnapshot` that `resolve_features` builds on every session
 and turn path; write it with `change_feature`.
 `packages/core/tests/features/test_feature_contracts.py` checks reads, writes and
-paths. A new feature, or a changed default, tier or platform, must update the "All
-features" table in `docs/features.md`: re-run `scripts/generate_feature_reference.py`
-(CI runs it with `--check`) and add a `CHANGELOG.md` line.
+paths. A new feature, or a changed default, tier or platform, needs a changelog
+fragment. Add a spec, or an entry in a test's per-feature table, next to its
+closest sibling, never at the end.
+
+## Changelog
+
+Anything a user can notice gets a fragment: `changes/<topic>.md` with one
+`- **Bold lead.**` paragraph in the style of `CHANGELOG.md`. Never edit
+`CHANGELOG.md` in a change; `scripts/changelog.py fold` moves fragments into it.
 
 ## Documentation
 
@@ -151,17 +187,17 @@ features" table in `docs/features.md`: re-run `scripts/generate_feature_referenc
 It grew to 120k words by every PR appending a paragraph; these rules stop that.
 `scripts/check_docs.py` enforces the budgets in CI.
 
-**Generated pages.** Settings: `docs/configuration.md` and `.env.example`, from
-the field's `description=` (`scripts/generate_config_reference.py`,
-`scripts/generate_env_example.py`). MCP tools: `docs/mcp-tools.md`, from the
-docstring (`scripts/generate_mcp_tool_catalogue.py`). Features: `docs/features.md`,
-from the registry (`scripts/generate_feature_reference.py`). Re-run the generator;
-CI runs each with `--check`. Keep descriptions to one short paragraph.
+**Generated pages.** `docs/configuration.md`, `docs/mcp-tools.md` and
+`docs/features.md` are built by the docs workflow from `scripts/generate_*.py`
+(a setting's `description=`, a tool's docstring, the feature registry); never
+commit them. `.env.example` is committed: re-run
+`scripts/generate_env_example.py`, and on a merge conflict take either side and
+re-run it. Keep descriptions to one short paragraph.
 
 **When to touch a hand-written page.** Only when a fact a reader acts on
 changes: a command, flag, required setting, visible behaviour, limit or
 recovery step. Most PRs need no docs change. Implementation detail goes in
-docstrings and comments; history goes in `CHANGELOG.md` and the PR.
+docstrings and comments; history goes in a changelog fragment and the PR.
 
 **How to change it.**
 
@@ -196,4 +232,4 @@ docstrings and comments; history goes in `CHANGELOG.md` and the PR.
 | metering, pricing, gates | `docs/billing.md` |
 | packages, turn path, trust model | `docs/architecture.md` |
 | `packages/mux` | `docs/mux.md`, `packages/mux/README.md` |
-| anything a user can notice | `CHANGELOG.md` under `[Unreleased]` |
+| anything a user can notice | a fragment in `changes/` |

@@ -1,0 +1,28 @@
+{
+  "description": [
+    "List an agent's tool rules, optionally for one channel."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_name": {
+        "type": "string"
+      },
+      "channel_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "agent_name"
+    ],
+    "type": "object"
+  }
+}

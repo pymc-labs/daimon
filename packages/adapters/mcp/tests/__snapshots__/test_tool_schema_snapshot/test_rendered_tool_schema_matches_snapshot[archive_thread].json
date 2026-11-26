@@ -1,0 +1,35 @@
+{
+  "description": [
+    "Archive a Discord thread you opened, with create_thread or from a mention.",
+    "",
+    "Its messages stay readable and a new post reopens it. Use it for a",
+    "finished or abandoned thread of yours that others wrote in. A thread",
+    "opened from someone's mention can be archived only when that person",
+    "or an admin asks. The thread you are answering in is archived",
+    "when your turn ends (action \"archive_scheduled\"), so say it will be",
+    "archived rather than that it is. Pass origin_context_id."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "thread_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "thread_id"
+    ],
+    "type": "object"
+  }
+}

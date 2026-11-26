@@ -1,9 +1,9 @@
 """Exercise the canonical migration chain through real Alembic and PostgreSQL.
 
 Main's branch (0132..0158) and the preview branch (0134..0167) both descend from
-0131_usage_obs_tenant_idx; 0168 joins them and the last of the linear tail 0169..0179 is the
-single head. The ORM describes the head, so below the merge the preview branch is compared
-without the objects main's branch changes.
+0131_usage_obs_tenant_idx; 0168 joins them and the last of the linear tail 0169.. is the
+single head, read from the files. The ORM describes the head, so below the merge the
+preview branch is compared without the objects main's branch changes.
 """
 
 from __future__ import annotations
@@ -128,79 +128,10 @@ PREVIEW_HEAD = "0167_cost_footer"
 MERGE = "0168_merge_main_preview"
 
 
-# Linear, oldest first; the first sits on MERGE and the last is the single head.
-TAIL = (
-    "0169_continuation_reasons",
-    "0170_helpers",
-    "0171_channel_changes",
-    "0172_fold_caps_into_allowances",
-    "0173_channel_settings",
-    "0174_drop_channel_admins",
-    "0174a_github_router_sessions",
-    "0175_channel_name_status",
-    "0176_routine_names",
-    "0177_invite_files",
-    "0178_web_logins",
-    "0179_reach_tallies",
-    "0180_tag_opt_outs",
-    "0181_reach_own_threads",
-    "0182_server_skills",
-    "0183_helper_files",
-    "0184_coding_key_claims",
-    "0185_agent_post_role",
-    "0186_github_router_sessions",
-    "0187_feature_values",
-    "0188_eval_key",
-    "0189_workspace_feature_values",
-    "0190_long_job_features",
-    "0191_drop_dev_toggle_values",
-    "0192_reset_allow_writes",
-    "0193_deployment_identity",
-    "0194_host_call_cards",
-    "0195_agent_record_versions",
-    "0196_connector_tokens",
-    "0197_thread_model_consents",
-    "0198_agent_backend_effort",
-    "0199_self_helpers",
-    "0200_skill_copies",
-    "0202_agent_backend_environment",
-    "0203_pending_carry_overs",
-    "0204_shared_agent_copies",
-    "0205_web_search_usage",
-    "0206_support_plans",
-    "0207_skill_manifest_bytes",
-    "0208_active_turn_deadline",
-    "0209_thread_model_effort",
-    "0210_dm_access",
-    "0211_callback_watch_imports",
-    "0212_sandbox_tools_feature",
-    "0213_outbox_attribution",
-    "0214_provider_key_gate",
-    "0215_gemini_records",
-    "0216_usage_obs_observed_at",
-    "0217_monitored_events",
-    "0218_support_menu_channel",
-    "0219_channel_budget_alerts",
-    "0220_discord_audience_facts",
-    "0221_routine_delivery_hold",
-    "0222_secret_shares",
-    "0223_dm_watch_delivery",
-    "0224_ops_events",
-    "0225_agent_github_grant_removals",
-    "0226_compute_tool_names",
-    "0227_turn_origin_own_dm_reach",
-    "0228_compute_task_wait_until",
-    "0229_compute_started_by_wake",
-    "0230_agent_chat_signed_in",
-    "0231_agent_chat_send_count",
-    "0232_agent_chat_session_grant",
-    "0233_turn_origin_public_thread",
-    "0234_retention_activity",
-    "0235_tenant_retirement",
-    "0236_retention_runs",
-    "0237_audit_clocks",
-    "0238_dm_activity",
-)
+# Linear, oldest first, read from the files so a rechain never edits this test; the first
+# sits on MERGE and the last is the single head.
+SCRIPT = ScriptDirectory(str(SCRIPTS))
+TAIL = tuple(r.revision for r in reversed(list(SCRIPT.iterate_revisions("heads", MERGE))))
 HEAD = TAIL[-1]
 
 
@@ -261,31 +192,6 @@ AFTER_MERGE_COLUMNS = {
     ("compute_sessions", "wake_turns"),
 }
 AFTER_MERGE_OBJECTS = {"ix_usage_observation_provider_observed_at"}
-
-
-# Indexes and the run table added by 0236, absent from every earlier head.
-RETENTION_INDEXES = {
-    "ix_thread_sessions_tenant_last_turn",
-    "ix_credential_requests_closed_at",
-    "ix_agent_posted_messages_tenant_posted",
-    "ix_message_feedback_created_at",
-    "ix_support_escalations_created_at",
-    "ix_task_continuations_closed_at",
-    "ix_long_job_finished_at",
-    "ix_compute_tasks_finished_at",
-    "ix_routines_last_finished_at",
-    "ix_github_access_requests_updated_at",
-    "ix_platform_channel_names_seen",
-    "ix_channel_changes_at",
-    "ix_web_audit_at",
-    "ix_web_logins_created_at",
-    "ix_web_threads_deleted_at",
-    "ix_web_threads_tenant_updated",
-    # Added by 0237, with the watches.last_fired_at column.
-    "ix_long_job_cancel_audit_requested_at",
-    # Added by 0238, with direct_message_conversations.updated_at.
-    "ix_dm_conversations_tenant_updated",
-}
 
 
 MAIN_BRANCH_OBJECTS = {"ix_platform_principals_account_id", "usage_observation_binding_id_fkey"}
@@ -427,7 +333,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
         else {name for name in TABLES if not name.startswith("lead_")}
     )
     if expected != HEAD:
-        compared_tables = compared_tables - {"web_logins", "web_login_accounts", "retention_runs"}
+        compared_tables = compared_tables - {"web_logins", "web_login_accounts"}
     else:
         # 0187 folds progress_plan_scopes (no longer modelled) into feature_values.
         compared_tables = compared_tables | {"feature_values"}
@@ -475,22 +381,6 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             and expected not in TOP
         ):
             return False
-        if expected != HEAD and kind == "index" and name in RETENTION_INDEXES:
-            return False
-        # 0237 drops the cancel audit's key to long_job; earlier heads still have it.
-        if (
-            expected != HEAD
-            and kind == "foreign_key_constraint"
-            and name == "long_job_cancel_audit_id_fkey"
-        ):
-            return False
-        if (
-            expected != HEAD
-            and kind == "column"
-            and name == "updated_at"
-            and getattr(getattr(obj, "table", None), "name", None) == "direct_message_conversations"
-        ):
-            return False
         # 0187: tenants gains feature_revision and loses cost_footer; the scope index goes.
         if kind == "index" and name == "ix_progress_plan_scopes_parent":
             return False
@@ -502,7 +392,6 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
                 "feature_revision",
                 "cost_footer",
                 "eval_key",
-                "last_fired_at",
             }
         ):
             return False
@@ -623,27 +512,26 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
 
 
 def test_authoritative_chain() -> None:
-    config = Config(str(ROOT / "alembic.ini"))
-    script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == [HEAD]
+    assert SCRIPT.get_heads() == [HEAD]
+    assert (SCRIPTS / "head.txt").read_text().strip() == HEAD, "head.txt names the head"
     for start, branch in ((FORK, CHAIN), (MAIN_HEAD, MAIN_BRANCH)):
         parent = start
         for revision in branch:
-            node = script.get_revision(revision)
+            node = SCRIPT.get_revision(revision)
             assert node is not None and node.down_revision == parent
             assert Path(node.path).stem == revision
             parent = revision
     parent = MERGE
     for revision in TAIL:
-        node = script.get_revision(revision)
+        node = SCRIPT.get_revision(revision)
         assert node is not None and node.down_revision == parent
         assert Path(node.path).stem == revision
         parent = revision
-    merge = script.get_revision(MERGE)
+    merge = SCRIPT.get_revision(MERGE)
     assert merge is not None
     assert set(merge.down_revision or ()) == {MAIN_BRANCH[-1], PREVIEW_HEAD}
     # Both branches are whole and nothing else joins them.
-    below = {revision.revision for revision in script.iterate_revisions(MERGE, MAIN_HEAD)}
+    below = {revision.revision for revision in SCRIPT.iterate_revisions(MERGE, MAIN_HEAD)}
     preview = CHAIN[CHAIN.index(MAIN_HEAD) + 1 :]
     assert below == {MERGE, *MAIN_BRANCH, *preview}
 

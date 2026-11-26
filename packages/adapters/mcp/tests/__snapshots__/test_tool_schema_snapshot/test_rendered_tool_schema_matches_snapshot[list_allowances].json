@@ -1,0 +1,23 @@
+{
+  "description": [
+    "List the workspace's spend allowances and caps, newest first. Admin-only.",
+    "``next_page`` goes back as ``after``."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "after": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

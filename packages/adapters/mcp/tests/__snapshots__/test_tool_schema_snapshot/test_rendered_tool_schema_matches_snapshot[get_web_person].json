@@ -1,0 +1,31 @@
+{
+  "description": [
+    "Show one person: role, status, groups, sign-ins and, for a visitor, their",
+    "invite. Email and sign-ins show only in a direct message with the admin; elsewhere",
+    "``private_details`` is ``direct_message``. Pass this active turn's origin_context_id.",
+    "Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "person_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "person_id"
+    ],
+    "type": "object"
+  }
+}

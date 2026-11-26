@@ -89,6 +89,7 @@ RELAY_AGENT_NAME_METADATA_KEY = "daimon_relay_agent_name"
 RELAY_SESSION_METADATA_KEY = "daimon_relay_session"
 RELAY_ROUTINE_METADATA_KEY = "daimon_relay_routine"
 RELAY_OWNER_METADATA_KEY = "daimon_relay_owner"
+RELAY_DESTINATION_METADATA_KEY = "daimon_relay_destination"
 RELAY_GRANT_METADATA_KEY = "daimon_relay_grant"
 RELAY_AGENT_CHAT_METADATA_KEY = "daimon_relay_agent_chat"
 #: Display-name prefix of a session's own relay vault.
@@ -255,6 +256,8 @@ async def chat_mcp_credential(
             metadata[RELAY_ROUTINE_METADATA_KEY] = str(relay.routine_id)
         if relay.owner is not None:
             metadata[RELAY_OWNER_METADATA_KEY] = relay.owner
+        if relay.destination is not None:
+            metadata[RELAY_DESTINATION_METADATA_KEY] = relay.destination
         if relay.grant is not None:
             metadata[RELAY_GRANT_METADATA_KEY] = relay.grant
         if relay.agent_chat is not None:
@@ -668,6 +671,7 @@ async def refresh_relay_vault(
         RELAY_SESSION_METADATA_KEY,
         RELAY_ROUTINE_METADATA_KEY,
         RELAY_OWNER_METADATA_KEY,
+        RELAY_DESTINATION_METADATA_KEY,
         RELAY_GRANT_METADATA_KEY,
     } & set(metadata)
     rebind = agent_chat is not None and agent_chat != bound and not names_other
@@ -696,6 +700,9 @@ async def refresh_relay_vault(
                 session_key=None if raw_key is None else uuid.UUID(raw_key),
                 routine_id=None if raw_routine is None else uuid.UUID(raw_routine),
                 owner=metadata.get(RELAY_OWNER_METADATA_KEY),
+                destination=metadata.get(RELAY_DESTINATION_METADATA_KEY)
+                if raw_routine is not None
+                else None,
                 grant=metadata.get(RELAY_GRANT_METADATA_KEY) if raw_key is not None else None,
                 agent_chat=agent_chat if rebind else bound,
             ),

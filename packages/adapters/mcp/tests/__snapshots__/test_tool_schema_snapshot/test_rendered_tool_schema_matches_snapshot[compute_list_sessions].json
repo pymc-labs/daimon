@@ -1,0 +1,25 @@
+{
+  "description": [
+    "List your live machines from every conversation.",
+    "",
+    "`here` is true for the ones this conversation can use. Other people's machines",
+    "are private."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

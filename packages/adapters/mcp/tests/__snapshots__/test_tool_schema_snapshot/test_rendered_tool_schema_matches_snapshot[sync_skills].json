@@ -1,0 +1,68 @@
+{
+  "description": [
+    "Install skills from a GitHub repo into the workspace's shared skill library.",
+    "",
+    "First use ``list_skills`` and prefer existing skills; import only a repository",
+    "the user requested. For a private repository, pass ``agent_name`` and",
+    "``origin_context_id`` so a missing App grant posts Connect GitHub.",
+    "",
+    "Discovers SKILL.md files and imports or updates skills. Pass ``agent_name`` to",
+    "also attach them, preserving existing skills; omit it only to stock the library.",
+    "Importing alone attaches nothing. Report returned source, branch, path and",
+    "summary. Inspect the repo to choose ``path`` (empty means root); ``branch``",
+    "defaults to main. Importing is admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_name": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "branch": {
+        "default": "main",
+        "type": "string"
+      },
+      "expected_ma_agent_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "path": {
+        "default": "",
+        "type": "string"
+      },
+      "url": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "url"
+    ],
+    "type": "object"
+  }
+}

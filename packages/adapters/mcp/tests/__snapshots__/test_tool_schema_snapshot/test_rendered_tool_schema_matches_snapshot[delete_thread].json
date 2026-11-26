@@ -1,0 +1,38 @@
+{
+  "description": [
+    "Remove your own messages from a thread you opened.",
+    "",
+    "A thread from create_thread or from a mention (the latter only when the",
+    "person who mentioned you or an admin asks); your posts, replies and status",
+    "cards go, except the running turn's and replies to someone the person asking",
+    "cannot speak for. The thread and everyone else's messages stay; a thread",
+    "with other people's replies may be refused. Reads at most 50 messages.",
+    "Each deletion is checked, audited and counted against the 10 per turn",
+    "and 40 per hour limits. A refusal stops with the number deleted.",
+    "thread_id is the thread id as turn_controls or create_thread gives it.",
+    "Pass this turn's origin_context_id."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "thread_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "thread_id"
+    ],
+    "type": "object"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "description": [
+    "Choose whether an agent takes a server skill's new versions as they come",
+    "(``follow``) or keeps the version it pins."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_id": {
+        "maxLength": 200,
+        "minLength": 1,
+        "type": "string"
+      },
+      "follow": {
+        "type": "boolean"
+      },
+      "skill_id": {
+        "maxLength": 200,
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "agent_id",
+      "skill_id",
+      "follow"
+    ],
+    "type": "object"
+  }
+}

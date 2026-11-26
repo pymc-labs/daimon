@@ -1,0 +1,39 @@
+{
+  "description": [
+    "Turn built-in sandbox tools (bash, file reads and edits and the rest) on or off",
+    "for one routine's own scheduled runs. Admin only.",
+    "",
+    "They are off for every unattended run by default. The supported way today is the",
+    "operator's ``daimon routines sandbox-tools``. This tool accepts only a live platform",
+    "admin's own token, re-checked against the server on each call; no Daimon",
+    "surface issues such a token yet, and the tool is kept for a future admin surface.",
+    "Owning the routine is not enough, and agent keys, agents in a conversation, operator",
+    "tokens, legacy tokens and other platforms are refused. DM routines cannot be opted",
+    "in. Off is the routine's own Off, which also overrides an opt-in for its agent. An",
+    "opt-in covers exactly the routine's current agent version and environment: once",
+    "either changes, runs go without built-ins and the opt-in is cleared. This is the",
+    "routine's own value of the ``routine_sandbox_tools`` setting, so a lock above it",
+    "still wins, and the settings history records each change. It takes effect from",
+    "the routine's next run. Setting the value a routine already has changes nothing.",
+    "``get_routine`` and ``list_routines`` show whether it is opted in, by its own setting",
+    "or its agent's, as ``sandbox_tools``. Timers, watches, agent chat,",
+    "``daimon run`` and checkpoints cannot be opted in."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "enabled": {
+        "type": "boolean"
+      },
+      "routine_id": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "routine_id",
+      "enabled"
+    ],
+    "type": "object"
+  }
+}

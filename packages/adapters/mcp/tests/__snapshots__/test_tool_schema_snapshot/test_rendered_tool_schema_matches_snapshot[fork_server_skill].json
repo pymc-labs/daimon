@@ -1,0 +1,26 @@
+{
+  "description": [
+    "Copy a server skill's latest version into an editable library skill named",
+    "``name``, which follows no updates. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "name": {
+        "maxLength": 64,
+        "minLength": 1,
+        "type": "string"
+      },
+      "skill_id": {
+        "maxLength": 200,
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "skill_id",
+      "name"
+    ],
+    "type": "object"
+  }
+}

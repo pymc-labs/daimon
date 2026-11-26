@@ -1,0 +1,18 @@
+{
+  "description": [
+    "Delete a routine (hard delete, tenant-scoped)."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "routine_id": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "routine_id"
+    ],
+    "type": "object"
+  }
+}

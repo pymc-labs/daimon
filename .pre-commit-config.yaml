@@ -13,12 +13,7 @@ repos:
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
-        # syrupy's block-scalar serializer indents every physical line of a
-        # multi-line string value, including blank paragraph-break lines —
-        # stripping that indentation here desyncs the committed snapshot
-        # from what a bare test run (re)generates, breaking the test the
-        # next time it runs without --snapshot-update.
-        exclude: (^|/)__snapshots__/.*\.ambr$|/viewer/vendor/
+        exclude: /viewer/vendor/
       - id: end-of-file-fixer
         # Vendored files stay byte-identical to their upstream release.
         exclude: /viewer/vendor/
@@ -94,6 +89,20 @@ repos:
         pass_filenames: false
         files: ^packages/core/alembic/versions/.*\.py$
 
+      - id: check-migration-chain
+        name: check migration chain
+        entry: uv run python scripts/rechain_migrations.py --check
+        language: system
+        pass_filenames: false
+        files: ^packages/core/alembic/(versions/.*\.py|head\.txt)$
+
+      - id: conventions
+        name: delivery-flow conventions
+        entry: python3 scripts/check_conventions.py --staged
+        language: system
+        pass_filenames: false
+        always_run: true
+
       - id: lint-designators
         name: lint companion-repo leakage
         entry: bash scripts/lint_designators.sh
@@ -109,15 +118,15 @@ repos:
         files: ^(packages/core/daimon/core/config\.py|packages/adapters/scheduler/daimon/adapters/scheduler/settings\.py|packages/core/daimon/core/billing\.py|\.env\.example|scripts/generate_env_example\.py|scripts/_settings_walk\.py)$
 
       - id: config-reference-check
-        name: config reference up to date
-        entry: uv run python scripts/generate_config_reference.py --check
+        name: config reference builds
+        entry: uv run python scripts/generate_config_reference.py
         language: system
         pass_filenames: false
-        files: ^(packages/core/daimon/core/config\.py|packages/adapters/scheduler/daimon/adapters/scheduler/settings\.py|packages/core/daimon/core/billing\.py|apps/notebook-host/src/notebook_host/config\.py|apps/report-host/src/report_host/config\.py|docker-compose\.yml|docs/configuration\.md|scripts/generate_config_reference\.py|scripts/_settings_walk\.py)$
+        files: ^(packages/core/daimon/core/config\.py|packages/adapters/scheduler/daimon/adapters/scheduler/settings\.py|packages/core/daimon/core/billing\.py|apps/notebook-host/src/notebook_host/config\.py|apps/report-host/src/report_host/config\.py|docker-compose\.yml|scripts/generate_config_reference\.py|scripts/_settings_walk\.py)$
 
       - id: mcp-tool-catalogue-check
-        name: mcp tool catalogue up to date
-        entry: uv run python scripts/generate_mcp_tool_catalogue.py --check
+        name: mcp tool catalogue builds
+        entry: uv run python scripts/generate_mcp_tool_catalogue.py
         language: system
         pass_filenames: false
-        files: ^(packages/adapters/mcp/daimon/adapters/mcp/(tools/.*\.py|server\.py|hub/app\.py)|docs/mcp-tools\.md|scripts/generate_mcp_tool_catalogue\.py)$
+        files: ^(packages/adapters/mcp/daimon/adapters/mcp/(tools/.*\.py|server\.py|hub/app\.py)|scripts/generate_mcp_tool_catalogue\.py)$

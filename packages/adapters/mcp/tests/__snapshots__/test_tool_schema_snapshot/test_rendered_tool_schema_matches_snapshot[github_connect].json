@@ -1,0 +1,84 @@
+{
+  "description": [
+    "Give this agent token access to more repos, such as a private GitHub repo.",
+    "",
+    "Use this when someone asks to let an agent read a private repository",
+    "at github.com/owner/repo. Show a single-use",
+    "connection button bound to the selected agent to an admin or to an owner",
+    "of that agent; repos connected this way are for that agent only. Other",
+    "members get Ask an admin and a recorded request. The card may go to the requester's",
+    "private chat instead; the result says so. Never repeat a private link in a",
+    "shared reply. For a setup",
+    "target, pass its current name and MA id from turn_controls; otherwise",
+    "this defaults to the responder.",
+    "When GitHub access interrupted a task, pass a short restatement as",
+    "requested_work so the task resumes after connection. Leave it empty",
+    "when someone only asks to connect GitHub.",
+    "For a clear 'give this agent access to owner/repo', call with repo_name",
+    "right away; don't ask for a yes first. Ask only if the repo or agent is",
+    "unclear. confirmed is ignored. A connected repo is granted",
+    "directly when this person may grant it. Otherwise the single Connect",
+    "GitHub link lets them connect that repo in a browser. Connecting repos",
+    "gives token access; it does not put them all in the filesystem.",
+    "After it posts, nothing is connected until the person saves on the page.",
+    "The card carries the steps: never repeat them, and never say done or connected."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_name": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "confirmed": {
+        "default": false,
+        "type": "boolean"
+      },
+      "expected_ma_agent_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "origin_context_id": {
+        "default": "",
+        "type": "string"
+      },
+      "repo_name": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "requested_work": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

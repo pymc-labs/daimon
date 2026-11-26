@@ -1,0 +1,27 @@
+{
+  "description": [
+    "Status of one session, read once. To wait for a turn, use ``await_turn``.",
+    "",
+    "``idle`` means the turn ended and ``list_events`` has its transcript.",
+    "",
+    "``paused`` means the turn waits on tool confirmations; ``hint`` says",
+    "whether its owner resumes it with ``continue_turn`` or it waits for an",
+    "approval in chat. Reading never answers them."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "daimon_id": {
+        "type": "string"
+      },
+      "handle": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "daimon_id",
+      "handle"
+    ],
+    "type": "object"
+  }
+}

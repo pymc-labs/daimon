@@ -1,0 +1,19 @@
+{
+  "description": [
+    "Remove a channel's spending budget, so only the balance and caps apply. Admin-only.",
+    "",
+    "A thread id clears its parent channel's budget."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "channel_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "channel_id"
+    ],
+    "type": "object"
+  }
+}
