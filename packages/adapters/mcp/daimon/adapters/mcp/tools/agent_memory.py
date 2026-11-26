@@ -25,6 +25,9 @@ from daimon.core.host_memory import (
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.data_memory import has_read
+from daimon.core.provider_routine import routine_of_scope
+from daimon.core.routines import mounts_personal_memory
+from daimon.core.stores.routines import get_routine
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -88,6 +91,12 @@ async def open_host_memory(
             read_only = await has_read(
                 session, tenant_id=auth.tenant_id, chat_session_id=origin.chat_session_id
             )
+    routine_posts = False
+    if personal and (routine_id := routine_of_scope(origin.thread_id)) is not None:
+        # As a Claude fire mounts it (`headless_runner`): only for a result nobody else sees.
+        async with runtime.session_factory() as session:
+            routine = await get_routine(session, routine_id, tenant_id=auth.tenant_id)
+        routine_posts = routine is None or not mounts_personal_memory(routine)
     place = HostMemoryPlace(
         tenant_id=auth.tenant_id,
         agent_id=derive_agent_uuid(
@@ -98,6 +107,7 @@ async def open_host_memory(
         hold=auth.hold,
         shared_thread=auth.requester_account_id is not None,
         read_only=read_only,
+        routine_posts=routine_posts,
     )
     try:
         kind = choose_store(

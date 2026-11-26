@@ -49,10 +49,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Agents that read data sources get tools to search and read them.** `data_sources`,
   `data_search`, `data_get`, `data_file` and `data_sql` answer only with what everyone who
-  will see the answer may read, and bill the person who asked. While names are hidden from
-  someone who will see the answer, `data_file` and `data_sql` are refused. After such a read,
+  will see the answer may read, and bill the person who asked. After such a read,
   a write that would not ask first shows a card in chat and is refused in a routine
   ([Permissions](docs/permissions.md#data-reads)).
+
+- **The agent no longer tells a person to expect an approval card for a cloud computer.**
+  Daimon shows the card itself when one is needed. The agent also sizes parallel work from
+  the machine's own CPUs, not from what `nproc` reports.
 
 - **A Gemini reply that thinks quietly for minutes is no longer reconnected every two
   minutes.** Google says pauses between chunks are normal, that the connection should stay
@@ -85,9 +88,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replacement). Gemini being busy, a network failure, or a refusal of the read still fails
   only that message and keeps the session.
 
-- **The reply card names the model a reply runs on.** An agent copied onto Gemini showed
-  the Claude model it was copied from on its "Working on it" card. The card now shows the
-  model the conversation actually uses, the same one the model reactions show.
+- **Switching a conversation or an agent to OpenAI or Gemini now behaves like changing models
+  within one provider.** A provider is on for a workspace as soon as the operator has set its
+  key, with no per-workspace step, and choosing a model for one conversation is on by default,
+  as is the connector relay (a provider receives what a connector returns). The "Working on
+  it" card names the model the reply actually runs on (an agent copied onto
+  Gemini no longer shows its Claude model), and effort per conversation now works on OpenAI
+  (low, medium, high). Refusing to switch the server's default agent also offers switching
+  just that conversation. A copy made to switch continues from a summary, and says so.
+  Word, PowerPoint, Excel and PDF skills, which run only on Anthropic, come as short open
+  equivalents on the other providers ([Providers](docs/providers.md)).
+
+- **Agents with tool rules, and channels that switch a built-in tool off, now answer on GPT
+  and Gemini instead of refusing the reply.** An `ask` rule, or one scoped to a channel, posts
+  Daimon's Approve card there as on Claude: only the asker answers, an approved call runs once,
+  and an unattended reply runs only what its rules allow. A built-in a channel or thread
+  switches off leaves that reply; one of the six file and shell tools off removes all six,
+  since the provider has one execution tool. A channel's own fixed deployment is still refused
+  there ([Providers](docs/providers.md#what-is-not-supported-yet)).
+
+- **Routines run on Gemini and OpenAI when their agent, channel or thread uses it.** A fire
+  runs as an unattended reply on that provider, under the same rules, spend gates and
+  metering as a chat reply, and posts like any routine, quiet runs included. As on Anthropic,
+  built-in tools stay off unless an operator turns on sandbox tools, whose opt-in now also
+  records the provider. OpenAI always runs its agents with a shell, so an OpenAI routine needs
+  sandbox tools. A routine that DMs its owner runs there too, as their private turn, and a
+  routine into a thread runs on the provider that thread kept. Its generated files are
+  delivered as on Anthropic, up to 24 MB each. Timers run on Gemini the same way; watch
+  reports still need Anthropic ([Routines](docs/routines.md)).
+
+- **An agent's connectors keep working after it switches to OpenAI or Gemini.** Daimon now
+  keeps and refreshes every connector sign-in itself, and gives an agent on Claude a fresh
+  short-lived copy for each reply, so a switch no longer needs a Reconnect. A connector added
+  with a pasted token now works on OpenAI and Gemini too. A sign-in made before this release
+  for an agent on Claude needs one last Reconnect before it works off Claude. An agent
+  with GitHub repositories can switch too: its `github` connector reaches them with
+  App tokens that end with the reply. The repository checkout and `gh` in the sandbox
+  still stay on Claude
+  ([Providers](docs/providers.md#what-daimon-adds-on-openai-and-gemini)).
+
+- **An agent's keys go with it to OpenAI and Gemini.** Its saved keys are a `.env` file
+  at `/workspace/.daimon/.env` in that provider's sandbox, so that provider receives them,
+  and the agent's guidance and default skills name that path and `/workspace/outputs`, where
+  that provider collects reply files. An admin can keep them on Claude with the `provider_keys_file` feature
+  ([Providers](docs/providers.md#what-daimon-adds-on-openai-and-gemini)).
 
 - **A long Gemini reply no longer fails when Gemini refuses to reconnect to it.** After two
   minutes with no news, Daimon reconnects to the reply. Gemini can refuse that while the reply

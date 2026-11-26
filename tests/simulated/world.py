@@ -29,7 +29,7 @@ from daimon.core.config import (
 )
 from daimon.core.defaults.loader import parse_deployment_default
 from daimon.core.ma_resolver import new_resolver_cache
-from daimon.core.provider_keys import DEFAULT_KEY_ENV, anthropic_key_present
+from daimon.core.provider_keys import DEFAULT_KEY_ENV
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.stores import usage_events
 from daimon.core.stores.access_policy import (
@@ -256,7 +256,6 @@ async def world(
     envs = {"anthropic": "DAIMON_ANTHROPIC__API_KEY", **DEFAULT_KEY_ENV}
     saved = {env: os.environ.pop(env, None) for env in envs.values()}
     os.environ.update({env: "sim" for p, env in envs.items() if p in keyed})
-    anthropic_key_present.cache_clear()  # read once per process; this world changes it
     sim = World(settings, sessions, script, network, api, openai, gemini)
     try:
         with network.installed(), _compressed_waits():
@@ -271,4 +270,3 @@ async def world(
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-        anthropic_key_present.cache_clear()

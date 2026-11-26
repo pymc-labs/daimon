@@ -11,7 +11,7 @@ import dataclasses
 import json
 import types
 import uuid
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import partial
@@ -20,6 +20,9 @@ import httpx
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
+from anthropic.types.beta.beta_managed_agents_mcp_server_url_definition import (
+    BetaManagedAgentsMCPServerURLDefinition,
+)
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
@@ -89,7 +92,14 @@ def _admission(
     )
 
 
-def _snapshot(*, ma_agent_id: str, model_id: str, environment_id: str = "env_1") -> SessionSnapshot:
+def _snapshot(
+    *,
+    ma_agent_id: str,
+    model_id: str,
+    environment_id: str = "env_1",
+    vault_id: str | None = None,
+    mcp_servers: Sequence[BetaManagedAgentsMCPServerURLDefinition] = (),
+) -> SessionSnapshot:
     """The configuration a session created from `_agent`/`_env` would freeze."""
     return SessionSnapshot(
         ma_agent_id=ma_agent_id,
@@ -101,9 +111,9 @@ def _snapshot(*, ma_agent_id: str, model_id: str, environment_id: str = "env_1")
         repo_url=None,
         repo_branch=None,
         memory_store_id=None,
-        vault_id=None,
+        vault_id=vault_id,
         tools_sha256=hash_tools([]),
-        mcp_servers_sha256=hash_mcp_servers([]),
+        mcp_servers_sha256=hash_mcp_servers(mcp_servers),
         env_sha256=None,
         agent_version=1,
         agent_name="daimon",
@@ -122,6 +132,8 @@ async def _make_snapshotted_thread_session(
     environment_id: str = "env_1",
     watermark_message_id: str | None = None,
     active_turn: bool = False,
+    vault_id: str | None = None,
+    mcp_servers: Sequence[BetaManagedAgentsMCPServerURLDefinition] = (),
 ) -> ThreadSessionRow:
     """A live mapping row that already records what its session runs.
 
@@ -135,7 +147,13 @@ async def _make_snapshotted_thread_session(
     change to the caller's next message — the state a test needs when it wants
     the drifted session reused rather than replaced.
     """
-    snapshot = _snapshot(ma_agent_id=ma_agent_id, model_id=model_id, environment_id=environment_id)
+    snapshot = _snapshot(
+        ma_agent_id=ma_agent_id,
+        model_id=model_id,
+        environment_id=environment_id,
+        vault_id=vault_id,
+        mcp_servers=mcp_servers,
+    )
     row = await new_thread_session(
         session,
         tenant_id=tenant.id,
@@ -542,6 +560,7 @@ def test_prepared_turn_public_fields_exclude_recorder() -> None:
         "runtime",
         "native_chat_session_id",
         "snapshot",
+        "env_sha256",
     }, "PreparedTurn must expose exactly the documented public fields"
     assert next(f for f in dataclasses.fields(PreparedTurn) if f.name == "runtime").default is None
 
@@ -557,6 +576,9 @@ async def test_bind_session_syncs_agent_mcp_credential_into_a_reused_session_vau
     nothing and their live session picks it up on the next turn."""
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
+    external = BetaManagedAgentsMCPServerURLDefinition(
+        name="internal", type="url", url="https://internal.example.com/mcp"
+    )
     await _make_snapshotted_thread_session(
         db_session,
         tenant=tenant,
@@ -566,12 +588,14 @@ async def test_bind_session_syncs_agent_mcp_credential_into_a_reused_session_vau
         ma_agent_id="ag_reuse",
         environment_id="env_reuse",
         watermark_message_id="msg-1",
+        vault_id="vlt_caller",
+        mcp_servers=[external],
     )
     await db_session.commit()
 
     public_url = "https://mcp.example.com/mcp"
     fernet = build_multifernet((Fernet.generate_key().decode(),))
-    agent = ma_agent(id="ag_reuse", tenant_id=tenant.id)
+    agent = ma_agent(id="ag_reuse", tenant_id=tenant.id, mcp_servers=[external])
     agent_uuid = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_reuse")
 
     # Someone else (the admin) attached the server and stored the token.
@@ -656,7 +680,37 @@ async def test_bind_session_syncs_agent_mcp_credential_into_a_reused_session_vau
         deleted.append(request.url.path.rsplit("/", 1)[-1])
         return httpx.Response(200, json={"id": "vcrd_gone", "type": "credential"})
 
+    def _live_session(_request: httpx.Request, _match: object) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "id": "sess_live",
+                "type": "session",
+                "agent": {
+                    "id": "ag_reuse",
+                    "mcp_servers": [],
+                    "model": {"id": "claude-sonnet-4-6"},
+                    "name": "daimon",
+                    "skills": [],
+                    "tools": [],
+                    "type": "agent",
+                    "version": 1,
+                },
+                "created_at": "2026-07-28T00:00:00Z",
+                "outcome_evaluations": [],
+                "environment_id": "env_reuse",
+                "metadata": {},
+                "resources": [],
+                "stats": {},
+                "status": "idle",
+                "updated_at": "2026-07-28T00:00:00Z",
+                "usage": {},
+                "vault_ids": ["vlt_caller"],
+            },
+        )
+
     router.add("POST", r"/v1/sessions", _explode)
+    router.add("GET", r"/v1/sessions/sess_live", _live_session)
     router.add("GET", r"/v1/vaults$", _vaults)
     router.add("GET", r"/v1/vaults/vlt_caller/credentials", _list_creds)
     router.add("POST", r"/v1/vaults/vlt_caller/credentials", _create_cred)

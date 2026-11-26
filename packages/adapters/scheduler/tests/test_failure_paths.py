@@ -95,7 +95,10 @@ async def test_routine_failure_paths_preserve_the_finished_reply_or_error(
         if case == "dm_fail":
             raise TurnError(kind="upstream", message="private provider error")
         return SimpleNamespace(
-            text="Finished reply", session_id="ses_completed", producing_agent_id="old_agent"
+            text="Finished reply",
+            session_id="ses_completed",
+            producing_agent_id="old_agent",
+            on_managed_agents=True,
         )
 
     async with AsyncAnthropic(api_key="offline") as client:

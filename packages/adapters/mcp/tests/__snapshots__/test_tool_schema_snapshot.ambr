@@ -1587,11 +1587,11 @@
       'description': '''
         Set your session's expiry to this many hours from now.
         <blank line>
-        Needs the owner in the conversation; a card asks first unless an admin turned the
-        card off. Without the card, as in agent chat, hours cannot exceed the default time.
-        Use the
-        original attended conversation. Hours cannot exceed the operator TTL. This does
-        not change the idle window used by subsequent command/file writes.
+        Use this from the owner's conversation, or from the owner's agent-chat session.
+        Daimon shows a card by itself when one is needed: do not tell the person to expect
+        an approval step. Where no card shows, hours cannot exceed the default time. Use
+        the original attended conversation. Hours cannot exceed the operator TTL. This
+        does not change the idle window used by subsequent command/file writes.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -1627,7 +1627,8 @@
         Read your session's machine state, capacity and expiry without renewing it.
         <blank line>
         State `launching` means the machine is still starting and cannot run commands
-        yet. `running` means it has started.
+        yet. `running` means it has started. The machine's size is the result's cpus and
+        memory_mb; nproc on the machine can show more, so size parallel work from cpus.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -1658,12 +1659,13 @@
       'description': '''
         Launch your own temporary machine from an operator image profile.
         <blank line>
-        Needs the owner in the conversation; a card asks first unless an admin turned the
-        card off. Without the card, as in agent chat, leave ttl_hours out: only the default
-        time runs. List profiles first: each names its fixed CPU/RAM, image and the regions
-        you may pass. Leave `region` out to use the profile's first region. No shared
-        credentials are mounted. Sessions are deleted after their idle lease; export files
-        before stopping or expiry.
+        Use this from the owner's conversation, or from the owner's agent-chat session.
+        Daimon shows a card by itself when one is needed: do not tell the person to expect
+        an approval step. Leave ttl_hours out unless the owner asked for longer: where no
+        card shows, only the default time runs. List profiles first: each names its fixed
+        CPU/RAM, image and the regions you may pass. Leave `region` out to use the
+        profile's first region. No shared credentials are mounted. Sessions are deleted
+        after their idle lease; export files before stopping or expiry.
         <blank line>
         Do not retry an uncertain response automatically: check compute_list_sessions first.
         In agent chat a retried launch starts a second machine.
@@ -1672,6 +1674,8 @@
         it is still starting: read compute_get_session_status until it says `running`
         before you run a command, and do not tell the owner it is ready before then.
         The result's profile_description says what the image holds and how to use it.
+        The machine's size is the result's cpus and memory_mb; nproc on the machine can
+        show more, so size parallel work from cpus.
       ''',
       'parameters': dict({
         'additionalProperties': False,
@@ -8719,8 +8723,9 @@
         its expected_revision, and the person confirms on a card that names the
         provider. A model change within the provider applies at once. The
         server's default or built-in agent switches only when the person says
-        it's for everyone (for_everyone=true); otherwise offer the copy
-        below. For "make a copy of yourself on Gemini": copy the agent with
+        it's for everyone (for_everyone=true); otherwise offer to switch just
+        this conversation (set_thread_model) or the copy below.
+        For "make a copy of yourself on Gemini": copy the agent with
         fork_agent and new_copy_if_taken=true (always a NEW copy, never an earlier
         one; use the name it returns from here on), then switch the copy here.
         Don't hand_off_task first: the switch hands this conversation to the copy
@@ -9284,9 +9289,8 @@
         Preview and confirm the server's allowed model providers. Admin-only.
         <blank line>
         providers is the complete replacement list, not an addition. A server no
-        admin configured uses Anthropic only, or this install's keyed providers when it
-        has no Anthropic key; adding another provider is the admin's opt-in to send
-        this server's conversations to that company.
+        admin configured uses Anthropic and this install's keyed providers; saving a list
+        narrows or widens that, and decides which companies get this server's conversations.
         Preview first, explain the server-wide scope and full list, then call with
         the same providers and returned expected_revision and preview_digest for
         the admin's Confirm card. Pass this active turn's origin_context_id.
@@ -11034,8 +11038,9 @@
         model) or a model from ``list_models`` as ``provider:id``. ``effort`` is
         ``low``, ``medium``, ``high``, ``xhigh``, ``max`` or ``default`` (the
         agent's own), and may be given alone: "think harder" means a higher
-        ``effort``, not another model. A model pick keeps the chosen effort; only
-        Claude models take one, and the note says when it was not set. The
+        ``effort``, not another model. A model pick keeps the chosen effort; Claude
+        models and OpenAI (low, medium, high) take one, Gemini none, and the note
+        says when it was not set. The
         conversation keeps the choice for every later reply until someone
         changes it; the reply in progress keeps its model. Other conversations
         are unaffected.

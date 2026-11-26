@@ -15,6 +15,7 @@ from daimon.core.routine_sandbox import (
     SandboxPin,
     current_agent_pin,
     current_pin,
+    provider_run_matches_pin,
     run_matches_pin,
 )
 from daimon.core.scope import DeploymentDefault
@@ -130,6 +131,32 @@ async def test_a_run_matches_only_the_exact_agent_version_and_environment(
         )
         is matches
     )
+
+
+@pytest.mark.parametrize(
+    ("pinned", "ran", "matches"),
+    [("gemini", "gemini", True), ("anthropic", "gemini", False), ("gemini", "openai", False)],
+)
+async def test_a_provider_run_matches_only_a_pin_made_on_its_provider(
+    pinned: str, ran: str, matches: bool
+) -> None:
+    """An opt-in made on Claude does not carry to Gemini or OpenAI, nor back."""
+    import uuid
+    from types import SimpleNamespace
+
+    tenant_id = uuid.uuid4()
+    pin = SandboxPin("ag", 7, "env_1", datetime(2026, 10, 2, 9, tzinfo=UTC), provider=pinned)
+    admission: Any = SimpleNamespace(
+        backend_revision=SimpleNamespace(backend=ran),
+        agent=SimpleNamespace(id="ag", version=7),
+        environment=SimpleNamespace(id="env_1"),
+    )
+    found = await provider_run_matches_pin(_client(tenant_id), pin, admission, tenant_id=tenant_id)
+    assert found is matches
+    session = ma_session(agent_id="ag", environment_id="env_1")
+    session = session.model_copy(update={"agent": session.agent.model_copy(update={"version": 7})})
+    on_claude = await run_matches_pin(_client(tenant_id), pin, session, tenant_id=tenant_id)
+    assert on_claude is (pinned == "anthropic")
 
 
 async def test_a_run_in_a_daimon_owned_environment_matches_its_pin(
