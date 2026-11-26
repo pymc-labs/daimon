@@ -231,15 +231,11 @@ writes the store. The checks:
 - `health`: each source's state, last sync and embedding coverage.
 - `drift`: chunks off their record, records without chunks, sources not synced in 48 hours or failing.
 
-`data_context` lists what the caller may read. A coding key reads as its maker, like a chat there; the hub's data tools take a
-`workspace`.
+A coding key reads data as its maker; one made in a limited channel keeps its rule. The hub lists data tools only where `data_reads` is On.
 
-`library_skills` (On unless an admin turns it off) serves `list_library_skills` and
-`read_library_skill` to coding keys, the hub and outside clients. A scoped skill shows only to
-someone whose data reads include its scope; chat's `list_skills` and `get_skill` apply that
-to everyone who can read the room, and in a direct message to the agent's owner. A scoped
-skill cannot be attached to an agent or channel, nor an attached one scoped. Admins add
-repositories and set scopes on the web or in chat, behind an approval card.
+`library_skills` serves `list_library_skills` and `read_library_skill` to coding keys, the hub
+and outside clients. A scoped skill shows only to holders of its scope: everyone in the room for chat's
+`list_skills` and `get_skill`, the agent's owner in a direct message. It can't be attached to an agent or channel, nor an attached skill scoped.
 
 ## After a restore
 

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from daimon.adapters.mcp import data_access
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.middleware import mcp_identity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -18,6 +19,7 @@ from daimon.core.features.tool_gate import server_gate_key
 from daimon.core.stores.domain import Role
 from daimon.core.workspace_skills import record_published
 from daimon.testing.factories import make_tenant, turn_on
+from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -65,3 +67,17 @@ async def test_a_scoped_skill_shows_only_where_the_audience_holds_its_scope(
     assert await unheld(runtime, auth) == {"team", "other"}, "a call refused data holds none"
     held[0] = ("team",)  # what everyone who can read the room holds
     assert await unheld(runtime, auth) == {"other"}
+
+
+async def test_no_scope_is_held_where_the_audience_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Teams room with outsiders, or without the consent to list its members, refuses data
+    (`data_audience_for` raises), so only unscoped skills show there."""
+
+    async def refused(runtime: McpRuntime, auth: AuthIdentity) -> None:
+        raise ToolError("People outside the team can read this conversation.")
+
+    monkeypatch.setattr(data_access, "data_audience_for", refused)
+    auth = AuthIdentity(account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.USER)
+    assert await data_access.held_scopes(cast(McpRuntime, SimpleNamespace()), auth) == ()
