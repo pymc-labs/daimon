@@ -1,16 +1,18 @@
 """Store for per-session settle state: pending settle requests, the billing cutoffs,
-which turn an agent-chat send started (`unattended_turn`) and whether its driver is
-a person signed in to the hub (`is_agent_chat_signed_in`).
+which turn an agent-chat send started (`unattended_turn`), whether its driver is
+a person signed in to the hub (`is_agent_chat_signed_in`) and which session a
+credential's grant belongs to (`find_agent_chat_session`).
 
 Per `guideline:architecture`: this module does NOT swallow exceptions.
 """
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
-from daimon.core._models import SessionSettleState
+from daimon.core._models import Account, SessionSettleState
 from sqlalchemy import case, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -274,12 +276,32 @@ async def count_agent_chat_sends(
     return AgentChatSends(begun=row[0], recorded=row[1], turn_event_id=row[2])
 
 
+@dataclass(frozen=True)
+class SessionProvenance:
+    """Where an agent-chat session came from, as Daimon stamped its metadata at creation:
+    the grant its Daimon credential signs (`chat_session_id`), the channel its tools were
+    chosen for, and the account that created it. Each is None when the stamp has none."""
+
+    grant: str | None
+    channel_id: str | None
+    account_id: uuid.UUID | None
+
+
+@dataclass(frozen=True)
+class AgentChatSession:
+    """The agent-chat session a credential's grant belongs to (`find_agent_chat_session`)."""
+
+    managed_session_id: str
+    channel_id: str | None
+
+
 async def record_agent_chat_driver(
     session: AsyncSession,
     *,
     managed_session_id: str,
     signed_in: bool,
     send: bool,
+    provenance: SessionProvenance,
     new_session: bool = False,
     sends_read: int | None = None,
 ) -> int | None:
@@ -292,17 +314,30 @@ async def record_agent_chat_driver(
     session its caller just created (`new_session`), only if this write creates the
     row; on any other, only if `agent_chat_sends` is still `sends_read`, the count the
     decision read, so another send begun in between names nobody.
+
+    `provenance` is copied on each write, whoever drives, so a session created before it
+    was recorded is found from its next send on (`find_agent_chat_session`).
+
+    The grant is a fresh uuid4 for each session (`sessions.create_session`), so no two
+    sessions share one. If two ever did, which would be a bug, the unique index refuses
+    this write: the error is raised, nothing is recorded, and the send is not made.
     """
+    where = {
+        "agent_chat_grant": provenance.grant,
+        "agent_chat_channel": provenance.channel_id,
+        "agent_chat_account_id": provenance.account_id,
+    }
     stmt = insert(SessionSettleState).values(
         managed_session_id=managed_session_id,
         agent_chat_signed_in=signed_in and send and new_session,
         agent_chat_sends=1 if send else None,
+        **where,
     )
     named: object = False
     if signed_in and send and not new_session and sends_read is not None:
         # Read before this row is updated: the count as it stood when the send began.
         named = case((SessionSettleState.agent_chat_sends == sends_read, True), else_=False)
-    set_: dict[str, object] = {"agent_chat_signed_in": named, "updated_at": func.now()}
+    set_: dict[str, object] = {"agent_chat_signed_in": named, "updated_at": func.now(), **where}
     if send:
         set_["agent_chat_sends"] = func.coalesce(SessionSettleState.agent_chat_sends, 0) + 1
     number = await session.scalar(
@@ -313,6 +348,27 @@ async def record_agent_chat_driver(
     return number if send else None
 
 
+async def record_agent_chat_provenance(
+    session: AsyncSession, *, managed_session_id: str, provenance: SessionProvenance
+) -> None:
+    """Copy only where an agent-chat session came from, for a resume that keeps the driver
+    record as it is (`agent_chat_requester.record_driver`): no driver, count or turn column
+    is written, and a new row leaves them empty, as no row does. A shared grant is refused
+    as in `record_agent_chat_driver`."""
+    where = {
+        "agent_chat_grant": provenance.grant,
+        "agent_chat_channel": provenance.channel_id,
+        "agent_chat_account_id": provenance.account_id,
+    }
+    stmt = insert(SessionSettleState).values(managed_session_id=managed_session_id, **where)
+    await session.execute(
+        stmt.on_conflict_do_update(
+            index_elements=[SessionSettleState.managed_session_id],
+            set_={**where, "updated_at": func.now()},
+        )
+    )
+
+
 async def is_agent_chat_signed_in(session: AsyncSession, *, managed_session_id: str) -> bool:
     """Whether the latest recorded driver of the session is signed in; no record is no."""
     value = await session.scalar(
@@ -321,3 +377,66 @@ async def is_agent_chat_signed_in(session: AsyncSession, *, managed_session_id: 
         )
     )
     return value is True
+
+
+async def find_agent_chat_session(
+    session: AsyncSession, *, grant: str, account_id: uuid.UUID
+) -> AgentChatSession | None:
+    """The agent-chat session whose Daimon credential signs `grant`, created by `account_id`.
+
+    None for any other session: a chat thread's, one no send recorded since provenance was
+    kept, or another account's."""
+    row = (
+        await session.execute(
+            select(
+                SessionSettleState.managed_session_id, SessionSettleState.agent_chat_channel
+            ).where(
+                SessionSettleState.agent_chat_grant == grant,
+                SessionSettleState.agent_chat_account_id == account_id,
+            )
+        )
+    ).one_or_none()
+    return None if row is None else AgentChatSession(managed_session_id=row[0], channel_id=row[1])
+
+
+async def count_agent_chat_provenance_for_account(
+    session: AsyncSession, *, account_id: uuid.UUID
+) -> int:
+    """How many agent-chat sessions record `account_id` as the account that created them."""
+    count = await session.scalar(
+        select(func.count())
+        .select_from(SessionSettleState)
+        .where(SessionSettleState.agent_chat_account_id == account_id)
+    )
+    return count or 0
+
+
+async def erase_agent_chat_provenance_for_account(
+    session: AsyncSession, *, account_id: uuid.UUID
+) -> int:
+    """For an account's erasure: clear where its agent-chat sessions came from, the grant,
+    channel and account. Such a session is then not found (`find_agent_chat_session`) and
+    reads as one no send recorded. The driver record and the settle cursor stay: they name
+    no one. Outside the session fence: no send decides from these columns."""
+    cleared = await session.scalars(
+        update(SessionSettleState)
+        .where(SessionSettleState.agent_chat_account_id == account_id)
+        .values(agent_chat_grant=None, agent_chat_channel=None, agent_chat_account_id=None)
+        .returning(SessionSettleState.managed_session_id)
+    )
+    return len(list(cleared))
+
+
+async def erase_agent_chat_provenance_for_tenant(
+    session: AsyncSession, *, tenant_id: uuid.UUID
+) -> int:
+    """For a tenant's deletion, before its accounts cascade: the same as
+    `erase_agent_chat_provenance_for_account` for each of its accounts."""
+    accounts = select(Account.id).where(Account.tenant_id == tenant_id)
+    cleared = await session.scalars(
+        update(SessionSettleState)
+        .where(SessionSettleState.agent_chat_account_id.in_(accounts))
+        .values(agent_chat_grant=None, agent_chat_channel=None, agent_chat_account_id=None)
+        .returning(SessionSettleState.managed_session_id)
+    )
+    return len(list(cleared))

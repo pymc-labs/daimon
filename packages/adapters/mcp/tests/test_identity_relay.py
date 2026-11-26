@@ -41,6 +41,7 @@ from daimon.core.ops_events import OpsEvent
 from daimon.core.stores import watches
 from daimon.core.stores.domain import Role
 from daimon.core.stores.routines import create_routine
+from daimon.core.stores.session_settle_state import SessionProvenance
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import create_thread_session, mark_dead
 from daimon.core.stores.turn_origins import bind_origin_session, create_origin
@@ -52,6 +53,9 @@ from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.applications import Starlette
+
+#: A send whose session carries no provenance stamp.
+NO_PROVENANCE = SessionProvenance(grant=None, channel_id=None, account_id=None)
 
 SECRET = b"r" * 32
 SERVER = SignedIdentityServer(
@@ -1209,6 +1213,7 @@ async def _agent_chat(
         await record_driver(
             factory,
             managed_session_id=session_id,
+            provenance=NO_PROVENANCE,
             signed_in_person=signed_in,
             session_status=None,
             earlier=EarlierTurn(open=False),

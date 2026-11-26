@@ -193,6 +193,7 @@ TAIL = (
     "0229_compute_started_by_wake",
     "0230_agent_chat_signed_in",
     "0231_agent_chat_send_count",
+    "0232_agent_chat_session_grant",
 )
 HEAD = TAIL[-1]
 

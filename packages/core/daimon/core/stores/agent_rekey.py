@@ -113,12 +113,16 @@ KEPT: Final[dict[tuple[str, str], str]] = {
 _NOT_IDS: Final = ("agent_name", "agent_version")
 
 # Columns named for agent chat that describe a session (who drives it, which sends were
-# recorded) and hold no agent id. Listed exactly, so a later column is still checked.
+# recorded, where it came from) and hold no agent id. Listed exactly, so a later column is
+# still checked.
 _NOT_ID_COLUMNS: Final = frozenset(
     {
         ("usage_reconcile_progress", "agent_chat_signed_in"),
         ("usage_reconcile_progress", "agent_chat_sends"),
         ("usage_reconcile_progress", "agent_chat_recorded_send"),
+        ("usage_reconcile_progress", "agent_chat_grant"),
+        ("usage_reconcile_progress", "agent_chat_channel"),
+        ("usage_reconcile_progress", "agent_chat_account_id"),
     }
 )
 
