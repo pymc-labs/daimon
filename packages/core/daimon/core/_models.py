@@ -2768,6 +2768,9 @@ class TurnOrigin(Base):
     # Set when the turn read a limited room through that reach: for the rest of the turn it
     # posts and sends direct messages to its person's own DM only.
     reach_read: Mapped[FalseFlag]
+    # The platform's word that `thread_id` is a public thread: with no room fact of its own
+    # yet it takes its parent's (`daimon.core.signed_room`). Any other thread then is narrow.
+    public_thread: Mapped[FalseFlag]
 
 
 class AgentHelper(Base):
