@@ -19,10 +19,10 @@ from functools import partial
 import httpx
 import pytest
 from anthropic import AsyncAnthropic
+from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from anthropic.types.beta.beta_managed_agents_mcp_server_url_definition import (
     BetaManagedAgentsMCPServerURLDefinition,
 )
-from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
