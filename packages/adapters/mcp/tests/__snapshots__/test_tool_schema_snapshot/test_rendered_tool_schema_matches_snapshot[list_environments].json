@@ -1,0 +1,24 @@
+{
+  "description": [
+    "List environments in the tenant pool. ``page`` is reserved for future pagination.",
+    "",
+    "Operator tokens need the ``tenant:read`` scope."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "page": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

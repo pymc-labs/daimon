@@ -1,0 +1,16 @@
+{
+  "description": [
+    "List the models an agent here can run on: plain name, id, provider and list price.",
+    "",
+    "Use it to answer \"what models can I use?\" or \"what does luna cost?\", and",
+    "to pick a name for an agent's model. Only providers this server has turned",
+    "on are listed, and every listed name (e.g. \"Opus 5.5\", \"Astra\", \"Argon\")",
+    "is accepted wherever a model is named. Prices are list prices per million",
+    "tokens, before this server's markup."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

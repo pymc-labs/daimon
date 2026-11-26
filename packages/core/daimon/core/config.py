@@ -3269,7 +3269,7 @@ class Settings(BaseSettings):
             "Deployment defaults for features, one variable each: "
             "DAIMON_FEATURES__PROGRESS_PLANS=on. A value may end in :locked so no "
             "workspace, agent, channel or thread can change it; disabled is off:locked. "
-            "An unknown feature stops startup. docs/features.md lists them."
+            "An unknown feature stops startup. The docs site's features page lists them."
         ),
     )
     thread_participation: ThreadParticipationSettings = Field(

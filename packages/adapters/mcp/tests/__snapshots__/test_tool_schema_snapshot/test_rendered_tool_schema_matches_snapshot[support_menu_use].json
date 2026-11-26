@@ -1,0 +1,54 @@
+{
+  "description": [
+    "Pick the support menu a place offers. Admin-only.",
+    "",
+    "``key`` is a menu key, or ``\"default\"`` to drop the place's own pick: the",
+    "menu above it, or the built-in one, applies. ``scope`` and ``scope_id`` as",
+    "for ``support_limit_set``. ``expected``: the menu key last read for the",
+    "place, or ``\"none\"``; a mismatch saves nothing. Example: ``key=\"support\"``,",
+    "``scope=\"channel\"``, ``scope_id=\"222\"``."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "expected": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "key": {
+        "type": "string"
+      },
+      "scope": {
+        "enum": [
+          "workspace",
+          "agent",
+          "channel"
+        ],
+        "type": "string"
+      },
+      "scope_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "key",
+      "scope"
+    ],
+    "type": "object"
+  }
+}

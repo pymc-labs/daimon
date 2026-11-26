@@ -21,14 +21,13 @@ groups and marks by. Both therefore build the registry the same way, and the
 same fully-configured-settings reasoning applies to both — a partially
 configured Settings would quietly produce a shorter catalogue.
 
-Run: uv run python scripts/generate_mcp_tool_catalogue.py [--check]
+Run: uv run python scripts/generate_mcp_tool_catalogue.py
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import difflib
 import inspect
 import os
 import re
@@ -387,37 +386,11 @@ def render_catalogue() -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Generate docs/mcp-tools.md from the live MCP tool registry.",
-    )
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="Verify the committed page matches generator output; exit nonzero on drift.",
-    )
-    args = parser.parse_args(argv)
-
-    generated = render_catalogue()
-
-    if args.check:
-        current = CATALOGUE_PATH.read_text() if CATALOGUE_PATH.exists() else ""
-        if current != generated:
-            diff = difflib.unified_diff(
-                current.splitlines(keepends=True),
-                generated.splitlines(keepends=True),
-                fromfile="docs/mcp-tools.md (committed)",
-                tofile="docs/mcp-tools.md (generated)",
-            )
-            sys.stderr.writelines(diff)
-            print(
-                "\ndocs/mcp-tools.md is out of date. "
-                "Run: uv run python scripts/generate_mcp_tool_catalogue.py",
-                file=sys.stderr,
-            )
-            return 1
-        return 0
-
-    CATALOGUE_PATH.write_text(generated)
+    # No --check: the docs workflow builds the page, which is never committed.
+    argparse.ArgumentParser(
+        description="Generate docs/mcp-tools.md from the live MCP tool registry."
+    ).parse_args(argv)
+    CATALOGUE_PATH.write_text(render_catalogue())
     return 0
 
 

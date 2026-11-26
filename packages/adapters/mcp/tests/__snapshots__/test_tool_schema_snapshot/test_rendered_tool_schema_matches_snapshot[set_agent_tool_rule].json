@@ -1,0 +1,49 @@
+{
+  "description": [
+    "Set one agent's tool rule."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_name": {
+        "type": "string"
+      },
+      "channel_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "rule": {
+        "enum": [
+          "allow",
+          "ask",
+          "deny"
+        ],
+        "type": "string"
+      },
+      "scope": {
+        "default": "chat",
+        "enum": [
+          "chat",
+          "chat_and_routines"
+        ],
+        "type": "string"
+      },
+      "tool_key": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "agent_name",
+      "tool_key",
+      "rule"
+    ],
+    "type": "object"
+  }
+}

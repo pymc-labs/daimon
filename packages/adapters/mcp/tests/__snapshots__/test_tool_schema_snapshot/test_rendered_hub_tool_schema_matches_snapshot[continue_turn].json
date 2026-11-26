@@ -1,0 +1,43 @@
+{
+  "description": [
+    "Send a follow-up on an existing session without waiting.",
+    "",
+    "Wait for the reply with ``await_turn``.",
+    "On a session ``get_session`` reports ``paused`` with the hint to call",
+    "``continue_turn`` (a turn started here, waiting on tool confirmations",
+    "after a restart), this resumes it first: the waiting calls are decided",
+    "by the current tool policy, and ``message`` is then optional; a",
+    "``message`` is sent once the resumed turn ends, waiting up to about 90",
+    "seconds. Only the session's own account can continue or resume it,",
+    "and never a turn waiting on an approval card in chat.",
+    "Only handles opened through agent chat can be continued here; platform",
+    "conversations and legacy sessions without this provenance are refused."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "daimon_id": {
+        "type": "string"
+      },
+      "handle": {
+        "type": "string"
+      },
+      "message": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "daimon_id",
+      "handle"
+    ],
+    "type": "object"
+  }
+}
