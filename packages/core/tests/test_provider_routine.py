@@ -5,10 +5,12 @@ from __future__ import annotations
 import uuid
 
 from daimon.core.authz import AgentRef, Place, Surface, build_subject
-from daimon.core.provider_routine import at_fire_place
+from daimon.core.provider_routine import SHELL_NEEDS_SANDBOX, at_fire_place, refusal_text
 from daimon.core.rule_views import RoutineOrigin
 from daimon.core.scope import ResolvedConfig
 from daimon.core.turn.admission import Admission, AdmissionGrant
+from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.unattended_capabilities import COORDINATOR_DETAIL
 from daimon.core.turn_hold import TurnHold
 from daimon.testing.ma_models import ma_agent, ma_environment
 
@@ -61,3 +63,13 @@ def test_an_unplaced_fire_keeps_its_admission_but_reads_memory_only() -> None:
     placed = at_fire_place(admitted, hold=None, origin_place=None)
     assert placed.hold is None and placed.origin_thread_id is None, placed
     assert placed.origin_seal_ids == admitted.origin_seal_ids and placed.memory_read_only
+
+
+def test_a_refused_routine_shows_only_a_person_facing_detail() -> None:
+    """The DM and channel paths record this text: the sandbox opt-in names who can help,
+    while an internal detail leaves the routine showing only its reason."""
+    sandbox = AdmissionDenied(reason="backend_unsupported", detail=SHELL_NEEDS_SANDBOX)
+    assert refusal_text(sandbox) == f"backend_unsupported: {SHELL_NEEDS_SANDBOX}"
+    internal = AdmissionDenied(reason="backend_unsupported", detail=COORDINATOR_DETAIL)
+    assert refusal_text(internal) is None
+    assert refusal_text(AdmissionDenied(reason="invoker_not_allowed")) is None

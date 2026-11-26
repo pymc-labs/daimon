@@ -115,8 +115,8 @@ from daimon.core.permissions import any_agent_rules, any_own_readers
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.promo_settlement import settle_promo_credit
 from daimon.core.provider_routine import (
-    SHELL_NEEDS_SANDBOX,
     admit_provider_routine,
+    refusal_text,
     run_provider_routine,
 )
 from daimon.core.purge import sweep_privacy_session_deletes
@@ -586,11 +586,7 @@ async def _build_fire(
                     sm,
                     row,
                     error.reason,
-                    # An OpenAI fire without the sandbox opt-in says who can help; any
-                    # other refusal records only its reason, never an internal detail.
-                    error=str(error)
-                    if isinstance(error, AdmissionDenied) and error.detail == SHELL_NEEDS_SANDBOX
-                    else None,
+                    error=refusal_text(error) if isinstance(error, AdmissionDenied) else None,
                     notify_owner=notify_owner,
                     expected_destination=("dm", owner_user_id),
                     expected_private=row,
@@ -827,7 +823,7 @@ async def _build_fire(
                 reason=error.reason,
             )
             async with sm() as s, s.begin():
-                await _refuse(s, row, error.reason, error=str(error))
+                await _refuse(s, row, error.reason, error=refusal_text(error))
             return
         ran = admission.agent
         if (
@@ -873,7 +869,7 @@ async def _build_fire(
         except AdmissionDenied as error:
             # An unattended rule refused the turn before its first message.
             async with sm() as s, s.begin():
-                await _refuse(s, row, error.reason, error=str(error))
+                await _refuse(s, row, error.reason, error=refusal_text(error))
             return
 
         async def files(text: str) -> str:

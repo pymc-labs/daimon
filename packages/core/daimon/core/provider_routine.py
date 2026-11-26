@@ -38,6 +38,13 @@ SHELL_NEEDS_SANDBOX = (
     "This routine's agent is on OpenAI, which always runs it with a shell. "
     "Ask a server admin to turn on sandbox tools for this routine."
 )
+#: Refusal details written for the routine's owner; any other detail stays in the logs.
+_PERSON_FACING: frozenset[str] = frozenset({SHELL_NEEDS_SANDBOX})
+
+
+def refusal_text(error: AdmissionDenied) -> str | None:
+    """What a refused routine shows its owner: a person-facing detail, else None (its reason)."""
+    return str(error) if error.detail in _PERSON_FACING else None
 
 
 class _Unrendered(TurnLifecycle):
