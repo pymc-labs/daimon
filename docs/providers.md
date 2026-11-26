@@ -21,8 +21,8 @@ in one conversation.
 | Web fetch | Yes | Through Daimon | Through Daimon | Through Daimon |
 | Web search | Yes | Yes | Yes, through Google Search | Not supported |
 | Output files | Yes | Yes | Yes | Yes, from harness 0.2.0 |
-| Reasoning effort | Yes | Low, medium, high | Agents take none | Not supported |
-| Spend limit for one reply | Yes | Daimon stops the reply | Holds only, no stop mid-turn | Not supported |
+| Reasoning effort | Yes | Low, medium, high | None | Not supported |
+| Spend limit for one reply | Yes | Daimon stops the reply | Daimon stops the reply | Not supported |
 | Routines | Yes | Not supported | Not supported | Not supported |
 | Workspace export and import | Yes | Not supported | Not supported | Not supported |
 | Skills | Full | Custom and agent skills, up to 28 MiB each | Custom and channel skills, up to 28 MiB each; small text skills share 2 MiB | Seeded defaults only |
@@ -31,7 +31,6 @@ A provider that cannot meet a channel's requirements refuses the reply.
 
 ### What is not supported yet
 
-- **Gemini:** stopping a turn at a spend limit.
 - **Self-hosted:** memory, routines, effort and a
   spend limit, workspace export and import. An agent can pick it only with
   its own runtime file row (`daimon selfhosted init --agent`).
@@ -86,10 +85,11 @@ then post a card in the thread that names the provider. It runs only when the
 person approves.
 
 Picking a model for one conversation, in chat or with the MCP tool
-`set_thread_model`, leaves the agent on its own model everywhere else. Only the
-agent's owner or an admin may do it, unless the `thread_providers` feature is
-on. It is off by default and lets anyone who may change a conversation's model
-do it. The pick stays when an admin edits the agent.
+`set_thread_model`, leaves the agent on its own model everywhere else. Anyone
+who may change a conversation's model can pick another provider's, as the
+`thread_providers` feature is on by default. Turn it off for an agent and only
+its owner or an admin may. The pick stays when an admin edits the agent. A
+conversation on OpenAI can also take its own effort, low, medium or high.
 
 An admin can **Switch back to Claude** from a refused reply or a panel, when
 the install has an Anthropic key. MCP tools and the CLI take
@@ -113,8 +113,7 @@ queued wakes, pending approvals or running jobs.
 
 Set only an OpenAI or Gemini key. `init` seeds the default agents on the first
 keyed provider at its default model, and agents you create later live there
-too. Each is pinned, and a server whose admin never chose its providers may use
-the keyed ones, so it replies with no Anthropic request. Thread titles and
+too. Each is pinned and replies with no Anthropic request. Thread titles and
 participation checks use a small model from that provider. An agent still on Anthropic gets a card offering a copy on
 another provider, or asking whoever runs Daimon to add the Anthropic key.
 Memory settings show as needing setup.
@@ -131,16 +130,16 @@ Memory settings show as needing setup.
   credential for that reply only, and the provider never sees a sign-in. Each tool keeps the
   agent's permission. Personal connectors need one Reconnect after a switch.
   Self-hosted agents get it too, and their harness asks before an `ask` tool.
-  Off by default, because the provider receives what the connectors return;
-  turn it on with the `mcp_connector_relay` feature.
+  The provider receives what the connectors return; turn the
+  `mcp_connector_relay` feature off to keep them out of OpenAI and Gemini.
 - **Confirmations.** A tool that needs one posts an Approve and Deny card on
   Discord, Slack, Teams and the web. Only the asker answers, and an approved
   call runs once. An unattended reply runs only what its rules allow. Turn it off
   with the `host_call_gate` feature.
 - **Copies of itself.** `ask_helper` with `self` starts a fresh copy per ask.
   All copies of one message stop at $10 of spend together, and share no files.
-- **Effort.** OpenAI takes low, medium or high, kept with the model; Gemini agents
-  take none. Fast stays on Claude.
+- **Effort.** OpenAI takes low, medium or high, kept with the model or set for one
+  conversation; Gemini takes none. Fast stays on Claude.
 - **Spend limit.** The host prices a reply's usage while it runs, as the runtime
   file section below describes.
 
@@ -194,11 +193,12 @@ file mounts work), and fixed container defaults.
 
 ## Enable providers for a tenant
 
-A tenant whose admin never chose uses Anthropic only. With no Anthropic key, it
-may use every provider whose deployment key is set, such as
-`DAIMON_CHANNEL_OPENAI_KEY` or `DAIMON_CHANNEL_GEMINI_KEY`. A key under another
-name through `--api-key-env` does not count. Self-hosted backends are never on
-by default. An admin's own choice always wins.
+Every key you set turns its provider on: a tenant whose admin never chose may
+use Anthropic and every provider whose deployment key is set, such as
+`DAIMON_CHANNEL_OPENAI_KEY` or `DAIMON_CHANNEL_GEMINI_KEY`, with or without an
+Anthropic key. A key under another name through `--api-key-env` does not count.
+Self-hosted backends are never on by default. An admin's own list always wins,
+so an admin can narrow it to Anthropic or add what is missing.
 
 An admin changes the list in chat by asking Daimon and confirming the card.
 On Discord, an operator can do the same from the CLI. Each call checks that
