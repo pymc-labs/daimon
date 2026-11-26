@@ -46,9 +46,8 @@ from mux.contracts.ids import ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding, SessionSpec
 from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini import compile_environment
-from mux.drivers.gemini.core import WITHHOLD_BUILTINS
 from mux.errors import BindingConflict, ContinuityLost, ScopeViolation, UnsupportedCapability
-from mux.profiles.gemini import INLINE_REUSE, SESSION_NAMESPACE
+from mux.profiles.gemini import INLINE_REUSE, SESSION_NAMESPACE, WITHHOLD_BUILTINS
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
 from mux.state.store import ERA_REF, StateStore, adopted_identity
