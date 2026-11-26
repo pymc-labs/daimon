@@ -329,6 +329,8 @@ def test_bearer_server_needs_workspaces_agents_and_a_matching_key() -> None:
         {k: v for k, v in _BEARER.items() if k != "agents"},
         {**_BEARER, "agents": []},
         {**_BEARER, "issuer": "x", "audience": "https://tools.example.com"},
+        {**_BEARER, "routine_claims": True},
+        {**_BEARER, "wake_claims": True},
     ):
         with pytest.raises(ValidationError):
             _settings([weaker], bearers={"internal": "k-1"})
@@ -642,14 +644,120 @@ def test_a_watch_poll_is_placed_where_the_watch_reports(
     assert watch_conversation(row) == expected, "the poll's place is the watch's report place"
 
 
+_DM_ROUTINE = RelayBinding(
+    "daimon",
+    uuid.uuid4(),
+    grant="grant-1",
+    routine_id=uuid.uuid4(),
+    owner="42",
+    destination="dm::",
+    execution=uuid.uuid4(),
+    revision="2026-10-01T12:00:00.123456+00:00",
+    dm_channel="77",
+)
+
+
 def test_the_relay_claim_carries_a_routine_and_never_both_bindings() -> None:
     routine_id = uuid.uuid4()
     binding = RelayBinding(agent_name="daimon", routine_id=routine_id)
     assert parse_relay_claim(binding.claim()) == binding
-    with pytest.raises(ValueError):
-        parse_relay_claim({"agent_name": "daimon", "session": str(uuid.uuid4()), "routine": "x"})
+    for both in (
+        {"agent_name": "daimon", "session": str(uuid.uuid4()), "routine": "x"},
+        {"agent_name": "daimon", "session": str(uuid.uuid4()), "routine": str(routine_id)},
+        {
+            "agent_name": "daimon", "session": str(uuid.uuid4()), "grant": "grant-1",
+            "routine": str(routine_id), "owner": "42", "destination": "dm::",
+        },
+    ):  # fmt: skip
+        with pytest.raises(ValueError):
+            parse_relay_claim(both)
     with pytest.raises(ValueError):
         parse_relay_claim({"agent_name": "daimon", "routine": 7})
+
+
+def test_a_dm_routines_relay_claim_reads_back_only_whole() -> None:
+    """A routine posting to its owner's DM binds its session beside the routine, with
+    every field the relay checks it by; any part missing or wrong is refused."""
+    whole = _DM_ROUTINE.claim()
+    assert parse_relay_claim(whole) == _DM_ROUTINE, "the combined binding reads back"
+    for key in ("session", "grant", "routine", "owner", "destination", "execution", "revision",
+                "dm_channel"):  # fmt: skip
+        with pytest.raises(ValueError):
+            parse_relay_claim({k: v for k, v in whole.items() if k != key})
+    for wrong in (
+        {"watch": str(uuid.uuid4())},
+        {"agent_chat": "sesn_1"},
+        {"owner": ""},
+        {"destination": "channel:9:"},
+        {"destination": "dm:77:"},
+        {"execution": "not-a-uuid"},
+        {"revision": "2026-10-01T12:00:00"},  # no time zone
+        {"revision": "yesterday"},
+        {"dm_channel": "abc"},
+        {"dm_channel": "７７"},  # decimal, but not ASCII
+        {"dm_channel": 77},
+    ):
+        with pytest.raises(ValueError):
+            parse_relay_claim({**whole, **wrong})
+
+
+def _dm_routine_claims(
+    place: TurnPlace | None, *, user: str | None = "42", wake: str | None = None
+) -> IdentityClaims:
+    return caller_claims(
+        issuer="daimon-test", audience="https://tools.example.com", agent_id="agent-1",
+        platform="discord", workspace_id="456", platform_user_id=user, agent_name="Helper",
+        place=place, room="dm", routine="r-1", wake=wake,  # pyright: ignore[reportArgumentType]
+    )  # fmt: skip
+
+
+def test_a_dm_routine_names_its_owner_and_dm_and_no_message() -> None:
+    payload = _decode_with(_dm_routine_claims(TurnPlace("77", None)))
+    assert {k: payload[k] for k in ("sub", "ws", "channel", "room", "routine")} == {
+        "sub": "discord:42",
+        "ws": "discord:456",
+        "channel": "77",
+        "room": "dm",
+        "routine": "r-1",
+    }
+    assert not {"msg", "wake"} & set(payload), "no message and no wake"
+    channel = caller_claims(
+        issuer="daimon-test", audience="https://tools.example.com", agent_id="agent-1",
+        platform="discord", workspace_id="456", platform_user_id="42", agent_name="Helper",
+        place=TurnPlace("5", None), room="team", routine="r-1",
+    )  # fmt: skip
+    assert channel.sub is None, "a channel routine still names no person"
+
+
+@pytest.mark.parametrize(
+    ("place", "user", "wake"),
+    [
+        (TurnPlace("77", "m-1"), "42", None),
+        (TurnPlace("77", None), None, None),
+        (TurnPlace("77", None), "", None),
+        (TurnPlace(None, None), "42", None),
+        (TurnPlace("77", None), "42", "turn"),
+        (TurnPlace("77", None), "42", "timer"),
+    ],
+    ids=["a-message", "no-person", "blank-person", "no-channel", "turn-wake", "timer-wake"],
+)
+def test_a_dm_routine_claim_is_refused_with_a_message_without_a_person_or_with_a_wake(
+    place: TurnPlace, user: str | None, wake: str | None
+) -> None:
+    with pytest.raises(ValueError):
+        _dm_routine_claims(place, user=user, wake=wake)
+
+
+def test_dm_routine_claims_are_off_by_default_and_need_routine_claims() -> None:
+    signed = {**_SERVER, "issuer": "i", "audience": "https://tools.example.com"}
+    plain = _settings([signed])
+    assert plain.servers[0].dm_routine_claims is False and not plain.names_dm_routine
+    routine = _settings([{**signed, "routine_claims": True}])
+    assert not routine.names_dm_routine, "routine claims alone sign no DM routine"
+    both = _settings([{**signed, "routine_claims": True, "dm_routine_claims": True}])
+    assert both.names_dm_routine, "an operator turns it on per server"
+    with pytest.raises(ValidationError, match="dm_routine_claims needs routine_claims"):
+        _settings([{**signed, "dm_routine_claims": True}])
 
 
 def test_agent_chat_requester_is_off_by_default_and_needs_requester_meta() -> None:

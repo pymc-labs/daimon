@@ -228,6 +228,18 @@
           [
             "types[]",
             "session.status_idle"
+          ],
+          [
+            "types[]",
+            "session.status_running"
+          ],
+          [
+            "types[]",
+            "session.status_rescheduled"
+          ],
+          [
+            "types[]",
+            "session.status_terminated"
           ]
         ]
       },
@@ -822,6 +834,18 @@
           [
             "types[]",
             "session.status_idle"
+          ],
+          [
+            "types[]",
+            "session.status_running"
+          ],
+          [
+            "types[]",
+            "session.status_rescheduled"
+          ],
+          [
+            "types[]",
+            "session.status_terminated"
           ]
         ]
       },
@@ -866,6 +890,18 @@
           [
             "types[]",
             "session.status_idle"
+          ],
+          [
+            "types[]",
+            "session.status_running"
+          ],
+          [
+            "types[]",
+            "session.status_rescheduled"
+          ],
+          [
+            "types[]",
+            "session.status_terminated"
           ]
         ]
       },

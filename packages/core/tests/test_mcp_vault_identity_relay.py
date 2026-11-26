@@ -11,11 +11,13 @@ from typing import Any
 import httpx
 import jwt as pyjwt
 from anthropic import AsyncAnthropic
+from daimon.core.lead_intake_execution import current_intake_execution
 from daimon.core.mcp_identity import (
     RELAY_CLAIM,
     RelayBinding,
     encode_seed,
     generate_signing_key,
+    parse_relay_claim,
     relay_url,
 )
 from daimon.core.mcp_vault import (
@@ -229,6 +231,43 @@ async def test_refresh_keeps_the_binding_and_adds_a_relay_attached_since(
     assert added["auth"]["token"] == renewed["auth"]["token"], "the new relay gets the same one"
     assert _signed(added)[RELAY_CLAIM]["session"] == str(key), "the binding survives a refresh"
     assert _signed(added)[RELAY_CLAIM]["grant"] == "grant-1", "so does the execution grant"
+
+
+async def test_a_dm_routines_binding_is_kept_whole_on_refresh_whatever_fire_runs_then(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    binding = RelayBinding(
+        "Helper", uuid.uuid4(), grant="grant-1", routine_id=uuid.uuid4(), owner="42",
+        destination="dm::", execution=uuid.uuid4(), revision=NOW.isoformat(), dm_channel="77",
+    )  # fmt: skip
+    vault, account_id, agent_id = await _relay_vault(db_session_factory, binding, RELAY)
+    metadata = vault.by_url(RELAY)["metadata"]
+    assert {k: metadata[k] for k in metadata if k.startswith("daimon_relay_")} == {
+        "daimon_relay_agent_name": "Helper",
+        "daimon_relay_session": str(binding.session_key),
+        "daimon_relay_grant": "grant-1",
+        "daimon_relay_routine": str(binding.routine_id),
+        "daimon_relay_owner": "42",
+        "daimon_relay_destination": "dm::",
+        "daimon_relay_execution": str(binding.execution),
+        "daimon_relay_revision": NOW.isoformat(),
+        "daimon_relay_dm_channel": "77",
+    }, "every field is recorded where a refresh finds it"
+    # Another fire is running in this task when the refresh comes: it is not this turn's.
+    other = current_intake_execution.set((uuid.uuid4(), uuid.uuid4()))
+    try:
+        await _refresh(
+            db_session_factory, vault, account_id, agent_id, relay_urls=(RELAY, OTHER),
+            now=NOW + dt.timedelta(minutes=20),
+        )  # fmt: skip
+    finally:
+        current_intake_execution.reset(other)
+    for url in (RELAY, OTHER):
+        signed = _signed(vault.by_url(url))
+        assert parse_relay_claim(signed[RELAY_CLAIM]) == binding, "rebuilt field for field"
+        assert not {"routine_id", "execution_id"} & set(signed), (
+            "the relay credential never carries the ordinary credential's fire"
+        )
 
 
 async def test_fresh_relay_vault_and_other_vaults_are_left_alone(

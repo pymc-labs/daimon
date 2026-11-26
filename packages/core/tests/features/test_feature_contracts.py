@@ -650,6 +650,8 @@ _CONFIG_SWITCHES: dict[str, str] = {
     "SignedIdentityServer.requester_meta": _SHAPE,
     "SignedIdentityServer.agent_chat_requester": _SHAPE,
     "SignedIdentityServer.routine_claims": _SHAPE,
+    "SignedIdentityServer.wake_claims": _SHAPE,
+    "SignedIdentityServer.dm_routine_claims": _SHAPE,
     "SignedIdentityServer.channel_scoped": _OPS,  # how a server scopes its answers, a per-server trust setting
     "SelfHostedSettings.admission_enabled": _OPS,
     "SelfHostedSettings.single_tenant": _OPS,
