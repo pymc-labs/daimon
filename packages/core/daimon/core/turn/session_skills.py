@@ -57,7 +57,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
-    from daimon.core.session_snapshot import MaSkill
     from daimon.core.turn.prepare import ProviderPreparationRequest
 
 log = structlog.get_logger(__name__)
@@ -86,6 +85,41 @@ def attaches_session_skills(profile: Profile) -> bool:
 def carried_skills(spec: AgentSpec) -> tuple[SkillRef, ...]:
     """Skills with bytes to carry: custom and channel ones, not a provider's built-ins."""
     return tuple(s for s in spec.skills or () if s.source in (None, "custom"))
+
+
+#: Anthropic's built-in skills, each with the open one under `defaults/skills/` a
+#: provider without them gets instead (own text, open libraries).
+OPEN_SKILLS: Mapping[str, str] = {
+    "docx": "open-docx",
+    "pptx": "open-pptx",
+    "xlsx": "open-xlsx",
+    "pdf": "open-pdf",
+}
+
+
+async def open_skills(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    built_in_ids: Iterable[str],
+) -> tuple[tuple[SkillRef, ...], tuple[str, ...]]:
+    """The tenant's open copies of these built-in skills, and the `skill:` loss of each left out.
+
+    A built-in has no copy when it has no open equivalent, or the tenant has not been
+    seeded with it yet (a deploy seeds `defaults/skills`; a keyless install never does).
+    """
+    from daimon.core.stores.seeded_skills import load_seeded_skill
+
+    ids = tuple(dict.fromkeys(built_in_ids))
+    async with sessionmaker() as session:
+        rows = {
+            i: await load_seeded_skill(session, tenant_id=tenant_id, name=OPEN_SKILLS[i])
+            for i in ids
+            if i in OPEN_SKILLS
+        }
+    copies = tuple(
+        SkillRef(id=r.anthropic_id, version="latest", source="custom") for r in rows.values() if r
+    )
+    return copies, tuple(f"skill:{i}" for i in ids if rows.get(i) is None)
 
 
 def skill_names(sizes: Mapping[tuple[str, str], SkillSizeRow]) -> dict[str, str]:
@@ -663,34 +697,42 @@ async def channel_session_skills(
     or unreadable, is a named `skill:` loss.
     """
     deps, skills = request.deps, request.admission.channel_skills
-    custom = tuple(s for s in skills if s.type == "custom")
-    if not custom or not attaches_session_skills(profile):
+    if not attaches_session_skills(profile):
         return (), (), {}
+    # The built-ins (a Teams turn's docx, pptx, xlsx) go as their open copies.
+    copies, missing = await open_skills(
+        deps.sessionmaker, request.tenant_id, (s.skill_id for s in skills if s.type != "custom")
+    )
+    custom = (
+        *((s.skill_id, s.version) for s in skills if s.type == "custom"),
+        *((c.id, c.version) for c in copies),
+    )
+    if not custom:
+        return (), missing, {}
 
-    async def pin(skill: MaSkill) -> SkillRef | None:
-        attached = SkillRef(id=skill.skill_id, version=skill.version, source="custom")
+    async def pin(skill: tuple[str, str | None]) -> SkillRef | None:
+        skill_id, current = skill
+        attached = SkillRef(id=skill_id, version=current, source="custom")
         try:
             version = (
                 await latest_version(deps.anthropic, scope, attached)
-                if skill.version in (None, "latest")
-                else skill.version
+                if current in (None, "latest")
+                else current
             )
         except (AnthropicError, DaimonError, MuxError, ValueError) as error:
             if (busy := read_blip(error)) is not None:
                 raise busy from error
             log.warning(
                 "session_skills.unresolved",
-                skill_id=skill.skill_id,
+                skill_id=skill_id,
                 causes=backend_refusal_causes(error),
             )
             return None
-        return SkillRef(id=skill.skill_id, version=version)
+        return SkillRef(id=skill_id, version=version)
 
     resolved = await asyncio.gather(*(pin(s) for s in custom))
     pins = tuple(p for p in resolved if p is not None)
-    unresolved = tuple(
-        f"skill:{s.skill_id}" for s, p in zip(custom, resolved, strict=True) if p is None
-    )
+    unresolved = tuple(f"skill:{s[0]}" for s, p in zip(custom, resolved, strict=True) if p is None)
     sizes = await measure_skills(
         deps.sessionmaker,
         deps.anthropic,
@@ -700,7 +742,7 @@ async def channel_session_skills(
         manifests=profile.skill_upload_limits is not None,
     )
     kept = fitting_skills(profile, pins, sizes)
-    return kept, (*unresolved, *skill_losses(pins, kept)), skill_names(sizes)
+    return kept, (*unresolved, *missing, *skill_losses(pins, kept)), skill_names(sizes)
 
 
 async def turn_session_skills(

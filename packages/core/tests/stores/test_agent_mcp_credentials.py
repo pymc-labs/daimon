@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -768,6 +769,7 @@ async def test_a_token_deleted_before_the_mirror_takes_the_lock_is_not_written_b
 
     from daimon.core import agent_mcp_credentials as module
     from daimon.core.agent_mcp_credentials import ResolvedMcpCredential
+    from daimon.core.mcp_oauth import connector_tokens
 
     stored = [
         ResolvedMcpCredential(mcp_server_url="https://crm.example/mcp", token="t", version="1")
@@ -797,6 +799,12 @@ async def test_a_token_deleted_before_the_mirror_takes_the_lock_is_not_written_b
     monkeypatch.setattr(module, "hold_agent_vault_lock", lock)
     monkeypatch.setattr(module, "_read_agent_mcp_credentials", read_under_lock)
     monkeypatch.setattr(module, "mirror_credentials_into_vault", mirror)
+    # The caller's OAuth grants (none here) are refreshed and mirrored alongside.
+    monkeypatch.setattr(connector_tokens, "refresh_due_grants", AsyncMock())
+    monkeypatch.setattr(
+        module.connector_tokens_store, "list_connector_tokens", AsyncMock(return_value=())
+    )
+    monkeypatch.setattr(module, "mirror_grants_into_vault", AsyncMock())
 
     await sync_agent_mcp_credentials(
         object(),  # type: ignore[arg-type]
@@ -865,8 +873,8 @@ def _calls_inside_the_vault_lock(source: str, function: str) -> set[str]:
 
 
 def test_every_mirror_reads_the_tokens_under_the_vault_lock() -> None:
-    """Rule contract: a copy of the agent's stored tokens into a vault reads them
-    under the vault lock, through `mirror_stored_credentials`.
+    """Rule contract: a copy of the agent's stored tokens or a person's grants into
+    a vault reads them under the vault lock, through `mirror_stored_credentials`.
 
     `forget_mirrored_mcp_token` clears each copy under that lock after the
     stored token is deleted, so a writer that read the tokens first writes a
@@ -882,10 +890,9 @@ def test_every_mirror_reads_the_tokens_under_the_vault_lock() -> None:
     offenders = {
         f"{path.relative_to(_PACKAGES)}:{line} in {function}"
         for path in sources
+        for copy in ("mirror_credentials_into_vault", "mirror_grants_into_vault")
         for line, function in _calls_outside(
-            "mirror_credentials_into_vault",
-            "mirror_stored_credentials",
-            path.read_text(encoding="utf-8"),
+            copy, "mirror_stored_credentials", path.read_text(encoding="utf-8")
         )
     }
     assert offenders == set(), (
@@ -893,9 +900,14 @@ def test_every_mirror_reads_the_tokens_under_the_vault_lock() -> None:
         f"which reads them under the vault lock: {sorted(offenders)}"
     )
     helper = (_PACKAGES / "core/daimon/core/agent_mcp_credentials.py").read_text(encoding="utf-8")
-    assert {"_read_agent_mcp_credentials", "mirror_credentials_into_vault"} <= (
-        _calls_inside_the_vault_lock(helper, "mirror_stored_credentials")
-    ), "mirror_stored_credentials must read the tokens and copy them inside the vault lock"
+    assert {
+        "_read_agent_mcp_credentials",
+        "mirror_credentials_into_vault",
+        "list_connector_tokens",
+        "mirror_grants_into_vault",
+    } <= _calls_inside_the_vault_lock(helper, "mirror_stored_credentials"), (
+        "mirror_stored_credentials must read the tokens and grants and copy them inside the lock"
+    )
 
 
 def test_the_mirror_contract_flags_a_mirror_outside_the_helper() -> None:
@@ -925,3 +937,80 @@ def test_the_mirror_contract_flags_a_mirror_outside_the_helper() -> None:
     assert "_read_agent_mcp_credentials" not in _calls_inside_the_vault_lock(
         read_first, "mirror_stored_credentials"
     )
+
+
+async def test_a_reused_held_session_is_mirrored_into_the_vault_it_mounts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A held session mounts its hold's own vault, so the per-turn mirror writes there."""
+    from daimon.core import agent_mcp_credentials as module
+    from daimon.core.turn_hold import TurnHold
+
+    hold = TurnHold("discord", "channel", True)
+    asked: list[object] = []
+    mirrored: list[str] = []
+
+    async def ensure(*_: object, **kwargs: object) -> str:
+        asked.append(kwargs.get("hold"))
+        return "vlt_held" if kwargs.get("hold") == hold else "vlt_plain"
+
+    async def mirror(*_: object, vault_id: str, **__: object) -> None:
+        mirrored.append(vault_id)
+
+    async def credentials(**_: object) -> tuple[object, ...]:
+        return (object(),)
+
+    monkeypatch.setattr(module, "ensure_agent_mcp_vault", ensure)
+    monkeypatch.setattr(module, "mirror_stored_credentials", mirror)
+    monkeypatch.setattr(module, "resolve_agent_mcp_credentials", credentials)
+    account = uuid.uuid4()
+    await sync_agent_mcp_credentials(
+        build_fake_anthropic(MARouter().dispatch),
+        sessionmaker=object(),  # type: ignore[arg-type]
+        fernet=build_multifernet((Fernet.generate_key().decode(),)),
+        tenant_id=uuid.uuid4(),
+        agent_id=uuid.uuid4(),
+        account_id=account,
+        jwt_secret=b"x" * 32,
+        public_url="https://mcp.example.com/mcp",
+        now=dt.datetime(2026, 9, 15, tzinfo=dt.UTC),
+        vault_ids={},
+        hold=hold,
+    )
+    assert asked == [hold], f"the hold selects the vault, never the cache: {asked}"
+    assert mirrored == ["vlt_held"], f"the mirror lands in the mounted vault: {mirrored}"
+
+
+async def test_a_reused_session_with_nothing_stored_still_clears_the_vault_copies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Removing a person's only grant leaves no tokens, yet the mirror must still run."""
+    from daimon.core import agent_mcp_credentials as module
+
+    mirrored: list[str] = []
+
+    async def ensure(*_: object, **__: object) -> str:
+        return "vlt_me"
+
+    async def mirror(*_: object, vault_id: str, **__: object) -> None:
+        mirrored.append(vault_id)
+
+    async def credentials(**_: object) -> tuple[object, ...]:
+        return ()
+
+    monkeypatch.setattr(module, "ensure_agent_mcp_vault", ensure)
+    monkeypatch.setattr(module, "mirror_stored_credentials", mirror)
+    monkeypatch.setattr(module, "resolve_agent_mcp_credentials", credentials)
+    await sync_agent_mcp_credentials(
+        build_fake_anthropic(MARouter().dispatch),
+        sessionmaker=object(),  # type: ignore[arg-type]
+        fernet=build_multifernet((Fernet.generate_key().decode(),)),
+        tenant_id=uuid.uuid4(),
+        agent_id=uuid.uuid4(),
+        account_id=uuid.uuid4(),
+        jwt_secret=b"x" * 32,
+        public_url="https://mcp.example.com/mcp",
+        now=dt.datetime(2026, 9, 15, tzinfo=dt.UTC),
+        vault_ids={},
+    )
+    assert mirrored == ["vlt_me"], f"the mirror runs with no stored credentials: {mirrored}"

@@ -68,11 +68,6 @@ _OFF_ON: Final[Mapping[str, str]] = {"off": "Off", "on": "On"}
 """A guardrail's on/off: On is the stricter value, so it comes last."""
 EVERY_PLATFORM: Final[frozenset[str]] = frozenset({"*"})
 """`platforms` for a feature that applies wherever a turn runs, chat or not (web, CLI, MCP)."""
-_PROVIDER_ONLY: Final[Mapping[str, tuple[Tier, ...]]] = {
-    _GEMINI: ("deployment", "workspace", "agent"),
-    _OPENAI: ("deployment", "workspace", "agent"),
-}
-"""Gemini and OpenAI compile one revision per agent, so a model feature stops at the agent."""
 _MANAGED_AGENTS_ONLY: Final[Mapping[str, tuple[Tier, ...]]] = {_GEMINI: (), _OPENAI: ()}
 """Runs only on Claude agent turns; Gemini and OpenAI agents never get it."""
 BACKEND_NAMES: Final[Mapping[str, str]] = {
@@ -160,6 +155,10 @@ class FeatureSpec:
     max_length: int = 0
     """Above 0, the feature also takes any one-line text up to this many characters (a name),
     besides its listed values."""
+    connect_only: bool = False
+    """An On needs proof only a sign-in flow has (the GitHub connect page): chat, tools, the web
+    app, the settings panel and an agent's spec refuse it, and only the operator CLI may set it.
+    Off and clearing stay open to anyone who may change it."""
     zero_unlimited: bool = False
     """A limit whose deployment 0 means no limit, as its legacy variable did: when settings
     combine, 0 is the loosest value, never the smallest."""
@@ -251,7 +250,6 @@ def _builtin(tool: str) -> FeatureSpec:
             "agent's own tool settings allow. Applies from the next message."
             + (_SEARCH_BILLING if tool == "web_search" else "")
         ),
-        backend_tiers=_PROVIDER_ONLY,
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     )
@@ -337,11 +335,9 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         tiers=TIERS,
         binds="session_mutable",
         doc=(
-            "The agent's saved keys as a .env file in its working files. Off leaves the file "
-            "out; the keys stay saved. Applies from the next message. "
-            "Claude agents only."
+            "The agent's saved keys as a .env file in its sandbox; Off leaves it out. "
+            "Applies from the next message."
         ),
-        backend_tiers=_MANAGED_AGENTS_ONLY,
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
     ),
@@ -877,7 +873,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         category="guardrails",
         effect="guardrail",
         values=_OFF_ON,
-        default="off",
+        default="on",
         tiers=("deployment",),
         binds="turn",
         doc=(
@@ -885,6 +881,19 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
             "sign-in, and that provider receives what they return. Off leaves them out."
         ),
         platforms=_CALL_GATE_PLATFORMS,
+        authority=_ADMIN,
+    ),
+    FeatureSpec(
+        key="provider_keys_file",
+        name="Keys on OpenAI and Gemini",
+        category="guardrails",
+        effect="guardrail",
+        values=_ON_OFF,
+        default="on",
+        tiers=("deployment",),
+        binds="turn",
+        doc="Sends the keys file to OpenAI and Gemini.",
+        platforms=EVERY_PLATFORM,
         authority=_ADMIN,
     ),
     FeatureSpec(
@@ -954,13 +963,71 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         doc=(
             "Ask shows a card with the destination and duration before a watch is made "
             "or resumed. Skip makes it without the card, in the same thread for the "
-            "default duration. Editing a watch, long jobs, key rotation and Fly launches "
-            "keep asking. Only a server admin can change it."
+            "default duration. Editing a watch, long jobs and key rotation keep asking. "
+            "Only a server admin can change it."
         ),
         platforms=EVERY_PLATFORM,
         authority=_SERVER_ADMIN,
         # Ask is the default and the strict value, so a stricter-wins rule could never
         # be loosened. Only a server admin sets either tier; the nearer one decides.
+        combine_override="most_specific",
+    ),
+    FeatureSpec(
+        key="compute_approval",
+        name="Approval for cloud computers",
+        category="guardrails",
+        effect="guardrail",
+        values={"skip": "Skip the card", "ask": "Ask"},
+        default="ask",
+        tiers=("workspace", "agent"),
+        binds="turn",
+        doc=(
+            "Ask shows a card to start or extend a cloud computer. Skip: no card, default time "
+            "only; OpenAI and Gemini still ask. Only a server admin sets it."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_SERVER_ADMIN,
+        # As `watch_approval`: Ask is the strict default, so the nearer tier decides.
+        combine_override="most_specific",
+    ),
+    FeatureSpec(
+        key="compute_wake_runs",
+        name="Cloud computers continue after a job",
+        category="guardrails",
+        effect="guardrail",
+        values=_ON_OFF,
+        default="off",
+        tiers=("workspace", "agent"),
+        binds="turn",
+        doc=(
+            "After an unwatched command ends, the agent may run the next, up to a set number "
+            "in a row; then it waits for the owner to run a command or write a file (not a "
+            "message). Off: it only reports. Only a server admin sets it."
+        ),
+        platforms=EVERY_PLATFORM,
+        depends_on=("compute",),
+        authority=_SERVER_ADMIN,
+        # Off is the default and the strict value, so a stricter-wins rule could never
+        # turn it on. Only a server admin sets either tier; the nearer one decides.
+        combine_override="most_specific",
+    ),
+    FeatureSpec(
+        key="compute_agent_chat",
+        name="Cloud computers from agent chat",
+        category="guardrails",
+        effect="guardrail",
+        values=_ON_OFF,
+        default="off",
+        tiers=("workspace", "agent"),
+        binds="turn",
+        doc=(
+            "Agent chat may start cloud computers without a card and use them; it lists and "
+            "stops all the person's. So may their keys driving it. Only a server admin sets it."
+        ),
+        platforms=EVERY_PLATFORM,
+        depends_on=("compute",),
+        authority=_SERVER_ADMIN,
+        # As `compute_wake_runs`: Off is the strict default, so the nearer tier decides.
         combine_override="most_specific",
     ),
     FeatureSpec(
@@ -1013,6 +1080,21 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
                 "tool result. Kept from when it is turned on, for the retention period.",
             ),
         )
+    ),
+    FeatureSpec(
+        key="github_follow_org",
+        name="Follow the GitHub org",
+        category="guardrails",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("agent",),
+        # Read when GitHub's repo list for the org is refreshed, at most an hour apart.
+        binds="provision",
+        doc=("Follows the whole org."),
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN_NOT_OWNER,
+        connect_only=True,
     ),
 )
 
@@ -1158,9 +1240,13 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     _capability(
         "compute",
         "Cloud computers",
-        "The agent can start a short-lived cloud computer to run code and keep files. Off "
-        "removes the computer tools here.",
+        (
+            "A short-lived cloud computer to run code. Only a server admin turns it "
+            "on; Off removes its tools."
+        ),
         requires=("compute_setup",),
+        default="off",
+        authority=_SERVER_ADMIN,
     ),
     _capability(
         "notebooks",
@@ -1194,7 +1280,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         category="chat",
         effect="capability",
         values=_ON_OFF,
-        default="off",
+        default="on",
         tiers=("deployment", "workspace", "agent"),
         binds="turn",
         doc=(

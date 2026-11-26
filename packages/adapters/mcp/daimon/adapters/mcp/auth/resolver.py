@@ -60,6 +60,10 @@ class AuthIdentity:
     # Ordinary chat execution identity (see the module docstring).
     chat_agent_id: uuid.UUID | None = None
     platform_user_id: str | None = None
+    # A person signed in to the MCP hub with their platform login, set only by the hub's
+    # own identity. Never a token kind: an agent, coding or CLI key's holder is not
+    # established as one person (`daimon.core.agent_chat_requester`).
+    signed_in_person: bool = False
     # Resolved from current platform authority and grants at the request boundary.
     # Platform callers never inherit a baked JWT admin claim.
     is_admin: bool = False
@@ -114,10 +118,14 @@ class AuthIdentity:
                 daimon_admin=self.is_admin,
                 action=action,
             )
-            and not self.is_external_agent
-            and self.hold is None
-            and not self.client
+            and self.holds_own_authority
         )
+
+    @property
+    def holds_own_authority(self) -> bool:
+        """Not an external agent key, a held credential or another organisation's client: the
+        caller acts as themselves, so their own configuration authority applies."""
+        return not self.is_external_agent and self.hold is None and not self.client
 
     @property
     def is_personal_user(self) -> bool:

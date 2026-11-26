@@ -9,9 +9,8 @@ export function PlacesEditor({ agent, config, catalog, ro, update, changed }: Pr
   if (config.places == null) return <Section><Locked who={agent.owner.name} /></Section>
   const places = config.places
   const has = (id: string) => places.some((p) => p.id === id)
-  const toggle = (id: "dm" | "web", on: boolean) => update((c) => {
-    c.places = on ? [...c.places!, id === "dm" ? { id, kind: "dm", platform: "discord", name: "Direct messages" } : { id, kind: "web", platform: "web", name: "Web chat" }]
-      : c.places!.filter((p) => p.id !== id)
+  const setWeb = (on: boolean) => update((c) => {
+    c.places = on ? [...c.places!, { id: "web", kind: "web", platform: "web", name: "Web chat" }] : c.places!.filter((p) => p.id !== "web")
   }, 0)
   const channels = places.filter((p) => p.kind === "channel")
   const free = catalog?.channels.filter((c) => !has(c.id)) ?? []
@@ -49,15 +48,11 @@ export function PlacesEditor({ agent, config, catalog, ro, update, changed }: Pr
         )}
       </Section>
       <Section title="Also">
-        <div className="-my-1">
-          {([["dm", "Direct messages"], ["web", "Web chat"]] as const).map(([id, label]) => (
-            <label key={id} className="flex h-9 items-center gap-2 text-sm">
-              <PlaceIcon place={{ kind: id, platform: id === "web" ? "web" : "discord" }} />{label}
-              {changed.has(`place:${id}`) && <Dot />}
-              <Switch className="ml-auto" checked={has(id)} disabled={ro} onCheckedChange={(v) => toggle(id, v)} />
-            </label>
-          ))}
-        </div>
+        <label className="-my-1 flex h-9 items-center gap-2 text-sm">
+          <PlaceIcon place={{ kind: "web", platform: "web" }} />Web chat
+          {changed.has("place:web") && <Dot />}
+          <Switch className="ml-auto" checked={has("web")} disabled={ro} onCheckedChange={setWeb} />
+        </label>
       </Section>
     </>
   )

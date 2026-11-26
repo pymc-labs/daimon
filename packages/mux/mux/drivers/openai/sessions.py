@@ -262,7 +262,11 @@ class OpenAISessions:
             "mux_config_revision": str(spec.config_revision),
         }
         if resolved is not None:
-            metadata.update(encode_metadata(resolved, self._c))
+            # Resume compares only (id, version), so the digests stay out of the session.
+            undigested = tuple(pin.model_copy(update={"digest": None}) for pin in resolved)
+            metadata.update(encode_metadata(undigested, self._c))
+        if len(metadata) > 16:
+            raise self._c.unsupported("session_metadata_size")
         body: Object = {"agent_id": spec.agent.id, "environment": environment, "metadata": metadata}
         if self._controls.model is not None:
             body["agent"] = {"model": self._controls.model}

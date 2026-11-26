@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -15,17 +16,21 @@ from daimon.core.continuity.wakes import enqueue_wake
 from daimon.core.direct_messages import (
     DirectMessageAccessRevoked,
     owner_dm_turn,
+    run_dm_routine,
     run_dm_timer,
+    run_dm_watch,
 )
 from daimon.core.scope import ResolvedConfig
 from daimon.core.stores.direct_messages import set_dm_enabled
 from daimon.core.stores.domain import ContinuationReason, TenantRow
 from daimon.core.stores.task_continuations import get_continuation
-from daimon.core.turn.admission import Admission, AdmissionGrant
+from daimon.core.turn.admission import Admission, AdmissionGrant, DmSource
 from daimon.core.turn.errors import SessionBusyError
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.turn_fakes import deps_for
+from mux.profiles.gemini import INLINE_REUSE_ID
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 OWNER = "555"
@@ -107,6 +112,27 @@ async def test_a_timer_runs_in_a_fresh_private_scope_with_its_prompt(
     assert kwargs["prompt"] == "seed text" and kwargs["watch_row"] is None
 
 
+async def test_a_dm_timer_runs_on_gemini_as_its_owners_private_turn(
+    db_session_factory: async_sessionmaker, monkeypatch
+):
+    """A timer of a Gemini agent takes the DM routine's provider path, not a refusal."""
+    tenant, account, row = await seed(db_session_factory)
+    revision = SimpleNamespace(profile=INLINE_REUSE_ID, backend="gemini")
+    admission = replace(
+        admission_for(tenant, account.id, "ag_target"),
+        backend_revision=revision,  # pyright: ignore[reportArgumentType]
+        backend_revision_origin="agent",
+    )
+    _admit, bind, run = patch_world(monkeypatch, admission)
+    bind.return_value = SimpleNamespace(admission=admission, backend=object())
+    run.return_value = SimpleNamespace(text="done", session_id="sesn_dm", outputs=None)
+
+    reply = await run_dm_timer(deps_for(None, db_session_factory), row, prompt="seed text")
+
+    assert reply.text == "done" and not reply.on_managed_agents, reply
+    assert bind.await_args.args[1].routine_sandbox_tools is False, "no built-ins without opt-in"
+
+
 async def test_a_timer_whose_agent_changed_does_not_run(
     db_session_factory: async_sessionmaker, monkeypatch
 ):
@@ -155,3 +181,53 @@ async def test_a_timer_waits_while_its_owner_has_a_dm_turn_running(
     async with owner_dm_turn(deps, platform="discord", owner=OWNER, wait=True):
         with pytest.raises(SessionBusyError):
             await run_dm_timer(deps, row, prompt="x")
+
+
+@pytest.mark.parametrize(
+    ("entry", "reach"), [("routine", True), ("timer", False), ("watch", False)]
+)
+async def test_only_the_owner_dm_routine_fire_is_given_own_dm_reach(
+    db_session_factory: async_sessionmaker, monkeypatch, entry: str, reach: bool
+):
+    """Watches and timers share the routine's DM path but never reach a limited room, and
+    only a routine's run may end with no text (its outbox then posts nothing)."""
+    tenant, account, row = await seed(
+        db_session_factory, reason="watch_report" if entry == "watch" else "timer"
+    )
+    admission = admission_for(tenant, account.id, "ag_target")
+    patch_world(monkeypatch, admission)
+    monkeypatch.setattr(
+        direct_messages,
+        "bind_session",
+        AsyncMock(
+            return_value=SimpleNamespace(admission=admission, backend=None, ma_session_id="sesn")
+        ),
+    )
+    unattended = AsyncMock(return_value=SimpleNamespace(text="done"))
+    monkeypatch.setattr(direct_messages, "_run_unattended_turn", unattended)
+    monkeypatch.setattr(
+        "daimon.core.stores.watches.record_delivery_session", AsyncMock(return_value=True)
+    )
+    deps = deps_for(None, db_session_factory)
+    source = DmSource(channel_id="4241", thread_id="4242")
+
+    if entry == "routine":
+        await run_dm_routine(
+            deps,
+            tenant_id=tenant.id,
+            owner_user_id=OWNER,
+            agent_name="target-agent",
+            prompt="p",
+            source=None,
+            budget_channel_id=None,
+            requester_org=RequesterOrg.HOST,
+        )
+    elif entry == "timer":
+        await run_dm_timer(deps, row, prompt="p")
+    else:
+        await run_dm_watch(
+            deps, row, owner_user_id=OWNER, prompt="p", source=source, budget_channel_id="4241"
+        )
+
+    assert unattended.await_args.kwargs["own_dm_reach"] is reach
+    assert unattended.await_args.kwargs["may_end_empty"] is reach

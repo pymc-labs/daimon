@@ -44,6 +44,7 @@ from daimon.core.channel_environments import (
     environment_option_value,
 )
 from daimon.core.channel_rules import READERS_LABELS, WRITERS_LABELS, ChannelRuleStatus
+from daimon.core.channel_skills import remove_label
 from daimon.core.github_connect_cards import repo_count
 from daimon.core.github_repo_auth import RepoAccess, normalize_owner_repo
 from daimon.core.model_switch import (
@@ -314,6 +315,8 @@ MAX_ENVIRONMENT_LINES: Final = 10
 MAX_SHOWN_ENVIRONMENT_NAME: Final = 200
 _MORE_LINE_RESERVE: Final = len("\n_and 9999 more_")
 _MAX_OPTION_TEXT: Final = 75
+#: Slack shows at most 10 checkboxes.
+_MAX_REMOVE_OPTIONS: Final = 10
 CHANNEL_SKILLS_LABEL: Final = "Channel skills"
 CHANNEL_SKILLS_HEADER: Final = "Extra skills"
 CHANNEL_SKILLS_NOTE: Final = (
@@ -1203,7 +1206,10 @@ def build_channel_skills_form(
             {
                 "type": "input",
                 "block_id": CHANNEL_SKILLS_REMOVE_INPUT_ID,
-                "label": {"type": "plain_text", "text": "Remove"},
+                "label": {
+                    "type": "plain_text",
+                    "text": remove_label(_MAX_REMOVE_OPTIONS, len(rows)),
+                },
                 "optional": True,
                 "element": {
                     "type": "checkboxes",
@@ -1213,7 +1219,7 @@ def build_channel_skills_form(
                             "text": {"type": "plain_text", "text": row.name[:_MAX_OPTION_TEXT]},
                             "value": row.skill_id,
                         }
-                        for row in rows[:10]
+                        for row in rows[:_MAX_REMOVE_OPTIONS]
                     ],
                 },
             }

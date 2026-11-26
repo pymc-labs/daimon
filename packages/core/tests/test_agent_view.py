@@ -8,12 +8,15 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import httpx
+import jwt as pyjwt
 import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core import agent_view
 from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.agent_view import AgentFacts, AgentViewDeps, AgentViewer, OwnMcpServer, PlaceDoc
+from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_identity import RELAY_CLAIM, relay_url
 from daimon.core.mcp_tool_listing import ListedTool, McpToolLister
 from daimon.core.scope import ChannelConfigRow, DeploymentDefault
 from daimon.core.stores import (
@@ -169,6 +172,39 @@ def test_a_rule_that_leaves_web_out_drops_the_web_chat_and_no_rule_keeps_it() ->
     assert [p.id for p in _places(rule=AgentRule(runs_in=("c1",)))] == ["c1"]
     assert [p.id for p in _places()] == ["web"], "an unruled agent answers in web chat"
     assert [p.id for p in _places(rule=AgentRule(runs_in=()))] == [], "nowhere is no place"
+
+
+@pytest.mark.parametrize(
+    ("rule", "own"),
+    [
+        (None, ()),
+        (AgentRule(runs_in=("c1",)), ()),
+        (AgentRule(runs_in=("c1", "web")), ()),
+        (AgentRule(invoker_role_ids=("111111111111111111",)), ()),
+        (AgentRule(runs_in=("c2", "web")), ("c2",)),
+    ],
+)
+def test_web_chat_is_listed_only_where_a_web_chat_may_run_the_agent(
+    rule: AgentRule | None, own: tuple[str, ...]
+) -> None:
+    """The Channels panel says web chat only where the web chat picker offers the agent to
+    someone its rules let in."""
+    policy = TenantAccessPolicy(
+        agent_rules={"helper": rule} if rule is not None else {},
+        channel_rules={c: ChannelRule(readers="own", writers="own") for c in own},
+    )
+    runs = authorize(
+        policy,
+        subject=Subject(
+            platform_user_id="u1", role_ids=("111111111111111111",), verified_membership=True
+        ),
+        action=Action.RUN_AGENT,
+        surface=Surface.WEB,
+        agent=AgentRef.of("helper"),
+        place=Place(channel_id="web:p1", parent_channel_id="web:p1"),
+    )
+    listed = "web" in [p.id for p in _places(rule=rule, own=own)]
+    assert listed == bool(runs), f"web chat listed={listed} but the web chat runs it={bool(runs)}"
 
 
 def test_a_channel_kept_to_its_own_agents_is_confidential() -> None:
@@ -466,7 +502,10 @@ async def _own_server_view(
         markup=Decimal(1),
         mcp_tools=McpToolLister(transport=handler),
         own_server=OwnMcpServer(
-            url=_OWN, secret=b"s" * 32, now=lambda: datetime(2026, 10, 2, tzinfo=UTC)
+            url=_OWN,
+            secret=b"s" * 32,
+            now=lambda: datetime(2026, 10, 2, tzinfo=UTC),
+            relay_names=frozenset({"crm"}),
         ),
     )
     view = None
@@ -511,6 +550,57 @@ async def test_the_deployments_own_server_is_listed_with_a_token_minted_for_the_
     assert (token.label, token.surface) == (f"internal:{token.jti}", "provider_turn"), (
         "an internal token the sweep prunes, refused what a provider turn is refused"
     )
+
+
+async def test_a_server_behind_the_identity_relay_is_listed_with_a_credential_naming_no_session(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A signed-identity server is reached only through the relay, with a chat credential."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["Authorization"].removeprefix("Bearer "))
+        return _answer(request)
+
+    view, account = await _own_server_view(
+        db_session,
+        db_session_factory,
+        httpx.MockTransport(handler),
+        is_admin=True,
+        url=relay_url(_OWN, "crm"),
+    )
+    assert view is not None, "the agent exists"
+    (server,) = view.mcp_servers
+    assert ([t.name for t in server.tools], server.listed) == (["search"], True), (
+        "the viewer sees the relayed server's real tools"
+    )
+    payloads = [pyjwt.decode(t, options={"verify_signature": False}) for t in seen]
+    assert payloads and all(p[RELAY_CLAIM] == {"agent_name": "helper"} for p in payloads), (
+        "the relay is told the agent and no session"
+    )
+    (token,) = await _tokens_of(db_session, account)
+    assert token.revoked_at is not None, "the credential is revoked once the list is read"
+    assert token.expires_at == datetime(2026, 10, 2, 0, 2, tzinfo=UTC), "it lives two minutes"
+
+
+async def test_a_relay_url_for_no_configured_server_gets_no_credential(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    asked: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        asked.append(request)
+        return _answer(request)
+
+    view, account = await _own_server_view(
+        db_session,
+        db_session_factory,
+        httpx.MockTransport(handler),
+        is_admin=True,
+        url=relay_url(_OWN, "other"),
+    )
+    assert view is not None and view.mcp_servers[0].listed is False, "nothing is listed"
+    assert (asked, await _tokens_of(db_session, account)) == ([], []), "nor a credential minted"
 
 
 async def test_an_unreadable_own_server_shows_not_listed_and_logs_why(

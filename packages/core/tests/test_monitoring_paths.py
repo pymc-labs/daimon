@@ -53,6 +53,10 @@ NO_QUESTION: dict[tuple[str, str], str] = {
         "run_wizard_submit_turn_observed",
     ): "answers to the agent's own form; request_text would also turn on MCP context",
     (
+        "packages/core/daimon/core/provider_routine.py",
+        "run_provider_routine",
+    ): "a routine's saved prompt, not a question asked now; a Claude routine keeps none either",
+    (
         "packages/testing/daimon/testing/channel_accounting.py",
         "run_turn",
     ): "a test harness, not a production path",

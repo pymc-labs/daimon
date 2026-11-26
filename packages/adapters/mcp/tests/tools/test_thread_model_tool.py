@@ -18,7 +18,8 @@ from daimon.adapters.mcp.tools.thread_model import (
 )
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings, TurnSettings
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import FeatureTarget, Role
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.stores.thread_models import get_thread_model
 from daimon.core.thread_models import _MODEL_EFFORTS  # pyright: ignore[reportPrivateUsage]
 from daimon.testing.factories import make_account, make_tenant
@@ -281,13 +282,22 @@ async def test_another_providers_model_previews_then_applies_only_on_the_card(
     assert await _stored(committing_sessionmaker, tenant.id, "T_THREAD") == "gpt-6-luna"
 
 
-async def test_another_providers_model_needs_the_owner_without_opt_in(
+async def test_another_providers_model_needs_the_owner_once_the_agent_turns_it_off(
     monkeypatch: pytest.MonkeyPatch,
     db_session: AsyncSession,
     committing_sessionmaker: async_sessionmaker[AsyncSession],
 ) -> None:
     tenant = await make_tenant(db_session)
     caller = await make_account(db_session, tenant=tenant)
+    await set_feature_value(
+        db_session,
+        tenant_id=tenant.id,
+        target=FeatureTarget("agent", agent_id=_RESPONDER_ID),
+        key="thread_providers",
+        value="off",
+        set_by=None,
+        surface="chat",
+    )
     await db_session.commit()
     runtime = _runtime(committing_sessionmaker, mux=True)
     await _openai_pick(monkeypatch, committing_sessionmaker, tenant.id, caller.id, admin=False)

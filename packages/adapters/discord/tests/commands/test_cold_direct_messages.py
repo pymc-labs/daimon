@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -889,6 +890,7 @@ async def test_dm_turn_card_rechecks_delivery_access_before_every_write(
     row_reply = private_reply(await conversation(db_session_factory))
     admission = SimpleNamespace(
         grant=row_reply.grant,
+        backend_revision=None,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
         display_name=lambda fallback: fallback,
@@ -938,6 +940,7 @@ async def test_dm_answer_pings_only_where_dm_completion_pings_and_completion_pin
     shown = {"dm_completion_pings": dm_pings, "completion_pings": pings}
     admission = SimpleNamespace(
         grant=private_reply(await conversation(db_session_factory)).grant,
+        backend_revision=None,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda key, *_args: shown.get(key, False),
         display_name=lambda fallback: fallback,
@@ -1023,6 +1026,7 @@ async def test_unknown_membership_does_not_close_the_dm_turn_card(db_session_fac
     await cog.on_message(message())
     admission = SimpleNamespace(
         grant=private_reply(await conversation(db_session_factory)).grant,
+        backend_revision=None,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
         display_name=lambda fallback: fallback,
@@ -1066,6 +1070,7 @@ async def test_unknown_membership_still_closes_the_card_on_a_proved_denial(
     await cog.on_message(message())
     admission = SimpleNamespace(
         grant=private_reply(await conversation(db_session_factory)).grant,
+        backend_revision=None,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
         display_name=lambda fallback: fallback,
@@ -1092,6 +1097,7 @@ async def test_unknown_membership_refuses_a_write_once_the_source_is_sealed(
     await cog.on_message(message())
     admission = SimpleNamespace(
         grant=private_reply(await conversation(db_session_factory)).grant,
+        backend_revision=None,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
         display_name=lambda fallback: fallback,
@@ -1115,6 +1121,7 @@ async def test_recipient_policy_closes_the_dm_turn_card(db_session_factory, monk
     grant = private_reply(await conversation(db_session_factory)).grant
     admission = SimpleNamespace(
         grant=grant,
+        backend_revision=None,
         agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="claude-test")),
         shown=lambda *_args, **_kwargs: False,
         display_name=lambda fallback: fallback,
@@ -1162,6 +1169,7 @@ async def test_answer_is_sent_as_text_only_when_the_card_shows_no_outcome(
         kwargs["card_for"](await conversation(db_session_factory))(
             SimpleNamespace(
                 grant=None,
+                backend_revision=None,
                 agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
                 shown=lambda *_args, **_kwargs: False,
                 display_name=lambda fallback: fallback,
@@ -1195,6 +1203,7 @@ async def test_failed_turn_adds_no_second_error_under_an_ended_card(
         kwargs["card_for"](await conversation(db_session_factory))(
             SimpleNamespace(
                 grant=None,
+                backend_revision=None,
                 agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
                 shown=lambda *_args, **_kwargs: False,
                 display_name=lambda fallback: fallback,
@@ -1270,6 +1279,7 @@ async def test_dm_card_edit_drops_the_transport_only_replacement_flag(
         kwargs["card_for"](await conversation(db_session_factory))(
             SimpleNamespace(
                 grant=None,
+                backend_revision=None,
                 agent=SimpleNamespace(name="private-0", model=SimpleNamespace(id="m")),
                 shown=lambda *_args, **_kwargs: False,
                 display_name=lambda fallback: fallback,
@@ -1801,3 +1811,45 @@ async def test_a_grant_that_lists_others_hides_the_agent(db_session_factory, mon
     await cog.on_message(msg)
     assert_generic_guidance(msg, tenants)
     assert await conversation(db_session_factory) is None, "an unlisted person gets no DM"
+
+
+@pytest.mark.parametrize(
+    ("reason", "stopping", "reported"),
+    [
+        ("conversation_moved", False, ["dropped"]),
+        ("burst_interrupted", False, []),
+        ("conversation_moved", True, []),
+    ],
+)
+async def test_a_dropped_dm_is_an_issue_unless_a_deploy_or_an_interruption_dropped_it(
+    db_session_factory, monkeypatch, reason, stopping, reported
+):
+    """Deploys make no DM issues; an interrupted burst's own error is reported where it was."""
+    cog, *_ = await setup(db_session_factory, monkeypatch)
+    issues = AsyncMock()
+    monkeypatch.setattr(module, "report_dm_issue", issues)
+    monkeypatch.setattr(module, "is_shutting_down", lambda: stopping)
+    msg = dm_message(101, "one")
+    await cog._tell_dropped(msg, reason=reason, tenant_id=uuid.uuid4())
+    assert [call.args[2] for call in issues.await_args_list] == reported
+    if reported:
+        assert issues.await_args.kwargs["user_id"] == str(msg.author.id), "with its person"
+    assert sent_text(msg.channel.send.await_args_list[-1]) == module._DROPPED_NOTICE
+    await cog.cog_unload()
+
+
+async def test_the_person_is_told_before_the_issue_is_recorded(db_session_factory, monkeypatch):
+    """A failing database delays only the issue, never the person's notice."""
+    cog, *_ = await setup(db_session_factory, monkeypatch)
+    order: list[str] = []
+    msg = dm_message(101, "one")
+    msg.channel.send.side_effect = lambda *_a, **_k: order.append("notice")
+
+    async def issue(*_args, **_kwargs):
+        order.append("issue")
+
+    monkeypatch.setattr(module, "report_dm_issue", issue)
+    monkeypatch.setattr(module, "is_shutting_down", lambda: False)
+    await cog._tell_dropped(msg, reason="conversation_moved", tenant_id=uuid.uuid4())
+    assert order == ["notice", "issue"], "the notice goes first"
+    await cog.cog_unload()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import re
 import uuid
 from typing import Any
@@ -10,7 +11,7 @@ import httpx
 import pytest
 from anthropic.types.beta.agent_create_params import Tool
 from daimon.core import agent_editing
-from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.agent_editing import (
     AgentActor,
     AgentEditDeps,
@@ -22,7 +23,7 @@ from daimon.core.authz import Subject, Surface
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores import agent_owners
-from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent
@@ -332,6 +333,37 @@ async def test_set_places_rewrites_the_rule_of_a_restricted_agent(
     )
 
 
+async def test_set_places_refuses_web_chat_for_a_channels_own_agent(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    outside = await _actor(db_session, admin=True)
+    # From inside the channel, where the agent's settings may change.
+    actor = dataclasses.replace(
+        outside,
+        subject=dataclasses.replace(outside.subject, origin_channel_ids=frozenset({"c2"})),
+    )
+    own = TenantAccessPolicy(
+        agent_rules={"helper": AgentRule(runs_in=("c2",))},
+        channel_rules={"c2": ChannelRule(readers="own", writers="own")},
+    )
+    await set_access_policy(db_session, tenant_id=actor.tenant_id, policy=own)
+    await db_session.commit()
+    deps = _deps(_router(actor.tenant_id, []), db_session_factory)
+    agent = await agent_editing.load_editable_agent(deps, actor=actor, ma_agent_id="ag_x")
+    with pytest.raises(AgentEditError) as refused:
+        await agent_editing.set_places(
+            deps,
+            actor=actor,
+            agent=agent,
+            before=[PlaceEdit("c2")],
+            after=[PlaceEdit("c2"), PlaceEdit("web")],
+        )
+    assert refused.value.kind == "invalid", "a channel's own agent never answers in a web chat"
+    async with db_session_factory() as session:
+        policy = await load_access_policy(session, tenant_id=actor.tenant_id)
+    assert policy.agent_rules == own.agent_rules, "the rule is unchanged"
+
+
 async def test_set_places_refuses_an_owner_who_is_not_an_admin_and_writes_nothing(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
@@ -353,7 +385,6 @@ async def test_set_places_changes_no_private_channels_pick_from_outside_it(
 ) -> None:
     """A shared agent's places include a private channel's pick, which is that
     channel's setting: an admin outside it neither adds nor removes it."""
-    import dataclasses
 
     from daimon.core.permissions import SEALED_REFUSAL
     from daimon.core.stores.access_policy import set_access_policy

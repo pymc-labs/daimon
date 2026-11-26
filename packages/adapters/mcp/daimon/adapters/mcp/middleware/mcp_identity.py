@@ -42,7 +42,11 @@ from daimon.adapters.mcp.auth.verifier import (
     TOKEN_LABEL_CLAIM,
 )
 from daimon.adapters.mcp.middleware.held_tools import held_tool_refusal, narrow_to_held_tools
-from daimon.adapters.mcp.middleware.tool_rule_backstop import DENIAL_REASON, tool_rule_refusal
+from daimon.adapters.mcp.middleware.tool_rule_backstop import (
+    DENIAL_REASON,
+    needs_host_gate,
+    tool_rule_refusal,
+)
 from daimon.core.admin_authority import AuthorityCache, resolve_authority
 from daimon.core.anthropic_guard import AnthropicDisabled, without_anthropic
 from daimon.core.channel_backend import is_selfhosted_channel
@@ -722,7 +726,14 @@ class IdentityMiddleware(Middleware):
             from daimon.core.tool_safety import confirmation_gated_tools
 
             # `call_tool` re-enters here with the inner tool's name, so the proxy is covered.
-            if str(getattr(context.message, "name", "")) in confirmation_gated_tools():
+            name = str(getattr(context.message, "name", ""))
+            if name in confirmation_gated_tools() or await needs_host_gate(
+                self._sessionmaker,
+                identity=identity,
+                tool_name=name,
+                policy=self._tool_safety,
+                public_url=self._public_url,
+            ):
                 return await self._require_host_call_gate().ask(
                     context,
                     identity,

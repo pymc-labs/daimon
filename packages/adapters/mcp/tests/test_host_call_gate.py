@@ -29,7 +29,13 @@ from daimon.adapters.mcp.tools._outbound import TurnScope, approve
 from daimon.core import host_calls
 from daimon.core.authz import Subject
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
-from daimon.core.confirmation import ServerSkillUpdateCard, confirmed_tools_for_turn
+from daimon.core.confirmation import (
+    ServerSkillUpdateCard,
+    compute_card_skipped,
+    confirmed_tools_for_turn,
+)
+from daimon.core.features.service import FeatureActor, change_feature
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.host_calls import ConfirmedCallRunner, confirmed_call_prefix, run_confirmed_calls
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.outbound.reach import ReachPlan, ReachTally, turn_tally_key
@@ -41,13 +47,14 @@ from daimon.core.stores.mcp_tokens import create_mcp_token_row, get_mcp_token
 from daimon.core.stores.reach_tallies import lock_tally, save_tally
 from daimon.core.stores.turn_origins import create_origin, get_session_origin
 from daimon.core.tool_safety import (
+    COMPUTE_APPROVAL_TOOLS,
     CONFIRMED_DAIMON_TOOLS,
     DAIMON_SERVER_NAME,
     ToolCall,
     ToolSafetyPolicy,
     confirmation_gated_tools,
 )
-from daimon.core.turn.approvals import agent_rule_lookup, interactive_decider
+from daimon.core.turn.approvals import agent_rule_lookup, interactive_decider, unattended_decider
 from daimon.core.turn.unattended_capabilities import protected_tools
 from daimon.core.turn_origin import ExecutionFlags, current_execution_origin_id, execution_origin
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
@@ -506,6 +513,105 @@ async def test_each_gated_tool_asks_and_runs_as_on_claude(
     await _call(rig, await _credential(rig, card.id), name, args)
     assert [ran for ran, _, _ in rig.ran] == [name], "ran once after the press"
     assert (await _card(rig)).status == "applied"
+
+
+@pytest.mark.parametrize("gate", ["on", "off"])
+@pytest.mark.parametrize(
+    ("rule", "channel", "attended"),
+    [
+        ("ask", None, True),
+        ("ask", None, False),
+        ("ask", "elsewhere", True),
+        ("deny", _CHANNEL, True),
+        ("deny", "elsewhere", True),
+    ],
+    ids=["ask", "ask_unattended", "ask_elsewhere", "channel_deny", "deny_elsewhere"],
+)
+async def test_a_rule_on_an_ungated_tool_is_decided_as_on_claude(
+    rig: Rig, rule: Literal["ask", "deny"], channel: str | None, attended: bool, gate: str
+) -> None:
+    """A provider turn has no approval pause: a tool with an `ask` or channel rule goes
+    to the gate, which gets the outcome Claude's decider gives. With the gate off an
+    `ask` is refused, not run, and a rule elsewhere still lets the tool run."""
+    policy = _settings().tool_safety.model_copy(update={"enabled": True, "agent_rules": True})
+    settings = _settings(host_call_gate=gate).model_copy(update={"tool_safety": policy})
+    runtime = SimpleNamespace(session_factory=rig.sessions, settings=settings)
+    rig.middleware = IdentityMiddleware(
+        subject_resolver=_none, tenant_resolver=_none, role_resolver=_none,
+        agent_id_resolver=_none, is_admin_resolver=_none, internal_resolver=_none,
+        sessionmaker=rig.sessions, tool_safety=policy, public_url=_URL,
+    )  # fmt: skip
+    rig.middleware.attach_host_call_gate(HostCallGate(runtime, public_url=_URL))  # pyright: ignore[reportArgumentType]
+    await _set_rule(rig, "list_agents", rule, channel)
+    identity = rig.identity()
+    if attended:
+        expected = await _claude_outcome(rig, policy, "list_agents", {})
+    else:
+        grant = f"grant-{uuid.uuid4()}"
+        now = dt.datetime.now(dt.UTC)
+        async with rig.sessions.begin() as session:
+            await create_origin(
+                session, tenant_id=rig.tenant_id, account_id=rig.account_id,
+                platform="discord", parent_channel_id=_CHANNEL, thread_id=_THREAD,
+                responder_ma_agent_id=_MA_AGENT, responder_name="Researcher",
+                configuration_target_ma_agent_id=None, configuration_target_name=None,
+                role=Role.USER, expires_at=now + dt.timedelta(hours=1), now=now,
+                sender_foreign=False, shared_channel=False, chat_session_id=grant,
+                attended=False,
+            )  # fmt: skip
+        identity = rig.identity(chat_session_id=grant)
+        decide = unattended_decider(
+            policy,
+            trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+            confirmed_tools=protected_tools(policy),
+            rules_for=agent_rule_lookup(
+                rig.sessions, tenant_id=rig.tenant_id, agent_id=_MA_AGENT,
+                server_urls={DAIMON_SERVER_NAME: _URL}, also_urls={DAIMON_SERVER_NAME: _URL},
+                channel_id=_CHANNEL,
+            ),
+            daimon_rules=True,
+        )  # fmt: skip
+        call = ToolCall(tool_use_id="c", server_name=DAIMON_SERVER_NAME, tool_name="list_agents")
+        expected = "ran" if (await decide(call)).allow else "refused"
+    if gate == "off" and expected == "asked":
+        expected = "refused"
+
+    try:
+        await _call(rig, identity, "list_agents", {}, proxy=True)
+        actual = "asked" if await _cards(rig) else "ran" if rig.ran else "refused"
+    except ToolError:
+        actual = "refused"
+
+    assert actual == expected, f"{rule} in {channel} ({gate}): the gate and Claude's differ"
+
+
+@pytest.mark.parametrize("name", sorted(COMPUTE_APPROVAL_TOOLS))
+async def test_compute_skip_still_cards_launch_and_extend_where_daimon_posts_the_card(
+    rig: Rig, name: str
+) -> None:
+    """A deliberate difference from Claude, as with `watch_approval`: with
+    `compute_approval` skip a Claude session starts or extends a machine without the
+    card, but on OpenAI and Gemini Daimon posts its own card for every gated tool
+    (`confirmation_gated_tools`), and neither switch changes that list. There the card
+    still asks, so the person sees the machine and its time before it starts."""
+
+    async def admin(_: object) -> bool:
+        return True
+
+    await change_feature(
+        rig.sessions, _settings(), FeatureActor(rig.tenant_id, None, "web", None, admin),
+        key="compute_approval", tier="agent", value="skip",
+        place=FeaturePlace(rig.tenant_id, "discord", None, agent_id=_MA_AGENT),
+    )  # fmt: skip
+    assert await compute_card_skipped(rig.sessions, rig.tenant_id, _MA_AGENT, "discord")
+    rig.extra = (name,)
+    _attach(rig)
+
+    text = await _call(rig, rig.identity(), name, {CONFIRMED_DAIMON_TOOLS[name]: "x"})
+
+    assert text == host_calls.waiting_text("the person who asked"), f"waiting result: {text}"
+    assert (await _card(rig)).tool_name == name, "the call waits on Daimon's own card"
+    assert rig.ran == [], "nothing starts before the press"
 
 
 async def test_ask_refuses_a_malformed_reach_plan_before_any_card(rig: Rig) -> None:

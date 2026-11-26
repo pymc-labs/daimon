@@ -15,8 +15,10 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-OUTPUT_DIR = Path("/mnt/session/outputs")
-KEY_FILE = Path("/mnt/session/uploads/.env")
+# Where reply files are collected: Claude's outputs mount, else the workspace's (OpenAI, Gemini).
+OUTPUT_DIRS = (Path("/mnt/session/outputs"), Path("/workspace/outputs"))
+# The agent's keys file: uploads on Claude, the workspace on OpenAI and Gemini.
+KEY_FILES = (Path("/mnt/session/uploads/.env"), Path("/workspace/.daimon/.env"))
 MAX_BYTES = 40 * 1024 * 1024
 
 
@@ -55,10 +57,18 @@ def text(value):
     return value
 
 
+def output_dir():
+    return next((path for path in OUTPUT_DIRS if path.parent.is_dir()), OUTPUT_DIRS[0])
+
+
+def key_file():
+    return next((path for path in KEY_FILES if path.is_file()), KEY_FILES[0])
+
+
 def key(name):
     # Mounted files are serialized as literal, shell-quoted assignments. Never source them.
     try:
-        for line in KEY_FILE.read_text().splitlines():
+        for line in key_file().read_text().splitlines():
             lhs, sep, rhs = line.partition("=")
             if sep and lhs.strip() == name:
                 parts = shlex.split(rhs, comments=False)
@@ -136,10 +146,11 @@ def image_bytes(data):
 def save_png(data):
     image_bytes(data)
     require(data.startswith(b"\x89PNG\r\n\x1a\n"), "Expected PNG output")
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    require(OUTPUT_DIR.resolve() == OUTPUT_DIR.absolute(), "Output directory must not be a symlink")
+    output = output_dir()
+    output.mkdir(parents=True, exist_ok=True)
+    require(output.resolve() == output.absolute(), "Output directory must not be a symlink")
     # An unpredictable exclusive name plus directory-relative opens prevents path escape/overwrite.
-    directory = os.open(OUTPUT_DIR, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    directory = os.open(output, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     name = f"workflow-{uuid.uuid4().hex}.png"
     try:
         fd = os.open(
@@ -153,7 +164,7 @@ def save_png(data):
             raise
     finally:
         os.close(directory)
-    return str(OUTPUT_DIR / name)
+    return str(output / name)
 
 
 def main(run, credential=None):

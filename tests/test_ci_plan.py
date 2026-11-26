@@ -55,6 +55,8 @@ def _ci() -> dict[str, Any]:
         (".gitignore", "tooling"),
         ("LICENSE", "docs"),
         ("apps/report-host/src/report_host/app.py", "report-host"),
+        ("apps/compute-session/src/compute_session/server.py", "compute-session"),
+        ("apps/compute-session/README.md", "tooling"),
         ("pyproject.toml", "all"),
         ("uv.lock", "all"),
         (".github/workflows/ci.yml", "all"),
@@ -172,6 +174,7 @@ _LEAVES = {
     "harness": r"\bdaimon_harness\b",
     "notebook-host": r"\bnotebook_host\b",
     "report-host": r"\breport_host\b",
+    "compute-session": r"\bcompute_session\b",
 }
 
 

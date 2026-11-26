@@ -53,7 +53,8 @@ from daimon.core.credential_env import assemble_env_bytes, upload_env_file
 from daimon.core.errors import DaimonError
 from daimon.core.features.model_input import DEFAULT_TOOLSET, SessionToolset
 from daimon.core.github_app_session import rotate_live_app_tokens
-from daimon.core.mcp_identity import identity_relay_urls
+from daimon.core.mcp_identity import identity_relay_urls, relay_base
+from daimon.core.mcp_server_url import canonical_mcp_url, same_mcp_url
 from daimon.core.mcp_vault import GITHUB_ROUTER_SESSION_TTL, refresh_mounted_mcp_vaults
 from daimon.core.session_compat import (
     ChangeReason,
@@ -262,6 +263,7 @@ async def apply_update_ops(
     shared_owner: uuid.UUID | None = None,
     legacy_memory_servers: tuple[str, ...] = (),
     hold: TurnHold | None = None,
+    slack_turn_context_id: uuid.UUID | None = None,
 ) -> AppliedOps | SessionBusy:
     """Run `ops` against the live session and return what it runs afterwards.
 
@@ -455,7 +457,18 @@ async def apply_update_ops(
                         )
                 # The organisation's tokens never reach an external caller's vault.
                 elif (
-                    fernet is not None and mcp.public_url is not None and mcp.jwt_secret is not None
+                    fernet is not None
+                    and mcp.public_url is not None
+                    and mcp.jwt_secret is not None
+                    # Nothing to mirror or clean in a session with no vault or no external server.
+                    and snapshot.vault_id is not None
+                    and any(
+                        not same_mcp_url(server.url, str(mcp.public_url))
+                        and not canonical_mcp_url(server.url).startswith(
+                            relay_base(str(mcp.public_url))
+                        )
+                        for server in agent.mcp_servers
+                    )
                 ):
                     await sync_agent_mcp_credentials(
                         anthropic,
@@ -469,6 +482,9 @@ async def apply_update_ops(
                         now=now,
                         exclude_github_copilot=snapshot.github_mode == "app",
                         vault_ids=mcp_vault_ids,
+                        # Into the vault this session mounts, as `create_session` chose it.
+                        hold=hold,
+                        slack_turn_context_id=slack_turn_context_id,
                     )
 
     return AppliedOps(snapshot=snapshot, applied=tuple(applied))

@@ -7,6 +7,7 @@ clients are never discovered implicitly.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -15,7 +16,7 @@ from uuid import NAMESPACE_URL, uuid5
 import structlog
 from daimon.core.mux_backend import TurnRuntime
 from daimon.core.pricing import ProviderPrice, provider_cost_of
-from daimon.core.session_compat import ReplaceSession
+from daimon.core.session_compat import ChangeReason, ReplaceSession
 from daimon.core.shared_threads import shared_owner
 from daimon.core.turn.admission import reauthorize
 from daimon.core.turn.carry_over import carry_on_adoption, replaced_session
@@ -28,7 +29,13 @@ from daimon.core.turn.gemini import (
     gemini_turn_scope,
 )
 from daimon.core.turn.gemini_state import HoldSettlement, interaction_of
-from daimon.core.turn.prepare import CONTINUED, PreparedTurn, ProviderPreparationRequest
+from daimon.core.turn.prepare import (
+    CONTINUED,
+    ContinuityOutcome,
+    PreparedTurn,
+    ProviderPreparationRequest,
+)
+from daimon.core.turn.provider_env import PATH, turn_env_file
 from daimon.core.turn.replace_binding import (
     BindingFacts,
     OldSession,
@@ -38,15 +45,23 @@ from daimon.core.turn.replace_binding import (
     replace_binding,
 )
 from daimon.core.turn.session_skills import SessionSkillFiles, tell_left_out, turn_session_skills
+from daimon.core.turn.unattended_capabilities import routine_builtins_withheld
 from daimon.core.usage_recording import record_provider_usage
 from mux.contracts.config import ConfigRevision
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ResourceRef, Scope, ThreadRef
-from mux.contracts.resources import ProviderBinding, SessionSpec
+from mux.contracts.ports import ManagedAgents
+from mux.contracts.resources import ProviderBinding, Session, SessionSpec
 from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini import compile_environment
-from mux.errors import BindingConflict, ContinuityLost, ScopeViolation, UnsupportedCapability
-from mux.profiles.gemini import INLINE_REUSE, SESSION_NAMESPACE
+from mux.errors import (
+    BindingConflict,
+    ContinuityLost,
+    ProviderError,
+    ScopeViolation,
+    UnsupportedCapability,
+)
+from mux.profiles.gemini import INLINE_REUSE, SESSION_NAMESPACE, WITHHOLD_BUILTINS
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
 from mux.state.store import ERA_REF, StateStore, adopted_identity
@@ -54,6 +69,12 @@ from mux.state.store import ERA_REF, StateStore, adopted_identity
 log = structlog.get_logger(__name__)
 SETUP_REF = "environment_setup"
 """Native ref: the digest of the sandbox setup a session was created with."""
+PRIOR_READ_BUDGET_S = 90.0
+"""How long a reused session's last interaction may take to read before the turn
+starts a fresh session instead. One read answers within Google's 60 s deadline;
+without a bound, a run Google can no longer read held each turn for over 6 min."""
+UNREADABLE_CODE = "upstream_read_retries_exhausted"
+"""Every retry of the read got a plain 5xx (`Base.retrying` names it from the category)."""
 
 
 async def prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedTurn:
@@ -89,10 +110,6 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         or request.session_account_id != (shared if shared is not None else admission.account_id)
     ):
         raise ScopeViolation(request.thread_id, "Gemini preparation differs from admission")
-    if admission.daimon_rules_need_driver:
-        # Daimon tool rules need an approval pause this backend does not have.
-        # Refused before any key, transport or journal is touched.
-        raise UnsupportedCapability(("daimon_tool_rules",), PROFILE)
     target = request.target_spec
     from daimon.core.turn.runtime_manifest import host_memory_represented
 
@@ -234,6 +251,15 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     )
     setup = "" if compiled in ({}, {"type": "remote", "sources": []}) else request_digest(compiled)
 
+    # A routine fire without its opt-in runs a session that leaves the agent's built-in
+    # tools out of every interaction, as Managed Agents disables them on its session.
+    request_origin = admission.request
+    withheld = routine_builtins_withheld(
+        request_origin.origin if request_origin is not None else None,
+        request_origin.attended if request_origin is not None else None,
+        admission.routine_sandbox_tools,
+    )
+
     async def created(era: str) -> ProviderBinding:
         agent = deployment.native_agent
         if agent is None:
@@ -278,7 +304,11 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
                     SESSION_NAMESPACE: ExtensionConfig(
                         namespace=SESSION_NAMESPACE,
                         version=1,
-                        value={"binding_id": binding_id, "thread": thread.model_dump(mode="json")},
+                        value={
+                            "binding_id": binding_id,
+                            "thread": thread.model_dump(mode="json"),
+                            **({WITHHOLD_BUILTINS: True} if withheld else {}),
+                        },
                     )
                 },
             ),
@@ -296,6 +326,26 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
                 },
             }
         )
+
+    async def replaced(
+        old: OldSession, reasons: tuple[ChangeReason, ...]
+    ) -> tuple[ProviderBinding, ContinuityOutcome]:
+        replacement = await replace_binding(
+            store=store,
+            slot=slot,
+            scope=scope,
+            old=old,
+            reasons=reasons,
+            create=lambda era, _mounts, _lease: created(era),
+            now=datetime.now(UTC),
+            clock=lambda: datetime.now(UTC),
+            abandon=lambda lost: end_session(
+                scope, backend, ref_of(lost), key=f"binding-abandon:{lost.id}"
+            ),
+            model_id=config.model or "",
+            agent_name=admission.agent.name,
+        )
+        return replacement.binding, replacement.continuity
 
     decision = (
         None
@@ -345,12 +395,9 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             binding = winner
         session_ref = ref_of(binding)
     elif isinstance(decision, ReplaceSession):
-        replacement = await replace_binding(
-            store=store,
-            slot=slot,
-            scope=scope,
+        binding, continuity = await replaced(
             # Another provider's session is read through its own reader.
-            old=await replaced_session(
+            await replaced_session(
                 request,
                 store,
                 prior,
@@ -358,30 +405,30 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
                 if prior.provider == INLINE_REUSE.provider and "session" in prior.native_refs
                 else None,
             ),
-            reasons=decision.reasons,
-            create=lambda era, _mounts, _lease: created(era),
-            now=datetime.now(UTC),
-            clock=lambda: datetime.now(UTC),
-            abandon=lambda lost: end_session(
-                scope, backend, ref_of(lost), key=f"binding-abandon:{lost.id}"
-            ),
-            model_id=config.model or "",
-            agent_name=admission.agent.name,
+            decision.reasons,
         )
-        binding, continuity = replacement.binding, replacement.continuity
         session_ref = ref_of(binding)
     else:
-        binding = prior
-        session = await backend.sessions.retrieve(scope, ref_of(prior))
-        if (
-            session.binding.id != prior.id
-            or session.binding.thread != prior.thread
-            or session.binding.config_revision != prior.config_revision
-        ):
-            raise ScopeViolation(
-                prior.native_refs["session"], "Gemini session differs from persisted binding"
+        session = await _readable_session(backend, scope, ref_of(prior), binding_id=prior.id)
+        if session is None:
+            # The last reply's interaction cannot be read, and a new one would chain on
+            # it. Start a fresh session from the stored transcript instead.
+            binding, continuity = await replaced(
+                OldSession(binding=prior, ref=ref_of(prior), backend=backend),
+                ("history_unreadable",),
             )
-        session_ref = session.ref
+            session_ref = ref_of(binding)
+        else:
+            binding = prior
+            if (
+                session.binding.id != prior.id
+                or session.binding.thread != prior.thread
+                or session.binding.config_revision != prior.config_revision
+            ):
+                raise ScopeViolation(
+                    prior.native_refs["session"], "Gemini session differs from persisted binding"
+                )
+            session_ref = session.ref
     current = await reauthorize(request.deps, admission)
     if (
         current.origin_seal_ids != admission.origin_seal_ids
@@ -390,6 +437,11 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         or current.backend_revision != config
     ):
         raise UnsupportedCapability(("gemini_changed_admission",), PROFILE)
+    # The keys file each reply reads, placed (or emptied) by hash before the send.
+    env = await turn_env_file(request)
+    placed = await backend.sessions.place_file(
+        scope, session_ref, PATH.removeprefix("/workspace/"), env.body if env else None
+    )
 
     async def record(*, observation: UsageObservation) -> bool:
         if observation.session != session_ref or observation.model is None:
@@ -435,6 +487,8 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         # Revokes a per-turn MCP credential however the turn ends.
         _finalize=runtime.end_of_turn,
         continuity=continuity,
+        _builtins_withheld=withheld and not (prior is not None and binding is prior),
+        env_sha256=env.sha256 if env is not None and placed else None,
     )
 
 
@@ -495,6 +549,41 @@ async def _settle_hold(
         )
     except Exception:  # expiry is the fallback; never fail a billed turn
         log.warning("provider_hold_settle_failed", interaction_id=interaction, exc_info=True)
+
+
+async def _readable_session(
+    backend: ManagedAgents, scope: Scope, ref: ResourceRef, *, binding_id: str
+) -> Session | None:
+    """The reused session, or None when its last interaction cannot be read in time.
+
+    Reading it applies that interaction's final state; a new interaction then chains
+    on it. When the provider keeps answering that read with a plain server error (every
+    retry spent), or does not answer within `PRIOR_READ_BUDGET_S`, the caller replaces
+    the session, so the conversation is not stuck behind a run the provider cannot
+    serve. Capacity (overloaded, high demand) and network failures still fail the turn:
+    they pass, and replacing would throw away a session that is fine.
+    """
+    deadline = asyncio.timeout(PRIOR_READ_BUDGET_S)
+    try:
+        async with deadline:
+            return await backend.sessions.retrieve(scope, ref)
+    except TimeoutError:
+        if not deadline.expired():
+            raise
+        cause = "timeout"
+    except ProviderError as error:
+        if error.category != "upstream" or error.native_code != UNREADABLE_CODE:
+            raise
+        cause = error.native_code
+    log.warning(
+        "turn.gemini_prior_interaction_unreadable",
+        binding_id=binding_id,
+        session_id=ref.id,
+        cause=cause,
+        budget_s=PRIOR_READ_BUDGET_S,
+        action="replace_session",
+    )
+    return None
 
 
 def old_gemini_session(

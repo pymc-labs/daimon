@@ -52,8 +52,8 @@ export function SkillsEditor(p: Props) {
   }
   return (
     <>
-      <SkillsRelease agent={p.agent} />
       <Section title={`Attached (${config.skills.length})`}>
+        <SkillsRelease agent={p.agent} />
         <div className="-mx-2">
           {config.skills.map((s) => (
             <div key={s.skill_id} {...pressProps(() => select(`skill:${s.skill_id}`))} className={cn("group flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-sm hover:bg-accent", lost.skills.has(s.skill_id) && "text-muted-foreground")}>

@@ -751,3 +751,50 @@ async def test_github_webhook_unhandled_event_returns_200(
     app = _build_app(sessionmaker)
     r = await _post_github(app, payload_dict={"some": "data"}, event="ping")
     assert r.status_code == 200, "unhandled event types must return 200 (not 4xx/5xx)"
+
+
+@pytest.mark.parametrize("action", ["created", "renamed", "deleted", "transferred"])
+async def test_a_repository_event_queues_a_refresh_of_its_installation(
+    db_session_factory: async_sessionmaker[AsyncSession], action: str
+) -> None:
+    """A repo made in an org the App covers whole reaches a following agent sooner."""
+    app = _build_app(db_session_factory)
+
+    response = await _post_github(
+        app,
+        payload_dict={
+            "action": action,
+            "installation": {"id": 9951},
+            "repository": {"id": 5, "full_name": "acme/new"},
+        },
+        event="repository",
+        delivery_id=f"repository-{action}",
+    )
+
+    assert response.status_code == 200
+    async with db_session_factory() as session:
+        job = await github_installation_reconciliation.get(session, installation_id=9951)
+    assert job is not None and job.state == "pending", f"{action} must queue one refresh"
+
+
+async def test_other_repository_actions_and_events_without_an_installation_queue_nothing(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    app = _build_app(db_session_factory)
+
+    archived = await _post_github(
+        app,
+        payload_dict={"action": "archived", "installation": {"id": 9952}},
+        event="repository",
+        delivery_id="repository-archived",
+    )
+    bare = await _post_github(
+        app,
+        payload_dict={"action": "created"},
+        event="repository",
+        delivery_id="repository-bare",
+    )
+
+    assert archived.status_code == bare.status_code == 200
+    async with db_session_factory() as session:
+        assert await github_installation_reconciliation.get(session, installation_id=9952) is None

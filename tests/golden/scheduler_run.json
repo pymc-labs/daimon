@@ -52,6 +52,7 @@
           "origin_place": {
             "channel_id": "C_ENV",
             "private_dm_id": "routine:00000000-0000-0000-0000-000000000003",
+            "reads_inside": false,
             "seal_ids": [],
             "thread_id": null
           },

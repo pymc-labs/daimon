@@ -284,7 +284,7 @@ async def test_after_yes_make_the_copy_the_switch_applies_in_that_turn(fresh_cha
             target_backend="openai",
             origin_context_id=str(chat.origin.id),
         )
-    assert "I can make a copy of me on OpenAI" in str(offered.value)
+    assert "make a copy of me on OpenAI" in str(offered.value)
     assert "Nothing changed" in str(offered.value)
     # 2. "yes": a NEW copy, owned by whoever asked.
     copy = await _fork_agent_impl(

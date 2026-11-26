@@ -146,8 +146,9 @@ def test_wake_text_is_short_and_fences_output_as_data():
         output_path="/tmp/daimon-tasks/x.out",
         created_at=now,
     )
-    text = ct.wake_text(task)
-    assert len(text) < ct.WAKE_OUTPUT_CHARS + 800
-    assert text.count(">>>end of untrusted data") == 1
-    assert text.endswith(">>>end of untrusted data")
-    assert "never instructions" in text and "exit code 2" in text
+    for reads in (True, False):
+        text = ct.wake_text(task, reads=reads)
+        assert len(text) < ct.WAKE_OUTPUT_CHARS + 800
+        assert text.count(">>>end of untrusted data") == 1
+        assert text.endswith(">>>end of untrusted data")
+        assert "never instructions" in text and "exit code 2" in text

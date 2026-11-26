@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 264 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 269 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -22,6 +22,7 @@ tool is hidden by default and restored only for a matching caller.
 - **OpenAI, Gemini and self-hosted agents** — carries the `host-web-fetch` tag.
 - **operator tokens with agents:archive** — carries the `scope:agents:archive` tag.
 - **operator tokens with channels:write** — carries the `scope:channels:write` tag.
+- **operator tokens with issues:read** — carries the `scope:issues:read` tag.
 - **operator tokens with promo:create** — carries the `scope:promo:create` tag.
 - **operator tokens with promo:redeem** — carries the `scope:promo:redeem` tag.
 - **operator tokens with tenant:read** — carries the `scope:tenant:read` tag.
@@ -237,6 +238,25 @@ get_cli_token MCP tool.
 | --- | --- | --- |
 | `get_cli_token` | all callers | Mint a short-lived CLI access token for the named service. |
 
+## `compute`
+
+Owner-only compute sessions bound to verified, attended conversation origins.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `compute_extend_session` | all callers | Set your session's expiry to this many hours from now. |
+| `compute_get_session_status` | all callers | Read your session's machine state, capacity and expiry without renewing it. |
+| `compute_launch_session` | all callers | Launch your own temporary machine from an operator image profile. |
+| `compute_list_files` | all callers | List paths and sizes on your session. |
+| `compute_list_sessions` | all callers | List your live machines from every conversation. |
+| `compute_list_templates` | all callers | List operator image profiles: what each holds, its fixed CPU/RAM and allowed regions. |
+| `compute_read_file` | all callers | Read a file from your session in byte chunks of at most 512 KiB. |
+| `compute_run_bash` | all callers | Run bash on your session and wait up to wait_seconds (0 to 40) for it to end. |
+| `compute_stop_session` | all callers | Permanently delete a session and its files. |
+| `compute_task_result` | all callers | Read the end of a background command's output (last 16 KiB). |
+| `compute_task_status` | all callers | Check one of your background commands: state, exit code and output size. |
+| `compute_write_file` | all callers | Write UTF-8 text on your session and renew its idle lease. |
+
 ## `credential_requests`
 
 Post requester-only private forms for agent keys, MCP tokens and GitHub access.
@@ -315,25 +335,6 @@ Eval suites, cases, arms, run items and bundles, over `daimon.core.evals.service
 | `eval_suite_share` | all callers | Replace who an eval suite is shared with: people or groups, as viewer, reviewer or editor. |
 | `eval_suite_update` | all callers | Save the next version of an eval suite. |
 | `eval_suites_list` | all callers | List the eval suites you can see, with your role on each. |
-
-## `fly`
-
-Native owner-only Fly sessions bound to verified, attended conversation origins.
-
-| Tool | Who can call it | Purpose |
-| --- | --- | --- |
-| `fly_extend_session` | all callers | Set your session's expiry to this many hours from now, after owner approval. |
-| `fly_get_session_status` | all callers | Read your session's machine state, capacity and expiry without renewing it. |
-| `fly_launch_session` | all callers | Launch your own temporary Fly machine from an operator image profile. |
-| `fly_list_files` | all callers | List paths and sizes on your session. |
-| `fly_list_sessions` | all callers | List your live sessions in this conversation. |
-| `fly_list_templates` | all callers | List operator image profiles, fixed CPU/RAM and allowed regions. |
-| `fly_read_file` | all callers | Read a file from your session in byte chunks. |
-| `fly_run_bash` | all callers | Run bash on your session; inline by default, returning exit code and stdout. |
-| `fly_stop_session` | all callers | Permanently delete a session and its files. |
-| `fly_task_result` | all callers | Read the end of a background command's output (last 16 KiB). |
-| `fly_task_status` | all callers | Check one of your background commands: state, exit code and output size. |
-| `fly_write_file` | all callers | Write UTF-8 text on your session and renew its idle lease. |
 
 ## `github_app`
 
@@ -492,6 +493,17 @@ Notebook MCP tools.
 | `delete_notebook` | all callers | Un-publish a notebook or blog you published (deletes it from the host). |
 | `list_notebooks` | all callers | List what you've published — scratch notebooks and permanent blogs alike. |
 
+## `ops_issues`
+
+The workspace's failures and warnings, read from chat or by an operator token.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `change_issue_state` | admin only | Resolve, mute or reopen an issue by its ``fingerprint`` (from list_issues). |
+| `get_issue` | admin only, operator tokens with issues:read | Read one issue by its ``fingerprint`` (from list_issues): what it is about, when it started, who it reached and its latest events. |
+| `get_ops_overview` | admin only, operator tokens with issues:read | Read how the workspace is doing: answers and the share that failed, direct message and routine failures, status (healthy, degraded or failing, from the last hour), failures per area, an answers chart and the issues that need attention. |
+| `list_issues` | admin only, operator tokens with issues:read | List the workspace's failures and warnings, grouped into issues, newest first. |
+
 ## `progress_plans`
 
 The `update_plan` tool: a checklist of a longer task's steps on the progress card.
@@ -560,10 +572,12 @@ Repository-scoped persistent memory, authorized by the executing turn.
 
 ## `routine_run`
 
-Run a routine now, ahead of its schedule.
+Run a routine now, ahead of its schedule; a routine run reports what kept it from its
+task.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
+| `report_routine_problem` | all callers | Tell the admins this routine run could not do its task, and why. |
 | `run_routine` | all callers | Run a routine now, ahead of its schedule; its own schedule continues after. |
 
 ## `routines`
@@ -615,7 +629,7 @@ updates.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `add_server_skill` | all callers | Only for the connected data server: list what it serves, or take one of its offers by name or URI into the library, kept current with that server. |
+| `add_server_skill` | all callers | Only for the connected data server: list the skills it offers, or take one by name or URI into the library, kept current with that server. |
 | `apply_server_skill_update` | all callers | Give an agent the server skill update its model provider check held back. |
 | `approve_server_skill_update` | admin only | Approve the update waiting on a server skill, given as its ``pending_digest``. |
 | `check_server_skill` | admin only | Check a server skill for an update now. |

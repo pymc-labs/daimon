@@ -25,6 +25,7 @@ from typing import Any, cast
 import structlog
 from anthropic import AsyncAnthropic
 from daimon.adapters.slack.agent_post import post_as_agent
+from daimon.adapters.slack.blockkit import error_title_block
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.output_delivery import SLACK_MAX_BYTES_PER_FILE, build_output_poster
 from daimon.adapters.slack.runtime import SlackRuntime
@@ -35,6 +36,7 @@ from daimon.core.config import DirectMessagePolicy, env_dm_policy
 from daimon.core.dm_access import sender_admits
 from daimon.core.message_split import split_fenced
 from daimon.core.outbound.opt_out import untag_opted_out
+from daimon.core.owner_notices import OwnerDm, OwnerNotice
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
     DeliveryTarget,
@@ -61,7 +63,7 @@ from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-__all__ = ["make_slack_routine_poster"]
+__all__ = ["make_slack_owner_dm", "make_slack_routine_poster"]
 
 log = structlog.get_logger(__name__)
 
@@ -70,6 +72,8 @@ log = structlog.get_logger(__name__)
 _UNUSABLE_DESTINATION = frozenset(
     {"channel_not_found", "not_in_channel", "is_archived", "thread_not_found"}
 )
+#: Slack errors that mean the creator cannot get a DM at all, on every run alike.
+_UNREACHABLE = frozenset({"user_not_found", "user_disabled", "account_inactive", "cannot_dm_bot"})
 
 
 async def _dm_fallback(
@@ -81,7 +85,7 @@ async def _dm_fallback(
     policy: DirectMessagePolicy,
     output_client: AsyncAnthropic,
     may_post: Callable[[], Awaitable[bool]],
-    sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+    sessionmaker: async_sessionmaker[AsyncSession],
 ) -> DeliveryOutcome:
     creator = row.created_by_user_id
     if creator is None or not policy.allows(creator):
@@ -123,12 +127,20 @@ async def _dm_fallback(
             post=build_output_poster(client, channel_id=channel, thread_ts=None),
             notice=notice,
             may_post=may_post,
+            sessions=sessionmaker,
+            tenant_id=row.tenant_id,
         )
     except SlackApiError as err:
-        log.info(
-            "routine.delivery_dm_failed", routine_id=str(row.id), error_type=type(err).__name__
+        log.warning(
+            "routine.delivery_fallback_failed",
+            routine_id=str(row.id),
+            error_type=type(err).__name__,
         )
-        return DeliveryOutcome(status="skipped", note=reason)
+        # A person gone or a DM Slack never allows repeats on every run: a skip, not a page.
+        closed = str(err.response.get("error", "")) in _UNREACHABLE  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]  # slack_sdk response is dict-like
+        return DeliveryOutcome(
+            status="skipped", note=reason, failed=None if closed else type(err).__name__
+        )
     return DeliveryOutcome(status="delivered", note=f"dm_fallback:{reason}")
 
 
@@ -201,6 +213,58 @@ async def _destination_refusal(
             return "destination_unavailable"
         raise
     return None
+
+
+def make_slack_owner_dm(runtime: SlackRuntime) -> OwnerDm:
+    """DM a routine's owner its failure notice, under the rules of the result fallback DM."""
+
+    async def send(row: RoutineRow, notice: OwnerNotice) -> str | None:
+        async with runtime.sessionmaker() as session:
+            tenant = await get_tenant(session, row.tenant_id)
+        client = (
+            await resolve_web_client(runtime, team_id=tenant.external_id)
+            if tenant is not None and tenant.archived_at is None
+            else None
+        )
+        if tenant is None or client is None:
+            return "tenant_archived"
+        owner = row.created_by_user_id
+        policy = env_dm_policy(runtime.settings.direct_message_policies, row.tenant_id)
+        if owner is None or not policy.allows(owner):
+            return "dm_policy_denies"
+        if not await tenant_dm_still_open(runtime.sessionmaker, row, tenant.external_id):
+            return "dms_off"
+        if not await sender_admits(
+            runtime.sessionmaker,
+            tenant_id=row.tenant_id,
+            agent_name=row.agent_name,
+            user_id=owner,
+            groups=user_group_lookup(runtime, client, team_id=tenant.external_id),
+        ):
+            return "agent_closed"
+        info = await client.users_info(user=owner)  # pyright: ignore[reportUnknownMemberType]
+        user = cast("dict[str, object]", info["user"])
+        if (
+            user.get("team_id") != tenant.external_id
+            or user.get("deleted")
+            or user.get("is_bot")
+            or user.get("is_stranger")
+        ):
+            return "person_unreachable"
+        opened = await client.conversations_open(users=owner)  # pyright: ignore[reportUnknownMemberType]
+        channel = cast("dict[str, str]", opened["channel"])["id"]
+        if notice.text is not None:
+            await client.chat_postMessage(channel=channel, text=notice.text)  # pyright: ignore[reportUnknownMemberType]
+        else:
+            # The body is unescaped: it carries Slack's own date markup.
+            blocks = [
+                error_title_block(notice.title),
+                {"type": "section", "text": {"type": "mrkdwn", "text": notice.body}},
+            ]
+            await client.chat_postMessage(channel=channel, text=notice.title, blocks=blocks)  # pyright: ignore[reportUnknownMemberType]
+        return None
+
+    return send
 
 
 def make_slack_routine_poster(
@@ -381,6 +445,8 @@ def make_slack_routine_poster(
             ),
             notice=notice,
             may_post=may_post,
+            sessions=runtime.sessionmaker,
+            tenant_id=row.tenant_id,
         )
         return DeliveryOutcome(status="delivered")
 
