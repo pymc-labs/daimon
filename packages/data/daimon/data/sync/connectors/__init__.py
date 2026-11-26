@@ -8,7 +8,6 @@ from daimon.data.sync.connectors.discord import DiscordConnector
 from daimon.data.sync.connectors.gcal import GCalConnector
 from daimon.data.sync.connectors.gdrive import GDriveConnector
 from daimon.data.sync.connectors.github import GitHubConnector
-from daimon.data.sync.connectors.github_markdown import GitHubMarkdownConnector
 from daimon.data.sync.connectors.hubspot import HubSpotConnector
 from daimon.data.sync.connectors.linear import LinearConnector
 from daimon.data.sync.connectors.linkedin import LinkedInConnector
@@ -23,7 +22,6 @@ register(SlackConnector())
 register(GDriveConnector())
 register(GCalConnector())
 register(GitHubConnector())
-register(GitHubMarkdownConnector())
 register(NotionConnector())
 register(BluedotConnector())
 register(LinkedInConnector())

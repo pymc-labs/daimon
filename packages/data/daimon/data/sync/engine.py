@@ -45,6 +45,7 @@ from daimon.data.sync.connector import (
     Source,
     SyncState,
 )
+from daimon.data.sync.connectors.github_api import app_token
 from daimon.data.sync.credentials import unseal
 from daimon.data.sync.embedding import embed_pending
 from daimon.data.sync.http import GuardedTransport
@@ -83,9 +84,12 @@ class Env:
     """The settings embedding reads; with `embed`, always set by `of`."""
     meter: Meter | None = None
     """Bills embeddings to the source's tenant; none: embeds unmetered."""
+    github_app: tuple[str, str] | None = None
+    """Daimon's GitHub App (id, private key), which reads a GitHub source with no token."""
 
     @classmethod
     def of(cls, settings: Settings) -> Env:
+        app = settings.github_app
         return cls(
             Schemas.of(settings.data),
             tuple(k.get_secret_value() for k in settings.crypto.keys),
@@ -94,6 +98,9 @@ class Env:
             settings.data.embed_url is not None,
             connect.configured_clients(settings.data),
             settings.data,
+            github_app=(app.app_id, app.private_key.get_secret_value())
+            if app.app_id and app.private_key
+            else None,
         )
 
 
@@ -593,6 +600,10 @@ async def ready(
         source = replace(source, people=people)
     if env.keyless_accounts:
         source = replace(source, keyless_accounts=await _keyless(conn, env, source))
+    if source.kind == "github" and env.github_app and not source.credentials.get("token"):
+        token = await app_token(conn, env.github_app, source, GuardedTransport(env.private_hosts))
+        if token:
+            source = replace(source, credentials={**source.credentials, "token": token})
     return source
 
 

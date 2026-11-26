@@ -12,13 +12,16 @@ lists publishes nobody, so its records are hidden at once; listed again within `
 they show again, later they go.
 
 Content, by `config.content` (default `issues, pulls`): issues and pull requests with their
-conversation comments, discussions with their comments and replies, and the text files of
-`config.file_paths`. Each run reads what changed since the last one; every `relist_hours`
-(168) it reads everything again, which is how a deleted or transferred record is removed.
+conversation comments, discussions with their comments and replies, and the paths (never the
+contents) of the files at or under `config.file_paths`. Each run reads what changed since the
+last one; every `relist_hours` (168) it reads everything again, which is how a deleted or
+transferred record is removed.
 
-Credential `{"token": "..."}`: a fine-grained token (or an App installation token) with read
-access to the organization's repositories: contents, issues, pull requests, discussions and
-metadata, plus administration read to list collaborators, and organization members read.
+Auth: Daimon's GitHub App reads the repositories the workspace connected in `org`, with a token
+minted per run (`github_api.app_token`). A credential `{"token": "..."}` is the fallback: a
+fine-grained token with read access to the organization's repositories (contents, issues, pull
+requests, discussions, metadata), administration read to list collaborators, and organization
+members read.
 Configuration (`sources.config`): `org`, `repos` (names to read; empty: all), `content`,
 `file_paths`, `branch` (default: each repository's own), `relist_hours`.
 """
@@ -55,7 +58,6 @@ from daimon.data.sync.connectors.chat import lost_for_good, names, obj, rows
 from daimon.data.sync.connectors.github_api import (
     Api,
     Refused,
-    blob,
     client_of,
     head,
     repositories,
@@ -154,7 +156,7 @@ class GitHubConnector(Connector):
     descriptor: ClassVar[Descriptor | None] = Descriptor(PROVIDER)
     recheck_reads: ClassVar[bool] = True
     fields: ClassVar[tuple[Field, ...]] = (
-        Field("token", "Token", "secret"),
+        Field("token", "Token", "secret", required=False),
         Field("org", "Organization", placeholder="your-org"),
         Field("repos", "Only these repositories", "list", required=False, placeholder="names"),
         Field(
@@ -321,12 +323,12 @@ class GitHubConnector(Connector):
         full_at = when(old["full_at"]) if old.get("full_at") else None
         full = full_at is None or started - full_at >= cfg.relist
         since = {str(k): str(v) for k, v in obj(old.get("since")).items()}
-        blobs = obj(old.get("blobs"))
+        paths = obj(old.get("paths"))
         state: Json = {
             "v": 1,
             "sig": cfg.signature,
             "since": dict(since),
-            "blobs": dict(blobs),
+            "paths": dict(paths),
             "full_at": old.get("full_at"),
             "lost": dict(obj(old.get("lost"))),
         }
@@ -338,7 +340,7 @@ class GitHubConnector(Connector):
             missing = set(since) - {str(r["id"]) for r in repos}
             for rid in lost_for_good(state["lost"], missing, started):
                 del state["since"][rid]
-                state["blobs"].pop(rid, None)
+                state["paths"].pop(rid, None)
             for repo in repos:
                 rid = str(repo["id"])
                 mark = None if full else since.get(rid)
@@ -463,28 +465,29 @@ class GitHubConnector(Connector):
     async def _files(
         self, api: Api, cfg: Config, repo: Json, state: Json, live: set[str], acl: Acl
     ) -> AsyncGenerator[ItemRecord]:
+        """The paths of the wanted files, never their contents."""
         rid, full_name = str(repo["id"]), str(repo["full_name"])
-        got = await head(api, full_name, cfg.branch or str(repo.get("default_branch") or ""))
+        branch = cfg.branch or str(repo.get("default_branch") or "")
+        got = await head(api, full_name, branch)
         if got is None:
             return
         sha, date = got
-        files = await tree(api, full_name, sha, wants(list(cfg.file_paths)))
-        known = {str(k): str(v) for k, v in obj(state["blobs"].get(rid)).items()}
-        for path in sorted(files):
+        paths = await tree(api, full_name, sha, wants(list(cfg.file_paths)))
+        known = set(map(str, rows(state["paths"].get(rid))))
+        for path in paths:
             live.add(f"file:{rid}:{path}")
-            if known.get(path) == files[path]:
+            if path in known:
                 continue
-            text = await blob(api, full_name, files[path])
             yield ItemRecord(
                 f"file:{rid}:{path}",
                 "file",
                 f"{path} ({repo['name']})",
-                text[:TEXT_MAX],
+                f"{path} in {full_name}",
                 date,
                 container=full_name,
                 container_kind="repo",
-                url=f"https://github.com/{full_name}/blob/{sha}/{path}",
-                payload={"repo_id": repo["id"], "path": path, "sha": sha},
+                url=f"https://github.com/{full_name}/blob/{quote(branch or sha)}/{quote(path)}",
+                payload={"repo_id": repo["id"], "path": path},
                 acl=acl,
             )
-        state["blobs"][rid] = files
+        state["paths"][rid] = paths

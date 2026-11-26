@@ -1,32 +1,38 @@
-"""What the GitHub connectors share: calls inside the source's budget, and the repository files
-they mirror."""
+"""What the GitHub connector shares: calls inside the source's budget, the token Daimon's GitHub
+App mints for a workspace, and the repository paths it lists."""
 
 from __future__ import annotations
 
-import base64
+import json
+import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from datetime import UTC, datetime
 from typing import Final
 from urllib.parse import quote
 
 import httpx
+import jwt
 from daimon.data.sync.connector import Json, Source
 from daimon.data.sync.connectors.chat import obj, rows
 from daimon.data.sync.http import GuardedTransport, Upstream, send
+from psycopg import AsyncConnection
+from psycopg.rows import DictRow
 
 API: Final = "https://api.github.com"
 PER_PAGE: Final = 100
 PAGES: Final = 500
 """Pages read of one list at most: a list that never ends is a fault."""
-FILE_MAX: Final = 1_000_000
-"""Bytes of one file read; a larger one is skipped."""
-TEXT: Final = (".md", ".markdown", ".txt", ".rst")
+APP_READS: Final = ("metadata", "contents", "issues", "pull_requests", "discussions", "members")
+"""What the connector asks of Daimon's GitHub App, read only, of those the installation grants."""
+APP_TOKEN_TTL: Final = 50 * 60.0
+"""Seconds a minted token is reused (GitHub's last an hour)."""
+_minted: dict[tuple[int, tuple[int, ...]], tuple[float, str]] = {}
 
 
 def client_of(source: Source, transport: httpx.AsyncBaseTransport | None) -> httpx.AsyncClient:
     token = source.credentials.get("token", "")
     if not token:
-        raise ValueError("the credential needs the token")
+        raise ValueError("the credential needs a token, or Daimon's GitHub App connected")
     return httpx.AsyncClient(
         base_url=API,
         headers={
@@ -37,6 +43,49 @@ def client_of(source: Source, transport: httpx.AsyncBaseTransport | None) -> htt
         timeout=60,
         transport=transport or GuardedTransport(source.private_hosts),
     )
+
+
+async def app_token(
+    conn: AsyncConnection[DictRow],
+    app: tuple[str, str],
+    source: Source,
+    transport: httpx.AsyncBaseTransport,
+) -> str | None:
+    """A read token from Daimon's GitHub App (`app`: its id and private key) for the repositories
+    the source's workspace connected in the source's organization; None: it connected none."""
+    cur = await conn.execute(
+        b"select r.installation_id, array_agg(r.repo_id order by r.repo_id) ids,"
+        b" max(i.permissions::text) granted from tenant_github_repos r"
+        b" left join github_app_installations i on i.installation_id = r.installation_id"
+        b" where r.tenant_id = %s and r.status = 'active'"
+        b" and lower(split_part(r.repo_full_name, '/', 1)) = lower(%s)"
+        b" group by r.installation_id order by count(*) desc limit 1",
+        (source.tenant_id, str(source.config.get("org") or "")),
+    )
+    row = await cur.fetchone()
+    if row is None:
+        return None
+    key = (int(row["installation_id"]), tuple(int(i) for i in row["ids"][:500]))
+    hit = _minted.get(key)
+    if hit and hit[0] > time.monotonic():
+        return hit[1]
+    granted = obj(json.loads(row["granted"] or "{}"))
+    now = int(time.time())
+    signed = jwt.encode({"iat": now - 60, "exp": now + 540, "iss": app[0]}, app[1], "RS256")
+    async with httpx.AsyncClient(base_url=API, transport=transport, timeout=30) as client:
+        r = await client.post(
+            f"/app/installations/{key[0]}/access_tokens",
+            headers={"Authorization": f"Bearer {signed}", "Accept": "application/vnd.github+json"},
+            json={
+                "repository_ids": list(key[1]),
+                "permissions": {k: "read" for k in APP_READS if k in granted or not granted},
+            },
+        )
+    token = str(obj(r.json()).get("token") or "") if r.status_code == 201 else ""
+    if not token:
+        raise Upstream(f"GitHub refused the App a token (HTTP {r.status_code})")
+    _minted[key] = (time.monotonic() + APP_TOKEN_TTL, token)
+    return token
 
 
 def when(s: object) -> datetime:
@@ -122,15 +171,9 @@ async def repositories(api: Api, org: str) -> list[Json]:
 
 
 def wants(prefixes: list[str]) -> Callable[[str], bool]:
-    """Text files at or under any of `prefixes` (a folder or a file; empty: anywhere)."""
-    folders = [p.strip("/") for p in prefixes]
-
-    def under(path: str) -> bool:
-        return path.lower().endswith(TEXT) and (
-            not folders or any(path == p or path.startswith(p + "/") for p in folders if p)
-        )
-
-    return under
+    """Files at or under any of `prefixes` (a folder or a file; empty: anywhere)."""
+    folders = [p.strip("/") for p in prefixes if p.strip("/")]
+    return lambda path: not folders or any(path == p or path.startswith(p + "/") for p in folders)
 
 
 async def head(api: Api, repo: str, branch: str | None) -> tuple[str, datetime] | None:
@@ -144,18 +187,13 @@ async def head(api: Api, repo: str, branch: str | None) -> tuple[str, datetime] 
     return str(j["sha"]), when(obj(obj(j.get("commit")).get("committer")).get("date"))
 
 
-async def tree(api: Api, repo: str, sha: str, want: Callable[[str], bool]) -> dict[str, str]:
-    """Path to blob sha of the wanted files at a commit."""
+async def tree(api: Api, repo: str, sha: str, want: Callable[[str], bool]) -> list[str]:
+    """The wanted file paths at a commit."""
     j = obj((await api.get(f"/repos/{repo}/git/trees/{sha}", {"recursive": "1"})).json())
     if j.get("truncated"):
         raise Upstream(f"{repo}: the file tree is too large to list")
-    return {
-        str(e["path"]): str(e["sha"])
+    return sorted(
+        str(e["path"])
         for e in rows(j.get("tree"))
-        if e.get("type") == "blob" and int(e.get("size") or 0) <= FILE_MAX and want(str(e["path"]))
-    }
-
-
-async def blob(api: Api, repo: str, sha: str) -> str:
-    j = obj((await api.get(f"/repos/{repo}/git/blobs/{sha}")).json())
-    return base64.b64decode(str(j.get("content") or "")).decode("utf-8", "replace")
+        if e.get("type") == "blob" and want(str(e["path"]))
+    )

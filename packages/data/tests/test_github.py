@@ -1,9 +1,8 @@
 """The GitHub connectors against a fake GitHub: who reads a repository's records, the live
-re-check of a lost grant, and a markdown mirror that is redacted as it is stored."""
+re-check of a lost grant, file paths without contents, and the GitHub App's token."""
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import uuid
@@ -13,12 +12,14 @@ from dataclasses import dataclass
 import httpx
 import pytest
 from cryptography.fernet import Fernet
-from daimon.data import declared, identity, recheck
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from daimon.data import identity, recheck
 from daimon.data.access import ReadContext, scoped, subject
 from daimon.data.identity import IdentityKey, Proof
 from daimon.data.schema import Schemas
 from daimon.data.sync.connector import CONNECTORS, Json, Source
-from daimon.data.sync.connectors.github_api import API, Api
+from daimon.data.sync.connectors.github_api import API, Api, app_token
 from daimon.data.sync.credentials import seal
 from daimon.data.sync.engine import Env, run_source
 from daimon.data.sync.http import Upstream
@@ -42,7 +43,7 @@ def sha_of(text: str) -> str:
 
 
 class FakeGitHub:
-    """The GitHub REST and GraphQL calls the connectors make, and a record of the blobs read."""
+    """The GitHub REST and GraphQL calls the connector makes."""
 
     def __init__(self) -> None:
         self.repos: dict[int, Json] = {}
@@ -52,7 +53,6 @@ class FakeGitHub:
         self.discussions: dict[int, list[Json]] = {}
         self.files: dict[int, dict[str, str]] = {}
         self.head = "c1"
-        self.blobs: list[str] = []
 
     def repo(self, id_: int, name: str, visibility: str, readers: list[int]) -> None:
         self.repos[id_] = {
@@ -110,13 +110,7 @@ class FakeGitHub:
             ]
             return httpx.Response(200, json={"tree": tree})
         if rest.startswith("git/blobs/"):
-            want = rest.removeprefix("git/blobs/")
-            text = next(t for t in self.files[id_].values() if sha_of(t) == want)
-            self.blobs.append(want)
-            return httpx.Response(
-                200,
-                json={"content": base64.b64encode(text.encode()).decode(), "encoding": "base64"},
-            )
+            raise AssertionError("a file's contents are never read")
         return httpx.Response(404)
 
     def graphql(self, name: str) -> httpx.Response:
@@ -215,8 +209,7 @@ def github(monkeypatch: pytest.MonkeyPatch) -> FakeGitHub:
     }
     for i in (1, 2):
         fake.files[i] = {"README.md": f"# repo {i}", "logo.png": "binary"}
-    for kind in ("github", "github_markdown"):
-        monkeypatch.setattr(CONNECTORS[kind], "transport", httpx.MockTransport(fake))
+    monkeypatch.setattr(CONNECTORS["github"], "transport", httpx.MockTransport(fake))
     return fake
 
 
@@ -237,7 +230,8 @@ async def test_a_record_is_read_by_the_people_github_lets_read_its_repository(
         "issue:2#1",
         "discussion:2#5",
         "file:2:README.md",
-    }, "issues, pull requests, discussions and the listed files, not the picture"
+    }, "issues, pull requests, discussions and the listed paths, not the picture"
+    assert stored["file:1:README.md"] == "README.md in acme/vault", "a path, never its contents"
     assert "u11: rotate them today" in stored["issue:1#1"], "the conversation is part of it"
     private = {"issue:1#1", "pull_request:1#2", "file:1:README.md"}
     assert await store.sees(11) == set(stored), "a collaborator, and a member of the public one"
@@ -324,47 +318,82 @@ async def test_a_lost_grant_is_dropped_at_read_before_any_sync(
     assert await shown() == set(), "nor in the organization that reads the public one"
 
 
-async def test_a_markdown_mirror_is_redacted_and_follows_the_repository(
-    store: Store, github: FakeGitHub
+async def test_the_github_app_mints_a_read_token_for_the_repositories_the_workspace_connected(
+    store: Store,
 ) -> None:
-    github.repo(3, "notes", "private", [])
-    github.files[3] = {
-        "docs/plan.md": "# Plan\nAcme asked for it.",
-        "docs/old.md": "gone soon",
-        "other/x.md": "outside the folder",
-    }
-    decl = declared.Declaration.model_validate(
-        {
-            "revision": 1,
-            "tenants": [
-                {
-                    "workspace": store.tenant,
-                    "redaction_sets": [{"id": "house", "rules": {"aliases": {"Acme": "client A"}}}],
-                }
-            ],
-        }
-    )
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode()
     await store.conn.execute(
-        b"insert into tenants (id, platform, external_id) values (%s, 'discord', 'guild-notes')",
+        b"insert into tenants (id, platform, external_id) values (%s, 'discord', 'guild-app')",
         (store.tenant,),
     )
-    await declared.apply(store.conn, store.schemas, store.env, decl)
-    src = await store.add(
-        "github_markdown", repo=f"{ORG}/notes", folders=["docs"], redaction_set="house"
+    for repo_id, name, status in (
+        (5, "acme/a", "active"),
+        (6, "Acme/b", "active"),
+        (7, "acme/c", "revoked"),
+        (8, "other/d", "active"),
+    ):
+        await store.conn.execute(
+            b"insert into tenant_github_repos (tenant_id, repo_id, owner_id, installation_id,"
+            b" repo_full_name, max_access, authorized_by_github_user_id, status)"
+            b" values (%s, %s, 1, 42, %s, 'read', 1, %s)",
+            (store.tenant, repo_id, name, status),
+        )
+    asked: list[Json] = []
+
+    def github(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/app/installations/42/access_tokens"
+        assert request.headers["authorization"].startswith("Bearer ey"), "signed as the App"
+        asked.append(json.loads(request.content))
+        return httpx.Response(201, json={"token": "minted"})
+
+    src = Source(
+        uuid.uuid4(),
+        store.tenant,
+        "github",
+        "g",
+        "github",
+        {"org": ORG},
+        {},
+        "",
+        {},
+        None,
+        RateBudget(0),
     )
-    await store.ok(src)
-
-    stored = await store.stored(src)
-    assert set(stored) == {"file:docs/plan.md", "file:docs/old.md"}, "only the listed folder"
-    assert "client A" in stored["file:docs/plan.md"], "the source's rule set is applied"
-    assert "Acme" not in stored["file:docs/plan.md"]
-
-    read = len(github.blobs)
-    await store.ok(src)
-    assert len(github.blobs) == read, "an unchanged head reads nothing"
-
-    del github.files[3]["docs/old.md"]
-    github.head = "c2"
-    await store.ok(src)
-    assert set(await store.stored(src)) == {"file:docs/plan.md"}, "a deleted file goes"
-    assert len(github.blobs) == read, "and an unchanged file is not read again"
+    mock = httpx.MockTransport(github)
+    assert await app_token(store.conn, ("1", pem), src, mock) == "minted"
+    assert await app_token(store.conn, ("1", pem), src, mock) == "minted"
+    assert asked == [
+        {
+            "repository_ids": [5, 6],
+            "permissions": {
+                k: "read"
+                for k in (
+                    "metadata",
+                    "contents",
+                    "issues",
+                    "pull_requests",
+                    "discussions",
+                    "members",
+                )
+            },
+        }
+    ], "the organization's active repositories, read only, minted once and reused"
+    other = Source(
+        uuid.uuid4(),
+        store.tenant,
+        "github",
+        "g",
+        "github",
+        {"org": "elsewhere"},
+        {},
+        "",
+        {},
+        None,
+        RateBudget(0),
+    )
+    assert await app_token(store.conn, ("1", pem), other, mock) is None, "nothing connected"

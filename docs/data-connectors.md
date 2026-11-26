@@ -139,10 +139,11 @@ now are searched, and those nearest to now come first.
 ## GitHub
 
 A source of kind `github` reads an organization's issues, pull requests, discussions and
-repository files. Give the credential `{"token": "..."}`, a fine-grained token (or an App
-installation token) for the organization with read access to contents, issues, pull requests,
-discussions and metadata, to administration (to list collaborators) and to organization
-members.
+repository file paths. It signs in as Daimon's [GitHub App](github.md#permissions) and reads
+the repositories the workspace connected in that organization, needing no credential. Without
+the App, give the credential `{"token": "..."}`, a fine-grained token for the organization
+with read access to contents, issues, pull requests, discussions and metadata, to
+administration (to list collaborators) and to organization members.
 
 ```json
 {"org": "your-org", "content": ["issues", "pulls", "discussions", "files"],
@@ -150,8 +151,8 @@ members.
 ```
 
 `content` defaults to issues and pull requests (with their conversation comments);
-`file_paths` lists the files or folders of markdown and text files to read when `files` is
-on; `repos` limits the repositories (all when empty).
+`file_paths` lists the files or folders whose paths are stored when `files` is on (file
+contents are never read or stored); `repos` limits the repositories (all when empty).
 
 A record is readable by the people GitHub lists as able to read its repository
 (collaborators with read access: owners, team members, direct and outside collaborators),
@@ -159,23 +160,10 @@ plus every organization member while the repository is public or internal. The l
 again every run and each record is checked
 against it when shown, so a repository made private or a person removed takes effect at once.
 A repository whose collaborators cannot be listed publishes nobody, and its records go dark
-within three hours.
+within three hours. A repository the source no longer lists is hidden at once; listed again
+within 30 days its records show again without a re-read, after that they are deleted.
 
 GitHub verifies no address: a person who signs in with GitHub is linked in every
 organization that lists their id, and a data admin links anyone else. Each run reads what
 changed; every `relist_hours` it reads everything, which is how a deleted or transferred
 issue goes. Review comments and reviews are not read.
-
-## GitHub markdown
-
-A source of kind `github_markdown` mirrors the markdown and text files of one repository, one
-record each, readable by the whole of the scope the source is created with. The credential
-is `{"token": "..."}`, a fine-grained token with read access to the repository's contents.
-
-```json
-{"repo": "your-org/notes", "folders": ["docs", "notes"], "branch": "main"}
-```
-
-`folders` lists files or folders to read (every text file when empty). A run compares the head
-commit with the last one read, reads only the changed files and removes those that are gone.
-The source's `redaction_set` rules are applied as the files are stored.
