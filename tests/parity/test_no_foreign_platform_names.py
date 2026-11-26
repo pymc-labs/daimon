@@ -202,6 +202,8 @@ _MAY_NAME: dict[str, frozenset[str]] = {
     "packages/adapters/mcp/daimon/adapters/mcp/tools/support.py": frozenset({"teams"}),
     "packages/adapters/scheduler/daimon/adapters/scheduler/settings.py": frozenset({"discord"}),
     "packages/core/daimon/core/agent_guidance.py": frozenset(_APPS),
+    # Admin attestation errors name the platform they looked the person up on.
+    "packages/core/daimon/core/github_connect_admin.py": frozenset({"slack", "teams"}),
     "packages/core/daimon/core/platform_system.py": frozenset(_APPS),
     "packages/core/daimon/core/platform_sign_in.py": frozenset({"discord", "slack"}),
     "packages/core/daimon/core/platform_words.py": frozenset(_APPS),
