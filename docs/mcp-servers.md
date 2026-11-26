@@ -30,7 +30,7 @@ Ask it to disconnect the server or connect again.
 
 A server admin can share one MCP server with the whole workspace, so agents and
 outside MCP clients use it without a sign-in of their own. Turn on the
-[`shared_connections`](features.md) feature, then open Integrations, MCP
+[`shared_connections`](features.md) feature, then open Integrations, Shared
 connections, and add the server's name, URL and token. The token is stored
 encrypted.
 

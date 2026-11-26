@@ -44,6 +44,7 @@ Where each feature can be set, and its default.
 | Platform skills | `platform_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
 | Agent skills | `agent_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Always On on Gemini, OpenAI |
 | Channel skills | `channel_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
+| Shared connections | `shared_connections` | Model input | Off | ✓ | ✓ |  |  |  |  |  |
 | Thread participation | `participation` | Chat | Off | ✓ | ✓ |  | ✓ | ✓ |  | Only Discord, Teams |
 | Progress plans | `progress_plans` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Cost footer | `cost_footer` | Chat | Shown |  | ✓ |  | ✓ | ✓ |  |  |
@@ -75,7 +76,6 @@ Where each feature can be set, and its default.
 | Shared memory | `memory_shared` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon; Always On on Gemini, OpenAI |
 | Channel memory | `memory_channel` | Capability | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Needs setup by whoever runs Daimon |
 | Private channel messages | `private_channel_messages` | Capability | On | ✓ |  |  |  |  |  | Needs setup by whoever runs Daimon; Only Teams |
-| Shared connections | `shared_connections` | Capability | Off | ✓ | ✓ |  |  |  |  |  |
 | Direct messages | `direct_messages` | Capability | Off | ✓ | ✓ | ✓ |  |  |  | On by default on Teams |
 | Web app: chat | `web.chat` | Capability | On | ✓ | ✓ |  |  |  |  |  |
 | Web app: agents | `web.agents` | Capability | On | ✓ | ✓ |  |  |  |  |  |
@@ -762,7 +762,7 @@ Every message in private and shared channels is read through Microsoft Graph, no
 
 ## Shared connections
 
-The team's shared MCP connections: admins add a server once, approve its tools, and the agents and MCP clients of the workspace use them as tools named after the connection. A tool acts with the connection's own credential, not as the person. Off hides them all.
+Tool servers the team shares: an admin adds one once and approves its tools, and the team's agents and connected apps use them as tools named after the connection. A tool acts with the connection's own credential, not as the person. Off hides them all.
 
 | | |
 | --- | --- |

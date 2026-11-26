@@ -32,9 +32,9 @@ from pydantic import BaseModel, JsonValue
 
 from mcp.types import TextContent
 
-_UNKNOWN = "No such workspace. Call list_daimons to see the ones you can reach."
+_UNKNOWN = "Not found. Call list_daimons for the workspace_id values you can reach."
 _NAME_MAX = 128
-_OFF = "Shared connections are turned off in that workspace."
+_OFF = "Shared connections are turned off there."
 _NO_WRITES = (
     "This tool changes things and needs a person's approval, which this client can't ask "
     "for. Nothing was done. Use it from a chat with a Daimon."

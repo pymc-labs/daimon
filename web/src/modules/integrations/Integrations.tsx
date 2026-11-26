@@ -10,7 +10,7 @@ import { WorkspacesTab } from "./Workspaces"
 
 const TABS = [
   { label: "Chat apps", to: "/integrations", end: true }, { label: "GitHub", to: "/integrations/github" },
-  { label: "Tool servers", to: "/integrations/mcp" }, { label: "MCP connections", to: "/integrations/connections" }, { label: "API tokens", to: "/integrations/tokens" },
+  { label: "Tool servers", to: "/integrations/mcp" }, { label: "Shared connections", to: "/integrations/connections" }, { label: "API tokens", to: "/integrations/tokens" },
 ]
 const DATA = { label: "Data sources", to: "/integrations/data" }
 

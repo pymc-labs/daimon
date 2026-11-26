@@ -720,15 +720,15 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
     FeatureSpec(
         key="shared_connections",
         name="Shared connections",
-        category="capabilities",
+        category="model_input",
         effect="capability",
         values=_ON_OFF,
         default="off",
         tiers=("deployment", "workspace"),
         binds="turn",
         doc=(
-            "The team's shared MCP connections: admins add a server once, approve its tools, and "
-            "the agents and MCP clients of the workspace use them as tools named after the "
+            "Tool servers the team shares: an admin adds one once and approves its tools, and "
+            "the team's agents and connected apps use them as tools named after the "
             "connection. A tool acts with the connection's own credential, not as the person. "
             "Off hides them all."
         ),

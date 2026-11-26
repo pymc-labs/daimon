@@ -39,7 +39,7 @@ function Body({ d }: { d: Data }) {
   return (
     <>
       <div className="mb-3 flex items-center justify-between gap-3">
-        <h2 className="text-sm font-semibold">MCP connections</h2>
+        <h2 className="text-sm font-semibold">Shared connections</h2>
         {can && <Button size="sm" onClick={() => setAdding(true)}><Plus />Add connection</Button>}
       </div>
       {!d.enabled && <div className={`${note} mb-3`}>Shared connections are turned off for this workspace</div>}

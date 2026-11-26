@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - **A server admin can share one MCP server with the whole workspace.** Turn on the
-  `shared_connections` feature, then add the server's URL and token under Integrations, MCP
+  `shared_connections` feature, then add the server's URL and token under Integrations, Shared
   connections. Daimon shows each tool's description and input schema, and a tool stays off
   until an admin turns it on; one that changes upstream is held until approved again. Tools appear
   as `<name>_<tool>` on Daimon's MCP server and the hub, so agents and outside MCP clients use
