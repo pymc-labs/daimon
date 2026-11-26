@@ -1,8 +1,5 @@
 {
  "routes": {
-  "DELETE /api/admin/data/admins/{account_id}": {
-   "tool": "change_data_access"
-  },
   "DELETE /api/admin/data/scopes/{scope_id}": {
    "tool": "change_data_access"
   },
@@ -121,9 +118,6 @@
   },
   "PATCH /{path:path}": {
    "exempt": "serves the web app's own pages"
-  },
-  "POST /api/admin/data/admins": {
-   "tool": "change_data_access"
   },
   "POST /api/admin/data/links": {
    "tool": "change_data_links"
