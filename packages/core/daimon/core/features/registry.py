@@ -1339,10 +1339,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         default="on",
         tiers=("workspace", "agent", "channel"),
         binds="session_mutable",
-        doc=(
-            "A person can have the agent read their own Google Drive as them. Each read asks "
-            "them on a card first, and everyone in the conversation sees what it finds."
-        ),
+        doc="Reads a person's Drive as them.",
         platforms=EVERY_PLATFORM,
         depends_on=("data_reads",),
         authority=_ADMIN_NOT_OWNER,
