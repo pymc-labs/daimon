@@ -106,10 +106,9 @@ def register_data_connect_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def connect_my_data(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, source_id: str, origin_context_id: str
     ) -> dict[str, Any]:
-        """Start your own sign-in to a data source (source_id from list_my_data's
-        can_connect). Runs on your Approve card. The link or code is sent to you by direct
-        message, never shown here; after you approve it there, check_my_data_connection
-        finishes it."""
+        """Start your own sign-in at a data source; source_id is one list_my_data offers.
+        Runs on your Approve card. The link or code comes by direct message, never shown
+        here; after you approve it there, check_my_data_connection finishes it."""
         auth = await _auth(ctx)
         own(auth)
         actor = await person(runtime, auth)

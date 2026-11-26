@@ -61,8 +61,9 @@ def unattended_turn() -> bool:
 
 
 def origin_read_only(admission: Admission) -> bool | None:
-    """The origin stamp a sealed or read-only turn's credential binds; None keeps it."""
-    return True if admission.memory_read_only or admission.source_sealed else None
+    """The origin stamp a sealed, read-only or data-reading turn's credential binds; None
+    keeps it."""
+    return True if admission.stores_read_only or admission.source_sealed else None
 
 
 def template_mcp_kept(target: AgentSpec | None) -> bool:
