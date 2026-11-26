@@ -505,7 +505,11 @@ async def _with_an_openai_generation(world: World) -> None:
             "generation": 2,
             "provider": "openai",
             "profile": "openai.agents_sdk",
-            "native_refs": {"session": "session-openai-a", "account_scope": "scope-1"},
+            "native_refs": {
+                "session": "session-openai-a",
+                "account_scope": "scope-1",
+                "env_file": "file:keys",
+            },
         }
     )
     await world.store.put_binding(openai, expected_generation=1)
@@ -529,6 +533,7 @@ async def test_the_erased_accounts_private_provider_sessions_go_to_the_provider_
     }, "only A's private sessions, never B's or the shared one"
     openai = next(i for i in sent if i.provider == "openai")
     assert (openai.account_scope_id, openai.profile) == ("scope-1", "openai.agents_sdk")
+    assert openai.native_refs["env_file"] == "file:keys", "purge can delete its keys file"
 
 
 async def test_a_provider_outage_never_fails_the_erasure(world: World) -> None:

@@ -39,14 +39,20 @@ def spa_router(web: WebSettings) -> APIRouter:
         # Only reads get pages; anything else, and any unknown api or auth path, is a 404.
         if request.method not in ("GET", "HEAD") or path.split("/", 1)[0] in _API_ROOTS:
             raise HTTPException(status_code=404, detail=NOT_FOUND)
-        file = _file_inside(root, path) if path else None
+        # The page itself, even asked for by name, takes the uncached answer below.
+        file = _file_inside(root, path) if path and path != "index.html" else None
+        asset = path.startswith("assets/")
         if file is not None:
             # Built assets carry a content hash in their name, so they never change.
-            cache = _IMMUTABLE if path.startswith("assets/") else "no-cache"
+            cache = _IMMUTABLE if asset else "no-cache"
             return FileResponse(file, headers={"Cache-Control": cache})
         index = _file_inside(root, "index.html")
-        if index is None:
+        # An asset from an earlier build is gone: the page as HTML would fail the browser's
+        # MIME check and blank the app instead of letting it reload.
+        if index is None or asset:
             raise HTTPException(status_code=404, detail=NOT_FOUND)
-        return FileResponse(index, headers={"Cache-Control": "no-cache"})
+        # Never stored: a restored or back-navigated tab would reuse a cached page that
+        # names the previous build's assets, which no longer exist after a deploy.
+        return FileResponse(index, headers={"Cache-Control": "no-store"})
 
     return router

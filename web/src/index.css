@@ -31,6 +31,7 @@
   --color-ring: var(--ring);
   --color-link: var(--link);
   --color-faint: var(--faint);
+  --color-answered: var(--answered);
   --color-warning: var(--warning);
   --color-success: var(--success);
   --color-navy: #0c1f40;
@@ -76,6 +77,7 @@
   --foreground: #0c1f40;
   --muted-foreground: #55627a;
   --faint: #5f6b80;
+  --answered: color-mix(in oklab, #5f6b80 45%, transparent);
   --primary: #0c1f40;
   --primary-foreground: #ffffff;
   --ring: #0c9e82;
@@ -107,6 +109,7 @@
   --foreground: #edf1f6;
   --muted-foreground: #9ca9bf;
   --faint: #8693ac;
+  --answered: color-mix(in oklab, #8693ac 45%, transparent);
   --primary: #b4e7dd;
   --primary-foreground: #0c1f40;
   --ring: #6fd6c2;

@@ -19,6 +19,7 @@ from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.shared_threads import shared_owner
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+from daimon.core.turn import gemini_prepare
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.binding import prepared_persistence
 from daimon.core.turn.deps import TurnDeps
@@ -31,6 +32,7 @@ from daimon.core.turn.gemini import (
     GeminiUsageRuntime,
 )
 from daimon.core.turn.prepare import PreparedTurn, bind_session_impl
+from daimon.core.turn.provider_env import EnvFile
 from daimon.core.turn.run import run_prepared_turn_impl
 from daimon.core.usage_billing import ObservationRecorder
 from daimon.testing.factories import make_tenant
@@ -40,9 +42,10 @@ from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.events import AgentMessagePayload, TextPart
 from mux.contracts.ids import ChannelRef, ModelRef, Scope, ThreadRef
 from mux.contracts.resources import AgentSpec, EnvironmentSpec
+from mux.drivers.gemini import core as gemini_core
 from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAttempt
 from mux.drivers.gemini.transport import Object
-from mux.errors import ScopeViolation
+from mux.errors import ProviderError, ScopeViolation
 from mux.state.lease import Slot
 from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from mux.testing.drivers.gemini.fake import MemoryStorage
@@ -181,6 +184,24 @@ async def test_explicit_registered_preparation_reuses_authorized_persisted_bindi
     assert not host.transport.requests and not host.ancillary.requests
 
 
+async def test_the_keys_file_is_placed_in_the_sandbox_before_each_reply(
+    host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = EnvFile(body=b"API_KEY=s3cret\n", sha256="hash")
+
+    async def keys(_request: object) -> EnvFile:
+        return env
+
+    monkeypatch.setattr(gemini_prepare, "turn_env_file", keys)
+    first = await prepare(host)
+    ((environment, config),) = host.transport.environments.items()
+    assert "s3cret" not in str(config), "never in the config interactions echo"
+    assert host.transport.environment_files[environment] == {".daimon/.env": len(env.body)}
+    second = await prepare(host)
+    assert (first.env_sha256, second.env_sha256) == ("hash", "hash")
+    assert len(host.transport.uploads) == 1, "an unchanged file is not sent again"
+
+
 async def test_fresh_preparation_creates_empty_slot_then_replaces_binding(host: Host) -> None:
     first = await prepare(host, reuse_existing=False)
     assert not first.reused
@@ -196,17 +217,6 @@ async def test_fresh_preparation_creates_empty_slot_then_replaces_binding(host: 
     assert second.session_ref != first.session_ref
     assert second.continuity.state in {"replaced", "replaced_after_loss"}
     assert "summar" not in second.continuity.user_prefix
-
-
-def _causes(error: BaseException) -> list[tuple[str, ...]]:
-    """`missing` of every UnsupportedCapability in the cause chain."""
-    found: list[tuple[str, ...]] = []
-    while error is not None:
-        missing = getattr(error, "missing", None)
-        if isinstance(missing, tuple):
-            found.append(missing)
-        error = error.__cause__ or error.__context__  # type: ignore[assignment]
-    return found
 
 
 @pytest.mark.parametrize("failure", ["runtime", "deployment", "tenant", "revision"])
@@ -383,7 +393,7 @@ async def test_a_shared_thread_binds_once_and_a_second_caller_continues_it(host:
         await as_caller(other, agent_origin)
 
 
-@pytest.mark.parametrize("failure", ["runtime", "model", "daimon_rules"])
+@pytest.mark.parametrize("failure", ["runtime", "model"])
 async def test_unsupported_host_configuration_is_visible_refusal_before_factory(
     host: Host, failure: str
 ) -> None:
@@ -411,18 +421,9 @@ async def test_unsupported_host_configuration_is_visible_refusal_before_factory(
         # Independently prove the preparation boundary also refuses a stale or
         # manually supplied admission, rather than relying on the first gate.
         admission = replace(admission, backend_revision=revision)
-    else:
-        # A rule that makes daimon's own tools ask is a gate this backend cannot hold.
-        admission = replace(
-            admission,
-            daimon_rule_tools=frozenset({"get_session"}),
-            daimon_rules_need_driver=True,
-        )
     with pytest.raises(AdmissionDenied) as refusal:
         await prepare(host, admission)
     assert refusal.value.reason == "backend_unsupported"
-    if failure == "daimon_rules":
-        assert ("daimon_tool_rules",) in _causes(refusal.value), "the log names the rule gap"
     assert not opened and not host.transport.requests and not host.ancillary.requests
 
 
@@ -904,3 +905,131 @@ async def test_a_released_gemini_slot_is_adopted_with_a_fresh_session_not_a_repl
     assert adopted.native_refs[ERA_REF] == f":g{bound.generation + 1}"
     third = await prepare(host)
     assert third.reused and third.session_ref == second.session_ref
+
+
+async def _turn(host: Host, prepared: PreparedTurn, key: str) -> None:
+    async def reseed() -> str:
+        raise AssertionError("Gemini host turn must never use Anthropic recovery")
+
+    outcome = await run_prepared_turn_impl(
+        host.deps,
+        prepared,
+        tenant_id=TENANT,
+        platform="slack",
+        thread_id="thread",
+        external_user_id="user",
+        user_message=f"question {key}",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=reseed,
+        recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+        operation_key=f"offline-host:{key}",
+    )
+    assert outcome.state.error is None
+
+
+def _gateway_timeout() -> ProviderError:
+    return ProviderError("upstream", retryable=True, native_error_code="http_504")
+
+
+async def test_an_unreadable_last_interaction_starts_a_fresh_session_not_a_failed_turn(
+    host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replays a stuck thread: every read of the last reply's interaction answers 504.
+
+    Before, the reused session's read retried 6 times and the turn failed in setup, and
+    every later turn in the thread failed the same way. Now the turn replaces the session,
+    carrying the stored transcript, and the new interaction does not chain on the old one.
+    """
+    monkeypatch.setattr(gemini_core, "INTERACTION_READ_RETRY_DELAYS_S", (0.0,) * 5)
+    host.transport.responses.extend(
+        [interaction("one", text="first answer"), interaction("two", text="second answer")]
+    )
+    first = await prepare(host)
+    await _turn(host, first, "1")
+    host.transport.reads["one"] = [_gateway_timeout() for _ in range(6)]
+    reads = host.transport.read_requests.count("one")
+    slot = Slot(thread=ThreadRef(channel=CHANNEL, thread_id="thread"), account_id=str(ACCOUNT))
+    before = await host.journal.state_store.get_binding(slot)
+    assert before is not None
+
+    second = await prepare(host)
+
+    assert host.transport.read_requests.count("one") - reads == 6, "every retry ran first"
+    assert not second.reused and second.session_ref != first.session_ref
+    after = await host.journal.state_store.get_binding(slot)
+    assert after is not None and (after.id, after.generation) == (
+        before.id,
+        before.generation + 1,
+    )
+    assert second.continuity.state == "replaced"
+    assert second.continuity.applied == ("history_unreadable",)
+    # The stored transcript carries into the fresh session's first message.
+    assert "question 1" in second.continuity.user_prefix
+    assert "first answer" in second.continuity.user_prefix
+    await _turn(host, second, "2")
+    assert "previous_interaction_id" not in host.transport.requests[-1]
+    third = await prepare(host)
+    assert third.reused and third.session_ref == second.session_ref
+
+
+async def test_a_last_interaction_read_that_hangs_is_bounded_then_replaced(
+    host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(gemini_prepare, "PRIOR_READ_BUDGET_S", 0.05)
+    host.transport.responses.append(interaction("one"))
+    first = await prepare(host)
+    await _turn(host, first, "1")
+    read = host.transport.get
+
+    async def hangs(interaction_id: str) -> Object:
+        if interaction_id == "one":
+            await asyncio.Event().wait()
+        return await read(interaction_id)
+
+    monkeypatch.setattr(host.transport, "get", hangs)
+    second = await asyncio.wait_for(prepare(host), 10)
+    assert not second.reused and second.continuity.applied == ("history_unreadable",)
+
+
+async def test_a_refused_last_interaction_read_still_fails_the_turn(
+    host: Host, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a provider that cannot serve the read replaces the session: a 4xx is final."""
+    host.transport.responses.append(interaction("one"))
+    first = await prepare(host)
+    await _turn(host, first, "1")
+    host.transport.reads["one"] = [
+        ProviderError("invalid_request", retryable=False, native_error_code="http_400")
+    ]
+    reads = host.transport.read_requests.count("one")
+    with pytest.raises(ProviderError):
+        await prepare(host)
+    assert host.transport.read_requests.count("one") - reads == 1
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ProviderError(
+            "overloaded", retryable=True, native_code="high_demand", native_error_code="http_500"
+        ),
+        ProviderError("overloaded", retryable=True, native_error_code="http_503"),
+        ProviderError("transient_network", retryable=True, native_code="connect_failed"),
+    ],
+    ids=["high_demand", "unavailable", "connect_failed"],
+)
+async def test_capacity_or_network_failures_keep_the_session(
+    host: Host, monkeypatch: pytest.MonkeyPatch, failure: ProviderError
+) -> None:
+    """These pass: the message fails as before and the conversation stays whole."""
+    monkeypatch.setattr(gemini_core, "INTERACTION_READ_RETRY_DELAYS_S", (0.0,) * 5)
+    host.transport.responses.append(interaction("one"))
+    first = await prepare(host)
+    await _turn(host, first, "1")
+    host.transport.reads["one"] = [failure for _ in range(6)]
+    with pytest.raises(ProviderError):
+        await prepare(host)
+    host.transport.reads["one"] = []
+    again = await prepare(host)
+    assert again.reused and again.session_ref == first.session_ref

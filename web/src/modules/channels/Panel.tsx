@@ -3,7 +3,7 @@ import { ExternalLink } from "lucide-react"
 import { Ago, Money } from "@/components/common"
 import { AgentLink } from "@/components/links"
 import { DrawerTabs, Facts, PanelHead, PanelSection, Tag } from "@/components/panel"
-import { QueryState } from "@/components/QueryState"
+import { ErrorState, QueryState } from "@/components/QueryState"
 import { Button } from "@/components/ui/button"
 import { shortDate, usd } from "@/lib/format"
 import { ChannelSupport } from "@/modules/admin/support/ChannelSupport"
@@ -91,6 +91,7 @@ export function ChannelPanel({ id }: { id: string }) {
                 <Answers c={c} workspace={list?.default_agent} settings={s} />
                 {c.platform !== "web" && <Access c={c} />}
                 <Budget c={c} />
+                {c.platform !== "web" && !s && settings.isError && <ErrorState error={settings.error} onRetry={() => void settings.refetch()} className="py-6" />}
                 {c.platform !== "web" && s && (
                   <>
                     <FeatureSettings place={{ channel: c.id }} tier="channel" edit={c.can_manage} hide={SUPPORT_KEYS} />

@@ -1003,6 +1003,42 @@ async def claim_routine_deliveries(
     return rows
 
 
+async def queue_owner_notice(
+    session: AsyncSession, routine_id: _uuid.UUID, notice: dict[str, Any]
+) -> None:
+    """Hold a failure notice for the owner's adapter, replacing one it has not sent yet."""
+    await session.execute(
+        update(Routine)
+        .where(Routine.id == routine_id)
+        .values(owner_notice=notice)
+        .execution_options(synchronize_session=False)
+    )
+
+
+async def take_owner_notices(
+    session: AsyncSession, *, platform: str, limit: int = 20
+) -> list[tuple[RoutineRow, dict[str, Any]]]:
+    """Take the held owner notices of `platform`'s live tenants, clearing each: at most once."""
+    tenant_ids = select(Tenant.id).where(Tenant.platform == platform, Tenant.archived_at.is_(None))
+    held = (
+        await session.scalars(
+            select(Routine)
+            .where(Routine.owner_notice.is_not(None), Routine.tenant_id.in_(tenant_ids))
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+    ).all()
+    taken = [(RoutineRow.model_validate(orm), orm.owner_notice or {}) for orm in held]
+    if held:
+        await session.execute(
+            update(Routine)
+            .where(Routine.id.in_([orm.id for orm in held]))
+            .values(owner_notice=None)
+            .execution_options(synchronize_session=False)
+        )
+    return taken
+
+
 async def settle_routine_delivery(
     session: AsyncSession,
     routine_id: _uuid.UUID,

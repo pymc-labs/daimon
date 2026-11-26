@@ -48,9 +48,9 @@ class ThreadOption:
 
 
 LEGACY_OPTIONS: Final = (
-    ThreadOption("Haiku", "haiku"),
-    ThreadOption("Sonnet", "sonnet"),
     ThreadOption("Opus", "opus"),
+    ThreadOption("Sonnet", "sonnet"),
+    ThreadOption("Haiku", "haiku"),
     ThreadOption("Agent default", "default"),
 )
 

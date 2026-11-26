@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import os
 import re
 import shutil
 import subprocess
@@ -12,7 +13,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 JARS = (
-    Path("/home/derick/scratch/daimon-os-devenv/tla2tools.jar"),
+    *((Path(os.environ["TLA2TOOLS_JAR"]),) if os.environ.get("TLA2TOOLS_JAR") else ()),
     Path.home() / ".cache/daimon/tla/tla2tools.jar",
 )
 MAX_SECONDS = 180

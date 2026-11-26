@@ -9,10 +9,12 @@ from daimon.core.defaults.mcp_merge import DAIMON_MCP_SERVER_NAME
 from daimon.core.mcp_server_url import GITHUB_COPILOT_MCP_URL, github_router_url
 from daimon.core.tool_safety import (
     CARDED_TOOLS,
+    COMPUTE_APPROVAL_TOOLS,
     CONFIRMED_DAIMON_TOOLS,
     DAIMON_SERVER_NAME,
     OPEN_TOOL_SAFETY,
     PUBLISH_TOOLS,
+    WATCH_APPROVAL_TOOLS,
     ResolvedAgentToolRule,
     ToolAnnotations,
     ToolCall,
@@ -27,6 +29,7 @@ from daimon.core.tool_safety import (
     unwrap_daimon_call,
 )
 from daimon.core.turn.approvals import interactive_decider, unattended_decider
+from daimon.core.turn.unattended_capabilities import protected_tools
 
 _ON = ToolSafetyPolicy(enabled=True)
 
@@ -285,10 +288,10 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
                 "approve_server_skill_update",
                 "change_setting",
                 "change_workspace_settings",
+                "compute_extend_session",
+                "compute_launch_session",
                 "create_watch",
                 "delete_allowance",
-                "fly_extend_session",
-                "fly_launch_session",
                 "remove_my_data",
                 "restore_library_skill_version",
                 "resume_watch",
@@ -441,9 +444,9 @@ def test_a_disabled_daimon_toolset_keeps_add_skill_disabled() -> None:
                 "add_server_skill",
                 "add_skill",
                 "approve_reach",
+                "compute_extend_session",
+                "compute_launch_session",
                 "create_watch",
-                "fly_extend_session",
-                "fly_launch_session",
                 "resume_watch",
                 "rotate_watch_key",
                 "start_long_job",
@@ -783,8 +786,8 @@ def test_a_daimon_rule_makes_call_tool_and_the_named_tool_ask() -> None:
         "call_tool",
         "hubspot_update_objects",
         "create_watch",
-        "fly_extend_session",
-        "fly_launch_session",
+        "compute_extend_session",
+        "compute_launch_session",
         "resume_watch",
         "rotate_watch_key",
         "start_long_job",
@@ -812,9 +815,9 @@ def test_a_rule_naming_a_confirmed_tool_does_not_duplicate_its_config() -> None:
             "add_skill",
             "approve_reach",
             "call_tool",
+            "compute_extend_session",
+            "compute_launch_session",
             "create_watch",
-            "fly_extend_session",
-            "fly_launch_session",
             "publish_report",
             "resume_watch",
             "rotate_watch_key",
@@ -871,9 +874,9 @@ def test_the_daimon_wildcard_gates_the_proxy_but_never_gets_a_config_of_its_own(
             "add_skill",
             "approve_reach",
             "call_tool",
+            "compute_extend_session",
+            "compute_launch_session",
             "create_watch",
-            "fly_extend_session",
-            "fly_launch_session",
             "resume_watch",
             "rotate_watch_key",
             "start_long_job",
@@ -894,9 +897,9 @@ def test_the_daimon_wildcard_gates_the_proxy_but_never_gets_a_config_of_its_own(
             "add_skill",
             "approve_reach",
             "call_tool",
+            "compute_extend_session",
+            "compute_launch_session",
             "create_watch",
-            "fly_extend_session",
-            "fly_launch_session",
             "get_session",
             "resume_watch",
             "rotate_watch_key",
@@ -990,15 +993,15 @@ def test_protected_names_always_ask_whatever_annotations_or_rules_say(
 @pytest.mark.parametrize(
     "tool,arguments,expected",
     [
-        ("fly_launch_session", {"template": "mmm"}, "ask"),
-        ("fly_extend_session", {"hours": 24}, "ask"),
-        ("fly_run_bash", {"command": "true"}, "allow"),
-        ("fly_write_file", {"content": "input"}, "allow"),
+        ("compute_launch_session", {"template": "mmm"}, "ask"),
+        ("compute_extend_session", {"hours": 24}, "ask"),
+        ("compute_run_bash", {"command": "true"}, "allow"),
+        ("compute_write_file", {"content": "input"}, "allow"),
     ],
 )
-def test_fly_only_lease_actions_force_a_card(tool, arguments, expected):
+def test_compute_lease_actions_force_a_card(tool, arguments, expected):
     call = ToolCall(
-        tool_use_id="fly", server_name=DAIMON_SERVER_NAME, tool_name=tool, input=arguments
+        tool_use_id="compute", server_name=DAIMON_SERVER_NAME, tool_name=tool, input=arguments
     )
     verdict = decide_tool_call(
         _ON, call, attended=True, trusted_servers=frozenset({DAIMON_SERVER_NAME})
@@ -1055,3 +1058,130 @@ def test_change_setting_is_carded_protected_and_never_auto_allowed() -> None:
     assert CARDED_TOOLS["change_setting"] == "origin_context_id"
     assert "change_setting" in PERMISSION_SETTER_TOOLS
     assert gate_protected_tool("change_setting")
+
+
+# --- An approval setting's skip, with the policy on ---------------------------------
+
+#: Each tool an approval setting can skip, and the group its setting skips with it.
+_SKIP_GROUPS = {
+    tool: group for group in (WATCH_APPROVAL_TOOLS, COMPUTE_APPROVAL_TOOLS) for tool in group
+}
+
+
+def _turn_set() -> frozenset[str]:
+    """A chat turn's confirmed tools with every card asking (`confirmed_tools_for_turn`)."""
+    from types import SimpleNamespace
+    from typing import Any, cast
+
+    from daimon.core.confirmation import confirmed_tools_for_turn
+
+    deps = SimpleNamespace(backend_selection_enabled=True, microsoft_send=True, tool_safety=_ON)
+    return confirmed_tools_for_turn(cast(Any, deps))
+
+
+def _skippable(tool: str) -> ToolCall:
+    """A real call of `tool` on Daimon's own server, with its confirmation field."""
+    field = CONFIRMED_DAIMON_TOOLS[tool]
+    assert field is not None
+    return ToolCall(
+        tool_use_id="tu_1", server_name=DAIMON_SERVER_NAME, tool_name=tool, input={field: "x"}
+    )
+
+
+def _decided(
+    tool: str,
+    confirmed: frozenset[str],
+    *,
+    attended: bool = True,
+    policy: ToolSafetyPolicy = _ON,
+    rule: ResolvedAgentToolRule | None = None,
+) -> str:
+    return decide_tool_call(
+        policy,
+        _skippable(tool),
+        attended=attended,
+        trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+        confirmed_tools=confirmed,
+        agent_rule=rule,
+    ).outcome
+
+
+def _asks_in_session(
+    tool: str,
+    confirmed: frozenset[str],
+    *,
+    policy: ToolSafetyPolicy = _ON,
+    rule_tools: frozenset[str] = frozenset(),
+) -> bool:
+    out = session_tools_for_policy(
+        policy,
+        _tools(),
+        trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+        confirmed_tools=confirmed,
+        daimon_rule_tools=rule_tools,
+    )
+    return has_confirmation_gate(out or _tools(), tool_name=tool)
+
+
+@pytest.mark.parametrize("tool", sorted(_SKIP_GROUPS))
+def test_a_skipped_card_does_not_ask_with_the_policy_on(tool: str) -> None:
+    """With tool safety on, a turn whose setting skips the card runs the tool unasked:
+    neither the session's always_ask list nor the decider asks."""
+    skipped = _turn_set() - _SKIP_GROUPS[tool]
+    assert _decided(tool, skipped) == "allow", "the decider asks no card"
+    assert not _asks_in_session(tool, skipped), "the session holds no always_ask for it"
+    assert _decided(tool, _turn_set()) == "ask", "with Ask the card stays"
+    assert _asks_in_session(tool, _turn_set())
+
+
+@pytest.mark.parametrize(
+    "confirmed",
+    [
+        frozenset[str](),
+        protected_tools(_ON),
+        protected_tools(_ON) | {"approve_reach"},
+        frozenset({"lead_intake_resolve", "approve_reach"}),
+    ],
+    ids=["none", "protected", "host_call_gate", "partial"],
+)
+@pytest.mark.parametrize("tool", sorted(_SKIP_GROUPS))
+def test_a_caller_that_does_not_read_the_settings_still_asks(
+    tool: str, confirmed: frozenset[str]
+) -> None:
+    """Only a set built from the approval settings can skip; any other set asks."""
+    assert _decided(tool, confirmed) == "ask"
+    assert _asks_in_session(tool, confirmed)
+
+
+@pytest.mark.parametrize("tool", sorted(_SKIP_GROUPS))
+def test_an_unattended_turn_is_refused_a_skipped_tool(tool: str) -> None:
+    """Nobody can see a card in an unattended turn, so a skip never applies there."""
+    skipped = _turn_set() - _SKIP_GROUPS[tool]
+    assert _decided(tool, skipped | protected_tools(_ON), attended=False) == "deny"
+    assert _decided(tool, skipped, attended=False) == "deny", "even without protected_tools"
+
+
+@pytest.mark.parametrize("tool", sorted(_SKIP_GROUPS))
+def test_an_operator_deny_wins_over_a_skipped_card(tool: str) -> None:
+    """The skip only drops the card: a tool the operator denies stays denied, and the
+    session still holds it so the call reaches the decider."""
+    skipped = _turn_set() - _SKIP_GROUPS[tool]
+    denied = ToolSafetyPolicy(enabled=True, denied=(f"{DAIMON_SERVER_NAME}/{tool}",))
+    assert _decided(tool, skipped, policy=denied) == "deny"
+    assert _asks_in_session(tool, skipped, policy=denied)
+    assert _decided(tool, skipped) == "allow", "with no deny the skip holds"
+
+
+@pytest.mark.parametrize(
+    ("rule", "outcome"), [("deny", "deny"), ("ask", "ask"), ("allow", "allow")]
+)
+@pytest.mark.parametrize("tool", sorted(_SKIP_GROUPS))
+def test_an_agent_rule_that_denies_or_asks_wins_over_a_skipped_card(
+    tool: str, rule: str, outcome: str
+) -> None:
+    skipped = _turn_set() - _SKIP_GROUPS[tool]
+    rules = ToolSafetyPolicy(enabled=True, agent_rules=True)
+    found = ResolvedAgentToolRule(rule=rule)  # type: ignore[arg-type]
+    assert _decided(tool, skipped, policy=rules, rule=found) == outcome
+    if rule != "allow":
+        assert _asks_in_session(tool, skipped, policy=rules, rule_tools=frozenset({tool}))

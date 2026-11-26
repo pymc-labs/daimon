@@ -92,25 +92,32 @@ async def test_a_legacy_choice_reads_as_claude_and_clearing_drops_the_run(switch
         assert await get_thread_consent(db, **where, agent_id=agent.agent_id) is None, "cleared"
 
 
-async def test_a_pick_off_the_agents_provider_needs_the_owner(switching):
-    """Who may switch stays: a stranger is refused until the agent lets anyone pick."""
+async def test_a_pick_off_the_agents_provider_needs_the_owner_once_the_agent_turns_it_off(
+    switching,
+):
+    """Anyone may pick by default; an agent that turns it off keeps it to its owner and admins."""
     service, agent, _, sessions, _, _ = switching
     stranger = BackendActor(agent.tenant_id, uuid.uuid4(), Subject())
     pick = _pick(service, agent, stranger, sessions)
+
+    async def feature(value: str) -> None:
+        async with sessions.begin() as db:
+            await set_feature_value(
+                db,
+                tenant_id=agent.tenant_id,
+                target=FeatureTarget("agent", agent_id=MA_AGENT),
+                key="thread_providers",
+                value=value,
+                set_by=None,
+                surface="chat",
+            )
+
+    await feature("off")
     refused = await pick_thread(pick, LUNA, thread_id="thread", admin=False)
     assert isinstance(refused, SwitchRefusal), "a refusal, not an exception"
     assert refused.reason == "owner_or_admin_required", refused.reason
     assert await _thread(sessions, agent) is None, "nothing was kept"
-    async with sessions.begin() as db:
-        await set_feature_value(
-            db,
-            tenant_id=agent.tenant_id,
-            target=FeatureTarget("agent", agent_id=MA_AGENT),
-            key="thread_providers",
-            value="on",
-            set_by=None,
-            surface="chat",
-        )
+    await feature("on")
     change = await _keep(pick)
     assert change.model_id == "gpt-6-luna", "the pick applies"
     assert "Earlier messages carry over." in change.note, change.note
@@ -162,6 +169,29 @@ async def test_the_thread_tier_runs_its_revision_and_a_rollback_keeps_it(switchi
             db, channel, agent, enabled=True, retained_revision=revision.local
         )
     assert retained == (revision, False, "agent"), "a rollback keeps the thread's run"
+
+
+async def test_a_conversations_effort_runs_on_openai_as_its_own_revision(switching):
+    """OpenAI takes low, medium and high per conversation; the session is selected afresh."""
+    service, agent, actor, sessions, _, _ = switching
+    await _keep(_pick(service, agent, actor, sessions))
+    where = {"tenant_id": agent.tenant_id, "platform": "discord", "thread_id": "thread"}
+    plain = await _thread(sessions, agent)
+    assert plain is not None and plain.consent is not None
+    async with sessions.begin() as db:
+        await set_thread_model(db, **where, effort="max")
+    assert await _thread(sessions, agent) == plain, "an effort OpenAI does not take is ignored"
+    async with sessions.begin() as db:
+        await set_thread_model(db, **where, effort="high")
+    thread = await _thread(sessions, agent)
+    assert thread is not None and thread.consent is not None
+    assert (thread.consent.effort, thread.consent.model) == ("high", plain.consent.model)
+    assert thread.consent.digest != plain.consent.digest, "a new thread revision, not a reuse"
+    async with sessions.begin() as db:
+        revision, _, _ = await resolve_turn_backend(
+            db, _channel(agent), agent, enabled=True, validate_origin=_accept, thread=thread
+        )
+    assert revision is not None and revision.effort == "high", "the turn runs at that effort"
 
 
 @pytest.mark.parametrize(

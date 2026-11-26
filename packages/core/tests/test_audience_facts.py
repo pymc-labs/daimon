@@ -182,7 +182,7 @@ def test_narrow_counts_readers_and_contained_counts_viewers() -> None:
 
     facts = _facts(
         _room("120", "three-no-history", *no_history_for("u1", "u2", "u3")),
-        _room("121", "two-no-history", *no_history_for("u1", "u2")),
+        _room("121", "two-blocked-by-name", *no_history_for("u1", "u2")),
         # Nobody holds history for outsiders either: they still view, so the room is contained.
         _room(
             "122",
@@ -193,7 +193,8 @@ def test_narrow_counts_readers_and_contained_counts_viewers() -> None:
     )
 
     assert facts["120"].team_shut_out_count == 3 and facts["120"].narrow
-    assert facts["121"].team_shut_out_count == 2 and not facts["121"].narrow
+    # Two blocked by name is narrow too: a member overwrite is a deliberate seal.
+    assert facts["121"].team_shut_out_count == 2 and facts["121"].narrow
     assert facts["122"].contained and facts["122"].outsiders_count == 1, "Q1 is View Channel only"
     assert not facts["120"].contained, "a history deny does not change who views the room"
 
@@ -223,3 +224,57 @@ def test_a_thread_takes_the_reading_standard_from_its_parent() -> None:
     thread = AudienceChannel("125", 11, "thread", parent_id="124")
 
     assert _facts(parent, thread)["125"].narrow
+
+
+def test_a_room_that_shuts_out_one_internal_person_by_name_is_narrow() -> None:
+    def blocked(person: DiscordOverwrite) -> bool:
+        return _facts(_room("130", "sales", *INTERNAL_ONLY, person))["130"].narrow
+
+    assert blocked(_person("u1", deny=VIEW))
+    assert blocked(_person("friend", deny=HISTORY)), "an internal role outside the team counts"
+    assert blocked(_person("u1", deny=VIEW | HISTORY))
+    assert not blocked(_person("u1", allow=VIEW)), "a member allow is no seal"
+
+
+def test_a_name_deny_that_does_not_shut_the_person_out_is_not_a_seal() -> None:
+    admin = AudienceMember("boss", frozenset({CORE, "admins"}))
+    owner = AudienceMember("founder", frozenset({CORE}), is_owner=True)
+    permissions = {**ROLE_PERMISSIONS, "admins": DISCORD_ADMINISTRATOR}
+
+    def narrow(members: list[AudienceMember], *overwrites: DiscordOverwrite) -> bool:
+        return compute_room_facts(
+            guild_id=GUILD,
+            members=members,
+            role_permissions=permissions,
+            channels=[_room("131", "room", *INTERNAL_ONLY, *overwrites)],
+            internal_role_ids=[CORE, FRIEND],
+            team_role_ids=[CORE],
+        )["131"].narrow
+
+    assert not narrow([admin, owner], _person("boss", deny=VIEW), _person("founder", deny=VIEW))
+    # A person who is not internal is no seal, and neither is a bot.
+    assert not narrow(MEMBERS, _person("outsider", deny=VIEW | HISTORY))
+    assert not narrow(MEMBERS, _person("bot", deny=VIEW))
+    # Another permission bit, or a deny the person's own allow undoes, shuts nobody out.
+    assert not narrow(MEMBERS, _person("u1", deny=1 << 11))
+    assert not narrow(MEMBERS, _person("u1", allow=VIEW | HISTORY, deny=VIEW | HISTORY))
+    # A name overwrite for someone who is not in the server is no seal either.
+    assert not narrow(MEMBERS, _person("gone", deny=VIEW))
+
+
+def test_two_internal_people_shut_out_through_roles_alone_stay_open() -> None:
+    overwrites = (
+        *CLOSED,
+        _role(FRIEND, allow=VIEW),
+        _role(CORE, deny=VIEW),
+        *(_person(user, allow=VIEW) for user in ("u1", "u2", "u3")),
+    )
+
+    assert not _facts(_room("132", "two-out", *overwrites))["132"].narrow
+
+
+def test_a_thread_takes_a_name_seal_from_its_parent() -> None:
+    parent = _room("133", "sales", *INTERNAL_ONLY, _person("u1", deny=VIEW))
+    thread = AudienceChannel("134", 11, "thread", parent_id="133")
+
+    assert _facts(parent, thread)["134"].narrow

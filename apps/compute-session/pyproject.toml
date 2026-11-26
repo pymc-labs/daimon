@@ -1,0 +1,23 @@
+[project]
+name = "daimon-compute-session"
+version = "0.2.0"
+description = "Thin MCP server and work image for Daimon compute sessions"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{ name = "PyMC Labs" }]
+# Two dependencies on purpose: the server shares its machine with whatever the
+# session owner installs, and everything here is reachable with the session token.
+dependencies = [
+    "starlette>=0.40",
+    "uvicorn>=0.34",
+]
+
+[project.urls]
+Repository = "https://github.com/pymc-labs/daimon"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/compute_session"]

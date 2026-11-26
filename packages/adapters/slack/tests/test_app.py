@@ -1525,6 +1525,7 @@ async def test_terminal_render_followed_by_raise_still_retires_card_intent(
         watermark=None,
         reused=False,
         continuity=ContinuityOutcome(),
+        session_ref=None,
     )
 
     @asynccontextmanager

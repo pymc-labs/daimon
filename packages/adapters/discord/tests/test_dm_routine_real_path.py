@@ -44,6 +44,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.mcp_vault import add_external_mcp_credential
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.mux_backend import resource_scope
+from daimon.core.provider_routine import SHELL_NEEDS_SANDBOX
 from daimon.core.routine_delivery import poll_deliveries_once
 from daimon.core.scheduler import RoutineDispatcher, run_one_tick
 from daimon.core.scope import DeploymentDefault
@@ -797,7 +798,20 @@ async def _reclassify(db: AsyncSession, row: RoutineRow, change: str, **back: An
         )
 
 
-async def test_routine_answer_reaches_only_the_owners_dm_and_bills_its_budget(harness: Harness):
+@pytest.mark.parametrize(
+    ("text", "sends", "tail"),
+    [
+        ("private answer", True, "private answer"),
+        ("", False, ""),
+        ("NO_POST: no new mail", False, "no new mail"),
+    ],
+    ids=["answer", "empty", "marker"],
+)
+async def test_routine_answer_reaches_only_the_owners_dm_and_bills_its_budget(
+    harness: Harness, text: str, sends: bool, tail: str
+):
+    """A quiet run, with no final text or a NO_POST one, is billed and sends nothing."""
+    harness.upstream.scripts = [answer(text)]
     row = await _routine_row(harness)
     await harness.fire(row)
     sent: list[tuple[int, int, str]] = []
@@ -814,9 +828,16 @@ async def test_routine_answer_reaches_only_the_owners_dm_and_bills_its_budget(ha
 
     await harness.deliver(fetch_channel=no_channel, open_dm=open_dm, files=False)
 
-    assert [(guild, user) for guild, user, _ in sent] == [(GUILD, int(OWNER_A))]
-    assert "private answer" in sent[0][2]
+    if sends:
+        assert [(guild, user) for guild, user, _ in sent] == [(GUILD, int(OWNER_A))]
+        assert text in sent[0][2]
+    else:
+        assert sent == []
     async with harness.factory() as session:
+        saved = await get_routine(session, row.id, tenant_id=row.tenant_id)
+        assert saved is not None and saved.last_error is None
+        assert saved.delivery_note == (None if sends else "no_result")
+        assert saved.last_result_tail == tail
         spent = await get_channel_spend(
             session, tenant_id=harness.tenant.id, channel_id=BUDGET, since=None, until=None
         )
@@ -832,14 +853,15 @@ async def test_revoked_owner_gets_no_run_and_no_delivery(harness: Harness):
     assert after is not None and after.last_error and after.delivery_status is None
 
 
-async def test_a_provider_native_agent_is_refused_before_any_session(
+async def test_an_openai_agent_without_the_sandbox_opt_in_is_refused_before_any_session(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ):
+    """OpenAI's shell cannot be left out of its session, so the fire stops before one."""
     real_admit = direct_messages.admit
 
     async def native_admit(*args: Any, **kwargs: Any) -> Any:
         admission = await real_admit(*args, **kwargs)
-        revision = type("Revision", (), {"profile": "openai.responses"})()
+        revision = type("Revision", (), {"profile": "openai.persistent_workspace"})()
         return replace(admission, backend_revision=revision, backend_revision_origin="agent")
 
     monkeypatch.setattr(direct_messages, "admit", native_admit)
@@ -848,10 +870,8 @@ async def test_a_provider_native_agent_is_refused_before_any_session(
     assert not harness.upstream.state.sessions, "no session was created"
     after = await harness.reload(row)
     assert after is not None
-    assert after.last_error == "DM routines need a Managed Agents agent"
+    assert after.last_error == f"backend_unsupported: {SHELL_NEEDS_SANDBOX}"
     assert after.delivery_status is None
-    with pytest.raises(RuntimeError, match="Managed Agents"):
-        await harness.routine()
 
 
 async def test_attached_owner_credentials_are_nonempty_distinct_and_scope_checked(harness: Harness):
@@ -1581,6 +1601,36 @@ async def test_routine_origin_cannot_promote_handoffs_to_attended(harness: Harne
     harness.upstream.scripts = [inspect]
     result = await harness.routine()
     assert result.text == "unattended parent" and observed == [False]
+
+
+async def test_routine_origin_holds_own_dm_reach_and_has_read_nothing_through_it(
+    harness: Harness,
+):
+    from daimon.core.stores.turn_origins import get_active_origin
+    from daimon.core.turn_origin import current_origin_id
+
+    observed = []
+
+    async def inspect(upstream: Upstream, sid: str) -> AsyncIterator[bytes]:
+        origin_id = current_origin_id.get()
+        assert origin_id is not None
+        async with harness.factory() as db:
+            origin = await get_active_origin(
+                db,
+                origin_id=origin_id,
+                tenant_id=harness.tenant.id,
+                account_id=harness.accounts[OWNER_A],
+                platform="discord",
+                now=datetime.now(UTC),
+            )
+        assert origin is not None
+        observed.append((origin.own_dm_reach, origin.reach_read))
+        async for chunk in answer("unattended parent")(upstream, sid):
+            yield chunk
+
+    harness.upstream.scripts = [inspect]
+    await harness.routine()
+    assert observed == [(True, False)], "the owner-DM routine may reach; it has not read yet"
 
 
 @pytest.mark.parametrize("change", ["agent", "retarget"])
