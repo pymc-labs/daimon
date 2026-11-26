@@ -1314,7 +1314,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
     FeatureSpec(
         key="data_reads",
         name="Data source reads",
-        category="capabilities",
+        category="model_input",
         effect="capability",
         values=_ON_OFF,
         default="off",
@@ -1323,8 +1323,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         doc=(
             "The agent can search the team's data sources, showing only what everyone "
             "who will see the answer may read. Other agents cannot ask it, writes out ask "
-            "first, and a memory it saves shows only to people who could read that data. "
-            "Not in rooms people outside the team can read."
+            "first, and its memories show only to people who could read that data."
         ),
         platforms=EVERY_PLATFORM,
         # Writes after a data read must wait for a card: tool safety is what cards them.
@@ -1554,9 +1553,8 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         tiers=("deployment", "workspace"),
         binds="turn",
         doc=(
-            "The data store, with its connected sources and search. Nothing runs until an "
-            "admin adds a source and turns data reads on for an agent. The operator or a team "
-            "can turn it off."
+            "The data store, with its sources and search, idle until an admin adds a source. "
+            "The operator or a team can turn it off."
         ),
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,
