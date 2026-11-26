@@ -1642,35 +1642,16 @@ async def _admit_gates(
     except Exception:
         _log.warning("turn.data_reads_lookup_failed", tenant_id=str(tenant_id), exc_info=True)
         data_reading, data_unknown = False, True
-    if not data_reading and (deps.settings is None or data_sources_on(deps.settings)):
-        # A session that read data counts as data-reading until `/new`, whatever
-        # `data_reads` says now: its context holds what it read. A workspace that never
-        # read data skips the lookup.
+    if not data_reading:
         try:
-            async with deps.sessionmaker() as session:
-                live = (
-                    await get_live_thread_session(
-                        session,
-                        tenant_id=tenant_id,
-                        platform=platform,
-                        thread_id=slot_thread_id or channel_id,
-                        account_id=principal.account_id,
-                    )
-                    if await tenant_has_reads(session, tenant_id=tenant_id)
-                    else None
-                )
+            data_reading = await _session_read_data(
+                deps, tenant_id, platform, slot_thread_id or channel_id, principal.account_id
+            )
         except Exception:
             if not data_unknown:
                 raise
             _log.warning("turn.data_session_lookup_failed", tenant_id=str(tenant_id))
-            live = None
             data_reading = True
-        data_reading = data_reading or (
-            live is not None
-            and live.effective_config is not None
-            and live.effective_config.data_read
-            and live.fresh_start_requested_at is None
-        )
     # Only data-reading agents ask each other: the helper's reads land on the asker's session
     # too (`daimon.adapters.mcp.data_access.ledgers`); either way round otherwise, data would
     # reach memory that does not record it.
@@ -3140,7 +3121,13 @@ async def _capture_backend_source(
             ids = (context.tenant_id, read_on, context.channel_id, context.thread_id)
             here = FeaturePlace.of(*ids, agent_id=actual.id)
             features = await place_features(deps, here, actual, HIDING_KEYS)
-            data_reading = features.on(DATA_READS)
+            data_reading = features.on(DATA_READS) or await _session_read_data(
+                deps,
+                context.tenant_id,
+                read_on,
+                context.thread_id or context.channel_id or "",
+                context.account_id,
+            )
             relay = agent_has_identity_relay(
                 (server.url for server in actual.mcp_servers),
                 public_url=deps.public_url,
@@ -3231,6 +3218,29 @@ _TURN_FEATURE_KEYS: Final = tuple(
         )
     )
 )
+
+
+async def _session_read_data(
+    deps: TurnDeps, tenant_id: uuid.UUID, platform: str, thread_id: str, account_id: uuid.UUID
+) -> bool:
+    """Whether the live session here read data: it counts as data-reading until `/new`,
+    whatever `data_reads` says now and with every source retired, as its context holds what
+    it read. A workspace that never read data skips the lookup."""
+    if not thread_id or (deps.settings is not None and not data_sources_on(deps.settings)):
+        return False
+    async with deps.sessionmaker() as session:
+        if not await tenant_has_reads(session, tenant_id=tenant_id):
+            return False
+        live = await get_live_thread_session(
+            session, tenant_id=tenant_id, platform=platform, thread_id=thread_id,
+            account_id=account_id,
+        )  # fmt: skip
+    return (
+        live is not None
+        and live.effective_config is not None
+        and live.effective_config.data_read
+        and live.fresh_start_requested_at is None
+    )
 
 
 async def place_features(
