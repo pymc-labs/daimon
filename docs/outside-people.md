@@ -36,8 +36,12 @@ your own DM, Daimon reads a narrow room for you when Discord lets you view it
 and read its history. This covers your DM chats and your own DM routines.
 
 Daimon checks your access on every read, so a removed person loses it at once.
-Private threads need membership. Watches, timers, helpers, web chat, agent keys
-and Slack get no exception.
+Private threads need membership. Watches, timers, helpers, agent keys and Slack
+get no exception.
+
+<!-- knowledge: web -->
+Web chat gets no exception either.
+<!-- /knowledge -->
 
 The exception covers only rooms that this feature made narrow. A room whose
 readers an admin limited by hand ([Permissions](permissions.md)) keeps its rule:

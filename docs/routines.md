@@ -133,10 +133,9 @@ run survives the run's completion.
 
 ## What a run does
 
-A run resolves the tenant, finds or creates the creator's account, checks the
-invoker allowlist and the balance, and resolves the agent. It then creates a
-session the way chat does and drives it with the same turn driver. It is not
-a chat turn: there is no thread binding, continuity, handoff or dead-session
+A run resolves the creator's account, checks the invoker allowlist and the
+balance, and resolves the agent. It then runs a session with chat's turn driver.
+It is not a chat turn: there is no thread binding, continuity, handoff or dead-session
 recovery.
 
 Nobody can click a confirmation, so tool calls follow the
