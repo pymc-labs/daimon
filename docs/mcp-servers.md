@@ -6,8 +6,8 @@ servers that need extra configuration.
 ## Connect a server
 
 Ask the agent to connect a server. It posts a card only you can open. Adding a
-server to an agent that other people use needs a server admin, but anyone can
-sign in to a server the agent already has. GitHub repos use
+server to an agent others use needs a server admin; anyone can sign in to a
+server the agent already has. GitHub repos use
 [GitHub](github.md), not a token.
 
 - **Servers that take a bearer token (Linear).** You get a private token form.
@@ -22,39 +22,40 @@ The sign-in routes are `{origin}/oauth/mcp/start` and
 `{origin}/oauth/mcp/callback`. [`DAIMON_MCP__PUBLIC_URL`](configuration.md#daimon_mcp__public_url)
 must be reachable from a browser, and
 [`DAIMON_CRYPTO__KEYS`](configuration.md#daimon_crypto__keys) must be set. If a
-connection fails, the agent still answers and names the server it could not use.
-Ask it to disconnect the server or connect again.
+connection fails, the agent still answers and names the server it could not use;
+ask it to disconnect or connect again.
 
 ## Share a server with the workspace
 
-An admin can share an MCP server with the workspace; agents and outside
-clients use it without their own sign-in. Open Integrations, Shared
-connections, and add its name, URL and token (stored encrypted).
+An admin can share an MCP server so agents and outside clients use it without
+their own sign-in: open Integrations, Shared connections, and add its name, URL
+and token (stored encrypted).
 [`shared_connections`](features.md), on by default, turns them all off.
 
-Daimon lists each tool's description and input schema; turn on the ones you
-want. A tool whose text changes upstream stays off until approved again; one
-named like a Daimon tool is left out. Each tool appears as
+Daimon lists each tool's description and schema; turn on the ones you want. A
+tool whose text changes upstream stays off until approved again; one named like a
+Daimon tool is left out. Each tool appears as
 `<name>_<tool>` on Daimon's MCP server, for members, not web guests. A scoped
-connection or tool is served only where everyone the answer reaches holds its
-scope.
+connection or tool is served only where data reads may answer and everyone the
+answer reaches holds its scope. The agent page lists what its viewer holds.
 
 A tool that changes data is marked by its name; you can change the mark. In
-chat it waits for the asker's card unless
-[`shared_write_approval`](features.md) is Skip. An outside MCP client, agent key
-or coding key may call it, told to ask its user first; a chat call with no
-conversation is refused. Turn a tool off here for the workspace, or with tool
-rules for one agent (agent keys follow; Ask refuses them). Every call is
-audited.
+chat it waits for the asker's card unless [`shared_write_approval`](features.md)
+is Skip. An outside MCP client, agent key or coding key may call it, told to ask
+its user first; a chat call with no conversation is refused. Turn a tool off here
+for the workspace, or with tool rules for one agent (agent keys follow; Ask
+refuses them). Every call is audited.
 
-Admins can do this from chat too, except setting a token; each change waits for
-their card.
+Admins can do this from chat too; each change waits for their card, naming the
+tool, its server, parameters and the words callers get. A token goes through
+their private form, never chat. In a room, addresses and errors go to them by
+direct message, through `send_private_details`.
 
 ## Register a client for servers without dynamic registration
 
 Some authorization servers, including Microsoft Entra ID, do not let Daimon
-register itself. The sign-in page then says the server does not offer sign-in
-Daimon can drive. Register a client by hand and list it in
+register itself; the sign-in page says the server offers no sign-in Daimon
+can drive. Register a client by hand and list it in
 [`DAIMON_MCP_OAUTH__CLIENTS`](configuration.md#daimon_mcp_oauth__clients) with
 the MCP servers it may serve. A sign-in uses the client only when the MCP server
 URL is listed (compared exactly, ignoring host case, a default port and a
@@ -63,7 +64,7 @@ trailing slash) and the authorization server is the listed
 
 > **Warning:** List only MCP servers you trust. A listed server decides which
 > scopes the sign-in asks for unless you set `scope`, and it receives the
-> tokens. The list is what stops any other server from borrowing the client.
+> tokens.
 
 For Entra ID:
 
@@ -74,10 +75,10 @@ For Entra ID:
 3. Under **API permissions**, add the delegated permissions the MCP server
    documents. Grant admin consent, or leave consent to each person if your
    tenant allows it.
-4. Configure the client. Point both endpoints at your tenant, because a
-   single-tenant app is refused at the `/organizations` endpoints (AADSTS50194).
-   Turn `send_resource` off, because Entra rejects a `resource` parameter that
-   does not match the scope's resource:
+4. Configure the client. Point both endpoints at your tenant: a
+   single-tenant app is refused at `/organizations` (AADSTS50194).
+   Turn `send_resource` off (Entra rejects a `resource` that does not
+   match the scope's):
 
 ```bash
 DAIMON_MCP_OAUTH__CLIENTS='[{"authorization_server_host": "login.microsoftonline.com",
@@ -89,22 +90,20 @@ DAIMON_MCP_OAUTH__CLIENTS='[{"authorization_server_host": "login.microsoftonline
 ```
 
 If the MCP server publishes no scopes, set `scope` to the scopes to request, for
-Entra usually `<application id URI>/.default`. A configured client also asks for
-`offline_access` when offered, so connections refresh on their own. The client
+Entra usually `<application id URI>/.default`. A configured client asks for
+`offline_access` when offered, so connections refresh themselves. The client
 secret is copied into each stored connection, so after rotating it people
 connect again.
 
-A value that does not parse stops Daimon at startup and names the bad entry. If
-the authorization server refuses the client, the sign-in page tells the person
-to ask the operator. The log records `mcp_oauth.callback_failed` or
-`mcp_oauth.authorization_declined`.
+A value that does not parse stops startup and names the bad entry. If the
+server refuses the client, the sign-in page tells the person to ask the operator;
+the log records `mcp_oauth.callback_failed` or `mcp_oauth.authorization_declined`.
 
 ## Let a server verify who is calling
 
 A remote MCP server can ask Daimon to sign each request with the calling agent,
 the workspace and, for a person's turn, who asked and from which channel and
-message. Daimon signs on its own side, so the key never reaches the agent's
-sandbox.
+message. Daimon signs itself, so the key never reaches the agent's sandbox.
 
 1. Run `daimon mcp identity-keygen`. Store the printed
    `DAIMON_MCP_IDENTITY__SIGNING_KEY` line as a secret on the MCP service, and
@@ -127,22 +126,23 @@ sandbox.
 The token carries `iss`, `aud`, `iat`, `exp`, `agent`, `agent_name`, `ws`
 (`<platform>:<workspace id>`) and, when a person asked, `sub`
 (`<platform>:<user id>`), `channel` and `msg`. Routines, agent chat, the web
-app's tool list and senders from another organisation name no person. Without `workspaces`, every
-workspace's agents reach the server. Request bodies over 4 MiB are refused.
+app's tool list and senders from another organisation name no person. Without
+`workspaces`, every workspace's agents reach the server. Bodies over 4 MiB are
+refused.
 
 A channel turn of an agent with a relay server runs held: it posts only in its
-channel and its threads, sends no DMs and has no admin tools. The agent keeps no
+channel and threads, sends no DMs and has no admin tools. The agent keeps no
 long-term memory, and its sessions are sealed to the channel.
 
 Set `"channel_scoped": false` on a server that checks each call's asker and
 place itself. An agent whose relay servers all set it gets its normal memory and
 sessions, so what it learns can surface in its other channels. One server left
 at the default `true` still limits the agent. Existing conversations keep their
-limits until someone starts a new one with `/new`. Remove the key before rolling
+limits until `/new`. Remove the key before rolling
 back to a release without it, which refuses to start on the unknown key.
 
-Only agents on Anthropic Managed Agents can use the relay. Self-hosted harness,
-GPT and Gemini agents cannot.
+Only agents on Anthropic Managed Agents can use the relay, not self-hosted
+harness, GPT or Gemini agents.
 
 ### Servers that attribute writes to the requester
 
@@ -186,7 +186,8 @@ It carries no `requester_conversation` or wake link, and goes only to a server
 with `"agent_chat_requester": true` (off by default). Agent, coding and CLI keys,
 the turn after a send that failed with a server error, and an older
 conversation's first turn name nobody (logged as `agent_chat.requester_withheld`).
-Turn it on only once every process runs this release.
+Turn it on only once every process runs this release: older ones send without
+clearing the record.
 
 A DM that is not open yet is `{"place_type": "dm", "channel_id": null,
 "parent_channel_id": null}`; a routine can only DM its owner.
@@ -208,15 +209,15 @@ link; one the caller supplied is removed. Each `POST` of the outcome wakes the
 conversation once, in a turn that reads and reports. Keep the link out of logs.
 
 Each call gets its own link to one watch per conversation and server. The watch
-follows the conversation to its newest session and lasts a day after the latest call.
-It needs the `watches` feature and `DAIMON_WATCHES__CALLBACK_BASE_URL`. In a Discord
-DM each post runs as a fresh private turn in that DM. A Slack DM, a helper or an owner
-at the watch limit gets none.
+follows the conversation to its newest session and lasts a day after the latest
+call. It needs the `watches` feature and `DAIMON_WATCHES__CALLBACK_BASE_URL`. In a
+Discord DM each post runs as a fresh private turn there. A Slack DM, a helper or
+an owner at the watch limit gets none.
 
 A request body that is not JSON, repeats a key, cannot be re-encoded, or holds
 a tool call without object `params` is refused with a 400. GET and DELETE
-requests are forwarded without a body. Rotating
-the key means changing the secret and restarting the MCP service.
+are forwarded without a body. Rotate the key by changing the secret and restarting the
+MCP service.
 
 ## Add a skill a server serves
 
@@ -226,8 +227,8 @@ server and skill name, or by its `skill://` URI. It goes through the same
 preview and approval as any added skill, and becomes the agent's own.
 
 Daimon checks every file against the size and SHA-256 the server lists, and
-refuses a skill that fails or whose files are built per request. Adding it
-again publishes a new version only when its content changed.
+refuses a skill that fails or whose files are built per request. Adding it again
+publishes a new version only on changed content.
 
 A server with a shared token is asked with it. A relay server is asked with a
 signed token naming the person asking and the channel. A server that signs
@@ -248,12 +249,12 @@ server's settings show **Managed by settings** and never move.
 
 An update that adds or changes a script, or changes `allowed-tools`, waits
 until an admin approves it. Other changes, such as `.md` and `.txt` files,
-apply without approval.
+apply at once.
 
 An agent switched to OpenAI or Gemini follows updates too. OpenAI uploads each
 version of a custom or channel skill, and a skill over its size limit is off
-there. Gemini carries the default skills only.
-Self-hosted channels use their deployment's own skills.
+there. Gemini carries the default skills only. Self-hosted channels use their
+deployment's own skills.
 
 ## Give an agent Google Workspace access
 

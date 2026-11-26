@@ -82,16 +82,14 @@ Google sign-in for data sources needs a Google OAuth client in
 
 A source has a freshness floor and ceiling in minutes. Its lifetime is three sync intervals,
 at least the floor and at most the ceiling. Once its last complete sync is older than that,
-its records are hidden from every read until the next complete sync. Without a ceiling a
-source is never hidden.
+its records are hidden from every read until the next complete sync. Without a ceiling a source is never hidden.
 
-A connector can also check a record with the source at read time, and a source that
-cannot is read as stored. A live source is asked at search time instead: it stores nothing,
+A connector can also check a record with the source at read time; a source that cannot is read as stored. A live source is asked at search time instead: it stores nothing,
 only callers holding its scope reach it, and one that fails or is slow is skipped.
 
 ## Publishing
 
-A new source starts in shadow, where no one reads it. Publishing it needs evidence. If the
+A new source starts in shadow, unread. Publishing it needs evidence. If the
 connector can ask the source whether a person may open a record, Daimon compares a sample
 of linked people and records and needs a clean run no older than 36 hours. Any case of Daimon
 showing more than the source does blocks publishing; showing less only warns. Other sources
@@ -99,29 +97,24 @@ publish after a complete sync.
 
 ## In the web app
 
-With the feature on, the web app has a Data section for search and browsing, which shows each
-person only what they may read. Owners and admins add, pause, publish and retire sources under
-Integrations > Data sources. Workspace admins manage scopes, grants, identity links and
-redaction sets under Admin > Data access, or from chat. Granting oneself a scope or linking an
-account to oneself is allowed and marked in the audit trail. Declared sources show as bound and are read-only there. People link and
+With the feature on, the web app has a Data section for search and browsing, showing each person only what they may read. Owners and admins add, pause, publish and retire sources in Integrations > Data sources. Workspace admins manage scopes, grants, identity links and
+redaction sets under Admin > Data access, or from chat. Self-grants and self-links are allowed and marked in the audit trail. Declared sources show as bound and are read-only there. People link and
 connect their own accounts on their Profile.
 
-From chat, admins can add a source, even the first, or refresh its credential. The value
+From chat, admins can add a source, even the first, or refresh a credential. The value
 goes through a private form only the asker opens, straight onto the source. In a room, emails,
 sign-ins and redaction rules reach the agent sealed; it sends them to the asker by direct message.
 
 ## Who sees an answer
 
-An answer shows only what everyone who will see it may read: the asker and, in a room, its
-members. Discord rooms keep their members; Slack and Teams rooms are read on each call. A
+An answer shows only what everyone who sees it may read: the asker and, in a room, its members. Discord rooms keep their members; Slack and Teams rooms are read on each call. A
 Slack room whose members cannot be read gets answers that hold only what everyone may read.
 
 Teams reads members with `ChannelMember.Read.Group` and `ChatMember.Read.Chat`, which a team
 owner or chat member grants when adding or updating the app, or `ChannelMember.Read.All` and
-`ChatMember.Read.All`, which a tenant admin grants once ([Teams](teams.md)). Where members
-cannot be read, answers hold only what everyone may read, and say when consent is missing.
+`ChatMember.Read.All`, which a tenant admin grants once ([Teams](teams.md)). Where members cannot be read, answers hold only what everyone may read and say when consent is missing.
 A Teams room with a guest, another organisation's member or a shared channel gets no data
-and is held from then on, so an agent that read data starts afresh there.
+and is held from then on, so an agent that read data starts afresh.
 
 After a data read, a conversation asks only agents that read data too, and their reads count
 as its own. A memory saved after a data read records what was read; recalling it counts as
@@ -161,15 +154,13 @@ read-only in the app. Daimon never deletes one: a removed entry stays, and
 with `publish: true` and a clean run. `replaces` retires the sources it names, by declared id or name. A `revision`
 below the last applied one is ignored. Credentials are `env:NAME` or `file:/path`, never values.
 
-A `connections` entry (`{id: crm, url: ..., token: "env:CRM_TOKEN"}`) declares a
-[shared MCP connection](mcp-servers.md#share-a-server-with-the-workspace); admins still
-approve its tools in the app.
+A `connections` entry (`id`, `url`, `token: "env:NAME"`) declares a
+[shared MCP connection](mcp-servers.md#share-a-server-with-the-workspace); admins approve its tools.
 
 ## Who can read a record
 
 `daimon data access-check --tenant <id> --source <id>` shows a source's state and freshness.
-Add `--record <id>` for the record's holders, and `--account <id>` to say whether that account
-can read it now, and why not.
+Add `--record <id>` for the record's holders, and `--account <id>` to say whether that account can read it, and why not.
 
 ## Vector search
 
