@@ -362,7 +362,11 @@ async def delete_env_file(
             )
         except MuxError as error:
             # Left at the provider; logged by category, never content.
-            log.warning("binding.env_file_kept", error=type(error).__name__)
+            log.warning(
+                "binding.env_file_kept",
+                error=type(error).__name__,
+                causes=backend_refusal_causes(error),
+            )
 
 
 async def _terminate(scope: Scope, old: OldSession, key: str) -> bool:

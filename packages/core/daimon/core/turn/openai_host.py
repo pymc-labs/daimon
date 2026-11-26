@@ -16,6 +16,7 @@ from typing import cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import structlog
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import native_mcp_session
 from daimon.core.mux_backend import (
@@ -390,7 +391,11 @@ async def _delete_env(scope: Scope, uploaded: list[tuple[OpenAIDriver, ResourceR
             await backend.artifacts.delete(scope, ref, key=f"env-delete:{ref.id}")
         except MuxError as error:
             # Left at the provider; logged by category, never content.
-            log.warning("openai.env_file_delete_failed", error=type(error).__name__)
+            log.warning(
+                "openai.env_file_delete_failed",
+                error=type(error).__name__,
+                causes=backend_refusal_causes(error),
+            )
     uploaded.clear()
 
 

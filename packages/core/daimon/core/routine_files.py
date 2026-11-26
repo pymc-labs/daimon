@@ -166,9 +166,13 @@ async def stage_routine_files(
         listed = await outputs.list_outputs()
     except UnsupportedCapability:  # a backend with no workspace listing has nothing to send
         return plain_payload(text) or ""
-    except MuxError:
+    except MuxError as error:
         listed = ()
-        log.exception("routine.files_staging_failed", session_id=outputs.session_id)
+        log.exception(
+            "routine.files_staging_failed",
+            session_id=outputs.session_id,
+            causes=backend_refusal_causes(error),
+        )
         notices.append("Generated files could not be attached.")
     try:
         for meta in listed:
@@ -209,9 +213,13 @@ async def stage_routine_files(
                     staged=True,
                 )
             )
-    except (MuxError, UploadTooLargeError):
+    except (MuxError, UploadTooLargeError) as error:
         # File collection must not discard a routine's completed reply.
-        log.exception("routine.files_staging_failed", session_id=outputs.session_id)
+        log.exception(
+            "routine.files_staging_failed",
+            session_id=outputs.session_id,
+            causes=backend_refusal_causes(error),
+        )
         notices.append("Generated files could not be attached.")
     return _envelope(text, files, notices)
 
