@@ -256,6 +256,7 @@ source_modules = [
     "daimon.core.github_connect_cards",
     "daimon.core.github_connect_delivery",
     "daimon.core.github_connect_flow",
+    "daimon.core.github_connect_follow",
     "daimon.core.github_connect_views",
     "daimon.core.github_credentials",
     "daimon.core.github_installation_reconcile",
