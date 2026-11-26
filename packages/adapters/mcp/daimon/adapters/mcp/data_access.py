@@ -69,7 +69,7 @@ _REFUSALS: Final[dict[RefusalReason, str]] = {
     "agent_request": "Only the agent's own conversations can read data sources. Nothing was read.",
 }
 _NO_TEAMS_CONSENT: Final = (
-    "Daimon may not read who is in this Teams conversation, so data sources stay closed here. "
+    "Daimon may not read who is in this conversation, so data sources stay closed here. "
     "A team owner or chat member grants that consent by updating the app."
 )
 #: Members a Slack room may page through before its viewers count as unknown.
