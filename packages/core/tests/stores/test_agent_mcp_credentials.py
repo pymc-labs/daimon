@@ -937,3 +937,45 @@ def test_the_mirror_contract_flags_a_mirror_outside_the_helper() -> None:
     assert "_read_agent_mcp_credentials" not in _calls_inside_the_vault_lock(
         read_first, "mirror_stored_credentials"
     )
+
+
+async def test_a_reused_held_session_is_mirrored_into_the_vault_it_mounts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A held session mounts its hold's own vault, so the per-turn mirror writes there."""
+    from daimon.core import agent_mcp_credentials as module
+    from daimon.core.turn_hold import TurnHold
+
+    hold = TurnHold("discord", "channel", True)
+    asked: list[object] = []
+    mirrored: list[str] = []
+
+    async def ensure(*_: object, **kwargs: object) -> str:
+        asked.append(kwargs.get("hold"))
+        return "vlt_held" if kwargs.get("hold") == hold else "vlt_plain"
+
+    async def mirror(*_: object, vault_id: str, **__: object) -> None:
+        mirrored.append(vault_id)
+
+    async def credentials(**_: object) -> tuple[object, ...]:
+        return (object(),)
+
+    monkeypatch.setattr(module, "ensure_agent_mcp_vault", ensure)
+    monkeypatch.setattr(module, "mirror_stored_credentials", mirror)
+    monkeypatch.setattr(module, "resolve_agent_mcp_credentials", credentials)
+    account = uuid.uuid4()
+    await sync_agent_mcp_credentials(
+        build_fake_anthropic(MARouter().dispatch),
+        sessionmaker=object(),  # type: ignore[arg-type]
+        fernet=build_multifernet((Fernet.generate_key().decode(),)),
+        tenant_id=uuid.uuid4(),
+        agent_id=uuid.uuid4(),
+        account_id=account,
+        jwt_secret=b"x" * 32,
+        public_url="https://mcp.example.com/mcp",
+        now=dt.datetime(2026, 9, 15, tzinfo=dt.UTC),
+        vault_ids={},
+        hold=hold,
+    )
+    assert asked == [hold], f"the hold selects the vault, never the cache: {asked}"
+    assert mirrored == ["vlt_held"], f"the mirror lands in the mounted vault: {mirrored}"

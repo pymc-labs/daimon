@@ -70,6 +70,7 @@ from daimon.core.stores import agent_mcp_credentials as cred_store
 from daimon.core.stores import connector_tokens as connector_tokens_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.domain import ConnectorTokenRow
+from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -405,6 +406,8 @@ async def sync_agent_mcp_credentials(
     now: dt.datetime,
     exclude_github_copilot: bool = False,
     vault_ids: McpVaultIds | None = None,
+    hold: TurnHold | None = None,
+    slack_turn_context_id: uuid.UUID | None = None,
 ) -> None:
     """Ensure this caller's vault holds the agent's external MCP credentials.
 
@@ -424,6 +427,9 @@ async def sync_agent_mcp_credentials(
     ``vault_ids`` remembers the vault ``ensure_agent_mcp_vault`` returned, so
     later turns skip its walk over every vault in the workspace. A cached
     vault that has since been deleted or archived is resolved again.
+
+    A held or private Slack session mounts its own vault (`ensure_agent_mcp_vault`):
+    ``hold`` and ``slack_turn_context_id`` select it, as at create, and skip the cache.
     """
     credentials = await resolve_agent_mcp_credentials(
         sessionmaker=sessionmaker,
@@ -454,6 +460,8 @@ async def sync_agent_mcp_credentials(
             public_url=public_url,
             now=now,
             session_factory=sessionmaker,
+            slack_turn_context_id=slack_turn_context_id,
+            hold=hold,
             scope=scope,
         )
 
@@ -470,7 +478,7 @@ async def sync_agent_mcp_credentials(
             exclude_github_copilot=exclude_github_copilot,
         )
 
-    if vault_ids is None:
+    if vault_ids is None or hold is not None or slack_turn_context_id is not None:
         await mirror(await ensure())
         return
     key = (account_id, agent_id, public_url)
