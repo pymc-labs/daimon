@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server admin can change any of them now. Turning it off leaves a running machine to be
   stopped or to end at its idle time ([Compute sessions](docs/compute.md#turn-it-on)).
 
+- **A remote MCP server reached through the identity relay can name the person behind an
+  agent-chat turn.** Set `agent_chat_requester` on a `requester_meta` server: a turn a person
+  started from an MCP client signed in to the hub then carries their user id with
+  `requester_kind` `"agent_chat"`, with no place and no wake link. Turns started with an agent,
+  coding or CLI key name nobody. It is off by default, and a conversation started earlier gains
+  it from its second message ([MCP servers](docs/mcp-servers.md#servers-that-attribute-writes-to-the-requester)).
+
 - **Routines start on time when many sessions are live.** The scheduler's check for due routines
   shared one loop with the GitHub token refresh, which takes about a second for each live
   session. With hundreds of sessions a check came more than 15 minutes after the one before, and

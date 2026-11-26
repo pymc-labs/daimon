@@ -402,13 +402,14 @@ def host_guards(monkeypatch: pytest.MonkeyPatch) -> list[Scope]:
     # A send's confirmation worker polls on its own schedule; its reads are
     # covered in test_agent_chat_safety.py, not in this request-order script.
     monkeypatch.setattr(agent_chat, "watch_turn", MagicMock())
-    # The settle request written before a headless send is database-only; its own
-    # tests cover it, and it sends no provider request.
+    # The settle request and the driver record written before a headless send are
+    # database-only; their own tests cover them, and they send no provider request.
     settle = agent_chat.session_settle_state
     requested = (None, dt.datetime(2026, 1, 1, tzinfo=dt.UTC))
     monkeypatch.setattr(settle, "request_settle", AsyncMock(return_value=requested))
     monkeypatch.setattr(settle, "withdraw_settle_request", AsyncMock())
     monkeypatch.setattr(settle, "name_settle_turn", AsyncMock())
+    monkeypatch.setattr(settle, "record_agent_chat_driver", AsyncMock())
     return scopes
 
 

@@ -112,6 +112,16 @@ KEPT: Final[dict[tuple[str, str], str]] = {
 # Names and versions follow the agent by name, so they never need a move.
 _NOT_IDS: Final = ("agent_name", "agent_version")
 
+# Columns named for agent chat that describe a session (who drives it, which sends were
+# recorded) and hold no agent id. Listed exactly, so a later column is still checked.
+_NOT_ID_COLUMNS: Final = frozenset(
+    {
+        ("usage_reconcile_progress", "agent_chat_signed_in"),
+        ("usage_reconcile_progress", "agent_chat_sends"),
+        ("usage_reconcile_progress", "agent_chat_recorded_send"),
+    }
+)
+
 
 def agent_id_columns() -> set[tuple[str, str]]:
     """Every metadata column whose name says it holds an agent id."""
@@ -119,7 +129,9 @@ def agent_id_columns() -> set[tuple[str, str]]:
         (table.name, column.name)
         for table in Base.metadata.tables.values()
         for column in table.columns
-        if "agent" in column.name and not any(part in column.name for part in _NOT_IDS)
+        if "agent" in column.name
+        and not any(part in column.name for part in _NOT_IDS)
+        and (table.name, column.name) not in _NOT_ID_COLUMNS
     }
 
 

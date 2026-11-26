@@ -2355,11 +2355,17 @@ class SignedIdentityServer(BaseModel):
     # Tools whose call, in a person's turn, carries a wake link the server posts to
     # when the work it started ends (`daimon.adapters.mcp.identity_relay._wake_link`).
     wake_tools: frozenset[str] = frozenset()
+    # Also name the person on an agent-chat turn they started signed in to the hub, as
+    # requester kind `agent_chat`. Off by default: a server that does not know the kind
+    # may refuse every call that carries it.
+    agent_chat_requester: bool = False
 
     @model_validator(mode="after")
     def _wake_needs_requester(self) -> SignedIdentityServer:
         if self.wake_tools and not self.requester_meta:
             raise ValueError("wake_tools needs requester_meta")
+        if self.agent_chat_requester and not self.requester_meta:
+            raise ValueError("agent_chat_requester needs requester_meta")
         return self
 
     @model_validator(mode="after")
@@ -2439,6 +2445,10 @@ class McpIdentitySettings(BaseModel):
             "requester fields the caller supplied and stamps each tool call with who it is "
             "for and where: the asker while their turn is live, or the person an unattended "
             "run acts for. "
+            "Set agent_chat_requester to true as well for a server that accepts "
+            'requester_kind "agent_chat": a turn a person started through the MCP hub, '
+            "signed in with their platform login, then names that person with no place. "
+            "Turns started with an agent, coding or CLI key name nobody. "
             "An agent using a server stays in its channel with no long-term memory, a fresh "
             "session per channel turn and no handoffs, because the server answers with what "
             "the channel's readers can read. Set channel_scoped to false for a server that "
@@ -2523,6 +2533,11 @@ class McpIdentitySettings(BaseModel):
     def names_requester(self) -> bool:
         """Whether any server is sent the requester's identity (`requester_meta`)."""
         return any(server.requester_meta for server in self.servers)
+
+    @property
+    def names_agent_chat_requester(self) -> bool:
+        """Whether any server is sent the person behind an agent-chat turn."""
+        return any(server.agent_chat_requester for server in self.servers)
 
     @property
     def needs_signing_key(self) -> bool:
