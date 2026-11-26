@@ -35,7 +35,7 @@ docker compose -f docker-compose.yml -f docker-compose.data.yml up -d --build da
 
 A source syncs every hour, or every `sync_minutes` of its config. A run cut off by its
 time budget continues on the next pass, and a failing source backs off from 5 minutes to 6
-hours. A source can also limit its upstream requests with `rate_per_minute`. The worker
+hours. `rate_per_minute` limits a source's upstream requests. The worker
 needs `DAIMON_CRYPTO__KEYS` to open source credentials. GCP deploys recreate the `<registry>-data-sync` VM
 from `compose.data-sync.yml` in the assets bucket, when present.
 
@@ -55,8 +55,8 @@ role, not a superuser or one that bypasses row security, and a credential
 `columns`); `occurred_at`, `url`, `author` and `container` are optional. The view's own
 filters and row security decide what Daimon sees. Without `readers`, the source's scope
 rules apply; with it, the column holds who may read each row. A row that leaves the view is
-removed after the next complete run, and a view that suddenly lists nothing is treated as a
-failure instead.
+removed after the next complete run, and a view that suddenly lists nothing counts as a
+failure.
 
 A database off loopback needs `sslmode=require` or stronger in the DSN, and `require` is
 added when it is unset. Connections to private addresses are refused. To reach a database on your own network,
@@ -69,8 +69,8 @@ link to one of those users. Daimon links an account only on a verified proof: a 
 link, or the person signing in to the source. A person who only chats has no link until
 they sign in to the web app.
 
-A workspace admin can link any account by hand, their own included, and the
-audit trail records it. A link an admin ends or rejects stays ended when the person signs in again.
+A workspace admin can link any account by hand, their own included,
+audited. A link an admin ends or rejects stays ended when the person signs in again.
 
 Google sign-in for data sources needs a Google OAuth client in
 [`DAIMON_DATA__GOOGLE_OAUTH_CLIENT_ID`](configuration.md#daimon_data__google_oauth_client_id).
@@ -96,7 +96,7 @@ publish after a complete sync.
 
 ## In the web app
 
-With the feature on, the web app has a Data section for search and browsing, which shows each
+With the feature on, the web app has a Data section for search and browsing, showing each
 person only what they may read. Owners and admins add, pause, publish and retire sources under
 Integrations > Data sources. Workspace admins manage scopes, grants, identity links and
 redaction sets under Admin > Data access, or from chat. Self-grants and self-links are
@@ -239,7 +239,7 @@ only where `data_reads` is On.
 `library_skills` serves `list_library_skills` and `read_library_skill` to coding keys, the hub and
 other clients. A scoped skill, in `list_skills`, `get_skill` or on an agent or channel,
 reaches only an audience holding its scope: everyone in the room, or in a direct message the
-asker and the agent's owner.
+asker and the agent's owner. On an agent or channel, Slack and Teams rooms never load it.
 
 ## After a restore
 
