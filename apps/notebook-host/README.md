@@ -187,6 +187,24 @@ their files, and stops read-only notebooks nobody has visited for
 `warm_window_seconds` while keeping their files. An open websocket counts as
 a visit for as long as it is open.
 
+A blog never expires. It stays, with its source and any data files, until
+someone deletes it with `DELETE /admin/blogs/{slug}`.
+
+A registered notebook or blog records the tenant that published it when the
+upload token names one, or when `PUT /admin/notebooks/{slug}` or
+`PUT /admin/blogs/{slug}` is sent a `tenant` id.
+`DELETE /admin/tenants/{tenant_id}/notebooks` deletes all of them, with their
+files, and returns `{"deleted": <count>}`. Editors are not registered, so
+that route does not see them; the sweep removes them at
+`subprocess_ttl_seconds`. A notebook published before its tenant was recorded
+has to be deleted by slug.
+
+Every response carries `Referrer-Policy: no-referrer`, whatever marimo sent,
+so the `access_token` in a link never reaches a site a notebook links to. The
+host sets no Content-Security-Policy: marimo's own pages inline scripts and
+build code at runtime, so any policy that still let them run would restrict
+nothing.
+
 Each stored notebook keeps a jail uid until it is deleted, so the uid range
 (`jail_uid_start`..`jail_uid_end`, 1000 by default) bounds how many can be
 kept at once, along with the volume's free space.

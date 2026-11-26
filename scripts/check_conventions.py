@@ -112,7 +112,8 @@ RULES = {
     "migration-markers": Rule(
         "A migration misdeclares its 'downgrade:' or 'schema:' marker.",
         "the markers say whether a deploy can roll back and whether old and new code "
-        "both run on the schema (expand) or the change must ship alone (contract).",
+        "both run on the schema (expand) or it must keep what the previous release uses "
+        "(contract).",
         "set both docstring lines to the true value (alembic writes TODO-declare "
         "placeholders); re-run: python3 scripts/lint_migrations.py",
         'CLAUDE.md "Migrations"',

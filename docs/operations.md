@@ -308,13 +308,22 @@ daimon audit prune <tenant-uuid>
 export. Repeat per tenant for a person in several workspaces. It uses local
 database access and is not an MCP tool.
 
-Retention is 90 days
-([`DAIMON_SECURITY_AUDIT_RETENTION_DAYS`](configuration.md#daimon_security_audit_retention_days);
-`0` keeps rows indefinitely). Schedule `daimon audit prune` for each tenant, for example
-daily, and include it and your backup expiry in your retention policy. Privacy
-erasure clears a person's identifiers from audit rows, and deleting a tenant
-removes its rows. Database triggers block ordinary updates and deletes. They
-guard against application mistakes, not against a database administrator.
+The scheduler deletes audit rows after
+[`DAIMON_RETENTION__SECURITY_AUDIT_DAYS`](configuration.md#daimon_retention__security_audit_days)
+(90 days), or `daimon audit prune` for one tenant. Erasure
+clears a person's identifiers; tenant deletion removes its rows. Database
+triggers block ordinary updates and deletes against application mistakes.
+
+## Set retention
+
+Each [`DAIMON_RETENTION__*`](configuration.md#daimon_retention__security_audit_days)
+setting is the age in days at which the scheduler deletes a record; `0` keeps it.
+[How Daimon handles data](https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md) lists every record and its default; conversation history is a
+[feature](features.md#conversation-history-kept).
+
+Reports expire after [`DAIMON_REPORT__RETENTION_DAYS`](configuration.md#daimon_report__retention_days)
+and notebooks at their expiry. Expire chart buckets, backups and logs within
+the shortest age you promise users.
 
 ## Manage operator tokens
 

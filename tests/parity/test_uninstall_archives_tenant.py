@@ -1,6 +1,6 @@
 """Scenario (g): uninstall -> tenant archived_at stamped + platform-scoped
-ephemeral rows absent (empty expected set on Discord by design), on both
-platforms.
+ephemeral rows absent (empty expected set on Discord and Teams by design), on
+every platform that installs.
 
 Divergence principle (05-CONTEXT D-10): Slack's `teardown_slack_install`
 additionally deletes 3 workspace-scoped ephemeral tables (slack_bot_tokens,
@@ -13,7 +13,7 @@ below rather than forced into a shared, platform-symmetric assertion.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import cast
+from typing import cast, get_args
 
 import pytest
 from cryptography.fernet import Fernet
@@ -57,7 +57,24 @@ async def _assert_platform_effects(
 
 
 # Removing the Teams app archives nothing (test_teams_deliberate_gaps.py).
-@pytest.mark.parametrize("driver", ["discord", "slack"], indirect=True)
+UNINSTALLS = ("discord", "slack", "teams")
+"""Platforms whose removal archives the tenant (Teams: removal from its last team)."""
+
+NO_UNINSTALL = {
+    "cli": "a local tenant is never installed; an operator retires it with the CLI",
+    "web": "the web app signs people into a chat workspace and installs nothing of its own",
+}
+"""Deliberate gaps: these tenants are never archived by an event, so never retired by age."""
+
+
+def test_every_platform_archives_on_removal_or_says_why_not() -> None:
+    platforms = set(get_args(Platform))
+    assert platforms == set(UNINSTALLS) | set(NO_UNINSTALL), (
+        "a new platform needs an uninstall that archives its tenant, or a reason here"
+    )
+
+
+@pytest.mark.parametrize("driver", UNINSTALLS, indirect=True)
 async def test_uninstall_archives_tenant(
     driver: PlatformDriver,
     db_session: AsyncSession,

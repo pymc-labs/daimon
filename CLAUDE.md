@@ -150,12 +150,12 @@ Migrations form one linear chain in `packages/core/alembic/versions/`, and
 `packages/core/alembic/head.txt` names its head, so two branches that add a
 migration conflict there instead of breaking `main`.
 
-1. Put a schema change in its own small PR, merged before the code that uses
-   it. Reverting a feature then leaves the schema alone; never revert a migration.
+1. A migration ships in the same PR as the code that uses it. Never revert a
+   migration.
 2. Declare `downgrade:` and `schema: expand|contract`. `expand` only adds
    (tables, nullable or defaulted columns, non-unique indexes, new functions),
-   so old and new code both run on it. Anything else is `contract`: it ships alone,
-   after the release that stopped using the old shape.
+   so old and new code both run on it. Anything else is `contract`: it must not
+   remove or change anything the previous release still uses.
 3. After merging or rebasing `main`, run `scripts/rechain_migrations.py`. It
    renumbers only your new migrations and rewrites `head.txt`. If `head.txt`
    conflicts, take `main`'s copy, finish the merge, then run it.

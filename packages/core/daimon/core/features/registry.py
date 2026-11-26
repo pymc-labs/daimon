@@ -1448,6 +1448,19 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         page="long-jobs.md#administration",
     ),
     _limit(
+        "conversation_retention",
+        "Conversation history kept",
+        "How long Daimon keeps a conversation after its last message, in channel "
+        "threads, private chats and web threads. An older conversation starts over at "
+        "its next message. 1 year by default; 0 for the whole server keeps conversations "
+        "until deleted. The smallest setting wins.",
+        {"365": "1 year", "180": "180 days", "90": "90 days", "30": "30 days"},
+        tiers=("deployment", "workspace"),
+        authority=_SERVER_ADMIN,
+        zero_unlimited=True,
+        page="operations.md#set-retention",
+    ),
+    _limit(
         "callback_watch_lifetime",
         "Callback watch lifetime",
         "How long a callback watch lasts, new or moved in, before it must be renewed. "

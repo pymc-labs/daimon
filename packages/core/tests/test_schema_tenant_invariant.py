@@ -31,6 +31,8 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
     "watch_inbox": "globally unique watch_id FK to tenant-scoped registration",
     "watch_firings": "globally unique watch_id FK; dispatch verifies tenant and conversation binding",
     "watch_controls": "operator-only global/tenant/owner stop scopes; no tenant-facing enumeration",
+    # One row per retention rule for the whole deployment: when a sweep last ran.
+    "retention_runs": "sweep clock keyed by rule name; holds no tenant data",
     # The tenant identity table itself; its `id` IS the tenant_id.
     "tenants": "identity table — `id` is the tenant_id",
     # One row per running Discord worker process, not per tenant.

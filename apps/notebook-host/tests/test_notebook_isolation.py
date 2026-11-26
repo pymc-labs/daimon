@@ -644,7 +644,7 @@ def test_host_logs_redact_the_access_token_in_every_form() -> None:
     access = logging.getLogger("uvicorn.access")
     access.info(
         '%s - "%s %s HTTP/%s" %d',
-        "10.0.0.1:1",
+        "203.0.113.7:1",
         "GET",
         "/n/nb/?access_token=SEKRET-tok&x=1",
         "1.1",
@@ -662,6 +662,8 @@ def test_host_logs_redact_the_access_token_in_every_form() -> None:
     out = buf.getvalue()
     assert "SEKRET-tok" not in out, "the link's token must not land in the host log"
     assert "access_token=[redacted]&x=1" in out
+    assert "203.0.113.7" not in out, "an access line must not name the client"
+    assert "GET" in out and "303" in out, "method and status stay"
     assert "ENC-tok" not in out, "nor its url-encoded form in marimo's next="
     assert "APP-tok" not in out, "nor anything the app's own loggers print"
 
@@ -802,6 +804,8 @@ def test_origin_mode_routes_by_exact_host(tmp_path: Path, monkeypatch: pytest.Mo
         {"sec-fetch-site": "same-site", "sec-fetch-mode": "navigate", "sec-fetch-dest": "iframe"},
         {"sec-fetch-site": "same-site", "sec-fetch-mode": "no-cors", "sec-fetch-dest": "script"},
         {"origin": "null"},
+        {"origin": "null", "sec-fetch-site": "same-site"},
+        {"origin": "null", "sec-fetch-site": "cross-site", "sec-fetch-mode": "navigate"},
     ],
 )
 def test_origin_mode_refuses_requests_from_another_notebooks_page(
@@ -827,6 +831,8 @@ def test_origin_mode_refuses_requests_from_another_notebooks_page(
             "sec-fetch-dest": "document",
         },
         {"origin": "ORIGIN_B"},
+        # no-referrer makes the page's own form posts carry a null Origin
+        {"origin": "null", "sec-fetch-site": "same-origin", "sec-fetch-mode": "navigate"},
     ],
 )
 def test_origin_mode_serves_its_own_page_and_the_link_opened_from_chat(

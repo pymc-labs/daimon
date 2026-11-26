@@ -13,7 +13,10 @@ repos:
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
+        exclude: /viewer/vendor/
       - id: end-of-file-fixer
+        # Vendored files stay byte-identical to their upstream release.
+        exclude: /viewer/vendor/
       - id: check-yaml
         exclude: ^mkdocs\.yml$
       - id: check-yaml
@@ -25,6 +28,7 @@ repos:
       - id: check-toml
       - id: check-merge-conflict
       - id: check-added-large-files
+        exclude: /viewer/vendor/
 
   - repo: local
     hooks:

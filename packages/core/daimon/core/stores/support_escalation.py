@@ -23,6 +23,7 @@ only the first two, so no two paths wait on each other in opposite orders.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
@@ -60,10 +61,12 @@ from daimon.core.windows import WindowPeriod, WindowState
 from sqlalchemy import (
     ColumnElement,
     CursorResult,
+    case,
     delete,
     false,
     func,
     insert,
+    literal,
     or_,
     select,
     text,
@@ -81,6 +84,21 @@ _LOCK_NAMESPACE = "daimon:support_escalation:"
 _LIMIT_LOCK_NAMESPACE = "daimon:support_limit:"
 PURGED_USER: Final = "purged"
 """The requester of a limit row whose person was erased; it keeps its charge."""
+RETIRED_PREFIX: Final = "retired:"
+
+
+def retired_user(platform_user_id: str) -> str:
+    """The one-way pseudonym a retired tenant's requests keep, so a reinstall still counts them."""
+    digest = hashlib.md5(platform_user_id.encode(), usedforsecurity=False).hexdigest()
+    return RETIRED_PREFIX + digest
+
+
+def _requester(platform_user_id: str) -> ColumnElement[bool]:
+    return SupportEscalation.platform_user_id.in_(
+        (platform_user_id, retired_user(platform_user_id))
+    )
+
+
 _COUNTED = func.coalesce(SupportEscalation.charge, SupportEscalation.hold)
 _IS_LIMIT = SupportEscalation.charged_to == "limit"
 _NOT_LIMIT = SupportEscalation.charged_to != "limit"
@@ -132,7 +150,7 @@ async def default_spent(
     """
     stmt = select(func.coalesce(func.sum(_COUNTED), 0)).where(
         SupportEscalation.tenant_id == tenant_id,
-        SupportEscalation.platform_user_id == platform_user_id,
+        _requester(platform_user_id),
         SupportEscalation.charged_to == "default",
     )
     return Decimal((await session.execute(stmt)).scalar_one())
@@ -185,7 +203,7 @@ async def delete_support_escalations_for_platform_user(
     result = await session.execute(
         delete(SupportEscalation).where(
             SupportEscalation.tenant_id == tenant_id,
-            SupportEscalation.platform_user_id == platform_user_id,
+            _requester(platform_user_id),
             _NOT_LIMIT,
         )
     )
@@ -206,7 +224,7 @@ async def anonymize_limit_requests_for_platform_user(
         update(SupportEscalation)
         .where(
             SupportEscalation.tenant_id == tenant_id,
-            SupportEscalation.platform_user_id == platform_user_id,
+            _requester(platform_user_id),
             _IS_LIMIT,
         )
         .values(**_ANONYMOUS)
@@ -214,6 +232,30 @@ async def anonymize_limit_requests_for_platform_user(
     rowcount = cast(CursorResult[Any], result).rowcount
     await session.flush()
     return rowcount
+
+
+async def anonymize_tenant_requests(session: AsyncSession, *, tenant_id: uuid.UUID) -> int:
+    """Erase every person from a retiring tenant's requests and keep the charges.
+
+    The requester becomes `retired_user`, so each person's spend still counts after a reinstall.
+    """
+    user = SupportEscalation.platform_user_id
+    kept = or_(user == PURGED_USER, user.startswith(RETIRED_PREFIX))
+    result = await session.execute(
+        update(SupportEscalation)
+        .where(SupportEscalation.tenant_id == tenant_id)
+        .values(
+            **{
+                **_ANONYMOUS,
+                "platform_user_id": case(
+                    (kept, user), else_=literal(RETIRED_PREFIX) + func.md5(user)
+                ),
+            },
+            settled_by=None,
+            settled_by_account_id=None,
+        )
+    )
+    return cast(CursorResult[Any], result).rowcount
 
 
 def _account_or_platform_user_predicate(
@@ -231,7 +273,7 @@ def _account_or_platform_user_predicate(
     if platform_user_keys:
         predicates.append(
             tuple_(SupportEscalation.tenant_id, SupportEscalation.platform_user_id).in_(
-                list(platform_user_keys)
+                [*platform_user_keys, *((t, retired_user(u)) for t, u in platform_user_keys)]
             )
         )
     return or_(*predicates)
@@ -368,9 +410,7 @@ async def limit_spent(
         SupportEscalation.limit_id == limit.id,
         _IS_LIMIT,
     ]
-    person = func.sum(_COUNTED).filter(
-        SupportEscalation.platform_user_id == platform_user_id, *_within(person_period)
-    )
+    person = func.sum(_COUNTED).filter(_requester(platform_user_id), *_within(person_period))
     shared = func.sum(_COUNTED).filter(*_within(period))
     stmt = select(func.coalesce(shared, 0), func.coalesce(person, 0)).where(*base)
     shared_used, person_used = (await session.execute(stmt)).one()
@@ -391,7 +431,7 @@ async def _default_spent_in(
 ) -> Decimal:
     stmt = select(func.coalesce(func.sum(_COUNTED), 0)).where(
         SupportEscalation.tenant_id == tenant_id,
-        SupportEscalation.platform_user_id == platform_user_id,
+        _requester(platform_user_id),
         SupportEscalation.charged_to == "default",
         *_within(period),
     )
@@ -574,7 +614,7 @@ async def person_standing(
         select(SupportEscalation)
         .where(
             SupportEscalation.tenant_id == person.tenant_id,
-            SupportEscalation.platform_user_id == user,
+            _requester(user),
             on_ledger,
         )
         .order_by(SupportEscalation.created_at.desc())

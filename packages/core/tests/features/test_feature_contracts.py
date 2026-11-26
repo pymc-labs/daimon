@@ -119,6 +119,7 @@ _NARROWED: dict[str, str] = {
     "long_jobs_max_deadline": "checked when a job starts, from its workspace and agent",
     "callback_watch_lifetime": "a server admin's limit, read when a callback watch is made",
     "daily_model_cap": "counts the team's spend, so a workspace or agent limit",
+    "conversation_retention": "a workspace's record policy, swept with no agent or thread",
     "thread_providers": "an agent owner's consent, checked when a conversation's model is picked",
     "monitor_direct_messages": "kept per agent: a DM or web chat has no channel to set",
     "monitor_mcp": "kept per agent: an MCP call has no channel or thread",
