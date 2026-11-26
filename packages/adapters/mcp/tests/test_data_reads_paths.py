@@ -22,7 +22,14 @@ import pytest
 from daimon.adapters.mcp import data_access, server
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools import agent_chat, data, repo_memory, sessions, task_continuity
+from daimon.adapters.mcp.tools import (
+    agent_chat,
+    agent_memory,
+    data,
+    repo_memory,
+    sessions,
+    task_continuity,
+)
 from daimon.core.capability_tools import CAPABILITY_TOOLS
 from daimon.core.data_audience import user_subject
 from daimon.core.data_tools import DATA_READS, DATA_TOOLS, REDACTED_DATA_RESULT, mark_data_result
@@ -72,6 +79,7 @@ _GUARDS: list[tuple[str, Callable[..., Any], str]] = [
     ("the data tools register in one place", server.create_mcp_app, "register_data_tools"),  # pyright: ignore[reportUnknownMemberType]
     ("a memory saved after a data read records it", repo_memory._refs, "reads_of"),  # pyright: ignore[reportPrivateUsage]
     ("a memory that recorded data shows to its audience only", repo_memory.repo_memory_impl, "_shown"),
+    ("host memory of a data-reading agent is read-only", agent_memory.open_host_memory, "reads_data"),
 ]  # fmt: skip
 
 
