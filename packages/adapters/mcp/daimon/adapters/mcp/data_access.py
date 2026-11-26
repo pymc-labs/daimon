@@ -198,6 +198,7 @@ async def _turn_origin(runtime: McpRuntime, auth: AuthIdentity, *, now: datetime
         agent_id=parent.responder_ma_agent_id,
     )
     caller_reads = await reads_data(runtime.session_factory, runtime.settings, place)
+    # From a DM (or web chat) the helper answers the asker alone, with their own access.
     viewers = origin.viewers if origin.kind == "room" else frozenset({asker})
     return DataOrigin(
         "agent_request", asker, viewers, origin.contained, caller_reads_data=caller_reads
