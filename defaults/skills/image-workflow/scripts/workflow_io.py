@@ -16,7 +16,8 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 OUTPUT_DIR = Path("/mnt/session/outputs")
-KEY_FILE = Path("/mnt/session/uploads/.env")
+# The agent's keys file: uploads on Claude, the workspace on OpenAI and Gemini.
+KEY_FILES = (Path("/mnt/session/uploads/.env"), Path("/workspace/.daimon/.env"))
 MAX_BYTES = 40 * 1024 * 1024
 
 
@@ -55,10 +56,14 @@ def text(value):
     return value
 
 
+def key_file():
+    return next((path for path in KEY_FILES if path.is_file()), KEY_FILES[0])
+
+
 def key(name):
     # Mounted files are serialized as literal, shell-quoted assignments. Never source them.
     try:
-        for line in KEY_FILE.read_text().splitlines():
+        for line in key_file().read_text().splitlines():
             lhs, sep, rhs = line.partition("=")
             if sep and lhs.strip() == name:
                 parts = shlex.split(rhs, comments=False)

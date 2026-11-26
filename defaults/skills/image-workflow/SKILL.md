@@ -5,7 +5,7 @@ description: Generate or edit raster images through OpenAI and save the finished
 
 Use the dedicated `image-maker` agent. Obtain missing provider credentials with
 `request_agent_key`, exact `key=OPENAI_API_KEY` and the
-waiting task. Never accept pasted keys. They mount at `/mnt/session/uploads/.env`;
+waiting task. Never accept pasted keys. They mount in the agent's keys file (`scripts/workflow_io.py` finds it);
 every user of that agent can use them and spend the provider project's quota.
 Do not put shared keys on default Daimon. Prefer an operator-limited provider
 project/budget. No unattended routines are added by this skill.

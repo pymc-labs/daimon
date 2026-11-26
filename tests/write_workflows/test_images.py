@@ -138,7 +138,8 @@ def test_named_mounted_key_is_literal_not_executed(load_workflow, monkeypatch, t
     runtime = load_workflow("image-workflow", "workflow_io")
     path = tmp_path / "synthetic-mount.txt"
     path.write_text("OTHER_KEY=ignore\nOPENAI_API_KEY='literal$(touch never)`cmd`#value'\n")
-    monkeypatch.setattr(runtime, "KEY_FILE", path)
+    # Found where OpenAI and Gemini put it when Claude's mount is absent.
+    monkeypatch.setattr(runtime, "KEY_FILES", (tmp_path / "absent", path))
     assert runtime.key("OPENAI_API_KEY") == "literal$(touch never)`cmd`#value"
     with pytest.raises(runtime.Failure, match="Missing GEMINI_API_KEY"):
         runtime.key("GEMINI_API_KEY")
