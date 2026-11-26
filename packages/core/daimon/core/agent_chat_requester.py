@@ -109,9 +109,14 @@ async def record_driver(
     A resume carries on a turn someone else may have started, so it can only take a
     name away: a signed-in person's resume keeps the record, anyone else's clears it.
     Each write also copies `provenance` (`session_provenance`), whether or not a relay
-    server opted in, so the MCP server can find the session by its credential's grant.
+    server opted in, so the MCP server can find the session by its credential's grant. A
+    signed-in person's resume copies only that, leaving the driver record as it is.
     """
     if resuming and signed_in_person:
+        async with sessionmaker.begin() as db:
+            await session_settle_state.record_agent_chat_provenance(
+                db, managed_session_id=managed_session_id, provenance=provenance
+            )
         return None
     async with sessionmaker.begin() as db:
         return await session_settle_state.record_agent_chat_driver(

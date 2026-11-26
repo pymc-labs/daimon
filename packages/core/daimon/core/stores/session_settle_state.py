@@ -317,6 +317,10 @@ async def record_agent_chat_driver(
 
     `provenance` is copied on each write, whoever drives, so a session created before it
     was recorded is found from its next send on (`find_agent_chat_session`).
+
+    The grant is a fresh uuid4 for each session (`sessions.create_session`), so no two
+    sessions share one. If two ever did, which would be a bug, the unique index refuses
+    this write: the error is raised, nothing is recorded, and the send is not made.
     """
     where = {
         "agent_chat_grant": provenance.grant,
@@ -342,6 +346,27 @@ async def record_agent_chat_driver(
         ).returning(SessionSettleState.agent_chat_sends)
     )
     return number if send else None
+
+
+async def record_agent_chat_provenance(
+    session: AsyncSession, *, managed_session_id: str, provenance: SessionProvenance
+) -> None:
+    """Copy only where an agent-chat session came from, for a resume that keeps the driver
+    record as it is (`agent_chat_requester.record_driver`): no driver, count or turn column
+    is written, and a new row leaves them empty, as no row does. A shared grant is refused
+    as in `record_agent_chat_driver`."""
+    where = {
+        "agent_chat_grant": provenance.grant,
+        "agent_chat_channel": provenance.channel_id,
+        "agent_chat_account_id": provenance.account_id,
+    }
+    stmt = insert(SessionSettleState).values(managed_session_id=managed_session_id, **where)
+    await session.execute(
+        stmt.on_conflict_do_update(
+            index_elements=[SessionSettleState.managed_session_id],
+            set_={**where, "updated_at": func.now()},
+        )
+    )
 
 
 async def is_agent_chat_signed_in(session: AsyncSession, *, managed_session_id: str) -> bool:
