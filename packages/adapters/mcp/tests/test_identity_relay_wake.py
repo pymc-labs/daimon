@@ -8,16 +8,15 @@ from __future__ import annotations
 import datetime as dt
 import json
 import uuid
-from typing import get_args
+from typing import cast, get_args
 
 import pytest
-from daimon.core._models import TaskContinuation
 from daimon.core.config import SignedIdentityServer
 from daimon.core.mcp_identity import RelayBinding, generate_signing_key
 from daimon.core.stores.domain import ContinuationReason, Role
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.stores.turn_origins import bind_origin_session, create_origin
-from daimon.testing.factories import make_tenant
+from daimon.testing.factories import make_task_continuation, make_tenant
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -100,17 +99,21 @@ async def _continuation(
         await bind_origin_session(
             db, origin_id=origin.id, chat_session_id=grant, human_invocation=human
         )
-        db.add(
-            TaskContinuation(
-                tenant_id=person.tenant_id, platform="discord", parent_channel_id=parent,
-                thread_id=thread, requester_account_id=person.account_id,
-                requester_external_user_id="user-1", target_ma_agent_id="agent_a",
-                target_name="Helper", requested_work="check again", reason=reason,
-                status="claimed", idempotency_key=uuid.uuid4(), claimed_at=now,
-                started_at=now, lease_owner=owner.hex,
-                lease_expires_at=now + dt.timedelta(minutes=5), attempts=1,
-            )
+        row = await make_task_continuation(
+            db, tenant_id=person.tenant_id, platform="discord", parent_channel_id=parent,
+            thread_id=thread, requester_account_id=person.account_id,
+            requester_external_user_id="user-1", target_ma_agent_id="agent_a",
+            target_name="Helper", requested_work="check again",
+            reason=cast(ContinuationReason, reason), idempotency_key=uuid.uuid4(),
         )  # fmt: skip
+        await db.execute(  # claimed and started under this owner's live lease
+            text(
+                "UPDATE task_continuations SET status = 'claimed', claimed_at = :now,"
+                " started_at = :now, lease_owner = :owner, lease_expires_at = :until,"
+                " attempts = 1 WHERE id = :id"
+            ),
+            {"now": now, "owner": owner.hex, "until": now + dt.timedelta(minutes=5), "id": row.id},
+        )
     return await _token(factory, person, RelayBinding("Agent A", mapping_id, grant=grant))
 
 
