@@ -1337,12 +1337,13 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         category="model_input",
         effect="capability",
         values=_ON_OFF,
-        default="off",
+        default="on",
         tiers=("workspace",),
         binds="turn",
         doc=(
             "Coding keys, the hub and outside clients can read the skill library, by scope. "
-            "Chat agents keep their own skill tools."
+            "Chat agents keep their own skill tools, which show a scoped skill "
+            "only where everyone who can read the room holds its scope."
         ),
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,

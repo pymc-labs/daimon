@@ -20,6 +20,7 @@ from anthropic.types.beta import (
     SkillListResponse,
 )
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.data_access import held_scopes
 from daimon.adapters.mcp.resource_ports import mcp_scope, walk_skill_versions
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import (
@@ -59,7 +60,9 @@ from daimon.core.mux_compat import update_agent
 from daimon.core.skills.attachments import delete_skill_unless_attached, still_attached_message
 from daimon.core.skills.fetch import GitHubFetchError
 from daimon.core.skills.pipeline import run_skill_sync
+from daimon.core.stores import workspace_skills
 from daimon.core.stores.seeded_skills import list_seeded_skill_names, load_seeded_skill
+from daimon.core.workspace_skills import may_read
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel
@@ -352,14 +355,34 @@ async def _skill_view(
     )
 
 
+async def _unheld_scopes(runtime: McpRuntime, auth: AuthIdentity) -> frozenset[str]:
+    """The library skills whose scope this call's audience doesn't hold: everyone present
+    in a room (the asker alone in a direct message) must be able to read a scope's data."""
+    async with runtime.session_factory() as session:
+        rows = await workspace_skills.list_skills(session, tenant_id=auth.tenant_id)
+    scoped = [row for row in rows if row.scope is not None]
+    if not scoped:
+        return frozenset()
+    held = await held_scopes(runtime, auth)
+    return frozenset(row.skill_id for row in scoped if not may_read(row, held))
+
+
 async def skill_hider(
-    runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None = None
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    origin_context_id: str | None = None,
+    *,
+    by_scope: bool = True,
 ) -> Callable[[str, str], bool]:
-    """Whether a tenant skill (its id and display-title body) belongs, or may belong, to an
-    agent across an isolated channel's line: every skill reader applies it."""
+    """Whether a tenant skill (its id and display-title body) is hidden from this call: it
+    belongs, or may belong, to an agent across an isolated channel's line, or (`by_scope`)
+    it holds a scope the call's audience doesn't. Every skill reader applies it."""
     caller = await _skill_view(runtime, auth, origin_context_id)
     owners = await load_skill_owners(runtime, caller, auth.tenant_id)
-    return lambda skill_id, body: caller.hides_skill(owners, skill_id=skill_id, body=body)
+    unheld = await _unheld_scopes(runtime, auth) if by_scope else frozenset[str]()
+    return lambda skill_id, body: (
+        skill_id in unheld or caller.hides_skill(owners, skill_id=skill_id, body=body)
+    )
 
 
 async def _hidden(
@@ -367,8 +390,10 @@ async def _hidden(
     auth: AuthIdentity,
     skill: SkillListResponse,
     origin_context_id: str | None = None,
+    *,
+    by_scope: bool = True,
 ) -> bool:
-    hides = await skill_hider(runtime, auth, origin_context_id)
+    hides = await skill_hider(runtime, auth, origin_context_id, by_scope=by_scope)
     body = strip_tenant_prefix(tenant_id=auth.tenant_id, display_title=skill.display_title or "")
     return hides(skill.id, body or "")
 
@@ -435,7 +460,8 @@ async def _delete_impl(
         )
     canonical = tenant_scoped_display_title(tenant_id=auth.tenant_id, name=name)
     skill = await find_skill_by_display_title(runtime.client, canonical, on_truncation="degrade")
-    if skill is None or await _hidden(runtime, auth, skill):
+    # An admin deletes by name whatever its scope, as the web app does.
+    if skill is None or await _hidden(runtime, auth, skill, by_scope=False):
         raise ToolError(f"skill '{name}' not found in this server's skills")
     # A skill an agent pins or a channel rule adds is resolved at every session
     # creation there; deleting it would fail each of those turns. Chat never

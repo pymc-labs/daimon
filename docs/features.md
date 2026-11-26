@@ -44,7 +44,7 @@ Where each feature can be set, and its default.
 | Platform skills | `platform_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Not on Gemini, OpenAI |
 | Agent skills | `agent_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  | Always On on Gemini, OpenAI |
 | Channel skills | `channel_skills` | Model input | On | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
-| Library skills | `library_skills` | Model input | Off |  | ✓ |  |  |  |  |  |
+| Library skills | `library_skills` | Model input | On |  | ✓ |  |  |  |  |  |
 | Thread participation | `participation` | Chat | Off | ✓ | ✓ |  | ✓ | ✓ |  | Only Discord, Teams |
 | Progress plans | `progress_plans` | Chat | Off | ✓ | ✓ | ✓ | ✓ | ✓ |  |  |
 | Cost footer | `cost_footer` | Chat | Shown |  | ✓ |  | ✓ | ✓ |  |  |
@@ -1112,13 +1112,13 @@ The agent can search the team's data sources, showing only what everyone who wil
 
 ## Library skills
 
-Coding keys, the hub and outside clients can read the skill library, by scope. Chat agents keep their own skill tools.
+Coding keys, the hub and outside clients can read the skill library, by scope. Chat agents keep their own skill tools, which show a scoped skill only where everyone who can read the room holds its scope.
 
 | | |
 | --- | --- |
 | Key | `library_skills` |
 | Values | `on` (On), `off` (Off) |
-| Default | `off` |
+| Default | `on` |
 | Levels | Workspace |
 | Combines | Off above is a ceiling |
 

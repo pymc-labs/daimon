@@ -2,7 +2,7 @@
 `library_skills`: list them and read their files. Chat turns never get these tools.
 
 A scoped skill shows only to a caller who holds its scope under the data audience rule
-(`data_audience_for`, `open_read`); one refused data sees unscoped skills only. A skill
+(`skill_hider`); one refused data sees unscoped skills only. A skill
 of an agent across an isolated channel's line stays hidden, as `get_skill` hides it.
 """
 
@@ -11,7 +11,6 @@ from __future__ import annotations
 from typing import Final
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.adapters.mcp.data_access import data_audience_for
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._hub_workspace import hub_workspace_tool
@@ -19,13 +18,8 @@ from daimon.adapters.mcp.tools.skills import skill_hider
 from daimon.core.skill_serving import MAIN_FILE, ServedSkill, read_served, served
 from daimon.core.stores import workspace_skills as store
 from daimon.core.stores.domain import WorkspaceSkillRow
-from daimon.core.workspace_skills import may_read
-from daimon.data import pool
-from daimon.data.reading import open_read
-from daimon.data.schema import Schemas
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
-from psycopg import Error
 from pydantic import BaseModel
 
 MAX_TEXT: Final = 100_000
@@ -55,27 +49,12 @@ class LibrarySkillFile(BaseModel):
     truncated: bool
 
 
-async def _held_scopes(runtime: McpRuntime, auth: AuthIdentity) -> tuple[str, ...]:
-    """The scopes the caller's answer may read, as the data tools resolve them; none when
-    no data may be read here."""
-    try:
-        audience = await data_audience_for(runtime, auth)
-        async with pool.connection(runtime.settings) as conn:
-            schemas = Schemas.of(runtime.settings.data)
-            salt = f"agent:{auth.chat_agent_id or auth.agent_id}"
-            r = await open_read(conn, schemas, auth.tenant_id, audience, salt=salt)
-    except (ToolError, Error):
-        return ()
-    return r.ctx.scopes
-
-
 async def visible_skills(runtime: McpRuntime, auth: AuthIdentity) -> list[WorkspaceSkillRow]:
-    """The library skills `auth` may read: by scope, then by the channel line."""
+    """The library skills `auth` may read: by scope and by the channel line."""
     async with runtime.session_factory() as session:
         rows = await store.list_skills(session, tenant_id=auth.tenant_id)
-    held = await _held_scopes(runtime, auth) if any(r.scope for r in rows) else ()
     hides = await skill_hider(runtime, auth)
-    return [r for r in rows if may_read(r, held) and not hides(r.skill_id, r.name)]
+    return [r for r in rows if not hides(r.skill_id, r.name)]
 
 
 def _info(skill: ServedSkill) -> LibrarySkill:

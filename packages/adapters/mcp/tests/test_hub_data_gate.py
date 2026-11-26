@@ -44,6 +44,10 @@ async def test_library_skills_on_in_one_workspace_lists_them_for_the_hub_caller(
         )
 
     both = hub(on.id, off.id)
+    assert await gate._hidden(both) == DATA_TOOLS, "On unless an admin turns it off"  # pyright: ignore[reportPrivateUsage]
+    async with db_session_factory.begin() as session:
+        for tenant in (on, off):
+            await turn_on(session, tenant_id=tenant.id, key=LIBRARY_SKILLS, value="off")
     assert await gate._hidden(both) == DATA_TOOLS | SERVING_TOOLS  # pyright: ignore[reportPrivateUsage]
     async with db_session_factory.begin() as session:
         await turn_on(session, tenant_id=on.id, key=LIBRARY_SKILLS)

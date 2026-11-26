@@ -44,8 +44,10 @@ from daimon.core.stores.room_viewers import read_viewers
 from daimon.core.stores.routines import get_routine
 from daimon.core.stores.turn_origins import get_active_origin, get_session_origin
 from daimon.data import identity, pool
+from daimon.data.reading import open_read
 from daimon.data.schema import Schemas
 from fastmcp.exceptions import ToolError
+from psycopg import Error
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -78,6 +80,20 @@ async def data_audience_for(runtime: McpRuntime, auth: AuthIdentity) -> DataAudi
     if isinstance(found, DataRefusal):
         raise ToolError(_REFUSALS[found.reason])
     return found
+
+
+async def held_scopes(runtime: McpRuntime, auth: AuthIdentity) -> tuple[str, ...]:
+    """The scopes the caller's answer may read, as the data tools resolve them; none when
+    no data may be read here."""
+    try:
+        audience = await data_audience_for(runtime, auth)
+        async with pool.connection(runtime.settings) as conn:
+            schemas = Schemas.of(runtime.settings.data)
+            salt = f"agent:{auth.chat_agent_id or auth.agent_id}"
+            r = await open_read(conn, schemas, auth.tenant_id, audience, salt=salt)
+    except (ToolError, Error):
+        return ()
+    return r.ctx.scopes
 
 
 async def data_origin(runtime: McpRuntime, auth: AuthIdentity, *, now: datetime) -> DataOrigin:

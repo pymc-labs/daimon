@@ -1,4 +1,4 @@
-"""Kept skill versions: kept where serving is On, repeatable, never back, scope kept."""
+"""Kept skill versions: kept where serving is On (the default), repeatable, never back, scope kept."""
 
 from daimon.core.capability_tools import LIBRARY_SKILLS
 from daimon.core.stores import workspace_skills as store
@@ -11,6 +11,7 @@ async def test_a_version_is_kept_once_and_only_where_serving_is_on(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     tenant = await make_tenant(db_session)
+    await turn_on(db_session, tenant_id=tenant.id, key=LIBRARY_SKILLS, value="off")
     await db_session.commit()
     files = {"SKILL.md": b"one"}
 

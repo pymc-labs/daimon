@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import inspect
 import uuid
-from collections.abc import Callable
 from types import SimpleNamespace
 from typing import cast
 
@@ -19,12 +18,11 @@ from daimon.core.features.tool_gate import server_gate_key
 from daimon.core.stores.domain import Role
 from daimon.core.workspace_skills import record_published
 from daimon.testing.factories import make_tenant, turn_on
-from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
-def test_serving_is_off_by_default_and_never_offered_to_chat_turns() -> None:
-    assert FEATURES[LIBRARY_SKILLS].default == "off"
+def test_serving_is_on_by_default_and_never_offered_to_chat_turns() -> None:
+    assert FEATURES[LIBRARY_SKILLS].default == "on"
     assert LIBRARY_SKILLS not in CAPABILITY_TOOLS, "chat sessions never get these tools"
     assert {server_gate_key(t) for t in SERVING_TOOLS} == {LIBRARY_SKILLS}
     source = inspect.getsource(mcp_identity.IdentityMiddleware)
@@ -37,7 +35,7 @@ def test_every_skill_reader_hides_across_the_channel_line() -> None:
         assert "skill_hider(" in inspect.getsource(reader), reader.__name__
 
 
-async def test_a_caller_refused_data_sees_only_unscoped_skills_on_their_side(
+async def test_a_scoped_skill_shows_only_where_the_audience_holds_its_scope(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -45,7 +43,7 @@ async def test_a_caller_refused_data_sees_only_unscoped_skills_on_their_side(
     tenant = await make_tenant(db_session)
     await turn_on(db_session, tenant_id=tenant.id, key=LIBRARY_SKILLS)
     await db_session.commit()
-    for skill_id, scope in (("open", None), ("team", "team"), ("across", None)):
+    for skill_id, scope in (("open", None), ("team", "team"), ("other", "other")):
         await record_published(
             db_session_factory,
             tenant_id=tenant.id,
@@ -55,17 +53,15 @@ async def test_a_caller_refused_data_sees_only_unscoped_skills_on_their_side(
             files={"SKILL.md": b"x"},
             scope=scope,
         )
+    held: list[tuple[str, ...]] = [()]
 
-    async def refused(runtime: McpRuntime, auth: AuthIdentity) -> None:
-        raise ToolError("refused")
+    async def held_scopes(runtime: McpRuntime, auth: AuthIdentity) -> tuple[str, ...]:
+        return held[0]
 
-    async def hider(
-        runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None = None
-    ) -> Callable[[str, str], bool]:
-        return lambda skill_id, name: skill_id == "across"
-
-    monkeypatch.setattr(skill_serving, "data_audience_for", refused)
-    monkeypatch.setattr(skill_serving, "skill_hider", hider)
+    monkeypatch.setattr(skills, "held_scopes", held_scopes)
     runtime = cast(McpRuntime, SimpleNamespace(session_factory=db_session_factory))
     auth = AuthIdentity(account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.USER)
-    assert [r.skill_id for r in await skill_serving.visible_skills(runtime, auth)] == ["open"]
+    unheld = skills._unheld_scopes  # pyright: ignore[reportPrivateUsage]
+    assert await unheld(runtime, auth) == {"team", "other"}, "a call refused data holds none"
+    held[0] = ("team",)  # what everyone who can read the room holds
+    assert await unheld(runtime, auth) == {"other"}

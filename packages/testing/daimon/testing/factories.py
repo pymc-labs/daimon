@@ -319,14 +319,16 @@ async def set_github_installation_snapshot(
     await session.flush()
 
 
-async def turn_on(session: AsyncSession, *, tenant_id: uuid.UUID, key: str) -> None:
-    """Turn the feature `key` On for the whole workspace."""
+async def turn_on(
+    session: AsyncSession, *, tenant_id: uuid.UUID, key: str, value: str = "on"
+) -> None:
+    """Turn the feature `key` On (or set it to `value`) for the whole workspace."""
     await set_feature_value(
         session,
         tenant_id=tenant_id,
         target=FeatureTarget("workspace"),
         key=key,
-        value="on",
+        value=value,
         set_by=None,
         surface="cli",
     )
