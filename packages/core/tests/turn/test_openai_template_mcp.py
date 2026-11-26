@@ -516,7 +516,7 @@ async def test_a_preparation_that_fails_after_minting_revokes_the_credential(tem
     request, _, _, _ = template
     minted: list[str] = []
 
-    async def mint_then_fail(preparation, runtime):
+    async def mint_then_fail(preparation, runtime, _uploaded):
         connection = preparation.target_spec.mcp_servers[0]
         assert runtime.mcp_secrets is not None
         minted.append(
