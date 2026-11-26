@@ -51,6 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that provider collects reply files. An admin can keep them on Claude with the `provider_keys_file` feature
   ([Providers](docs/providers.md#what-daimon-adds-on-openai-and-gemini)).
 
+- **A long Gemini reply no longer fails when Gemini refuses to reconnect to it.** After two
+  minutes with no news, Daimon reconnects to the reply. Gemini can refuse that while the reply
+  is still running; Daimon now keeps checking the reply until it ends and answers from it,
+  within the usual time limit. A refusal on a reply's first connection still ends it, also
+  after Daimon restarts mid-reply, and the logs now say why Gemini refused.
+
 - **A finished command no longer sends a second message when the conversation already has its
   result, or when its machine was stopped from the conversation.** Reading the result there,
   or stopping the machine from the conversation it started in, withdraws a message nobody has
@@ -69,6 +75,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   set keeps it, so an agent its owner turned on stays on and one turned off stays off. Only a
   server admin can change any of them now. Turning it off leaves a running machine to be
   stopped or to end at its idle time ([Compute sessions](docs/compute.md#turn-it-on)).
+
+- **A remote MCP server reached through the identity relay can name the person behind an
+  agent-chat turn.** Set `agent_chat_requester` on a `requester_meta` server: a turn a person
+  started from an MCP client signed in to the hub then carries their user id with
+  `requester_kind` `"agent_chat"`, with no place and no wake link. Turns started with an agent,
+  coding or CLI key name nobody. It is off by default, and a conversation started earlier gains
+  it from its second message ([MCP servers](docs/mcp-servers.md#servers-that-attribute-writes-to-the-requester)).
 
 - **Routines start on time when many sessions are live.** The scheduler's check for due routines
   shared one loop with the GitHub token refresh, which takes about a second for each live

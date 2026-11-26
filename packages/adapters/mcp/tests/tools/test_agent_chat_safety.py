@@ -376,7 +376,11 @@ async def _record(
     """What an agent-chat send left behind before the restart."""
     async with factory.begin() as db:
         await session_settle_state.record_unattended_turn(
-            db, managed_session_id=_SESSION, turn_event_id=boundary, rules_channel_id=channel
+            db,
+            managed_session_id=_SESSION,
+            turn_event_id=boundary,
+            rules_channel_id=channel,
+            send=None,
         )
 
 
@@ -1302,7 +1306,11 @@ async def test_a_throttled_confirmation_is_decided_again_on_resume(
     await _deny_in_channel(factory, "C1")
     async with factory.begin() as db:
         await session_settle_state.record_unattended_turn(
-            db, managed_session_id=_SESSION, turn_event_id=boundary, rules_channel_id="C1"
+            db,
+            managed_session_id=_SESSION,
+            turn_event_id=boundary,
+            rules_channel_id="C1",
+            send=None,
         )
     await _continue_turn_impl(runtime, _auth(), _SESSION, None)
     await _settle(runtime)
@@ -1375,7 +1383,11 @@ async def test_another_sessions_record_does_not_authorize_this_one(
     boundary = fake.pause()
     async with factory.begin() as db:
         await session_settle_state.record_unattended_turn(
-            db, managed_session_id="ses_elsewhere", turn_event_id=boundary, rules_channel_id=None
+            db,
+            managed_session_id="ses_elsewhere",
+            turn_event_id=boundary,
+            rules_channel_id=None,
+            send=None,
         )
     runtime = _runtime(fake, factory, _DISABLED)
     with pytest.raises(ToolError, match="approval in the chat"):

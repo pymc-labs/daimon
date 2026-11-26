@@ -462,6 +462,7 @@ source_modules = [
     "daimon.core.workspace_transfer",
     "daimon.core.workspace_ports_compat",
     "daimon.core.agent_catalog",
+    "daimon.core.agent_chat_requester",
     "daimon.core.agent_changes",
     "daimon.core.agent_editing",
     "daimon.core.agent_github",
