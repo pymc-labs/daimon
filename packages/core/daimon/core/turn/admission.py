@@ -521,6 +521,8 @@ class Admission:
     # The turn-bound, session-tool and session-identity features at this place; None only
     # for hand-built admissions, which render every turn control and keep every tool.
     features: FeatureSnapshot | None = field(default=None, compare=False, repr=False)
+    # A routine fire whose admin opt-in matched this run keeps its built-in tools.
+    routine_sandbox_tools: bool = field(default=False, compare=False, repr=False)
 
     @property
     def toolset(self) -> SessionToolset:

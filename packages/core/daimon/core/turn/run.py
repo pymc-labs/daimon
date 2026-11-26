@@ -2164,7 +2164,11 @@ async def run_prepared_turn_impl(
                                 if watch_row is not None
                                 else unattended_entry_point(origin)
                             )
-                            host_builtins[0] = capability_policy(native_entry).allow_builtins
+                            native_policy = capability_policy(
+                                native_entry,
+                                routine_sandbox_tools=prepared.admission.routine_sandbox_tools,
+                            )
+                            host_builtins[0] = native_policy.allow_builtins
                             native_profile = revision.profile if revision is not None else "unknown"
                             native_gated = deps.settings is not None and deployment_on(
                                 deps.settings, "host_call_gate", platform
@@ -2175,7 +2179,7 @@ async def run_prepared_turn_impl(
                                     prepared._native_spec,  # pyright: ignore[reportPrivateUsage]
                                     profile_id=native_profile,
                                     gated=native_gated,
-                                    sandbox=capability_policy(native_entry).allow_builtins,
+                                    sandbox=native_policy.allow_builtins,
                                 )
 
                             native_check()

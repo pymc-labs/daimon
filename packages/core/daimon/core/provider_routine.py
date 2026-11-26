@@ -2,20 +2,22 @@
 
 Managed Agents routines open a headless session (`headless_runner`); another provider
 has no such session, so its fire is admitted and driven like a chat turn nobody
-watches, in a fresh channel scope. One rule then serves both: the turn's unattended
+watches, in the routine's own channel scope. One rule then serves both: the turn's unattended
 origin sends every gated Daimon call to the host call gate's unattended verdict, and
-the turn is metered to the tenant after admission's balance and cap gates.
+the turn is metered to the tenant after admission's balance and cap gates. Built-in
+tools run only with the routine's sandbox opt-in, as on Managed Agents.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
 from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX
 from daimon.core.authz import Subject, Surface
+from daimon.core.routine_sandbox import RoutineSandbox, builtins_allowed, provider_run_matches_pin
 from daimon.core.rule_views import routine_destination_channel
 from daimon.core.stores.domain import Role, RoutineRow
 from daimon.core.turn.admission import Admission, admit
@@ -28,6 +30,12 @@ from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.unattended import is_provider_turn
 from daimon.core.turn_hold import RequesterOrg
+from mux.profiles import get_profile
+
+SHELL_NEEDS_SANDBOX = (
+    "This routine's agent is on OpenAI, which always runs it with a shell. "
+    "Ask a server admin to turn on sandbox tools for this routine."
+)
 
 
 class _Unrendered(TurnLifecycle):
@@ -56,13 +64,26 @@ def routine_scope_channel(row: RoutineRow) -> str:
     return routine_destination_channel(row) or row.channel_id or f"{CHANNEL_SCOPE_PREFIX}{row.id}"
 
 
+def routine_scope_thread(routine_id: uuid.UUID) -> str:
+    """The one thread a routine's provider fires bind, a fresh session each time."""
+    return f"{CHANNEL_SCOPE_PREFIX}routine:{routine_id}"
+
+
 async def admit_provider_routine(
-    deps: TurnDeps, row: RoutineRow, *, platform: str, owner: str, subject: Subject
+    deps: TurnDeps,
+    row: RoutineRow,
+    *,
+    platform: str,
+    owner: str,
+    subject: Subject,
+    sandbox: RoutineSandbox | None,
 ) -> Admission:
     """Admit the fire as its owner, for the routine's agent, on the place's provider.
 
     Refused unless it runs on another provider: a place that now answers on Claude
     takes its routine through Managed Agents on the next fire, never through here.
+    `sandbox` keeps built-ins on only while its pin matches this admission; OpenAI's
+    shell cannot be left out, so there a fire without it is refused.
     """
     admission = await admit(
         deps,
@@ -80,25 +101,46 @@ async def admit_provider_routine(
         surface=Surface.ROUTINE,
         routine_agent_name=row.agent_name,
     )
-    if not is_provider_turn(admission):
+    revision = admission.backend_revision
+    if revision is None or not is_provider_turn(admission):
         raise AdmissionDenied(reason="backend_unsupported")
-    return admission
+    opted_in = sandbox is not None and await _sandbox_holds(deps, sandbox, admission, row, platform)
+    if not opted_in and get_profile(revision.profile).implicit_execution:
+        raise AdmissionDenied(reason="backend_unsupported", detail=SHELL_NEEDS_SANDBOX)
+    return replace(admission, routine_sandbox_tools=opted_in)
+
+
+async def _sandbox_holds(
+    deps: TurnDeps, sandbox: RoutineSandbox, admission: Admission, row: RoutineRow, platform: str
+) -> bool:
+    """The opt-in covers this fire's provider, agent and environment, and
+    `unattended_capabilities` still allows built-ins; a drifted pin is reported."""
+    if not await provider_run_matches_pin(
+        deps.anthropic, sandbox.pin, admission, tenant_id=row.tenant_id, records=deps.sessionmaker
+    ):
+        await sandbox.on_drift()
+        return False
+    return await builtins_allowed(
+        deps.sessionmaker, deps.settings, row.tenant_id, platform, admission.agent.id
+    )
 
 
 async def run_provider_routine(
     deps: TurnDeps,
     admission: Admission,
     *,
+    routine_id: uuid.UUID,
     tenant_id: uuid.UUID,
     platform: str,
     owner: str,
     prompt: str,
 ) -> ProviderRoutineRun:
-    """Run the admitted fire once, unattended, in a fresh scope of its channel.
+    """Run the admitted fire once, unattended, in the routine's own scope.
 
-    A failed turn raises its error, as a Managed Agents fire does.
+    Each fire replaces that scope's session, so a run starts fresh, as a Managed
+    Agents fire does, and a routine keeps one binding. A failed turn raises its error.
     """
-    scope_id = f"{CHANNEL_SCOPE_PREFIX}{uuid.uuid4()}"
+    scope_id = routine_scope_thread(routine_id)
     deadline = turn_deadline(now=datetime.now(UTC), ceiling_s=admission.turn_ceiling_s)
     prepared = await bind_session(
         deps,

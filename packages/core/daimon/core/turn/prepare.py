@@ -227,6 +227,8 @@ class PreparedTurn:
     native_chat_session_id: str | None = field(default=None, kw_only=True)
     _scope: Scope | None = field(default=None, kw_only=True, compare=False, repr=False)
     _native_spec: AgentSpec | None = field(default=None, kw_only=True, compare=False, repr=False)
+    # The provider created this turn's session without the agent's built-in tools.
+    _builtins_withheld: bool = field(default=False, kw_only=True, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -1218,6 +1220,10 @@ async def bind_session_impl(
                 if selected.verified_counterpart is not None
                 else selected.target_spec
             )
+            if result._builtins_withheld and native_spec is not None:  # pyright: ignore[reportPrivateUsage]
+                from daimon.core.turn.unattended import without_builtins
+
+                native_spec = without_builtins(native_spec)
             result = replace(result, _native_spec=native_spec)
             ref = result.session_ref
             backend = result.backend

@@ -38,6 +38,7 @@ from daimon.core.turn.replace_binding import (
     replace_binding,
 )
 from daimon.core.turn.session_skills import SessionSkillFiles, tell_left_out, turn_session_skills
+from daimon.core.turn.unattended_capabilities import routine_builtins_withheld
 from daimon.core.usage_recording import record_provider_usage
 from mux.contracts.config import ConfigRevision
 from mux.contracts.extensions import ExtensionConfig
@@ -45,6 +46,7 @@ from mux.contracts.ids import ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding, SessionSpec
 from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini import compile_environment
+from mux.drivers.gemini.core import WITHHOLD_BUILTINS
 from mux.errors import BindingConflict, ContinuityLost, ScopeViolation, UnsupportedCapability
 from mux.profiles.gemini import INLINE_REUSE, SESSION_NAMESPACE
 from mux.state.lease import Slot
@@ -230,6 +232,15 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     )
     setup = "" if compiled in ({}, {"type": "remote", "sources": []}) else request_digest(compiled)
 
+    # A routine fire without its opt-in runs a session that leaves the agent's built-in
+    # tools out of every interaction, as Managed Agents disables them on its session.
+    request_origin = admission.request
+    withheld = routine_builtins_withheld(
+        request_origin.origin if request_origin is not None else None,
+        request_origin.attended if request_origin is not None else None,
+        admission.routine_sandbox_tools,
+    )
+
     async def created(era: str) -> ProviderBinding:
         agent = deployment.native_agent
         if agent is None:
@@ -273,7 +284,11 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
                     SESSION_NAMESPACE: ExtensionConfig(
                         namespace=SESSION_NAMESPACE,
                         version=1,
-                        value={"binding_id": binding_id, "thread": thread.model_dump(mode="json")},
+                        value={
+                            "binding_id": binding_id,
+                            "thread": thread.model_dump(mode="json"),
+                            **({WITHHOLD_BUILTINS: True} if withheld else {}),
+                        },
                     )
                 },
             ),
@@ -430,6 +445,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         # Revokes a per-turn MCP credential however the turn ends.
         _finalize=runtime.end_of_turn,
         continuity=continuity,
+        _builtins_withheld=withheld and not (prior is not None and binding is prior),
     )
 
 
