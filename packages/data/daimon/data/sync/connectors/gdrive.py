@@ -4,7 +4,8 @@ their request (`daimon.data.my_drive`), while `config.personal_drive` is on (the
 
 Each file's readers come from its own permission list, read as the admin by domain admin
 access. A permission grants a person of the domain by primary email, a group (its members
-come from the Directory API, read by this source with its own credentials), the whole domain
+come from the Directory API, read by this source or by another source of its `config.group`,
+the same name on each source of one Google connection), the whole domain
 when the share is discoverable, and nobody else: link-only shares, other domains, external
 people, deleted and expiring permissions grant nothing here. A file nobody inside may read is
 not stored. The access evidence of a file lapses `relist_hours` + 12 h after it was read, so a
@@ -454,6 +455,7 @@ class GDriveConnector(Connector):
             ("yes", "no"),
             required=False,
         ),
+        Field("group", "Source group", required=False, placeholder="google"),
         Field("include_folders", "Only these folders", "list", required=False, placeholder="IDs"),
         Field("exclude_folders", "Never read", "list", required=False, placeholder="folder IDs"),
         Field("max_mb", "Largest file read, in MB", required=False, placeholder="20"),

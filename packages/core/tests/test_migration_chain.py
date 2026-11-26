@@ -199,6 +199,7 @@ TAIL = (
     "0241_data_identity",
     "0242_data_ops",
     "0243_data_redaction",
+    "0244_data_groups",
 )
 HEAD = TAIL[-1]
 

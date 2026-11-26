@@ -104,10 +104,14 @@ under those folders; `exclude_folders` are never read, with everything below the
 
 Google Docs, Slides and Sheets (first tab) are read as text, and text and Office files through
 attachment extraction; other files keep their title only. A file is readable by the people its
-sharing names: people of the domain by primary email, groups by their members (read from
-the directory by this source), and the whole domain when a share is discoverable. Link-only
-shares, outside people and expiring shares grant nothing, and a file nobody inside can read is
-not stored.
+sharing names: people of the domain by primary email, and groups by their members (read from
+the directory by this source or another of its group). A discoverable share grants the whole
+domain. Link-only shares, outside people and expiring shares grant nothing, and a file
+nobody inside can read is not stored.
+
+A source group is the Google sources of one workspace whose config names the same `group`,
+one per Google connection. Group membership read by any of them counts for all of them. A
+source with no `group`, or another one, never uses another source's membership.
 
 Changes arrive through each shared drive's change feed. Everything is listed again every
 `relist_hours`, which is also how soon a new share on a folder reaches the files below it.
@@ -165,8 +169,9 @@ contents are never read or stored); `repos` limits the repositories (all when em
 
 A record is readable by the people GitHub lists as able to read its repository
 (collaborators with read access: owners, team members, direct and outside collaborators),
-plus every organization member while the repository is public or internal. The list is read
-again every run and each record is checked
+plus every organization member while the repository is public or internal.
+
+The list is read again every run and each record is checked
 against it when shown, so a repository made private or a person removed takes effect at once.
 A repository whose collaborators cannot be listed publishes nobody, and its records go dark
 within three hours. A repository the source no longer lists is hidden at once; listed again
