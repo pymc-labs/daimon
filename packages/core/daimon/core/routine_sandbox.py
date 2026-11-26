@@ -10,7 +10,8 @@ change needs a new opt-in. `unattended_capabilities` off still wins.
 `current_pin` and `current_agent_pin` read what an opt-in would pin now (an
 unreadable one refuses it) for `change_sandbox`; `routine_sandbox` hands the deciding
 pin to the headless runner, which checks it against the run's own session
-(`run_matches_pin`).
+(`run_matches_pin`), or to an OpenAI or Gemini fire, checked against its admission
+(`provider_run_matches_pin`). Each pin names the provider it was made on.
 """
 
 from __future__ import annotations
@@ -19,10 +20,12 @@ import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsSession
+from daimon.core.channel_backend import agent_native_provider
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, find_environment_by_daimon_tag
@@ -36,6 +39,7 @@ from daimon.core.features.service import (
 from daimon.core.features.snapshot import FeaturePlace, place_guardrail, resolve_one
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent, retrieve_environment
+from daimon.core.routine_provider import routine_provider
 from daimon.core.rule_views import routine_destination_channel
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.stores.domain import (
@@ -56,7 +60,11 @@ from daimon.core.stores.feature_values import (
     place_values,
 )
 from daimon.core.stores.scoped_config_read import resolve
+from daimon.core.stores.tenants import get_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+if TYPE_CHECKING:
+    from daimon.core.turn.admission import Admission
 
 __all__ = [
     "DM_SANDBOX_REFUSAL",
@@ -73,6 +81,7 @@ __all__ = [
     "opted_in_by",
     "opted_in_by_many",
     "own_opt_in",
+    "provider_run_matches_pin",
     "routine_place",
     "routine_sandbox",
     "run_matches_pin",
@@ -139,6 +148,10 @@ async def current_pin(
                 ),
                 default=default,
             )
+            tenant = await get_tenant(session, row.tenant_id)
+            if tenant is None:
+                raise _unavailable("routine's agent", "no workspace")
+            provider = await routine_provider(session, row, platform=tenant.platform)
         environment = await find_environment_by_daimon_tag(
             client,
             tenant_id=row.tenant_id,
@@ -154,6 +167,7 @@ async def current_pin(
         agent_version=agent.version,
         environment_id=environment.id,
         environment_updated_at=_revision(environment),
+        provider=provider,
     )
 
 
@@ -191,7 +205,16 @@ async def current_agent_pin(
         raise _unavailable(f"agent {agent_name}", str(exc)) from exc
     if agent is None or agent.archived_at is not None or environment is None:
         raise _unavailable(f"agent {agent_name}", "not live")
-    return AgentSandboxPin(agent_id=agent.id, environment_name=environment_name)
+    try:
+        async with session_factory() as session:
+            provider = await agent_native_provider(
+                session, tenant_id=tenant_id, agent_id=agent.id, agent_name=agent_name
+            )
+    except Exception as exc:  # any read failure refuses the opt-in
+        raise _unavailable(f"agent {agent_name}", str(exc)) from exc
+    return AgentSandboxPin(
+        agent_id=agent.id, environment_name=environment_name, provider=provider or "anthropic"
+    )
 
 
 async def run_matches_pin(
@@ -209,13 +232,60 @@ async def run_matches_pin(
     `AgentSandboxPin` needs only the same agent id and the environment its name
     resolves to now.
     """
+    if pin.provider != "anthropic":
+        return False
+    return await _matches(
+        client,
+        pin,
+        agent_id=session.agent.id,
+        agent_version=session.agent.version,
+        environment_id=session.environment_id,
+        tenant_id=tenant_id,
+        records=records,
+    )
+
+
+async def provider_run_matches_pin(
+    client: AsyncAnthropic,
+    pin: AnySandboxPin,
+    admission: Admission,
+    *,
+    tenant_id: uuid.UUID,
+    records: async_sessionmaker[AsyncSession] | None = None,
+) -> bool:
+    """`run_matches_pin` for an OpenAI or Gemini fire: the pin names the fire's provider,
+    and its admitted agent and environment are the pinned ones."""
+    revision = admission.backend_revision
+    if revision is None or pin.provider != revision.backend:
+        return False
+    return await _matches(
+        client,
+        pin,
+        agent_id=admission.agent.id,
+        agent_version=admission.agent.version,
+        environment_id=admission.environment.id,
+        tenant_id=tenant_id,
+        records=records,
+    )
+
+
+async def _matches(
+    client: AsyncAnthropic,
+    pin: AnySandboxPin,
+    *,
+    agent_id: str,
+    agent_version: int,
+    environment_id: str | None,
+    tenant_id: uuid.UUID | None,
+    records: async_sessionmaker[AsyncSession] | None,
+) -> bool:
     if isinstance(pin, AgentSandboxPin):
-        return await _agent_pin_matches(client, pin, session, tenant_id, records)
+        return await _agent_pin_matches(client, pin, agent_id, environment_id, tenant_id, records)
     if (
         tenant_id is None
-        or session.agent.id != pin.agent_id
-        or session.agent.version != pin.agent_version
-        or session.environment_id != pin.environment_id
+        or agent_id != pin.agent_id
+        or agent_version != pin.agent_version
+        or environment_id != pin.environment_id
     ):
         return False
     try:
@@ -234,11 +304,12 @@ async def run_matches_pin(
 async def _agent_pin_matches(
     client: AsyncAnthropic,
     pin: AgentSandboxPin,
-    session: BetaManagedAgentsSession,
+    agent_id: str,
+    environment_id: str | None,
     tenant_id: uuid.UUID | None,
     records: async_sessionmaker[AsyncSession] | None,
 ) -> bool:
-    if tenant_id is None or session.agent.id != pin.agent_id:
+    if tenant_id is None or agent_id != pin.agent_id:
         return False
     try:
         environment = await find_environment_by_daimon_tag(
@@ -250,7 +321,7 @@ async def _agent_pin_matches(
     return (
         environment is not None
         and environment.archived_at is None
-        and environment.id == session.environment_id
+        and environment.id == environment_id
     )
 
 
