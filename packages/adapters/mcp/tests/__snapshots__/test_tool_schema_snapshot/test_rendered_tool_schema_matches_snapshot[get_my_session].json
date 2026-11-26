@@ -2,9 +2,10 @@
   "description": [
     "Get one session's status and metadata (no reply text, read-only).",
     "",
-    "Use this to check whether a turn has finished (``status`` becomes",
-    "``idle``/``terminated``) before reading the transcript with",
-    "``list_events``. ``status`` ``paused`` means the turn waits on tool",
+    "A one-time status read. To wait for a turn, use ``await_turn`` instead",
+    "of calling this again and again. ``status`` becomes",
+    "``idle``/``terminated`` when a turn has finished and the transcript can",
+    "be read with ``list_events``. ``status`` ``paused`` means the turn waits on tool",
     "confirmations; ``hint`` says whether ``continue_turn`` resumes it or",
     "it waits for an approval in the chat where it was asked. Reading",
     "never answers them."

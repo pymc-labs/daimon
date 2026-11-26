@@ -24,6 +24,7 @@ from .test_chat_session_tool_reachability import SECRET, _build_client, _make_ap
 
 AGENT_CHAT_TOOLS = {
     "ask",
+    "await_turn",
     "deliver_turn_charts",
     "describe_agent",
     "list_my_sessions",

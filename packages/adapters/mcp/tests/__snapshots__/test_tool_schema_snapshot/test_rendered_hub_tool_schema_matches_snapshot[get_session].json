@@ -1,6 +1,8 @@
 {
   "description": [
-    "Status of one session. Poll until ``idle`` before reading ``list_events``.",
+    "Status of one session, read once. To wait for a turn, use ``await_turn``.",
+    "",
+    "``idle`` means the turn ended and ``list_events`` has its transcript.",
     "",
     "``paused`` means the turn waits on tool confirmations; ``hint`` says",
     "whether its owner resumes it with ``continue_turn`` or it waits for an",

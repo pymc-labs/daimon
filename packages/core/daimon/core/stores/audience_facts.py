@@ -8,17 +8,21 @@ room is unknown, and unknown is contained and narrow.
 
 from __future__ import annotations
 
+import asyncio
+import time
 import uuid
-from collections.abc import Collection, Mapping
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
+import structlog
 from daimon.core._models import DiscordAudienceState, DiscordChannelAudience
 from daimon.core.audience_facts import UNKNOWN_FACTS, RoomFacts
 from sqlalchemy import and_, delete, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+_log = structlog.get_logger(__name__)
 _BATCH = 1000
 
 
@@ -186,6 +190,82 @@ async def read_status(
         updated_at=state.updated_at,
         usable=state.complete and state.fresh_until is not None and state.fresh_until > now,
     )
+
+
+#: A turn waits at most this long for the facts to come back (mode `on` only).
+FACTS_WAIT_S = 20.0
+#: Pause between two reads of the state row while a turn waits.
+FACTS_WAIT_POLL_S = 0.5
+#: A retire or lapse older than this is an outage, not a short gap: no wait.
+FACTS_WAIT_RECENT_S = 60.0
+#: The most a caller's `on_wait` callback may take.
+FACTS_WAIT_CALLBACK_S = 2.0
+
+
+async def _pause(seconds: float) -> None:
+    await asyncio.sleep(seconds)
+
+
+def _clock() -> float:
+    return time.monotonic()
+
+
+def _publish_expected(status: AudienceStatus | None, now: datetime) -> bool:
+    """Unusable facts retired, or lapsed, only moments ago: a publish is about to come."""
+    if status is None or status.usable:
+        return False
+    since = status.updated_at if not status.complete else status.fresh_until
+    return since is not None and now - since <= timedelta(seconds=FACTS_WAIT_RECENT_S)
+
+
+async def wait_for_usable_facts(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    budget_s: float | None = None,
+    on_wait: Callable[[], Awaitable[None]] | None = None,
+) -> float | None:
+    """Wait for the server's facts to be usable when a fresh publish is expected soon.
+
+    No wait, and None, when the facts are usable, were never written, were retired or
+    lapsed more than `FACTS_WAIT_RECENT_S` ago, or `budget_s` (the part of `FACTS_WAIT_S`
+    this turn has left; None is all of it) is spent. Otherwise `on_wait` is awaited once (for
+    at most `FACTS_WAIT_CALLBACK_S`; its failure is only logged) and the transaction is
+    committed, so no connection or lock is held while it sleeps. The state row is read about
+    every `FACTS_WAIT_POLL_S` until the facts are usable or the elapsed time since the call
+    began, reads included, reaches the budget. The bound is on the waiting: a database read
+    in flight is finished, never cancelled (a cancelled read can leave the session
+    unusable), so a slow database can run a little past it. Returns the elapsed seconds; a
+    caller that still finds the facts unusable fails closed as before. One
+    `audience.facts_wait` log.
+    """
+    budget = FACTS_WAIT_S if budget_s is None else min(budget_s, FACTS_WAIT_S)
+    if budget <= 0:
+        return None
+    started = _clock()
+    status = await read_status(session, tenant_id=tenant_id, now=datetime.now(UTC))
+    if not _publish_expected(status, datetime.now(UTC)):
+        return None
+    if on_wait is not None:
+        try:
+            await asyncio.wait_for(on_wait(), timeout=FACTS_WAIT_CALLBACK_S)
+        except Exception:  # best effort; a slow or failed callback never holds admission
+            _log.debug("audience.facts_wait_callback_failed", exc_info=True)
+    await session.commit()
+    usable = False
+    while _clock() - started < budget and not usable:
+        await _pause(min(FACTS_WAIT_POLL_S, max(budget - (_clock() - started), 0.0)))
+        status = await read_status(session, tenant_id=tenant_id, now=datetime.now(UTC))
+        await session.commit()
+        usable = status is not None and status.usable
+    waited = _clock() - started
+    _log.info(
+        "audience.facts_wait",
+        tenant_id=str(tenant_id),
+        waited_s=round(waited, 1),
+        result="usable" if usable else "gave_up",
+    )
+    return waited
 
 
 async def read_channel_facts(

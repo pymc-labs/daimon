@@ -474,7 +474,8 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             return False
         if (
             kind == "column"
-            and name in {"self_helpers", "helper_key", "own_dm_reach", "reach_read"}
+            and name
+            in {"self_helpers", "helper_key", "own_dm_reach", "reach_read", "public_thread"}
             and getattr(getattr(obj, "table", None), "name", None) == "turn_origins"
             and expected != HEAD
         ):

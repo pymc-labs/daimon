@@ -2,6 +2,7 @@
   "description": [
     "Send a follow-up on an existing session without waiting.",
     "",
+    "Wait for the reply with ``await_turn``.",
     "On a session ``get_session`` reports ``paused`` with the hint to call",
     "``continue_turn`` (a turn started here, waiting on tool confirmations",
     "after a restart), this resumes it first: the waiting calls are decided",
