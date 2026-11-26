@@ -490,19 +490,19 @@ async def test_a_silent_stream_still_checks_mid_run_usage_against_the_spend_limi
     """
     monkeypatch.setattr(GeminiTurnIO, "idle_check_s", 0.05)
     opened = script(harness, ["stall"])
-    checked: list[str] = []
+    revisions: list[JsonValue] = []
     enforce = GeminiTurnIO.enforce_spend_limit
 
     async def recorded(self: GeminiTurnIO, event: Event) -> None:
-        checked.append(event.type)
+        if event.type == "usage.observed":
+            revisions.append(cast("dict[str, JsonValue]", event.payload).get("revision"))
         await enforce(self, event)
 
     monkeypatch.setattr(GeminiTurnIO, "enforce_spend_limit", recorded)
-    before_end: list[int] = []
+    before_end: list[list[JsonValue]] = []
 
     async def spend_then_finish() -> None:
         await asyncio.sleep(0.2)
-        seen = checked.count("usage.observed")
         running = interaction("in_progress")
         running["usage"] = {
             **cast("dict[str, JsonValue]", running["usage"]),
@@ -511,14 +511,14 @@ async def test_a_silent_stream_still_checks_mid_run_usage_against_the_spend_limi
         harness.transport.saved["host"] = running
         for _ in range(100):
             await asyncio.sleep(0.05)
-            if checked.count("usage.observed") > seen:
+            if 2 in revisions:
                 break
-        before_end.append(checked.count("usage.observed") - seen)
+        before_end.append(list(revisions))
         harness.transport.saved["host"] = interaction("completed")
 
     finishing = asyncio.create_task(spend_then_finish())
     state, lifecycle = await turn(harness, stream_read_timeout_s=None)
     await finishing
     answered(state, lifecycle)
-    assert before_end == [1], "the mid-run usage reached the spend limit before the end"
+    assert before_end and 2 in before_end[0], "the mid-run reading reached the spend limit"
     assert len(opened) == 1, "the stream was never closed and reopened"

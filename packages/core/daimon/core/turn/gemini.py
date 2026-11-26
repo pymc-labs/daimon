@@ -953,10 +953,10 @@ class _LazyStream(AsyncIterator[TurnEvent]):
     def wake(self) -> None:
         """Catch up from stored history without closing the stream.
 
-        Gemini's stream only says when an interaction needs action or ends, so the
-        steps of a long silent run (tool calls, usage) reach the turn through stored
-        history. A status read stores them; this replays them into the stream so the
-        card, the transcript and the spend limit keep up while the stream stays open.
+        Gemini's stream only says when an interaction needs action or ends. While it
+        runs, a status read stores no steps, only a new usage reading when the meter
+        changes; this replays that into the stream so the spend limit keeps up while
+        the stream stays open.
         """
         self._wake.set()
 
@@ -1147,14 +1147,14 @@ class _LazyStream(AsyncIterator[TurnEvent]):
 
     async def _drop_source(self) -> None:
         pull, self._pull = self._pull, None
-        if pull is not None and not pull.done():
-            pull.cancel()
-        if pull is not None:
-            await asyncio.wait({pull})  # never raises the read's own error
-            if not pull.cancelled():
-                pull.exception()  # retrieved: a closed stream's read error is moot
         source, self._source = self._source, None
-        if source is not None:
+        try:
+            if pull is not None:
+                pull.cancel()
+                await asyncio.wait({pull})  # never raises the read's own error
+                if not pull.cancelled():
+                    pull.exception()  # retrieved: a closed stream's read error is moot
+        finally:
             close = getattr(source, "aclose", None)
             if close is not None:
                 await close()

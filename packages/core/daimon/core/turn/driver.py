@@ -2089,8 +2089,9 @@ async def _consume_with_reconnect(
                 if silence is not None:
                     silence.status = status
                 if status in {"running", "rescheduling"}:
-                    # A provider whose stream omits a run's steps replays them
-                    # from stored history into the same open stream.
+                    # A provider whose stream omits what a status read stores
+                    # (Gemini: a running interaction's usage) replays it from
+                    # stored history into the same open stream.
                     idle_running = getattr(io, "idle_running", None)
                     if callable(idle_running):
                         idle_running()
