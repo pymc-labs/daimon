@@ -218,7 +218,7 @@ async def test_access_lists_holders_by_name(rig: Rig, monkeypatch: pytest.Monkey
     monkeypatch.setattr(manage, "data_admins", admins)
     out = await rig.call("list_data_access")
     assert [h["name"] for h in out["scopes"][0]["holders"]] == ["Maya", None]
-    assert out["data_admins"][0]["name"] == "Ada" and out["you_may_name_data_admins"]
+    assert out["data_admins"][0]["name"] == "Ada"
 
 
 @pytest.mark.parametrize(("details", "email"), [("direct_message", None), ("shown", "m@x.example")])

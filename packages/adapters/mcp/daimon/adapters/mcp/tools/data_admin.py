@@ -141,8 +141,6 @@ def register_data_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             "data_admins": [
                 {"account_id": str(a.account_id), "name": names.get(a.account_id)} for a in admins
             ],
-            "you_may_name_data_admins": actor.role == "owner"
-            or any(a.account_id == actor.account_id for a in admins),
             "people": [
                 {"account_id": str(a), "name": n} for a, n in sorted(names.items(), key=_by_name)
             ],
@@ -176,30 +174,32 @@ def register_data_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 match action:
                     case "create_scope":
                         await manage.create_scope(
-                            conn, schemas, tenant_id=t, by=by, id=scope_id, kind=kind,
+                            conn, schemas, tenant_id=t, by=by, admin=True, id=scope_id, kind=kind,
                             name=name, description=description,
                         )  # fmt: skip
                     case "delete_scope":
-                        await manage.delete_scope(conn, schemas, tenant_id=t, by=by, id=scope_id)
+                        await manage.delete_scope(
+                            conn, schemas, tenant_id=t, by=by, admin=True, id=scope_id
+                        )
                     case "grant":
                         await manage.grant(
-                            conn, schemas, tenant_id=t, by=by, scope=scope_id,
+                            conn, schemas, tenant_id=t, by=by, admin=True, scope=scope_id,
                             holder=holder_of(names, holder),
                         )  # fmt: skip
                     case "revoke":
                         await manage.revoke(
-                            conn, schemas, tenant_id=t, by=by, scope=scope_id,
+                            conn, schemas, tenant_id=t, by=by, admin=True, scope=scope_id,
                             holder=holder_of(names, holder),
                         )  # fmt: skip
                     case "add_data_admin":
                         await identity.grant_data_admin(
                             conn, schemas, tenant_id=t, by=by,
-                            account_id=account_of(names, person), by_owner=actor.role == "owner",
+                            account_id=account_of(names, person), admin=True,
                         )  # fmt: skip
                     case "remove_data_admin":
                         await identity.revoke_data_admin(
                             conn, schemas, tenant_id=t, by=by,
-                            account_id=account_of(names, person), by_owner=actor.role == "owner",
+                            account_id=account_of(names, person), admin=True,
                         )  # fmt: skip
             except IdentityError as e:
                 raise refused(e) from None
@@ -275,25 +275,25 @@ def register_data_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 match action:
                     case "link":
                         await identity.admin_link(
-                            conn, schemas, tenant_id=t, by=by,
+                            conn, schemas, tenant_id=t, by=by, admin=True,
                             key=_key(provider, workspace, subject),
                             account_id=account_of(names, person),
                         )  # fmt: skip
                     case "reject":
                         await identity.reject_candidate(
-                            conn, schemas, tenant_id=t, by=by,
+                            conn, schemas, tenant_id=t, by=by, admin=True,
                             key=_key(provider, workspace, subject),
                             account_id=account_of(names, person),
                         )  # fmt: skip
                     case "unlink":
                         await identity.unlink(
-                            conn, schemas, tenant_id=t, by=by,
+                            conn, schemas, tenant_id=t, by=by, admin=True,
                             key=_key(provider, workspace, subject),
                         )  # fmt: skip
                     case "hide_names" | "show_names":
                         await redaction.set_redacted(
                             conn, schemas, t, account_of(names, person),
-                            action == "hide_names", by=by,
+                            action == "hide_names", by=by, admin=True,
                         )  # fmt: skip
             except IdentityError as e:
                 raise refused(e) from None
@@ -315,11 +315,11 @@ def register_data_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             try:
                 if not name:
                     found = await redaction.list_sets(
-                        conn, schemas, actor.tenant_id, by=actor.account_id
+                        conn, schemas, actor.tenant_id, by=actor.account_id, admin=True
                     )
                     return {"sets": [_set(s) for s in found]}
                 one = await redaction.show_set(
-                    conn, schemas, actor.tenant_id, name, by=actor.account_id
+                    conn, schemas, actor.tenant_id, name, by=actor.account_id, admin=True
                 )
             except IdentityError as e:
                 raise ToolError(str(e)) from None
@@ -347,7 +347,7 @@ def register_data_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         async with store(runtime) as conn:
             try:
                 done = await redaction.approve(
-                    conn, schemas, actor.tenant_id, name, sha, by=actor.account_id
+                    conn, schemas, actor.tenant_id, name, sha, by=actor.account_id, admin=True
                 )
             except IdentityError as e:
                 raise refused(e) from None
