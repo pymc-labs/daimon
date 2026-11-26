@@ -72,8 +72,8 @@ platform verified. That is a web app sign-in with Discord, Slack or Microsoft, a
 link, or the person signing in to the source. A person who only chats has no link until
 they sign in to the web app.
 
-A data admin or workspace admin can link someone else's account, never their own, and the
-audit trail records it. A link a data admin ends or rejects stays ended when the person signs in again.
+A workspace admin can link someone else's account, never their own, and the
+audit trail records it. A link an admin ends or rejects stays ended when the person signs in again.
 
 Google sign-in for data sources needs a Google OAuth client in
 [`DAIMON_DATA__GOOGLE_OAUTH_CLIENT_ID`](configuration.md#daimon_data__google_oauth_client_id).
