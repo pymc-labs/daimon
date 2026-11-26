@@ -12,11 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agent no longer starts a fresh session each turn, except when held, or loses long-term
   memory: it and other agents ask each other only when both read data, writes out still ask
   first, and a memory saved after a data read shows only to people who could read that data.
-  Workspace admins manage data access, and may grant themselves a scope (audited). Redaction
-  sets take `at: storage` or `at: answer` and apply to their own sources. Teams rooms with a
-  guest, another organisation's member or a shared channel get no data; others get data
-  answers for their members once the app (0.6.3) is re-uploaded and a team owner or chat
-  member grants `ChannelMember.Read.Group` or `ChatMember.Read.Chat`
+  Workspace admins manage data access, and may grant themselves a scope or link an account
+  to themselves (audited). Redaction sets take `at: storage` or `at: answer`, reach SQL and
+  file text best effort, and apply to their own sources. Teams rooms with a guest, another
+  organisation's member or a shared channel get no data; others get public data until the
+  app (0.6.3) may read their members, per team or for the whole tenant
   ([Data sources](docs/data-sources.md#who-sees-an-answer)).
 
 - **The web app gets pages for data sources, with the feature on.** A Data section searches

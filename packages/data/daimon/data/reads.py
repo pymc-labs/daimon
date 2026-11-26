@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import base64
 import binascii
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -222,6 +222,11 @@ async def get(
     return Record(_item(row), row["body"], files)
 
 
+def textual(content_type: str) -> bool:
+    """Whether a file of `content_type` is read as text."""
+    return content_type.startswith("text/") or content_type.endswith(("json", "csv", "xml"))
+
+
 async def read_file(
     conn: AsyncConnection[DictRow],
     schemas: Schemas,
@@ -229,10 +234,12 @@ async def read_file(
     env: Env,
     record_id: UUID,
     index: int,
+    answer: Mapping[UUID, redaction.Redactor] | None = None,
 ) -> tuple[bytes, str] | None:
     """The bytes and content type of a record's attached file, asked of its source now with
     the source's own credential (the store keeps no bytes). None when the reader may not see
-    the record, it has no such file, or the source no longer shows it."""
+    the record, it has no such file, or the source no longer shows it. A text file goes
+    through its source's ingest rules and, best effort, its `answer` rules."""
     record = await get(conn, schemas, ctx, record_id, env)
     file = next((a for a in record.attachments if a.ord == index), None) if record else None
     if record is None or file is None:
@@ -265,9 +272,13 @@ async def read_file(
         got = await connector.fetch_file(
             source, payload, record.item.external_id, file.name, file.ord
         )
-        if got is None or redactor is None or not got[1].startswith("text/"):
+        rules = [r for r in (redactor, (answer or {}).get(record.item.source_id)) if r]
+        if got is None or not rules or not textual(got[1]):
             return got
-        return redactor.text(got[0].decode("utf-8", "replace")).encode(), got[1]
+        text = got[0].decode("utf-8", "replace")
+        for r in rules:
+            text = r.text(text)
+        return text.encode(), got[1]
     finally:
         await connector.release(source)
 
