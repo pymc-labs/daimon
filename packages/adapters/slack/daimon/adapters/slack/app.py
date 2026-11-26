@@ -344,7 +344,7 @@ from daimon.core.turn.thread_queue import (
     group_by_author,
     release_thread,
 )
-from daimon.core.turn_keys import list_mounted_key_names
+from daimon.core.turn_keys import answering_env_sha256, list_mounted_key_names
 from daimon.core.turn_origin import (
     build_handoff_notice,
     render_turn_origin,
@@ -2924,15 +2924,11 @@ class SlackApp:
                     thread_id=thread_id,
                     account_id=admission.account_id,
                 )
-                _live_config = (
-                    None if _live_row_for_keys is None else _live_row_for_keys.effective_config
-                )
-                _env_sha256 = None if _live_config is None else _live_config.env_sha256
                 key_names = await list_mounted_key_names(
                     _keys_session,
                     tenant_id=tenant_id,
                     agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)),
-                    env_sha256=_env_sha256,
+                    env_sha256=answering_env_sha256(prepared, _live_row_for_keys),
                 )
 
             # --- Build user message ---
