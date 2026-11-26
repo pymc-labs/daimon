@@ -162,6 +162,28 @@ async def test_changed_rules_apply_to_answers_until_their_source_syncs_again(
     assert await store.sync() == "ok" and not await answered()
 
 
+async def test_rules_approved_during_a_sync_apply_to_answers_until_the_next_one(
+    store: Store, feed: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await store.declare(1, redaction_sets=[{"id": "house", "rules": RULES}], sources=[SOURCE])
+    assert await store.sync() == "ok"
+    fetch = Feed.fetch
+
+    async def approved_meanwhile(self: Feed, source: Source) -> AsyncGenerator[Record]:
+        await redaction.restart_sources(store.conn, store.data.schemas, store.tenant, "house")
+        async for r in fetch(self, source):
+            yield r
+
+    monkeypatch.setattr(Feed, "fetch", approved_meanwhile)
+    assert await store.sync() == "ok"
+    assert await redaction.answer_redactors(store.conn, store.data.schemas, store.tenant), (
+        "the run stored under the old rules"
+    )
+    monkeypatch.setattr(Feed, "fetch", fetch)
+    assert await store.sync() == "ok"
+    assert not await redaction.answer_redactors(store.conn, store.data.schemas, store.tenant)
+
+
 async def test_removed_text_is_never_stored_and_excluded_records_are_dropped(
     store: Store, feed: None
 ) -> None:
