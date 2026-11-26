@@ -12,13 +12,16 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from daimon.adapters.mcp import oauth_github
-from daimon.adapters.mcp.oauth_github_follow import (
-    FollowOffer,
-    confirmed_offer,
-    follow_offers,
-    follow_offers_html,
-)
+from daimon.adapters.mcp.oauth_github_follow import follow_offers_html
+from daimon.core import github_connect_flow, github_connect_follow
 from daimon.core.features.snapshot import CACHE
+from daimon.core.github_connect_follow import confirmed_offer, follow_offers
+from daimon.core.github_connect_views import (
+    ConnectInstallation,
+    ConnectRepo,
+    FollowOffer,
+    agent_editor_view,
+)
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import FeatureTarget, Role
 from daimon.core.stores.feature_values import get_feature_value
@@ -31,8 +34,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .test_oauth_github_permissions import WRITE_INSTALLATION, _Editor, _editor, _Org
 
 # The suite stubs the module attribute for every test; these tests ask the real function.
-_REAL_ORG_PROOF = oauth_github._org_proof
-_REAL_ORG_ADMIN_OFFERS = oauth_github._org_admin_offers
+_REAL_ORG_PROOF = github_connect_follow.org_proof
+_REAL_ORG_ADMIN_OFFERS = github_connect_follow.org_admin_offers
 _STYLES = Path(oauth_github.__file__).parent / "static" / "web.css"
 _CHROME = Path(
     os.environ.get(
@@ -44,7 +47,7 @@ _CHROME = Path(
 @pytest.fixture(autouse=True)
 def _live_admin(monkeypatch: pytest.MonkeyPatch) -> None:
     """The platform's own admin check is not what these tests are about."""
-    monkeypatch.setattr(oauth_github, "_attest_native_admin", AsyncMock(return_value=True))
+    monkeypatch.setattr(github_connect_flow, "attest_native_admin", AsyncMock(return_value=True))
 
 
 def _installation(
@@ -56,15 +59,15 @@ def _installation(
     truncated: bool = False,
     state: str = "active",
     owner_type: str = "Organization",
-) -> oauth_github._Installation:
-    return oauth_github._Installation(
+) -> ConnectInstallation:
+    return ConnectInstallation(
         id=inst,
         owner_id=inst,
         owner_login=login,
         repository_selection=selection,
         owner_type=owner_type,
         repos=tuple(
-            oauth_github._Repo(inst * 100 + n, inst, inst, f"{login}/repo-{n}", "admin")
+            ConnectRepo(inst * 100 + n, inst, inst, f"{login}/repo-{n}", "admin")
             for n in range(repos)
         ),
         truncated=truncated,
@@ -140,7 +143,7 @@ def test_the_checkbox_is_one_plain_words_row_that_starts_hidden() -> None:
 
 
 def _page(follow: tuple[FollowOffer, ...], *, following: bool = False) -> str:
-    page = oauth_github._agent_editor_page(
+    view = agent_editor_view(
         root="https://mcp.test",
         state="state",
         invitation_hash="invitation",
@@ -157,7 +160,7 @@ def _page(follow: tuple[FollowOffer, ...], *, following: bool = False) -> str:
         follow=follow,
         following=following,
     )
-    return page.body.decode()
+    return oauth_github._agent_editor_page(view).body.decode()
 
 
 def test_the_editor_page_has_the_checkbox_only_when_offered() -> None:
@@ -188,7 +191,7 @@ _FOLLOW = {"access": "write", "repo": "101", "follow_org": "77"}
 async def test_an_admin_of_the_org_turns_it_on_and_the_gap_is_queued(
     committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(oauth_github, "_org_proof", AsyncMock(return_value="org_admin"))
+    monkeypatch.setattr(github_connect_follow, "org_proof", AsyncMock(return_value="org_admin"))
     async with _editor(committing_sessionmaker, monkeypatch, [_ORG]) as editor:
         hidden, page = await editor.page()
         assert 'name="follow_org" value="77"' in page, "the whole org is offered"
@@ -221,7 +224,7 @@ async def test_a_client_workspace_admin_who_is_not_an_org_admin_cannot_turn_it_o
 ) -> None:
     """The signer sees one repo of the org; the box is not offered and a forged post is refused."""
     checked = AsyncMock(return_value=None)
-    monkeypatch.setattr(oauth_github, "_org_proof", checked)
+    monkeypatch.setattr(github_connect_follow, "org_proof", checked)
     async with _editor(committing_sessionmaker, monkeypatch, [_ORG]) as editor:
         hidden, page = await editor.page()
         assert 'name="follow_org"' not in page
@@ -240,13 +243,13 @@ async def test_an_owner_who_is_no_longer_an_admin_cannot_turn_it_on(
     committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The stored role still says admin; the live check does not."""
-    monkeypatch.setattr(oauth_github, "_org_proof", AsyncMock(return_value="org_admin"))
+    monkeypatch.setattr(github_connect_follow, "org_proof", AsyncMock(return_value="org_admin"))
     async with _editor(committing_sessionmaker, monkeypatch, [_ORG], requester="owner") as editor:
         async with editor.sessionmaker.begin() as session:
             await set_role(session, editor.account_id, Role.ADMIN)
         hidden, _ = await editor.page()
         live = AsyncMock(return_value=False)
-        monkeypatch.setattr(oauth_github, "_attest_native_admin", live)
+        monkeypatch.setattr(github_connect_flow, "attest_native_admin", live)
 
         refused = await editor.save(hidden, **_FOLLOW)
 
@@ -264,7 +267,7 @@ async def test_an_owner_without_the_follow_box_still_saves_without_a_live_admin_
         hidden, page = await editor.page()
         assert 'name="follow_org"' not in page, "an owner who is not an admin is not offered it"
         live = AsyncMock(return_value=False)
-        monkeypatch.setattr(oauth_github, "_attest_native_admin", live)
+        monkeypatch.setattr(github_connect_flow, "attest_native_admin", live)
 
         saved = await editor.save(hidden, access="write", repo="101")
 
@@ -276,7 +279,7 @@ async def test_an_owner_without_the_follow_box_still_saves_without_a_live_admin_
 async def test_a_person_who_is_not_an_admin_gets_no_offer_and_no_follow(
     committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(oauth_github, "_org_proof", AsyncMock(return_value="org_admin"))
+    monkeypatch.setattr(github_connect_follow, "org_proof", AsyncMock(return_value="org_admin"))
     async with _editor(committing_sessionmaker, monkeypatch, [_ORG], requester="member") as editor:
         hidden, page = await editor.page()
         refused = await editor.save(hidden, **_FOLLOW)
@@ -290,7 +293,7 @@ async def test_a_person_who_is_not_an_admin_gets_no_offer_and_no_follow(
 async def test_ticking_it_without_the_whole_org_saves_nothing(
     committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(oauth_github, "_org_proof", AsyncMock(return_value="org_admin"))
+    monkeypatch.setattr(github_connect_follow, "org_proof", AsyncMock(return_value="org_admin"))
     two = _Org(77, 55, "alpha", WRITE_INSTALLATION, [(101, "admin"), (102, "admin")])
     async with _editor(committing_sessionmaker, monkeypatch, [two]) as editor:
         hidden, _ = await editor.page()
@@ -379,7 +382,7 @@ async def test_a_truncated_installation_listing_proves_nothing(
 ) -> None:
     with pytest.raises(ValueError, match="does not match total_count"):
         await _proof(membership=_DENIED, installation_repos=[101, 102], total=3)
-    monkeypatch.setattr(oauth_github, "_org_proof", _REAL_ORG_PROOF)  # the suite stubs it
+    monkeypatch.setattr(github_connect_follow, "org_proof", _REAL_ORG_PROOF)  # the suite stubs it
     hidden = await _REAL_ORG_ADMIN_OFFERS(
         lambda: _github_org(membership=_DENIED, installation_repos=[101, 102], total=3),
         "user-token",
@@ -399,7 +402,7 @@ async def test_a_github_outage_is_not_read_as_a_no() -> None:
 async def test_the_save_records_which_proof_passed(
     committing_sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(oauth_github, "_org_proof", AsyncMock(return_value="full_listing"))
+    monkeypatch.setattr(github_connect_follow, "org_proof", AsyncMock(return_value="full_listing"))
     async with _editor(committing_sessionmaker, monkeypatch, [_ORG]) as editor:
         hidden, _ = await editor.page()
 

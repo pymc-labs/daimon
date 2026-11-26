@@ -365,6 +365,16 @@ _UNGATED_LINKS = {
     "core/turn/deps.py::build_turn_deps": "a turn's links; `render_turn_origin` drops them",
     "core/turn/admission.py::_web_links": "same: the test above checks every render's features",
     "core/features/eval_key.py::sample_controls": "a fixed example turn for the eval, never sent",
+    "core/github_panel.py::connect_root": (
+        "the connect flow's host is deployment-wide: the GitHub App has one setup URL, so it "
+        "cannot follow a per-place feature"
+    ),
+    "core/github_connect_flow.py::_back": (
+        "the back link to the agent page exists only for an invitation minted in the web app"
+    ),
+    "adapters/mcp/oauth_github.py::build_oauth_github_routes": (
+        "same: the back link to the agent page exists only for an invitation minted in the web app"
+    ),
 }
 # `aware_at` is `links_at` without links; `load_here_card` asks `links_at` at its answering
 # agent; `_where_aware` asks `aware_at` at the MCP caller's places.
