@@ -518,7 +518,7 @@ def caller_claims(
             and place.channel_id
             and not place.message_id
             and room is not None
-            and (room != "dm" or bool(platform_user_id))
+            and (room != "dm" or (wake == "watch_report" and bool(platform_user_id)))
         ):
             raise ValueError("a continuation wake needs its room and its kind, and no message")
     person = owned or (
