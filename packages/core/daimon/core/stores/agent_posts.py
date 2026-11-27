@@ -16,6 +16,7 @@ boundary. Callers own the transaction; every write ends with
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from datetime import datetime
 from typing import Any, Literal, cast
 
@@ -117,6 +118,32 @@ async def get_post(
         stmt = stmt.with_for_update()
     row = await session.scalar(stmt)
     return AgentPostRow.model_validate(row) if row is not None else None
+
+
+async def posted_under(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    parent_channel_id: str,
+    channel_ids: Collection[str],
+) -> bool:
+    """Whether an agent's own tool post in one of `channel_ids` is recorded under the parent.
+
+    A deleted post counts: this asks where a thread sits, not what is still there.
+    """
+    if not channel_ids:
+        return False
+    found = await session.scalar(
+        select(AgentPostedMessage.id)
+        .where(
+            AgentPostedMessage.tenant_id == tenant_id,
+            AgentPostedMessage.source == "tool",
+            AgentPostedMessage.channel_id.in_(channel_ids),
+            AgentPostedMessage.parent_channel_id == parent_channel_id,
+        )
+        .limit(1)
+    )
+    return found is not None
 
 
 async def list_posts_in(
