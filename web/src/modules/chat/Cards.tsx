@@ -33,7 +33,7 @@ const frame = "rounded-xl border bg-background p-4"
 
 function Approval({ card, busy, onAnswer }: Props & { card: Extract<Card, { kind: "approval" }> }) {
   if (card.state !== "pending") {
-    const [label, icon] = card.state === "denied" ? ["Denied", ShieldX] as const : card.state === "always" ? ["Always allowed", ShieldCheck] as const : ["Approved once", ShieldCheck] as const
+    const [label, icon] = card.state === "denied" ? ["Denied", ShieldX] as const : card.state === "always" ? ["Always allowed", ShieldCheck] as const : [card.footer ?? "Approved once", ShieldCheck] as const
     return <Settled icon={icon} label={label} tone={card.state === "denied" ? "no" : "ok"}>{card.title.replace(/\?$/, "")}</Settled>
   }
   return (
@@ -57,6 +57,7 @@ function Approval({ card, busy, onAnswer }: Props & { card: Extract<Card, { kind
           <div className="mt-3 flex flex-wrap gap-2">
             <Button size="sm" disabled={busy} onClick={() => onAnswer({ answer: "approve" })}>{card.always_allowed ? "Approve once" : "Approve"}</Button>
             {card.always_allowed && <Button size="sm" variant="outline" disabled={busy} onClick={() => onAnswer({ answer: "always" })}>Always allow</Button>}
+            {card.session_allowed && <Button size="sm" variant="outline" disabled={busy} onClick={() => onAnswer({ answer: "session" })}>Allow for this conversation</Button>}
             <Button size="sm" variant="ghost" disabled={busy} onClick={() => onAnswer({ answer: "deny" })}>Deny</Button>
           </div>
         </div>

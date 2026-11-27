@@ -3229,6 +3229,16 @@ class DataSettings(BaseModel):
             "Postgres servers may reach. Public hosts need no entry."
         ),
     )
+    google_keyless_accounts: Annotated[tuple[str, ...], NoDecode] = Field(
+        default=(),
+        description=(
+            "Service accounts a Daimon workspace's Google data sources may sign as without a "
+            "key file, comma-separated `workspace=account` entries; the workspace is a tenant "
+            "id or `<platform>:<workspace id>` (Daimon's own identity needs Token Creator on "
+            "each account). A source with no key whose workspace has no entry for its account "
+            "is refused."
+        ),
+    )
     declared: str | None = Field(
         default=None,
         description=(
@@ -3248,7 +3258,9 @@ class DataSettings(BaseModel):
         default=None, description="Secret of the Google OAuth client for data sources."
     )
 
-    _split_lists = field_validator("private_hosts", mode="before")(_split_csv)
+    _split_lists = field_validator("private_hosts", "google_keyless_accounts", mode="before")(
+        _split_csv
+    )
 
     @field_validator("schema_name")
     @classmethod

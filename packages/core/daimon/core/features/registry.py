@@ -42,10 +42,12 @@ Requirement = Literal[
     "teams_public_url",
     "support_channel",
     "support_credits",
+    "google_sign_in",
 ]
 """``platform_adapter``: the chat platform's adapter is set up in this deployment.
 ``support_channel``: the platform has a request channel, the deployment's or the workspace's own.
 ``support_credits``: people have credits to ask (Everyone above 0, or any limit).
+``google_sign_in``: the deployment has a Google sign-in for data sources.
 The rest name one integration's setup: its operator switch or host address, credentials and keys."""
 DEFAULT: Final = "default"
 """The value a control writes to drop its own setting and inherit."""
@@ -1443,6 +1445,38 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         depends_on=("data_sources", "tool_safety"),
         authority=_ADMIN_NOT_OWNER,
         page="features.md#data-source-reads",
+    ),
+    FeatureSpec(
+        key="data_personal_drive",
+        name="Drive reads",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="on",
+        tiers=("workspace", "agent", "channel"),
+        binds="session_mutable",
+        doc=("Reads own Drive."),
+        platforms=EVERY_PLATFORM,
+        requires=("google_sign_in",),
+        depends_on=("data_sources",),
+        page="data-connectors.md#personal-drive",
+        authority=_ADMIN_NOT_OWNER,
+    ),
+    FeatureSpec(
+        key="data_personal_calendar",
+        name="Calendar reads",
+        category="capabilities",
+        effect="capability",
+        values=_ON_OFF,
+        default="on",
+        tiers=("workspace",),
+        binds="session_mutable",
+        doc=("Reads own calendars."),
+        platforms=EVERY_PLATFORM,
+        requires=("google_sign_in",),
+        depends_on=("data_sources",),
+        page="data-connectors.md#google-calendar",
+        authority=_ADMIN_NOT_OWNER,
     ),
     _limit(
         "long_jobs_max_usd",

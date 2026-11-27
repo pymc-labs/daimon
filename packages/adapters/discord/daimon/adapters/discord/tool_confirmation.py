@@ -40,6 +40,7 @@ from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.posted_controls.confirmation import (
     NO_LONGER_PENDING_MESSAGE,
     NOT_YOURS_MESSAGE,
+    SESSION_LABEL,
     ConfirmationCard,
     ConfirmationCardState,
     ConfirmationHow,
@@ -63,6 +64,7 @@ from daimon.core.posted_controls.tool_rule_confirmation import (
     save_always_allow,
     snapshot_tool_rule,
 )
+from daimon.core.session_allowances import allow
 from daimon.core.turn.output import audience_output_check
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -216,6 +218,12 @@ class _ConfirmationView(discord.ui.LayoutView):
                 )
                 always.callback = self._on_always
                 row.add_item(always)
+            if card.allow_session:
+                session: discord.ui.Button[discord.ui.LayoutView] = discord.ui.Button(
+                    style=discord.ButtonStyle.secondary, label=SESSION_LABEL
+                )
+                session.callback = self._on_session
+                row.add_item(session)
             # An admin card already shows its details above the buttons.
             if not prompt.admin:
                 row.add_item(details)
@@ -239,6 +247,9 @@ class _ConfirmationView(discord.ui.LayoutView):
 
     async def _on_deny(self, interaction: discord.Interaction) -> None:
         await self._settle(interaction, "denied")
+
+    async def _on_session(self, interaction: discord.Interaction) -> None:
+        await self._settle(interaction, "approved", session=True)
 
     async def _on_always(self, interaction: discord.Interaction) -> None:
         clicked_at = monotonic()
@@ -378,7 +389,9 @@ class _ConfirmationView(discord.ui.LayoutView):
             return refusal
         return settle_local_confirmation(self._prompt, self._answer, clicker, answer)
 
-    async def _settle(self, interaction: discord.Interaction, answer: ConfirmationAnswer) -> None:
+    async def _settle(
+        self, interaction: discord.Interaction, answer: ConfirmationAnswer, *, session: bool = False
+    ) -> None:
         refusal = await self.authorize(str(interaction.user.id), answer)
         if refusal is not None:
             if refusal == NOT_YOURS_MESSAGE:
@@ -400,11 +413,13 @@ class _ConfirmationView(discord.ui.LayoutView):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             return
+        if session and self._prompt.session_allow:
+            allow(self._prompt.session_allow)
         answered = build_confirmation_card(
             self._prompt,
             state=answer,
             answered_by_platform_user_id=str(interaction.user.id),
-            how="once" if self._prompt.tool_rules_enabled else None,
+            how="session" if session else "once" if self._prompt.tool_rules_enabled else None,
         )
         # Same per-card order as `_retire`, registered before any await, so a
         # Stopped retire that follows can never land before this answer.

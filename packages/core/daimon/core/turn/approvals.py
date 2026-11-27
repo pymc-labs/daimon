@@ -41,6 +41,7 @@ from daimon.core.confirmation import (
     prompt_for_tool_call,
 )
 from daimon.core.defaults.metadata import is_private_routine_stamp
+from daimon.core.session_allowances import SESSION_ALLOWABLE, allowance_key, allowed
 from daimon.core.stores import agent_tool_rules, server_skills
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
@@ -620,9 +621,12 @@ def interactive_decider(
     server_urls: Mapping[str, str] | None = None,
     skill_update_for: SkillUpdateLookup | None = None,
     data_read: bool = False,
+    session_key: str | None = None,
 ) -> ToolCallDecider:
-    """Decider for chat: reads run, writes wait for `confirm`. With `data_read` (a session
-    that reads data sources) nothing that could carry data out runs unasked (`after_data_read`).
+    """Decider for chat: reads run, writes wait for `confirm`. With `session_key` (the
+    conversation), a `SESSION_ALLOWABLE` card also offers to allow it for the conversation.
+    With `data_read` (a session that reads data sources) nothing that could carry data out runs
+    unasked (`after_data_read`).
 
     `confirm` is the adapter's card hook; the default refuses, which is what a
     surface without cards gets. A hook that raises is logged and the write is
@@ -701,6 +705,16 @@ def interactive_decider(
             return ToolConfirmationResult(allow=True)
         if verdict.outcome == "deny":
             return ToolConfirmationResult(allow=False, deny_message=refusal_message(call, verdict))
+        allow_key = (
+            allowance_key(session_key, requester_platform_user_id, call.tool_name)
+            if session_key
+            and call.tool_name in SESSION_ALLOWABLE
+            and call.server_name in trusted_servers
+            else None
+        )
+        if allow_key is not None and allowed(allow_key):
+            log.info("tool_safety.session_allowed", tool=call.key)
+            return ToolConfirmationResult(allow=True)
         asked = now()
         timeout = card_timeout(policy, now=asked)
         if timeout < CARD_TURN_MARGIN:
@@ -728,6 +742,8 @@ def interactive_decider(
             )
             if policy.enabled and policy.agent_rules:
                 prompt = prompt.model_copy(update={"tool_rules_enabled": True})
+            if allow_key is not None:
+                prompt = prompt.model_copy(update={"session_allow": allow_key})
             if (
                 policy.enabled
                 and policy.agent_rules
@@ -807,6 +823,7 @@ def chat_tool_confirmation(
     server_urls: Mapping[str, str] | None = None,
     skill_update_for: SkillUpdateLookup | None = None,
     data_read: bool = False,
+    session_key: str | None = None,
 ) -> ToolConfirmation:
     """Posture for a chat turn.
 
@@ -837,6 +854,7 @@ def chat_tool_confirmation(
             server_urls=server_urls,
             skill_update_for=skill_update_for,
             data_read=data_read,
+            session_key=session_key,
         )
         if attended
         else unattended_decider(

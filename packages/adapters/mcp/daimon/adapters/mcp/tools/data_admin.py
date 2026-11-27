@@ -91,8 +91,10 @@ def register_data_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         kind: str = "",
         name: str = "",
         settings: dict[str, str | list[str]] | None = None,
+        group: str = "",
     ) -> dict[str, Any]:
-        """Add a data source (create: kind, name, settings by the kind's non-secret fields),
+        """Add a data source (create: kind, name, settings by the kind's non-secret fields, and
+        its source group: sources of one workspace with the same group share group membership),
         post the asker's private form for a source's credential (set_credential: source_id),
         or pause, resume, retire, publish, unpublish or sync one (source_id). Runs on the
         asker's Approve card. Never ask for a credential in chat or pass one in settings: a
@@ -118,6 +120,7 @@ def register_data_admin_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                         conn, schemas, keys_of(runtime), tenant_id=actor.tenant_id,
                         by=actor.account_id, kind=kind, name=name, settings=dict(settings or {}),
                         credential_later=needs,
+                        group=group,
                     )  # fmt: skip
                     if not needs:
                         return {"created": str(made)}

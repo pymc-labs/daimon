@@ -14,12 +14,12 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from daimon.data import access, recheck, redaction
+from daimon.data import access, extras, recheck, redaction
 from daimon.data.access import ReadContext
 from daimon.data.schema import Schemas
 from daimon.data.sync.attachments import text_of
 from daimon.data.sync.connector import CONNECTORS
-from daimon.data.sync.engine import Env, build_source
+from daimon.data.sync.engine import Env, build_source, ready
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
 
@@ -76,6 +76,8 @@ class Record:
     item: Item
     body: str
     attachments: list[Attachment]
+    live: bool = False
+    """The body gained text its source added now (`extras`), which no stored record holds."""
 
 
 @dataclass(frozen=True)
@@ -178,11 +180,13 @@ async def readable(
     env: Env | None = None,
 ) -> bool:
     """Whether this reader may read every item in `refs` (`daimon.core.stores.data_memory`).
-    Only a stored record (`record:<id>`) can be told; anything else, or a record gone or
-    hidden, is not readable."""
+    A stored record (`record:<id>`) can be told, and a person's own data (`person:<account>`)
+    by that person alone; anything else, or a record gone or hidden, is not readable."""
     ids: set[UUID] = set()
     for ref in refs:
         kind, _, value = ref.partition(":")
+        if kind == "person" and ctx.readers == (f"account:{value}",):
+            continue
         if kind != "record":
             return False
         try:
@@ -212,7 +216,7 @@ async def get(
 ) -> Record | None:
     """One record with its text and attached files; None when it does not exist or this
     reader may not see it (the two look alike). With `env`, a source that re-checks reads is
-    asked again (`recheck`)."""
+    asked again (`recheck`) and the text gains what its source adds live (`extras`)."""
     d = schemas.data
     async with access.scoped(conn, schemas, ctx):
         cur = await conn.execute(
@@ -232,9 +236,12 @@ async def get(
             for a in await cur.fetchall()
         ]
     ref = (row["source_id"], row["external_id"])
-    if env is not None and ref not in await recheck.allowed(conn, schemas, env, ctx.readers, [ref]):
+    if env is None:
+        return Record(_item(row), row["body"], files)
+    if ref not in await recheck.allowed(conn, schemas, env, ctx.readers, [ref]):
         return None
-    return Record(_item(row), row["body"], files)
+    more = await extras.added(conn, schemas, env, ctx.readers, [ref])
+    return Record(_item(row), row["body"] + more.get(ref, ""), files, ref in more)
 
 
 def textual(content_type: str) -> bool:
@@ -284,7 +291,7 @@ async def read_file(
         )
     except redaction.NotApproved:
         return None
-    source = build_source(row, env, None)
+    source = await ready(conn, env, build_source(row, env, None))
     try:
         got = await connector.fetch_file(
             source, payload, record.item.external_id, file.name, file.ord

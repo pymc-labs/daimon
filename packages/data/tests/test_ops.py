@@ -195,18 +195,25 @@ async def test_declared_apply_never_deletes_and_refuses_a_lower_revision(
     first = file(
         5,
         scopes=[{"id": "shared:eng", "kind": "shared", "name": "Eng"}],
-        sources=[{"id": "wiki", "kind": "fake", "name": "Wiki", "mode": "federated"}],
+        sources=[
+            {"id": "wiki", "kind": "fake", "name": "Wiki", "mode": "federated", "group": "google"}
+        ],
     )
     report = await declared.apply(store.conn, schemas, store.env, first)
     assert not report.ignored and report.results, "the first file is applied"
     rows = await store.sql(
-        f"select name, bound, publication from {store.d}.sources where tenant_id = %s", store.tenant
+        f"select name, bound, publication, source_group from {store.d}.sources"
+        " where tenant_id = %s",
+        store.tenant,
     )
-    assert [(r["name"], r["bound"], r["publication"]) for r in rows] == [("Wiki", True, "shadow")]
-    with pytest.raises(psycopg.errors.InsufficientPrivilege):
-        await store.sql(
-            f"update {store.d}.sources set name = 'x' where tenant_id = %s", store.tenant
-        )
+    assert [(r["name"], r["bound"], r["publication"], r["source_group"]) for r in rows] == [
+        ("Wiki", True, "shadow", "google")
+    ], "the declared group is the source's own column"
+    for edit in ("name = 'x'", "source_group = 'other'"):
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            await store.sql(
+                f"update {store.d}.sources set {edit} where tenant_id = %s", store.tenant
+            )
 
     lower = file(
         4, sources=[{"id": "wiki", "kind": "fake", "name": "Renamed", "mode": "federated"}]

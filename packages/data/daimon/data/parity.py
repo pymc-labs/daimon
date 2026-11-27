@@ -28,7 +28,7 @@ import structlog
 from daimon.data import audit
 from daimon.data.schema import Schemas
 from daimon.data.sync.connector import CONNECTORS, Source
-from daimon.data.sync.engine import Env, build_source
+from daimon.data.sync.engine import Env, build_source, ready
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
 
@@ -99,7 +99,7 @@ async def _people(
         (
             source.tenant_id,
             source.provider,
-            str(source.config.get("workspace") or source.id),
+            CONNECTORS[source.kind].workspace_of(source),
             PEOPLE,
         ),
     )
@@ -115,7 +115,7 @@ async def compare(
     connector = CONNECTORS.get(row["kind"])
     if connector is None or not connector.has_can_open() or row["mode"] != "stored":
         raise ValueError("this source has no oracle to compare with")
-    source = build_source(row, env, None)
+    source = await ready(conn, env, build_source(row, env, None))
     people = await _people(conn, schemas, source)
     cur = await conn.execute(
         f"select external_id from {d}.records where source_id = %s and acl is not null"

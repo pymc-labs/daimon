@@ -15,13 +15,16 @@ import hashlib
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, ClassVar, Final
+from typing import Any, ClassVar, Final, Literal
 from uuid import UUID
 
 import psycopg.conninfo
+from daimon.data.identity import SourceAccount
 from daimon.data.sync.rate import RateBudget
 
 Json = dict[str, Any]
+type Part = Literal["drive", "calendar"]
+"""What Daimon reads as a person, which each person can turn off (`daimon.data.personal`)."""
 
 
 @dataclass(frozen=True)
@@ -44,6 +47,16 @@ class Descriptor:
 
 
 @dataclass(frozen=True)
+class Person:
+    """One person's sign-in at a source (`connect.py`). `token` is their live access token;
+    None when the connection no longer proves itself (a refused refresh), so its access ends."""
+
+    account_id: UUID
+    subject: str
+    token: str | None
+
+
+@dataclass(frozen=True)
 class Source:
     """What a connector is given of one source: its row, its opened credential and its cursor."""
 
@@ -59,8 +72,21 @@ class Source:
     last_sync_at: datetime | None
     budget: RateBudget
     private_hosts: tuple[str, ...] = ()
+    keyless_accounts: tuple[str, ...] = ()
+    """The service accounts the deployment lets this source sign as without a key."""
     deadline: float | None = None
     """Monotonic time after which the run stops at its next checkpoint."""
+    people: tuple[Person, ...] = ()
+    """The people signed in at this source; set only for a connector with `person_sign_in`."""
+
+
+@dataclass(frozen=True)
+class Roster:
+    """A source's whole account listing for one workspace (see `identity.record_accounts`)."""
+
+    provider: str
+    workspace: str
+    accounts: tuple[SourceAccount, ...]
 
 
 @dataclass
@@ -150,6 +176,8 @@ class SyncState:
     trust_empty: bool = False
     """A `live` that is empty while records are stored is refused, as a wrong database or a
     revoked grant looks like it; set this when empty is the truth."""
+    keep: tuple[str, ...] = ()
+    """Prefixes of ids a `live` pass keeps though unlisted: a container lost for now."""
 
 
 @dataclass
@@ -178,6 +206,8 @@ class LiveHit:
     url: str | None = None
     author: str | None = None
     occurred_at: datetime | None = None
+    detail: str = ""
+    """More text, kept only when every reader's hit carries the same (a Toggl admin's rates)."""
 
 
 class Connector:
@@ -189,6 +219,13 @@ class Connector:
     fields: ClassVar[tuple[Field, ...]] = ()
     default_scope: ClassVar[str | None] = None
     descriptor: ClassVar[Descriptor | None] = None
+    person_sign_in: ClassVar[bool] = False
+    """The engine gives a run the people signed in at the source (`Source.people`)."""
+
+    def workspace_of(self, source: Source) -> str:
+        """The namespace of this source's subjects (`config.workspace`, else the source);
+        a connector that keys its accounts by something else (a domain) overrides it."""
+        return str(source.config.get("workspace") or source.id)
 
     def descriptor_for(self, source: Source) -> Descriptor | None:
         """Whether this source's records are on the access list model; a connector whose
@@ -205,6 +242,10 @@ class Connector:
         return
         yield  # pragma: no cover
 
+    async def accounts(self, source: Source) -> Roster | None:
+        """The workspace's users, after the permission pass and before content. None by default."""
+        return None
+
     @classmethod
     def has_permissions(cls) -> bool:
         return cls.permissions is not Connector.permissions
@@ -220,6 +261,10 @@ class Connector:
     async def release(self, source: Source) -> None:
         """End of a run: close what the connector kept open for it."""
 
+    def warning(self, source: Source) -> str | None:
+        """What this run could not read while the source still synced, for its status."""
+        return None
+
     async def test(self, source: Source) -> tuple[bool, str]:
         return True, "ok"
 
@@ -230,6 +275,20 @@ class Connector:
 
     async def live_search(self, source: Source, query: str, limit: int) -> list[LiveHit]:
         """Live kinds: what the source finds for `query` now. Read-only; nothing is kept."""
+        raise NotImplementedError
+
+    live_as_reader: ClassVar[bool] = False
+    """A live source read as each reader, with their own access (`live_search_as`); it
+    answers only a caller who names readers, and a hit shows only if every reader's read has it."""
+    personal_part: ClassVar[Part | None] = None
+    """The personal part a read as the reader reads (`daimon.data.personal`); a reader who
+    turned it off is never read as."""
+
+    async def live_search_as(
+        self, source: Source, query: str, limit: int, subjects: Sequence[str]
+    ) -> list[LiveHit]:
+        """Live kinds read as one person, given their subjects (bare ids in the source's own
+        namespace): what that person's own access finds for `query` now."""
         raise NotImplementedError
 
     async def can_open(
@@ -243,6 +302,17 @@ class Connector:
     @classmethod
     def has_can_open(cls) -> bool:
         return cls.can_open is not Connector.can_open
+
+    async def live_extra(
+        self, source: Source, external_ids: Sequence[str], subjects: Sequence[tuple[str, ...]]
+    ) -> dict[str, str]:
+        """Text a read of these stored records adds, read from the source now and never
+        stored, by `external_id`: only what every reader (one subject tuple each) may see."""
+        return {}
+
+    @classmethod
+    def has_live_extra(cls) -> bool:
+        return cls.live_extra is not Connector.live_extra
 
     def scan_key(self, source: Source) -> str | None:
         """A sync that reads an external database returns that database's key (`dsn_key`): runs

@@ -63,6 +63,7 @@ class SourceOut(BaseModel):
     publication: str
     bound: bool
     default_scope: str
+    group: str | None
     created_at: datetime
     records: int
     last_sync_at: datetime | None
@@ -90,6 +91,7 @@ class NewSource(BaseModel):
     kind: str = Field(max_length=100)
     name: str = Field(max_length=200)
     settings: dict[str, str | list[str]] = Field(default_factory=dict, max_length=50)
+    group: str | None = Field(default=None, max_length=63)
 
 
 class Created(BaseModel):
@@ -127,7 +129,7 @@ def integrations_data_router(runtime: WebRuntime) -> APIRouter:
                 made = await manage.create_source(
                     conn, schemas, keys_of(runtime),
                     tenant_id=person.tenant_id, by=person.account_id,
-                    kind=body.kind, name=body.name, settings=dict(body.settings),
+                    kind=body.kind, name=body.name, settings=dict(body.settings), group=body.group,
                 )  # fmt: skip
             except IdentityError as e:
                 raise refused(e) from None

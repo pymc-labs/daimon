@@ -7,23 +7,28 @@ It is read-only and its results are never stored, but go through the source's re
 as a stored record's text does: `exclude_ids` drop a hit, and a set not approved leaves the
 source out. Each call is metered like a search arm through the caller's `meter`. It fails
 open: a source that errors or is still running when the search's time budget ends is left
-out, and the rest answer.
+out, and the rest answer. Calendars are not a source of their own: each reader's own calendar
+is read through the workspace's Google connection (`personal.google_connection`), unless the
+workspace or any reader turned the `calendar` part off (`daimon.data.personal`); with no source
+that can act as every reader, no calendar is searched.
 """
 
 from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass, replace
 from typing import Final
 
 import structlog
-from daimon.data import audit, redaction
+from daimon.data import audit, personal, redaction
 from daimon.data.access import ReadContext
+from daimon.data.recheck import reader_subjects
 from daimon.data.schema import Schemas
-from daimon.data.sync.connector import CONNECTORS, LiveHit
-from daimon.data.sync.engine import Env, build_source
+from daimon.data.sync import request_cache
+from daimon.data.sync.connector import CONNECTORS, LiveHit, Part, Source
+from daimon.data.sync.engine import Env, build_source, ready
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
 
@@ -34,6 +39,8 @@ type Meter = Callable[[uuid.UUID, int], Awaitable[None]]
 
 LIMIT: Final = 10
 """Hits one source returns to one search, at most."""
+READERS: Final = 4
+"""Per-reader live searches one search runs at once."""
 
 
 def audit_meter(
@@ -72,8 +79,10 @@ async def search(
     seconds: float,
     limit: int = LIMIT,
     meter: Meter | None = None,
+    off_parts: Collection[Part] = (),
 ) -> list[LiveResult]:
-    """One result per live source the caller may read, within `seconds` for all of them."""
+    """One result per live source the caller may read, within `seconds` for all of them; a
+    source that reads a part the workspace turned off (`off_parts`) is not asked."""
     d = schemas.data
     cur = await conn.execute(
         f"select s.id, s.tenant_id, s.kind, s.name, s.provider, s.config, s.credential,"
@@ -85,8 +94,52 @@ async def search(
         (list(ctx.tenant_ids), [x for x in ctx.scopes if x != "restricted:acl"]),
     )
     rows = [
-        r for r in await cur.fetchall() if CONNECTORS.get(r["kind"]) and CONNECTORS[r["kind"]].live
+        r
+        for r in await cur.fetchall()
+        if r["kind"] != "gcal" and CONNECTORS.get(r["kind"]) and CONNECTORS[r["kind"]].live
     ]
+    if found := await personal.google_connection(conn, schemas, env, ctx.tenant_ids, ctx.readers):
+        rows.append({**found[0], "kind": "gcal"})  # calendars: the workspace's Google connection
+    off = set(off_parts) | {
+        part
+        for r in rows
+        if (part := CONNECTORS[r["kind"]].personal_part)
+        and await personal.turned_off(conn, schemas, ctx.tenant_ids, ctx.readers, part)
+    }
+    rows = [r for r in rows if CONNECTORS[r["kind"]].personal_part not in off]
+
+    people: dict[uuid.UUID, list[tuple[str, ...]]] = {}
+    for r in rows:
+        if CONNECTORS[r["kind"]].live_as_reader:
+            people[r["id"]] = await reader_subjects(
+                conn,
+                schemas,
+                build_source(r, env, None),
+                ctx.readers,
+                own_links=CONNECTORS[r["kind"]].personal_part is not None,
+            )
+
+    gate = asyncio.Semaphore(READERS)
+
+    async def read(source: Source, query: str, limit: int) -> list[LiveHit]:
+        connector = CONNECTORS[source.kind]
+        if not connector.live_as_reader:
+            return await connector.live_search(source, query, limit)
+        who = people[source.id]
+        if not who or not all(who):
+            raise PermissionError("a reader the source cannot act as")
+
+        async def ask(subjects: tuple[str, ...]) -> list[LiveHit]:
+            async with gate:
+                return await connector.live_search_as(source, query, limit, subjects)
+
+        found = [{h.ref: h for h in x} for x in await asyncio.gather(*(ask(s) for s in who))]
+        return [
+            replace(h, text=h.text + h.detail if same else h.text, detail="")
+            for ref, h in found[0].items()
+            if all(ref in x for x in found[1:])
+            for same in [all(x[ref].detail == h.detail for x in found[1:])]
+        ]
 
     async def one(row: DictRow) -> LiveResult:
         try:
@@ -99,10 +152,10 @@ async def search(
             )
         except redaction.NotApproved:
             return LiveResult(row["id"], row["name"], (), "error")
-        source = build_source(row, env, None)
+        source = await ready(conn, env, build_source(row, env, None))
         connector = CONNECTORS[source.kind]
         try:
-            hits = await connector.live_search(source, query, limit)
+            hits = await read(source, query, limit)
             if meter:
                 await meter(source.id, len(hits))
         except Exception as e:
@@ -116,15 +169,16 @@ async def search(
 
     if not rows:
         return []
-    tasks = {asyncio.create_task(one(r)): r for r in rows}
-    done, late = await asyncio.wait(tasks, timeout=seconds)
-    for task in late:
-        task.cancel()
-    await asyncio.gather(*late, return_exceptions=True)
-    return [
-        task.result() if task in done else LiveResult(r["id"], r["name"], (), "timeout")
-        for task, r in tasks.items()
-    ]
+    async with request_cache.scope():
+        tasks = {asyncio.create_task(one(r)): r for r in rows}
+        done, late = await asyncio.wait(tasks, timeout=seconds)
+        for task in late:
+            task.cancel()
+        await asyncio.gather(*late, return_exceptions=True)
+        return [
+            task.result() if task in done else LiveResult(r["id"], r["name"], (), "timeout")
+            for task, r in tasks.items()
+        ]
 
 
 def _redacted(rules: redaction.Redactor, hit: LiveHit) -> LiveHit:

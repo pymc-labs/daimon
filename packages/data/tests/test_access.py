@@ -52,12 +52,16 @@ class Store:
         return next(iter(found[0].values())) if found else None
 
     async def source(
-        self, tenant: uuid.UUID | None = None, *, publication: str = "published"
+        self,
+        tenant: uuid.UUID | None = None,
+        *,
+        publication: str = "published",
+        group: str | None = None,
     ) -> uuid.UUID:
         found = await self.one(
-            f"insert into {self.d}.sources (tenant_id, kind, name, provider, default_scope, publication)"
-            " values (%s, 'docs', 'docs', 'acme', %s, %s) returning id",
-            (tenant or self.tenant, ACL_SCOPE, publication),
+            f"insert into {self.d}.sources (tenant_id, kind, name, provider, default_scope, publication,"
+            " source_group) values (%s, 'docs', 'docs', 'acme', %s, %s, %s) returning id",
+            (tenant or self.tenant, ACL_SCOPE, publication, group),
         )
         assert isinstance(found, uuid.UUID), "a source insert returns its id"
         return found
@@ -334,6 +338,30 @@ async def test_a_new_list_gets_existing_members_and_a_group_of_another_source_gr
     assert foreign
 
 
+async def test_group_membership_counts_within_a_source_group_and_never_outside_it(
+    store: Store,
+) -> None:
+    me = someone()
+    reader, partner = await store.source(group="g"), await store.source(group="g")
+    outsider = await store.source(group="h")
+    async with store.conn.transaction():
+        u = await acl.unit(store.conn, store.schemas, reader, "pass", "groups")
+        await acl.publish(store.conn, store.schemas, u, 1, {"a/w:group:b": [me]})
+    grp = acl.ref("a/w:group:b", group=True)
+    shared = await store.put(partner, "doc:1", await store.intern(partner, grp))
+    foreign = await store.put(outsider, "doc:1", await store.intern(outsider, grp))
+    assert await store.seen(store.who(me)) == {shared}, "only a source of the unit's group grants"
+    await store.conn.execute(
+        f"update {store.d}.sources set source_group = null where id = %s".encode(), (partner,)
+    )
+    await store.conn.execute(
+        f"update {store.d}.sources set source_group = 'g' where id = %s".encode(), (outsider,)
+    )
+    assert await store.seen(store.who(me)) == {foreign}, "leaving or joining a group counts at once"
+    async with store.conn.transaction():
+        assert set((await acl.nightly(store.conn, store.schemas)).values()) == {0}, "drift"
+
+
 async def test_two_paths_to_one_list_keep_the_valid_one_and_expiry_needs_no_job(
     store: Store,
 ) -> None:
@@ -571,5 +599,8 @@ async def test_a_memorys_data_is_readable_only_if_every_item_is(store: Store) ->
     assert not await readable(store.who(me, you), refs), "one item is hidden from someone"
     for unknown in ("live:" + str(src), "sql", "record:nope"):
         assert not await readable(store.who(me), [unknown]), f"{unknown} cannot be told"
+    own = ["person:" + me.removeprefix("account:"), *refs]
+    assert await readable(store.who(me), own), "a person's own data: by them alone"
+    assert not await readable(store.who(me, you), own), "never with anyone else"
     await store.conn.execute(f"delete from {store.d}.records where id = %s".encode(), (mine,))
     assert not await readable(store.who(me), refs), "a deleted item hides the memory"

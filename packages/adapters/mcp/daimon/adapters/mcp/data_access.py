@@ -14,6 +14,7 @@ import asyncio
 import time
 import uuid
 from collections.abc import Collection, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Final, Literal, cast
 
@@ -83,9 +84,19 @@ _SLACK_PERSON_TTL_S: Final = 300.0
 _slack_person: dict[tuple[str, str], tuple[float, bool]] = {}
 
 
-async def data_audience_for(runtime: McpRuntime, auth: AuthIdentity) -> DataAudience:
-    """Who a data call by `auth` answers for, or a refusal naming why none may run."""
+async def data_audience_for(
+    runtime: McpRuntime, auth: AuthIdentity, *, own_read: bool = False
+) -> DataAudience:
+    """Who a data call by `auth` answers for, or a refusal naming why none may run.
+
+    `own_read`: the call reads the asker's own data as them, on a card only they answer. It
+    runs in a room outsiders may read too, answering for the asker alone and public only (what
+    the room's readers may see is no bound on it), but never on another agent's request."""
     origin = await data_origin(runtime, auth, now=datetime.now(UTC))
+    if own_read and origin.kind == "agent_request":
+        raise ToolError(_REFUSALS["agent_request"])
+    if own_read and origin.contained and origin.kind != "none":
+        origin = replace(origin, contained=False, viewers=None)
     agent_id = auth.chat_agent_id or auth.agent_id
     async with runtime.session_factory() as session:
         owner = None if agent_id is None else await owner_of(session, auth.tenant_id, agent_id)

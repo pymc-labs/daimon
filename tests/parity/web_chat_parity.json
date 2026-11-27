@@ -413,6 +413,9 @@
     "teams": "daimon.adapters.teams.settings"
    }
   },
+  "PUT /api/profile/data/personal/{part}": {
+   "tool": "data_drive_reads"
+  },
   "PUT /api/support/channel": {
    "tool": "support_channel_set"
   },

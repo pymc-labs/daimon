@@ -5,15 +5,17 @@ import { toast } from "sonner"
 import { BrandIcon } from "@/components/brand"
 import { Ago } from "@/components/common"
 import { Button } from "@/components/ui/button"
+import { Switch } from "@/components/ui/switch"
 import { api } from "@/lib/api"
 import { useConfirm } from "@/lib/confirm"
 import { Pill } from "@/modules/agents/bits"
-import type { Connectable, Connected, Connection, Started } from "@/modules/data/types"
+import type { Connectable, Connected, Connection, PersonalPart, Started } from "@/modules/data/types"
 import { DeviceCode } from "./DeviceCode"
 import { Row } from "./profile-parts"
 
 const BASE = "/api/profile/data"
 const KEY = ["profile", "data"]
+const PARTS: Record<PersonalPart, string> = { drive: "Read my Google Drive as me", calendar: "Read my calendar as me" }
 
 /**
  * The data sources a person's accounts are linked to, and the ones they connected themselves,
@@ -41,11 +43,16 @@ export function useDataAccounts(enabled: boolean) {
     mutationFn: (c: Connection) => api.del(`${BASE}/connections/${c.source_id}`),
     onSuccess: () => { void qc.invalidateQueries({ queryKey: KEY }); toast("Disconnected") },
   })
+  const setPart = useMutation({
+    mutationFn: ({ part, on }: { part: PersonalPart; on: boolean }) => api.put(`${BASE}/personal/${part}`, { on }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: KEY }),
+  })
   const d = q.data
   const notices = d?.notices ?? []
   const have = new Set(d?.connections.map((c) => c.source_id))
   const open = d?.connectable.filter((c) => !have.has(c.source_id)) ?? []
-  const count = notices.length + (d ? d.accounts.length + d.connections.length + open.length : 0)
+  const parts = (Object.keys(PARTS) as PersonalPart[]).filter((p) => d?.personal[p] !== undefined)
+  const count = notices.length + (d ? d.accounts.length + d.connections.length + open.length + parts.length : 0)
   const rows = d && (
     <>
       {notices.map((n, i) => (
@@ -76,6 +83,12 @@ export function useDataAccounts(enabled: boolean) {
         <Row key={c.source_id}>
           <span className="min-w-0 flex-1 truncate">{c.name}</span>
           <Button size="sm" variant="outline" disabled={start.isPending} aria-label={`Connect ${c.name}`} onClick={() => start.mutate(c)}>Connect</Button>
+        </Row>
+      ))}
+      {parts.map((part) => (
+        <Row key={part}>
+          <span className="min-w-0 flex-1 truncate">{PARTS[part]}</span>
+          <Switch checked={d.personal[part] ?? false} disabled={setPart.isPending} aria-label={PARTS[part]} onCheckedChange={(on) => setPart.mutate({ part, on })} />
         </Row>
       ))}
       {start.error && <p role="alert" className="px-4 py-3 text-right text-sm text-destructive">{start.error.message}</p>}

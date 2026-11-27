@@ -50,6 +50,21 @@ async def _tenant(db_session: AsyncSession) -> uuid.UUID:
     return tenant.id
 
 
+async def _pages(
+    sessions: Sessions, actor: FeatureActor, place: FeaturePlace, op: str
+) -> list[list[str]]:
+    """The option values of each page of a group, following Next."""
+    pages: list[list[str]] = []
+    while True:
+        screen = await panel.show(sessions, _settings(), actor, place, op)
+        assert screen is not None
+        pages.append([o.value for o in screen.selects[0].options])
+        nxt = [o.value for o in screen.paging if o.label == panel.NEXT]
+        if not nxt:
+            return pages
+        op = nxt[0]
+
+
 async def test_the_root_picks_a_group_and_each_group_lists_its_features(
     db_session: AsyncSession, db_session_factory: Sessions
 ) -> None:
@@ -59,9 +74,8 @@ async def test_the_root_picks_a_group_and_each_group_lists_its_features(
     assert groups and root.back is None
     seen: set[str] = set()
     for op in groups:
-        screen = await panel.show(db_session_factory, _settings(), actor, _place(actor), op)
-        assert screen is not None and screen.back is not None
-        seen |= {o.value.split(":")[2] for o in screen.selects[0].options}
+        pages = await _pages(db_session_factory, actor, _place(actor), op)
+        seen |= {v.split(":")[2].split("~")[0] for page in pages for v in page}
     place = _place(actor)
     views = await read_features(db_session_factory, _settings(), place)
     discord = {
@@ -207,17 +221,15 @@ async def test_no_select_is_cut_by_the_platform_option_limit(
             )
         }
         for category in {spec.category for spec in FEATURES.values()}:
-            screen = await panel.show(
-                db_session_factory, _settings(), actor, place, panel.open_op(category)
-            )
-            assert screen is not None
-            offered = len(screen.selects[0].options)
+            pages = await _pages(db_session_factory, actor, place, panel.open_op(category))
+            assert all(len(page) <= panel.SELECT_LIMIT for page in pages), "a page is cut"
+            offered = sum(len(page) for page in pages)
             wanted = sum(
                 1
                 for s in FEATURES.values()
                 if s.category == category and s.on_platform(platform) and s.key in shown
             )
-            assert offered == wanted <= panel.SELECT_LIMIT, f"{platform} {category} is cut"
+            assert offered == wanted, f"{platform} {category} drops a feature"
     op = panel.open_op("chat", "progress_plans")
     screen = await panel.show(
         db_session_factory, _settings(), actor, _place(actor), op, agents=agents

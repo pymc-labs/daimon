@@ -1,7 +1,8 @@
 """`/api/profile/data/*`: the signed-in person's accounts in the workspace's data sources.
 
-What they are known as in each source, and the sources they signed in to themselves (through
-the provider's own OAuth page or a device code). Never a token: only who they signed in as.
+What they are known as in each source, the sources they signed in to themselves (through the
+provider's own OAuth page or a device code), and the personal parts Daimon reads as them
+(`daimon.data.personal`). Never a token: only who they signed in as.
 """
 
 from __future__ import annotations
@@ -13,7 +14,8 @@ from typing import Annotated, Literal
 import httpx
 from daimon.adapters.web.data_common import Viewer, refused, schemas_of, store
 from daimon.adapters.web.runtime import WebRuntime
-from daimon.data import identity, manage
+from daimon.core.personal_parts import allowed_parts
+from daimon.data import identity, manage, personal
 from daimon.data.connect import (
     PROVIDERS,
     Connector,
@@ -68,6 +70,11 @@ class Connected(BaseModel):
     """Links an admin changed since the last view; seeing them marks them read."""
     connections: list[ConnectionOut]
     connectable: list[ConnectableOut]
+    personal: dict[personal.Part, bool]
+
+
+class PartIn(BaseModel):
+    on: bool
 
 
 class Start(BaseModel):
@@ -98,20 +105,43 @@ def profile_data_router(runtime: WebRuntime) -> APIRouter:
         schemas, keys, runtime.http_client, redirect, clients=configured_clients(settings.data)
     )
 
+    async def workspace_parts(tenant_id: uuid.UUID) -> list[personal.Part]:
+        """The personal parts the workspace allows (`daimon.core.personal_parts`)."""
+        async with runtime.sessionmaker() as db:
+            names = await allowed_parts(db, settings, tenant_id, "web")
+        return [p for p in personal.PARTS if p in names]
+
     @router.get("")
     async def connected(caller: Viewer) -> Connected:  # pyright: ignore[reportUnusedFunction]
         p = caller.person
+        allowed = await workspace_parts(p.tenant_id)
         async with store(runtime) as conn:
             accounts = await manage.identities(conn, schemas, p.tenant_id, account_id=p.account_id)
             made = await manage.person_connections(conn, schemas, p.tenant_id, p.account_id)
             open_ = await manage.connectable(conn, schemas, p.tenant_id, list(PROVIDERS))
             notices = await identity.take_notices(conn, schemas, p.tenant_id, p.account_id)
+            parts = await personal.parts(conn, schemas, p.tenant_id, p.account_id, allowed)
         return Connected(
             accounts=[AccountOut.model_validate(a, from_attributes=True) for a in accounts],
             notices=[NoticeOut.model_validate(n, from_attributes=True) for n in notices],
             connections=[ConnectionOut.model_validate(c, from_attributes=True) for c in made],
             connectable=[ConnectableOut(source_id=i, name=n, provider=pr) for i, n, pr in open_],
+            personal=parts,
         )
+
+    @router.put("/personal/{part}")
+    async def set_part(  # pyright: ignore[reportUnusedFunction]
+        caller: Viewer, part: personal.Part, body: PartIn
+    ) -> dict[personal.Part, bool]:
+        """Turn one personal part on or off for the signed-in person (the chat tools
+        `data_drive_reads` and `data_calendar_reads`)."""
+        p = caller.person
+        allowed = await workspace_parts(p.tenant_id)
+        async with store(runtime) as conn:
+            if part not in await personal.parts(conn, schemas, p.tenant_id, p.account_id, allowed):
+                raise HTTPException(status_code=404, detail="Not offered in this workspace.")
+            await personal.set_part(conn, schemas, p.tenant_id, p.account_id, part, body.on)
+            return await personal.parts(conn, schemas, p.tenant_id, p.account_id, allowed)
 
     @router.post("/connect")
     async def start(caller: Viewer, body: Start) -> Started:  # pyright: ignore[reportUnusedFunction]

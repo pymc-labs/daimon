@@ -40,39 +40,23 @@ docker compose -f docker-compose.yml -f docker-compose.data.yml up -d --build da
 
 A source syncs every hour, or every `sync_minutes` of its config. A run cut off by its
 time budget continues on the next pass, and a failing source backs off from 5 minutes to 6
-hours. A source can also limit its upstream requests with `rate_per_minute`. The worker
-needs `DAIMON_CRYPTO__KEYS` to open source credentials. The GCP deploy workflow recreates
+hours. A source makes at most 60 upstream requests a minute unless its config sets
+`rate_per_minute` (0 removes the limit). The worker needs `DAIMON_CRYPTO__KEYS` to open
+source credentials. The GCP deploy workflow recreates
 a VM named `<registry>-data-sync` on each deploy, from `compose.data-sync.yml` in the assets
 bucket, when the deployment has one.
 
-### External Postgres
+## Kinds of source
 
-A source of kind `postgres` reads a view of another database. Give it a read-only login
-role, not a superuser or one that bypasses row security, and a credential
-`{"dsn": "postgresql://..."}`. The source's config:
-
-```json
-{"view": "app.documents", "kind": "document",
- "columns": {"id": "id", "title": "name", "body": "text", "updated_at": "changed_at"},
- "readers": {"column": "reader_ids", "workspace": "acme", "kind": "user"}}
-```
-
-`id`, `title`, `body` and `updated_at` are required (a column of another name goes in
-`columns`); `occurred_at`, `url`, `author` and `container` are optional. The view's own
-filters and row security decide what Daimon sees. Without `readers`, the source's scope
-rules apply; with it, the column holds who may read each row. A row that leaves the view is
-removed after the next complete run, and a view that suddenly lists nothing is treated as a
-failure instead.
-
-A database off loopback needs `sslmode=require` or stronger in the DSN, and `require` is
-added when it is unset. Connections to private addresses are refused. To reach a database on your own network,
-list its host name or address range in `DAIMON_DATA__PRIVATE_HOSTS`.
+Setup and access rules for each kind are on two pages: [databases, chat, files and
+code](data-connectors.md), and [notes, meetings, social and business
+apps](data-connectors-apps.md).
 
 ## People and their accounts
 
 A record a source shares with some of its users reads for a Daimon account only through a
 link to one of those users. Daimon links an account only on a proof the source or chat
-platform verified. That is a GitHub link or the person signing in to the source.
+platform verified. That is a GitHub link or the person signing in to the source (Bluedot and Notion).
 
 <!-- knowledge: web -->
 A web app sign-in with Discord, Slack or Microsoft is one too. A person who only chats has

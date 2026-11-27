@@ -212,6 +212,19 @@ async def test_a_source_credential_goes_only_through_the_askers_private_form(
     assert posted == ["Orders", "Orders"] and made["credential_form"] == again["credential_form"]
 
 
+async def test_a_source_group_reaches_the_store(rig: Rig) -> None:
+    await rig.call(
+        "change_data_source",
+        action="create",
+        kind="bluedot",
+        name="Calls",
+        group="team-a",
+        origin_context_id="o",
+    )
+    name, sent = rig.calls[-1]
+    assert name == "create_source" and "team-a" in sent, "the chat group is the source's group"
+
+
 async def test_a_refusal_of_the_store_reads_as_its_message(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:

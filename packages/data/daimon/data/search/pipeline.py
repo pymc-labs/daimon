@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Final
@@ -27,6 +27,7 @@ from daimon.data.metering import Meter, Payer, can_spend
 from daimon.data.schema import Schemas
 from daimon.data.search import arms, rerank, timewin
 from daimon.data.search.arms import Filters, Row
+from daimon.data.sync.connector import Part
 from daimon.data.sync.engine import Env
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
@@ -138,6 +139,7 @@ async def search(
     use_rerank: bool = True,
     env: Env | None = None,
     live_meter: federated.Meter | None = None,
+    off_parts: Collection[Part] = (),
 ) -> Result:
     """The best `limit` chunks (one per record) for `text`, as `ctx` may read them.
 
@@ -145,7 +147,8 @@ async def search(
     embedding and the rerank are billed to `payer` through `meter` (neither, when there is
     no meter or payer): a payer out of balance gets full text only. Spend is recorded as
     soon as the provider answers, whatever happens to the rest of the search. With `env`,
-    hits pass `recheck.allowed` and live sources are asked, each call through `live_meter`.
+    hits pass `recheck.allowed` and live sources are asked, each call through `live_meter`
+    (those reading a part in `off_parts` are not).
     """
     end = time.monotonic() + settings.search_seconds
     notes: list[str] = []
@@ -227,7 +230,14 @@ async def search(
             live = (
                 tg.create_task(
                     federated.search(
-                        conn, schemas, env, ctx, q, seconds=max(1.0, _left(end)), meter=live_meter
+                        conn,
+                        schemas,
+                        env,
+                        ctx,
+                        q,
+                        seconds=max(1.0, _left(end)),
+                        meter=live_meter,
+                        off_parts=off_parts,
                     )
                 )
                 if env is not None

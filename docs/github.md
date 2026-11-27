@@ -39,6 +39,15 @@ URL on to the web app.
 5. Keep the scheduler running. It removes expired connection flows and their
    encrypted tokens.
 
+### Permissions
+
+Give the App read access to **Metadata**, **Contents**, **Issues**, **Pull requests**
+and **Discussions** on repositories and to **Members** on organizations, plus the write
+access agents use (contents, issues, pull requests). The
+[GitHub data source](data-connectors.md#github) reads connected repositories with a read-only
+token of those it is granted; without Discussions or Members it cannot read discussions or
+who in the organization reads a public repository.
+
 ### Connect repositories to an agent
 
 Ask an agent to connect GitHub, or run `/github connect` in Discord or Slack. A

@@ -19,7 +19,13 @@ from daimon.core.config import (
     DiscordSettings,
     Settings,
 )
-from daimon.core.data_tools import DATA_SETUP_TOOLS, DATA_SOURCE_TOOLS, DATA_TOOLS
+from daimon.core.data_tools import (
+    DATA_SETUP_TOOLS,
+    DATA_SOURCE_TOOLS,
+    DATA_TOOLS,
+    PERSONAL_CALENDAR_TOOLS,
+    PERSONAL_DRIVE_TOOLS,
+)
 from daimon.core.errors import StaleChannelValue
 from daimon.core.features.model_input import (
     DEFAULT_TOOLSET,
@@ -46,7 +52,7 @@ from daimon.core.features.snapshot import (
 )
 from daimon.core.features.tool_gate import SESSION_KEPT_TOOLS, gated_tools
 from daimon.core.features.toolset import place_session, place_toolset
-from daimon.core.relay_scope import without_data_sources
+from daimon.core.relay_scope import without_data_sources, without_personal_google
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
 from daimon.core.session_snapshot import (
     desired_snapshot,
@@ -278,6 +284,15 @@ def test_a_workspace_with_no_data_source_is_offered_only_what_adds_one() -> None
     assert {"list_data_sources", "change_data_source"} == DATA_SETUP_TOOLS
 
 
+def test_the_calendar_tool_follows_its_own_feature_and_both_need_a_google_source() -> None:
+    drive_off = agent_toolset(_snapshot(data_personal_drive="off"), _agent())
+    assert drive_off.hidden_daimon_tools == PERSONAL_DRIVE_TOOLS, "calendar stays when Drive goes"
+    calendar_off = agent_toolset(_snapshot(data_personal_calendar="off"), _agent())
+    assert calendar_off.hidden_daimon_tools == PERSONAL_CALENDAR_TOOLS, "and Drive when it goes"
+    none = agent_toolset(without_personal_google(_snapshot()), _agent())
+    assert none.hidden_daimon_tools == PERSONAL_DRIVE_TOOLS | PERSONAL_CALENDAR_TOOLS
+
+
 def test_compute_off_keeps_the_stop_tools_and_long_jobs_off_hides_its_own() -> None:
     """A deliberate difference: a running sandbox session stays stoppable from chat with
     compute Off, while the long job tools all go with their feature."""
@@ -327,7 +342,15 @@ def test_capabilities_without_setup_hide_their_tools_only_where_the_setup_is_jud
         for key, spec in FEATURES.items()
     }
     toolset = agent_toolset(FeatureSnapshot(place, 1, features), _agent())
-    unset = {"notebooks", "report_publish", "media", "microsoft_365", "compute"}
+    unset = {
+        "notebooks",
+        "report_publish",
+        "media",
+        "microsoft_365",
+        "compute",
+        "data_personal_drive",
+        "data_personal_calendar",
+    }
     expected = (unset if server_setup else set()) | set(_OFF_BY_DEFAULT)
     assert toolset.off_capabilities == expected, "setup missing where judged, or Off by default"
     for key in ("watches", "github", "routines", "lead_intake"):

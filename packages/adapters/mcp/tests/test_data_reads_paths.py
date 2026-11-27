@@ -13,6 +13,7 @@ import textwrap
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
@@ -38,6 +39,7 @@ from daimon.core.data_audience import (
     DataOrigin,
     Reader,
     audience_ref,
+    audience_ref_holds,
     data_audience,
     user_subject,
 )
@@ -117,8 +119,9 @@ def _names(node: ast.AST) -> set[str]:
 
 def test_every_data_tool_reads_as_its_audience_and_marks_its_result() -> None:
     defs = _tool_defs()
-    assert set(defs) >= DATA_TOOLS, "every data tool registers in register_data_tools"
-    for name in DATA_TOOLS:
+    reading = DATA_TOOLS | {"data_my_drive"}
+    assert set(defs) >= reading, "every data tool registers in register_data_tools"
+    for name in reading:
         assert {"reading", "_text"} <= _names(defs[name]), f"{name} skips the audience or mark"
         if name != "data_sources":
             assert "noted" in _names(defs[name]), f"{name} leaves its reads out of memory"
@@ -169,7 +172,7 @@ def test_a_data_reading_agent_is_unsealed_and_guarded() -> None:
     assert admission.Admission.stores_read_only.fget is not None
     assert "data_reading" in inspect.getsource(admission.Admission.stores_read_only.fget)
     assert "tool_safety" in FEATURES[DATA_READS].depends_on, "writes after a data read are carded"
-    assert CAPABILITY_TOOLS[DATA_READS] == DATA_TOOLS, "the data tools hide with data_reads"
+    assert CAPABILITY_TOOLS[DATA_READS] == DATA_TOOLS, "they hide with data_reads"
 
 
 def _auth(**fields: Any) -> AuthIdentity:
@@ -275,6 +278,80 @@ async def test_a_teams_room_with_a_guest_holds_its_next_turns_and_unread_ones_ge
         assert (got.notice is not None and "consent" in got.notice) == notice, (
             "only a missing consent is named"
         )
+
+
+@pytest.mark.parametrize("own_read", [False, True])
+async def test_own_drive_reads_in_a_contained_room_for_the_asker_public_only(
+    monkeypatch: pytest.MonkeyPatch, own_read: bool
+) -> None:
+    async def contained(*_: object, **__: object) -> DataOrigin:
+        return DataOrigin("room", Reader("discord:u", uuid.uuid4()), None, contained=True)
+
+    monkeypatch.setattr(data_access, "data_origin", contained)
+    runtime = cast(McpRuntime, SimpleNamespace(session_factory=_Sessions()))
+    auth = _auth(platform="discord", external_id="u")
+    if not own_read:
+        with pytest.raises(ToolError, match="outside the team"):
+            await data_access.data_audience_for(runtime, auth)
+        return
+    got = await data_access.data_audience_for(runtime, auth, own_read=True)
+    assert got.public_only and got.redact, "the room's outsiders see only what anyone may"
+
+
+async def test_own_drive_read_is_remembered_by_its_audience_ref(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The note an own-Drive read leaves is recalled in the same place while everyone present
+    was a reader; a room outsiders may read leaves an unknown read, never recalled."""
+    me = uuid.uuid4()
+    assert "audience_ref" in _names(_tool_defs()["data_my_drive"])
+    runtime = cast(McpRuntime, SimpleNamespace(session_factory=_Sessions()))
+    auth = _auth(platform="discord", external_id="u")
+
+    async def private(*_: object, **__: object) -> DataOrigin:
+        return DataOrigin("private", Reader("discord:u", me), place="discord:D")
+
+    monkeypatch.setattr(data_access, "data_origin", private)
+    here = await data_access.data_audience_for(runtime, auth, own_read=True)
+    assert audience_ref(here) == f"audience:{me}@discord:D"
+    assert audience_ref_holds(audience_ref(here), here)
+    elsewhere = replace(here, place="discord:E")
+    assert not audience_ref_holds(audience_ref(here), elsewhere), "only in the same place"
+    assert not audience_ref_holds(
+        audience_ref(here), replace(here, people=frozenset({me, uuid.uuid4()}))
+    )
+
+    async def contained(*_: object, **__: object) -> DataOrigin:
+        return DataOrigin("room", Reader("discord:u", me), None, contained=True, place="discord:R")
+
+    monkeypatch.setattr(data_access, "data_origin", contained)
+    got = await data_access.data_audience_for(runtime, auth, own_read=True)
+    assert audience_ref(got) == UNKNOWN_READ
+
+
+async def test_own_drive_is_refused_on_another_agents_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def asked(*_: object, **__: object) -> DataOrigin:
+        return DataOrigin("agent_request", caller_reads_data=True)
+
+    monkeypatch.setattr(data_access, "data_origin", asked)
+    runtime = cast(McpRuntime, SimpleNamespace(session_factory=_Sessions()))
+    with pytest.raises(ToolError):
+        await data_access.data_audience_for(
+            runtime, _auth(platform="discord", external_id="u"), own_read=True
+        )
+
+
+class _Sessions:
+    def __call__(self) -> _Sessions:
+        return self
+
+    async def __aenter__(self) -> _Sessions:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
 
 
 def test_a_transcript_read_elsewhere_hides_data_results() -> None:

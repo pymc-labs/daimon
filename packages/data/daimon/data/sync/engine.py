@@ -13,20 +13,22 @@ never readable by scope.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable, Mapping
 from contextlib import aclosing, suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Final
 from uuid import UUID
 
+import httpx
 import psycopg
 import structlog
 from daimon.core.config import DataSettings, Settings
-from daimon.data import acl, audit, redaction
+from daimon.data import acl, audit, connect, identity, redaction
 from daimon.data.access import ACL_SCOPE
 from daimon.data.locks import advisory_key
 from daimon.data.metering import Meter
@@ -45,8 +47,10 @@ from daimon.data.sync.connector import (
     Source,
     SyncState,
 )
+from daimon.data.sync.connectors.github_api import app_token
 from daimon.data.sync.credentials import unseal
 from daimon.data.sync.embedding import embed_pending
+from daimon.data.sync.http import GuardedTransport, Upstream
 from daimon.data.sync.rate import RateBudget
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
@@ -72,20 +76,33 @@ class Env:
     schemas: Schemas
     crypto_keys: tuple[str, ...] = ()
     private_hosts: tuple[str, ...] = ()
+    keyless_accounts: tuple[str, ...] = ()
+    """`workspace=account` entries: the service accounts a workspace's Google sources may sign
+    as without a key."""
     embed: bool = False
+    clients: Mapping[str, connect.Client] = field(default_factory=dict[str, connect.Client])
+    """Daimon's own sign-in clients, for refreshing a connected person's token."""
     data: DataSettings | None = None
     """The settings embedding reads; with `embed`, always set by `of`."""
     meter: Meter | None = None
     """Bills embeddings to the source's tenant; none: embeds unmetered."""
+    github_app: tuple[str, str] | None = None
+    """Daimon's GitHub App (id, private key), which reads a GitHub source with no token."""
 
     @classmethod
     def of(cls, settings: Settings) -> Env:
+        app = settings.github_app
         return cls(
             Schemas.of(settings.data),
             tuple(k.get_secret_value() for k in settings.crypto.keys),
             settings.data.private_hosts,
+            settings.data.google_keyless_accounts,
             settings.data.embed_url is not None,
+            connect.configured_clients(settings.data),
             settings.data,
+            github_app=(app.app_id, app.private_key.get_secret_value())
+            if app.app_id and app.private_key
+            else None,
         )
 
 
@@ -98,6 +115,8 @@ class RunResult:
     updated: int = 0
     deleted: int = 0
     error: str | None = None
+    warning: str | None = None
+    """What an `ok` run could not read; shown as the source's last error."""
 
 
 class _Busy(Exception):
@@ -198,6 +217,20 @@ class _Run:
                 {g: list(members) for g, members in unit.groups.items()},
                 unit.fetched_at,
                 timedelta(minutes=unit.minutes),
+            )
+
+    async def identities(self) -> None:
+        """The source's users, recorded as the identities of its workspace."""
+        roster = await self.connector.accounts(self.src)
+        if roster is not None:
+            await identity.record_accounts(
+                self.conn,
+                self.env.schemas,
+                tenant_id=self.src.tenant_id,
+                provider=roster.provider,
+                workspace=roster.workspace,
+                accounts=roster.accounts,
+                auto_link_domain=self.src.config.get("auto_link_domain"),
             )
 
     async def content(self) -> None:
@@ -463,11 +496,13 @@ class _Run:
         """Delete the source's records that are not upstream any more. An empty list while
         records are stored is refused: a wrong database or a revoked grant looks like it."""
         live = sorted(sync.live or ())
+        keep = list(sync.keep)
         if not live and not sync.trust_empty:
             row = await _one(
                 self.conn,
-                f"select count(*) as n from {self.d}.records where source_id = %s",
-                (self.src.id,),
+                f"select count(*) as n from {self.d}.records where source_id = %s and not exists"
+                " (select 1 from unnest(%s::text[]) p where starts_with(external_id, p))",
+                (self.src.id, keep),
             )
             if row and row["n"]:
                 raise EmptySnapshot(
@@ -478,8 +513,9 @@ class _Run:
             res = await self.conn.execute(
                 f"delete from {self.d}.records where source_id = %s and external_id in ("
                 f"select external_id from {self.d}.records where source_id = %s"
-                " except select unnest(%s::text[]))".encode(),
-                (self.src.id, self.src.id, live),
+                " except select unnest(%s::text[])) and not exists"
+                " (select 1 from unnest(%s::text[]) p where starts_with(external_id, p))".encode(),
+                (self.src.id, self.src.id, live, keep),
             )
             self.c.deleted += res.rowcount
             await self.conn.execute(
@@ -494,9 +530,18 @@ class EmptySnapshot(RuntimeError):
     """A connector said nothing exists upstream while records are stored."""
 
 
+DEFAULT_RATE: Final = 60.0
+MINT_SECONDS: Final = 10.0
+"""How long minting a GitHub App token may take before the source reads without one."""
+"""Upstream calls per minute a source may make unless `rate_per_minute` says otherwise
+(0 is unlimited)."""
+
+
 def build_source(row: DictRow, env: Env, deadline: float | None) -> Source:
     config: Json = row["config"] or {}
-    return Source(
+    set_rate = config.get("rate_per_minute")
+    rate = DEFAULT_RATE if set_rate in (None, "") else float(set_rate)
+    source = Source(
         id=row["id"],
         tenant_id=row["tenant_id"],
         kind=row["kind"],
@@ -507,10 +552,73 @@ def build_source(row: DictRow, env: Env, deadline: float | None) -> Source:
         default_scope=row["default_scope"],
         state=row["state"] or {},
         last_sync_at=row["last_sync_at"],
-        budget=RateBudget(float(config.get("rate_per_minute") or 0)),
+        budget=RateBudget(rate, burst=rate),
         private_hosts=env.private_hosts,
         deadline=deadline,
     )
+    return source
+
+
+async def _keyless(conn: AsyncConnection[DictRow], env: Env, source: Source) -> tuple[str, ...]:
+    """The service accounts the deployment lets this source's Daimon workspace sign as without a
+    key: entries `<workspace>=<account>`, the workspace a tenant id or `<platform>:<id>` (as in
+    the declared file). Never keyed by anything a source's own config says."""
+    found: list[str] = []
+    for entry in env.keyless_accounts:
+        ws, _, account = entry.partition("=")
+        ws = ws.strip()
+        try:
+            same = UUID(ws) == source.tenant_id
+        except ValueError:
+            platform, _, ext = ws.partition(":")
+            cur = await conn.execute(
+                b"select 1 from tenants where id = %s and platform = %s and external_id = %s",
+                (source.tenant_id, platform, ext),
+            )
+            same = await cur.fetchone() is not None
+        if same and account.strip():
+            found.append(account.strip().lower())
+    return tuple(found)
+
+
+async def ready(
+    conn: AsyncConnection[DictRow],
+    env: Env,
+    source: Source,
+    accounts: Collection[UUID] | None = None,
+) -> Source:
+    """The source with what needs the store: the people signed in at it (those of `accounts`
+    only, when given), when its connector reads as each person, and the keyless accounts its
+    workspace may sign as."""
+    connector = CONNECTORS.get(source.kind)
+    if connector is None:
+        return source
+    if connector.person_sign_in:
+        people = await connect.connected_people(
+            conn,
+            env.schemas,
+            env.crypto_keys,
+            env.clients,
+            GuardedTransport(env.private_hosts),
+            source.id,
+            accounts,
+        )
+        source = replace(source, people=people)
+    if env.keyless_accounts:
+        source = replace(source, keyless_accounts=await _keyless(conn, env, source))
+    if source.kind == "github" and env.github_app and not source.credentials.get("token"):
+        try:  # no token: this source's reads fail closed, never the whole read
+            async with asyncio.timeout(MINT_SECONDS):
+                transport = GuardedTransport(env.private_hosts)
+                token = await app_token(conn, env.github_app, source, transport)
+        except (Upstream, httpx.HTTPError, TimeoutError, ValueError) as e:
+            log.warning("data.app_token_failed", source=str(source.id), error=type(e).__name__)
+            token = None
+            fail = f"Daimon's GitHub App gave no token: {_error_text(e)}"
+            source = replace(source, credentials={**source.credentials, "mint_error": fail})
+        if token:
+            source = replace(source, credentials={**source.credentials, "token": token})
+    return source
 
 
 _LOAD: Final = (
@@ -587,11 +695,12 @@ async def _locked(
     )
     run_id: UUID = started["id"]
     deadline = time.monotonic() + budget if budget else None
-    status, error, scan = "ok", None, None
+    status, error, scan, warning = "ok", None, None, None
     run: _Run | None = None
     source: Source | None = None
     try:
         source = build_source(row, env, deadline)
+        source = await ready(conn, env, source)
         key = connector.scan_key(source)
         if key:
             scan = advisory_key(d, f"scan:{key}")
@@ -600,6 +709,7 @@ async def _locked(
                 raise _Busy
         run = _Run(conn, env, source, connector, started["started_at"], redactor)
         await run.permissions()
+        await run.identities()
         await run.content()
         if run.c.partial:
             status = "partial"
@@ -615,10 +725,11 @@ async def _locked(
         if scan is not None:
             await unlock(conn, scan)
         if source is not None:
+            warning = connector.warning(source)
             with suppress(Exception):  # a connector's cleanup must not hide the run's result
                 await connector.release(source)
     counts = run.c if run else _Counts()
-    result = RunResult(run_id, status, counts.added, counts.updated, counts.deleted, error)
+    result = RunResult(run_id, status, counts.added, counts.updated, counts.deleted, error, warning)
     await _finish(conn, env, row, started["started_at"], result)
     if run and not result.error and env.embed and env.data is not None:
         await embed_pending(conn, env.schemas, source_id, settings=env.data, meter=env.meter)
@@ -665,7 +776,7 @@ async def _finish(
                 "st": r.status,
                 "ok": r.status == "ok" and stale is None,
                 "stale": stale is not None,
-                "err": r.error,
+                "err": r.error or r.warning,
                 "at": started,
                 "src": row["id"],
             },

@@ -29,6 +29,7 @@ from psycopg.types.json import Jsonb
 
 MANAGED: Final = "The deployment manages this. Change it in the declared file."
 HOLDER: Final = re.compile(r"^\S{1,200}$")
+GROUP: Final = r"[a-z0-9][a-z0-9-]{0,62}"
 SCOPE_KINDS: Final = ("public", "internal", "shared", "client", "restricted")
 Action = Literal["pause", "resume", "retire", "publish", "unpublish", "sync"]
 
@@ -80,6 +81,8 @@ class SourceView:
     publication: str
     bound: bool
     default_scope: str
+    group: str | None
+    """Its source group: sources of one workspace with the same one share group membership."""
     created_at: datetime
     records: int
     last_sync_at: datetime | None
@@ -176,7 +179,8 @@ async def _one(conn: AsyncConnection[DictRow], sql: str, args: Sequence[Any], wh
 
 _SOURCES = """
 select s.id, s.name, s.kind, s.mode, s.status, s.publication, s.bound, s.default_scope,
-  s.created_at, c.last_sync_at, c.last_status, c.last_error, coalesce(c.errors, 0) as errors,
+  s.source_group as "group", s.created_at, c.last_sync_at, c.last_status, c.last_error,
+  coalesce(c.errors, 0) as errors,
   (select count(*) from {d}.records r where r.source_id = s.id) as records,
   p.finished_at, p.people, p.checked, p.wrong_more, p.wrong_less, p.unresolved, p.ok
 from {d}.sources s
@@ -220,6 +224,7 @@ async def sources(
                 r["publication"],
                 r["bound"],
                 r["default_scope"],
+                r["group"],
                 r["created_at"],
                 r["records"],
                 r["last_sync_at"],
@@ -267,16 +272,20 @@ async def create_source(
     kind: str,
     name: str,
     settings: dict[str, Any],
+    group: str | None = None,
     credential_later: bool = False,
 ) -> uuid.UUID:
     """Add a source. `settings` holds the kind's form fields: secret ones are sealed as the
-    credential, the rest are its config. It starts in shadow, unpublished; with
-    `credential_later`, paused and without its secret until `set_credential`."""
+    credential, the rest are its config; `group` is its source group. It starts in shadow,
+    unpublished; with `credential_later`, paused and without its secret until `set_credential`."""
     connector = CONNECTORS.get(kind)
     if connector is None:
         raise Invalid("Pick a kind of source.")
     if not name.strip():
         raise Invalid("Give the source a name.")
+    group = (group or "").strip().lower() or None
+    if group and not re.fullmatch(GROUP, group):
+        raise Invalid("A group is lowercase letters, digits and dashes.")
     known = {f.name for f in connector.fields}
     if extra := set(settings) - known:
         raise Invalid(f"Unknown setting: {sorted(extra)[0]}.")
@@ -301,10 +310,11 @@ async def create_source(
     scope = connector.default_scope or (ACL_SCOPE if connector.descriptor else "internal")
     cur = await conn.execute(
         f"insert into {schemas.data}.sources (tenant_id, kind, name, config, credential,"
-        " default_scope, mode, created_by, status) values (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+        " default_scope, mode, source_group, created_by, status)"
+        " values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
         " returning id".encode(),
         (tenant_id, kind, name.strip(), Jsonb(config), sealed, scope,
-         "federated" if connector.live else "stored", by,
+         "federated" if connector.live else "stored", group, by,
          "paused" if credential_later else "active"),
     )  # fmt: skip
     row = await cur.fetchone()

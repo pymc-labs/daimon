@@ -57,7 +57,7 @@ from daimon.core.tool_safety import backend_switch_tools as backend_switch_tools
 from mux.contracts.config import ThreadMode
 from mux.contracts.ids import ChannelRef
 from mux.contracts.profile import Capability, Effort
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
 if TYPE_CHECKING:
     from daimon.core.channel_backend import AgentBackendService, AgentSettings
@@ -156,6 +156,8 @@ class ConfirmationPrompt(BaseModel):
         default=None, exclude_if=lambda value: value is None
     )
     tool_rules_enabled: bool = Field(default=False, exclude_if=lambda value: not value)
+    session_allow: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    """With it, the card also offers "Allow for this conversation" (`session_allowances`)."""
     visible_lines: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     lead_intake_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
     # A publish that may leave a lasting public link (a report, any notebook
@@ -516,6 +518,31 @@ def prompt_for_tool_call(
     denied_action: str
     consequence: str | None = None
     detail_lines: tuple[str, ...]
+    if call.tool_name == "data_my_drive" and own_server:
+        return ConfirmationPrompt(
+            title="Read your Google Drive as you?",
+            consequence="Everyone who can see this conversation will see what it finds.",
+            action="Read your Google Drive",
+            denied_action="Drive not read",
+            detail_lines=(f"Search: {_one_line(data.get('query'), limit=200)}",),
+            requester_platform_user_id=requester_platform_user_id,
+            expires_at=now + timeout,
+        )
+    if call.tool_name in ("data_drive_reads", "data_calendar_reads") and own_server:
+        part = "Google Drive" if call.tool_name == "data_drive_reads" else "calendar"
+        try:  # as the tool parses it, so the card never says the opposite of the call
+            on = TypeAdapter(bool).validate_python(data.get("on"))
+        except ValidationError:
+            on = False
+        verb = "Let Daimon read" if on else "Stop Daimon reading"
+        return ConfirmationPrompt(
+            title=f"{verb} your {part} as you?",
+            action=verb,
+            denied_action="Nothing changed",
+            detail_lines=(),
+            requester_platform_user_id=requester_platform_user_id,
+            expires_at=now + timeout,
+        )
     if call.tool_name in {"request_provider_allowlist"} and own_server:
         reference = ConfigurationReference.model_validate(
             {

@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import re
 import secrets
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
@@ -25,6 +26,7 @@ from daimon.data import identity
 from daimon.data.audit import record_audit
 from daimon.data.identity import Conflict, IdentityKey, Missing, Proof, fence_account
 from daimon.data.schema import Schemas
+from daimon.data.sync.connector import Person
 from daimon.data.sync.credentials import seal, unseal
 from psycopg import AsyncConnection
 from psycopg.rows import DictRow
@@ -65,6 +67,9 @@ class Provider:
     subject_key: str = "sub"
     email_key: str = ""
     """Where `whoami_url` answers the person's email, kept only with `email_verified` true."""
+    mcp_url: str = ""
+    """Else the user is the answer of the MCP server's tool `whoami_tool`."""
+    whoami_tool: str = ""
 
 
 GOOGLE = Provider(
@@ -76,7 +81,17 @@ GOOGLE = Provider(
     whoami_url="https://openidconnect.googleapis.com/v1/userinfo",
     email_key="email",
 )
-PROVIDERS: dict[str, Provider] = {p.id: p for p in (GOOGLE,)}
+BLUEDOT = Provider(
+    "bluedot",
+    "device",
+    ("offline_access",),
+    issuer="https://signin.bluedothq.com",
+    mcp_url="https://app.bluedothq.com/api/v1/mcp",
+    whoami_tool="get_current_user",
+    subject_key="id",
+)
+NOTION = Provider("notion", "code", issuer="https://mcp.notion.com", subject_key="user_id")
+PROVIDERS: dict[str, Provider] = {p.id: p for p in (GOOGLE, BLUEDOT, NOTION)}
 
 
 @dataclass(frozen=True)
@@ -124,6 +139,10 @@ class Connection:
 
 def _obj(value: object) -> dict[str, object]:
     return cast("dict[str, object]", value) if isinstance(value, dict) else {}
+
+
+def _list(value: object) -> list[object]:
+    return cast("list[object]", value) if isinstance(value, list) else []
 
 
 def _short(resp: httpx.Response) -> str:
@@ -423,12 +442,70 @@ class Connector:
                 },
             )
             body = r.json() if r.status_code == 200 else {}
+        elif p.mcp_url:
+            body = await self._mcp_user(p, str(tok.get("access_token")))
         found = _dotted(body, p.subject_key)
         if found in (None, ""):
             raise Failed("no_subject")
         email = _dotted(body, p.email_key) if p.email_key else None
         verified = _dotted(body, "email_verified") in (True, "true")
         return str(found), str(email) if isinstance(email, str) and email and verified else None
+
+    async def _mcp_user(self, p: Provider, access: str) -> object:
+        """What the provider's MCP server says of the token's user: `initialize`, then the
+        `whoami_tool` call. Empty on any refusal."""
+        head = {
+            "Authorization": f"Bearer {access}",
+            "Accept": "application/json, text/event-stream",
+        }
+
+        async def rpc(msg: dict[str, object], session: str | None = None) -> httpx.Response:
+            h = {**head, **({"Mcp-Session-Id": session} if session else {})}
+            return await self.http.post(p.mcp_url, headers=h, json={"jsonrpc": "2.0", **msg})
+
+        r = await rpc(
+            {
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {"name": "Daimon", "version": "1"},
+                },
+            }
+        )
+        if r.status_code != 200:
+            return {}
+        sid = r.headers.get("mcp-session-id")
+        await rpc({"method": "notifications/initialized"}, sid)
+        r = await rpc(
+            {
+                "id": 2,
+                "method": "tools/call",
+                "params": {"name": p.whoami_tool, "arguments": {}},
+            },
+            sid,
+        )
+        if r.status_code != 200:
+            return {}
+        text = r.text
+        if r.headers.get("content-type", "").startswith("text/event-stream"):
+            text = next((x[5:] for x in text.splitlines() if x.startswith("data:")), "{}")
+        try:
+            result = _obj(_obj(json.loads(text or "{}")).get("result"))
+            if result.get("isError"):
+                return {}
+            body: object = result.get("structuredContent")
+            if body is None:
+                body = {}
+                for x in _list(result.get("content")):
+                    if _obj(x).get("type") == "text":
+                        body = json.loads(str(_obj(x).get("text")))
+                        break
+        except ValueError:
+            return {}
+        user = _obj(body)
+        return user if user.get("id") else _obj(user.get("user"))
 
     async def _complete(
         self,
@@ -630,3 +707,35 @@ class Connector:
                 account_id=account_id,
                 source_id=source_id,
             )
+
+
+async def connected_people(
+    conn: AsyncConnection[DictRow],
+    schemas: Schemas,
+    keys: Sequence[str],
+    clients: Mapping[str, Client],
+    transport: httpx.AsyncBaseTransport,
+    source_id: uuid.UUID,
+    accounts: Collection[uuid.UUID] | None = None,
+) -> tuple[Person, ...]:
+    """The people connected to a source (those of `accounts` only, when given), each with a
+    good access token (refreshed when it ends soon), or none when the connection no longer
+    proves itself."""
+    only = "" if accounts is None else " and account_id = any(%s)"
+    cur = await conn.execute(
+        f"select account_id, subject, status from {schemas.data}.person_connections"
+        f" where source_id = %s{only} order by account_id".encode(),
+        (source_id,) if accounts is None else (source_id, list(accounts)),
+    )
+    rows = await cur.fetchall()
+    out: list[Person] = []
+    async with httpx.AsyncClient(timeout=20, transport=transport) as http:
+        sign_in = Connector(schemas, keys, http, "", clients)
+        for r in rows:
+            token = (
+                await sign_in.token(conn, account_id=r["account_id"], source_id=source_id)
+                if r["status"] == "active"
+                else None
+            )
+            out.append(Person(r["account_id"], r["subject"], token))
+    return tuple(out)

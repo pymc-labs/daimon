@@ -12,11 +12,11 @@ export type Step = {
 export type FileOut = { id: string; name: string; size: number; kind: "csv" | "xlsx" | "pdf" | "png" }
 
 export type Card =
-  | { id: string; kind: "approval"; state: "pending" | "approved" | "always" | "denied"; title: string; consequence?: string; details: string[]; footer?: string; always_allowed: boolean }
+  | { id: string; kind: "approval"; state: "pending" | "approved" | "always" | "denied"; title: string; consequence?: string; details: string[]; footer?: string; always_allowed: boolean; session_allowed?: boolean }
   | { id: string; kind: "credential"; state: "pending" | "saved" | "skipped"; headline: string; fact: string; key: string }
   | { id: string; kind: "refusal"; title: string; body: string; help?: string; action?: "switch_back_to_claude" | null }
 
-export type CardAnswer = { answer: "approve" | "always" | "deny" | "save" | "skip"; value?: string }
+export type CardAnswer = { answer: "approve" | "always" | "session" | "deny" | "save" | "skip"; value?: string }
 
 export type Msg = {
   id: string

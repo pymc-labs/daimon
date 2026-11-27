@@ -16,17 +16,19 @@ import uuid
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Final
+from typing import Any, Final
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.data_access import data_audience_for, ledgers
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._card import require_card
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.core.data_audience import DataAudience, audience_ref
 from daimon.core.data_tools import mark_data_result
+from daimon.core.personal_parts import allowed_parts
 from daimon.core.ports.data_metering import SessionMeter
 from daimon.core.stores.data_memory import note_reads
-from daimon.data import caller_sql, federated, pool, reads
+from daimon.data import caller_sql, federated, my_drive, personal, pool, reads
 from daimon.data.caller_sql import SqlRefused
 from daimon.data.metering import Payer
 from daimon.data.reading import Reading, open_read
@@ -66,10 +68,10 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @asynccontextmanager
     async def reading(
-        auth: AuthIdentity,
+        auth: AuthIdentity, *, own_read: bool = False
     ) -> AsyncIterator[tuple[AsyncConnection[DictRow], Reading, DataAudience]]:
         """The connection, what the answer may read (`daimon.data.reading`) and for whom."""
-        audience = await data_audience_for(runtime, auth)
+        audience = await data_audience_for(runtime, auth, own_read=own_read)
         async with pool.connection(settings) as conn:
             salt = f"agent:{auth.chat_agent_id or auth.agent_id}"
             r = await open_read(conn, schemas, auth.tenant_id, audience, salt=salt)
@@ -99,6 +101,12 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                         "datasets": [dataclasses.asdict(d) for d in sets]})  # fmt: skip
         return _text(shown, audience)
 
+    async def workspace_parts(auth: AuthIdentity) -> list[personal.Part]:
+        """The personal parts this workspace allows (`daimon.core.personal_parts`)."""
+        async with runtime.session_factory() as session:
+            names = await allowed_parts(session, settings, auth.tenant_id, auth.platform or "web")
+        return [p for p in personal.PARTS if p in names]
+
     @mcp.tool()
     async def data_search(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
@@ -120,6 +128,7 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             since=since,
             until=until,
         )
+        allowed = await workspace_parts(auth)
         async with reading(auth) as (conn, r, audience):
             if r.names_hidden(query):
                 return _text({"hits": [], "live": [], "notes": []}, audience)
@@ -135,6 +144,7 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 filters=filters,
                 env=env,
                 live_meter=federated.audit_meter(conn, schemas, auth.tenant_id, auth.account_id),
+                off_parts=[p for p in personal.PARTS if p not in allowed],
             )
         hits = [
             {k: v for k, v in dataclasses.asdict(h).items() if k not in ("text", "arms")}
@@ -154,7 +164,8 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             record = await reads.get(conn, schemas, r.ctx, _uuid(record_id), env)
         if record is None:
             raise ToolError(NOT_FOUND)
-        await noted(auth, [f"record:{record.item.id}"])
+        live = [f"live:{record.item.source_id}"] if record.live else []
+        await noted(auth, [f"record:{record.item.id}", *live])
         start = max(start, 0)
         end = start + PAGE
         body = r.show(record.body, record.item.source_id)  # whole: no name straddles a page
@@ -206,3 +217,68 @@ def register_data_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 raise ToolError(str(e)) from None
         await noted(auth, [audience_ref(audience)])
         return _text(r.show(dataclasses.asdict(result), ids=False), audience)
+
+    @mcp.tool()
+    async def data_my_drive(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, query: str, origin_context_id: str, limit: int = 10
+    ) -> str:
+        """Search your own Google Drive (My Drive) as you for `query`, with the text of Docs,
+        Slides and Sheets; never stored. Each call asks you on a card first, and everyone who
+        can see this conversation, people outside the team included, sees what it finds. Not on
+        another agent's request. Shared drives are in `data_search`."""
+        auth = await _auth(ctx)
+        if auth.is_external_agent or auth.hold is not None or auth.client:
+            raise ToolError("Only a person can have their own Drive read.")
+        # Refuses before the card where no person is here to answer it.
+        await data_audience_for(runtime, auth, own_read=True)
+        await require_card(
+            runtime, auth, tool_name="data_my_drive", origin_context_id=origin_context_id
+        )
+        async with reading(auth, own_read=True) as (conn, r, audience):
+            if r.names_hidden(query):
+                return _text({"files": []}, audience)
+            hits = await my_drive.search(
+                conn, schemas, env, auth.tenant_id, auth.account_id, query, min(max(limit, 1), 25)
+            )
+        if hits:
+            await noted(auth, [audience_ref(audience)])  # recalled in this place, by these people
+        files, left = list[dict[str, Any]](), my_drive.ANSWER_TEXT
+        for s, h in hits:  # cut after the redaction, so no rule's match straddles the cut
+            shown = r.show({"source_id": str(s), **dataclasses.asdict(h)})
+            files.append({**shown, "text": shown["text"][:left]})
+            left = max(left - len(shown["text"]), 0)
+        return _text({"files": files}, audience)
+
+    async def switch_part(
+        ctx: Context, part: personal.Part, tool: str, on: bool, origin_context_id: str
+    ) -> str:
+        auth = await _auth(ctx)
+        if auth.is_external_agent or auth.hold is not None or auth.client:
+            raise ToolError("Only a person can change what Daimon reads as them.")
+        await require_card(runtime, auth, tool_name=tool, origin_context_id=origin_context_id)
+        allowed = await workspace_parts(auth)
+        async with pool.connection(settings) as conn:
+            offered = await personal.parts(conn, schemas, auth.tenant_id, auth.account_id, allowed)
+            if part not in offered:
+                raise ToolError(f"Reading your {part} is not offered here.")
+            await personal.set_part(conn, schemas, auth.tenant_id, auth.account_id, part, on)
+            parts = await personal.parts(conn, schemas, auth.tenant_id, auth.account_id, allowed)
+        return json.dumps(parts)
+
+    @mcp.tool()
+    async def data_drive_reads(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, on: bool, origin_context_id: str
+    ) -> str:
+        """Turn on or off Daimon reading your own Google Drive (My Drive) as you in this
+        workspace; it stays on until you turn it off. Asks you on a card first. Returns each
+        part this workspace offers, and whether it is on."""
+        return await switch_part(ctx, "drive", "data_drive_reads", on, origin_context_id)
+
+    @mcp.tool()
+    async def data_calendar_reads(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, on: bool, origin_context_id: str
+    ) -> str:
+        """Turn on or off Daimon reading your own calendar as you in this workspace; it stays
+        on until you turn it off. Asks you on a card first. Returns each part this workspace
+        offers, and whether it is on."""
+        return await switch_part(ctx, "calendar", "data_calendar_reads", on, origin_context_id)
