@@ -321,7 +321,7 @@ class CapabilityGateMiddleware(Middleware):
         # Where pages are absent or off, the watch tools keep their names but never name pages.
         if pageless or any(hides_tools(place.get("artifacts")) for place in found):
             tools = [without_pages(t) for t in tools]
-        if _lists_everything(auth) or not found:
+        if not found:
             return tools
         off = gated_tools(
             key for key in GATED_KEYS if any(hides_tools(place.get(key)) for place in found)
