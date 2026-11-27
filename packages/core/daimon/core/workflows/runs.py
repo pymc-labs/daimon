@@ -1686,6 +1686,8 @@ async def settle_from_post(
                 k: placed.get(k) for k in ("channel", "thread", "message", "link")
             }
             outcome = engine.Succeeded(output, summary="Posted")
+        elif post.note == delivery.NOTHING_TO_POST:
+            outcome = engine.Succeeded({"status": "skipped"}, summary="Nothing to post")
         else:
             why = _NOT_POSTED.get(post.note or "", "The post did not go.")
             outcome = engine.Failed("fatal", why, reason=post.note or post.status)

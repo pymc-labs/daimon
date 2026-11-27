@@ -6,10 +6,11 @@ module. Ids are `uuid5` of the routine id and `now` is an argument, so a move is
 
 Every routine becomes one of four shapes. Its `run` agent step works where it posts (`at`),
 else at home, else privately on its owner's personal memory; a Post then posts the result
-where the routine did, unless the agent already posted there itself:
+where the routine did, unless the agent already posted there itself; then `files` posts
+only the files it made, if any, as the routine sent them on their own:
 
-- A. a channel or thread: `run` at it, `seen` branch, `post` there, `done`;
-- B. a DM: `run` private, `seen`, `post` to the person it runs as, `done`;
+- A. a channel or thread: `run` at it, `seen` branch, `post` (or `files`) there, `done`;
+- B. a DM: `run` private, `seen`, `post` (or `files`) to the person it runs as, `done`;
 - C. no destination, a channel: `run` at home, `done`;
 - D. neither: `run` private, `done`.
 """
@@ -32,6 +33,7 @@ SCHEMA: Final = "daimon.workflow/v1"
 STEP: Final = "run"
 SEEN: Final = "seen"
 POST: Final = "post"
+FILES: Final = "files"
 DONE: Final = "done"
 TRIGGER: Final = "schedule"
 NOTE: Final = "Moved from a routine"
@@ -237,13 +239,23 @@ def _spec(
         run["memory"] = "personal"
     nodes: dict[str, Any] = {STEP: run}
     if post is not None:
-        seen = {"when": f"${{{{ '{post}' in steps.{STEP}.posted }}}}", "to": DONE}
-        nodes[SEEN] = {"title": "Posted already?", "kind": "branch", "cases": [seen], "else": POST}
+        # `files` posts nothing when the step made none (`delivery.queue_deliver`).
+        cases = [{"when": f"${{{{ '{post}' in steps.{STEP}.posted }}}}", "to": FILES}]
+        nodes[SEEN] = {"title": "Posted already?", "kind": "branch", "cases": cases, "else": POST}
+        files = f"${{{{ steps.{STEP}.files }}}}"
         nodes[POST] = {
             "to": post,
             "message": f"${{{{ steps.{STEP}.summary }}}}",
-            "files": f"${{{{ steps.{STEP}.files }}}}",
+            "files": files,
             "title": "Post the result",
+            "next": DONE,
+            "kind": "post",
+            "as_agent": key,
+        }
+        nodes[FILES] = {
+            "to": post,
+            "files": files,
+            "title": "Post the files",
             "next": DONE,
             "kind": "post",
             "as_agent": key,

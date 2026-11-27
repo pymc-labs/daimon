@@ -267,6 +267,10 @@ async def queue_post(
     return ids[0], events
 
 
+#: The note of a post with no words and no files, which settles without going.
+NOTHING_TO_POST: Final = "nothing_to_post"
+
+
 async def queue_deliver(
     session: AsyncSession,
     *,
@@ -320,15 +324,20 @@ async def queue_deliver(
                 target = target | {"refused": NOT_A_DESTINATION}
             mention += values
     message = None if deliver.message is None else render(deliver.message, context, now=now)
-    files = render(deliver.files, context, now=now)
+    rendered_files = render(deliver.files, context, now=now)
+    files = cast("list[JsonValue]", rendered_files) if isinstance(rendered_files, list) else []
+    text = _text(fallback if deliver.message is None else message)
     return await queue_post(
         session,
         run=run,
         workflow=workflow,
         kind=kind,
         targets=[target, *also[:5]],
-        text=_text(fallback if deliver.message is None else message),
-        files=cast("list[JsonValue]", files) if isinstance(files, list) else [],
+        text=text,
+        files=files,
+        # Nothing to say and no files: nothing goes, so a files-only post with none is quiet.
+        status="pending" if text or files else "skipped",
+        note=None if text or files else NOTHING_TO_POST,
         speaker=run.run_as_account_id,
         mention=mention[:10],
         step_id=step_id,

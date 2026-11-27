@@ -208,17 +208,16 @@ def test_a_routine_works_where_it_posts_and_posts_unless_it_did(name: str) -> No
     if to is None:
         assert list(nodes) == ["run", "done"] and run["next"] == "done"
         return
-    assert list(nodes) == ["run", "seen", "post", "done"] and run["next"] == "seen"
+    assert list(nodes) == ["run", "seen", "post", "files", "done"] and run["next"] == "seen"
     assert nodes["seen"]["cases"] == [
-        {"when": f"${{{{ '{to}' in steps.run.posted }}}}", "to": "done"}
-    ]
+        {"when": f"${{{{ '{to}' in steps.run.posted }}}}", "to": "files"}
+    ], "an agent that posted itself still gets its files posted"
     assert nodes["seen"]["else"] == "post"
-    post = nodes["post"]
-    assert (post["to"], post["as_agent"], post["next"]) == (to, "daimon", "done")
-    assert (post["message"], post["files"]) == (
-        "${{ steps.run.summary }}",
-        "${{ steps.run.files }}",
-    )
+    post, files = nodes["post"], nodes["files"]
+    for node in (post, files):
+        assert (node["to"], node["as_agent"], node["next"]) == (to, "daimon", "done")
+        assert node["files"] == "${{ steps.run.files }}"
+    assert post["message"] == "${{ steps.run.summary }}" and "message" not in files
 
 
 def test_the_agent_key_and_the_dm_text_and_source_links_are_kept() -> None:
