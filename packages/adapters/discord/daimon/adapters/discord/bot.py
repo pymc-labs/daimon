@@ -877,7 +877,9 @@ class DaimonBot(commands.Bot):
         self._committed_message_ids: set[str] = set()
         self._orphans_retired: bool = False
         self._audience_sync = AudienceSync(
-            self.runtime.sessionmaker, reader=reader_from_settings(self.runtime.settings)
+            self.runtime.sessionmaker,
+            reader=reader_from_settings(self.runtime.settings),
+            settings=self.runtime.settings,
         )
         # Room-fact withdrawals come from the raw gateway events, before discord.py's
         # cache and before any handler (see `watch_gateway`).

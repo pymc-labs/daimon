@@ -1066,12 +1066,15 @@ def origin_of(url: str) -> str:
 
 
 WebProvider = Literal["discord", "slack", "microsoft"]
-WebModuleKey = Literal["chat", "agents", "channels", "routines", "credits", "integrations", "admin"]
+WebModuleKey = Literal[
+    "chat", "agents", "channels", "routines", "data", "credits", "integrations", "admin"
+]
 _WEB_MODULES: tuple[WebModuleKey, ...] = (
     "chat",
     "agents",
     "channels",
     "routines",
+    "data",
     "credits",
     "integrations",
     "admin",
@@ -1169,7 +1172,8 @@ class WebSettings(BaseModel):
         default=_WEB_MODULES,
         description=(
             "Sections of the web app that are on, comma-separated: "
-            "chat, agents, channels, routines, credits, integrations, admin."
+            "chat, agents, channels, routines, data, credits, integrations, admin. "
+            "The data section also needs the data sources feature."
         ),
     )
     nodes: WebNodesSettings = Field(
@@ -3224,6 +3228,24 @@ class DataSettings(BaseModel):
             "Private hosts or ranges, comma-separated, that database connections to external "
             "Postgres servers may reach. Public hosts need no entry."
         ),
+    )
+    declared: str | None = Field(
+        default=None,
+        description=(
+            "Path of the YAML or JSON file that declares data sources, scopes and grants. It is "
+            "applied at start and every 10 minutes; its rows are read-only in the app. Unset: "
+            "nothing is declared."
+        ),
+    )
+    google_oauth_client_id: str | None = Field(
+        default=None,
+        description=(
+            "Google OAuth client id that people sign in with to prove their Google account to a "
+            "data source. Unset: no Google sign-in for data sources."
+        ),
+    )
+    google_oauth_client_secret: SecretStr | None = Field(
+        default=None, description="Secret of the Google OAuth client for data sources."
     )
 
     _split_lists = field_validator("private_hosts", mode="before")(_split_csv)

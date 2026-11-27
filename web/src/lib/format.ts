@@ -42,7 +42,7 @@ export function shortDate(iso?: string | null) {
   return d.getFullYear() === new Date().getFullYear() ? dayMonth(d) : `${dayMonth(d)} ${d.getFullYear()}`
 }
 
-const timeOnly = (iso: string) =>
+export const timeOnly = (iso: string) =>
   new Date(iso).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })
 
 export const initials = (name: string) =>

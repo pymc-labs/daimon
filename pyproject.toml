@@ -149,15 +149,17 @@ type = "forbidden"
 source_modules = ["daimon.core"]
 forbidden_modules = ["daimon.data"]
 
-# The data store reaches core through settings, stores and the ports core defines for it.
+# The data store reaches core through settings, stores, the ports core defines for it, and the
+# read audience core resolves.
 [[tool.importlinter.contracts]]
-name = "The data store reaches core only through settings, stores and ports"
+name = "The data store reaches core only through settings, stores, ports and the read audience"
 type = "forbidden"
 source_modules = ["daimon.data"]
 forbidden_modules = ["daimon.core"]
 allow_indirect_imports = true
 ignore_imports = [
     "daimon.data.** -> daimon.core.config",
+    "daimon.data.** -> daimon.core.data_audience",
     "daimon.data.** -> daimon.core.stores",
     "daimon.data.** -> daimon.core.stores.**",
     "daimon.data.** -> daimon.core.ports",

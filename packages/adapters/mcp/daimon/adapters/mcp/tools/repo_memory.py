@@ -7,19 +7,28 @@ from typing import Literal, TypedDict
 
 import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.data_access import ledgers, readable_by_audience
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import load_channel_policy
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
+from daimon.core.data_audience import UNKNOWN_READ
 from daimon.core.features.snapshot import FeaturePlace, may_turn_on, resolve_features
 from daimon.core.github_app_session import REQUESTER_CACHE, effective_app_grant_view
 from daimon.core.github_requester_access import linked_permissions
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.permissions import readers_limited_at
 from daimon.core.repo_memory import MemoryOrigin, new_entry
+from daimon.core.stores.data_memory import note_reads, reads_of
 from daimon.core.stores.github_access import AuthorizedRepo
 from daimon.core.stores.github_connect import requester_linked_github_user_id
-from daimon.core.stores.repo_memory import delete_entry, get_entry, list_entries, save_entry
+from daimon.core.stores.repo_memory import (
+    MemoryEntry,
+    delete_entry,
+    get_entry,
+    list_entries,
+    save_entry,
+)
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -135,13 +144,16 @@ async def repo_memory_impl(
     async with runtime.session_factory.begin() as session:
         if operation == "list":
             entries = await list_entries(session, **key, account_id=auth.account_id)
+            entries = await _shown(runtime, auth, entries, recall=False)
             lines = [f"Repo memories for {target.repo_full_name}:"]
             lines.extend(f"{e.name}: {e.title} [{e.kind}, {e.scope}]" for e in entries)
             return "\n".join(lines) if entries else f"No repo memories for {target.repo_full_name}."
         if operation == "view":
             entry = await get_entry(session, **key, name=name)
-            if entry is not None and (
-                entry.scope == "repo" or entry.created_by_account_id == auth.account_id
+            if (
+                entry is not None
+                and (entry.scope == "repo" or entry.created_by_account_id == auth.account_id)
+                and await _shown(runtime, auth, [entry])
             ):
                 return entry.body
         elif operation == "delete":
@@ -158,6 +170,7 @@ async def repo_memory_impl(
                     kind=kind,
                     scope=scope,
                 )
+                entry = entry.model_copy(update={"data_refs": await _refs(runtime, auth)})
                 previous = await save_entry(session, entry=entry)
             except ValueError as exc:
                 raise ToolError(str(exc)) from exc
@@ -168,6 +181,39 @@ async def repo_memory_impl(
                 )
             return f"Saved repo memory '{entry.name}' for {target.repo_full_name}."
     raise ToolError(f"Repo memory '{name}' not found for {target.repo_full_name}.")
+
+
+async def _refs(runtime: McpRuntime, auth: AuthIdentity) -> list[str] | None:
+    """What a save records: what the session read so far, which bounds who may recall it.
+    `resolve_repo` refuses a save with no session; one would recall nowhere."""
+    if auth.chat_session_id is None:
+        return [UNKNOWN_READ]
+    async with runtime.session_factory() as session:
+        refs = await reads_of(
+            session, tenant_id=auth.tenant_id, chat_session_id=auth.chat_session_id
+        )
+    return refs or None
+
+
+async def _shown(
+    runtime: McpRuntime, auth: AuthIdentity, entries: list[MemoryEntry], *, recall: bool = True
+) -> list[MemoryEntry]:
+    """The entries everyone this answer is for may recall: no data recorded, or every
+    recorded item readable by them all. What is `recall`ed (viewed, not listed) joins the
+    session's reads, so a memory saved from it records them too."""
+    tagged = [e for e in entries if e.data_refs]
+    ok = await readable_by_audience(runtime, auth, [e.data_refs or [] for e in tagged])
+    hidden = {e.name for e, shown in zip(tagged, ok, strict=True) if not shown}
+    recalled = [ref for e in tagged if e.name not in hidden for ref in e.data_refs or []]
+    if recall and recalled:
+        sessions = await ledgers(runtime, auth)
+        async with runtime.session_factory.begin() as session:
+            for chat_session_id in sessions:
+                await note_reads(
+                    session, tenant_id=auth.tenant_id, chat_session_id=chat_session_id,
+                    refs=recalled,
+                )  # fmt: skip
+    return [e for e in entries if e.name not in hidden]
 
 
 def register_repo_memory_tools(mcp: FastMCP, runtime: McpRuntime) -> None:

@@ -94,6 +94,7 @@ from daimon.adapters.slack.continuation_dispatch import dispatch_pending_continu
 from daimon.adapters.slack.credential_requests import (
     evaluate_credential_submission,
     handle_credential_request_click,
+    run_data_source_credential_submission,
     run_env_credential_submission,
     run_env_file_credential_submission,
     run_mcp_credential_submission,
@@ -714,6 +715,10 @@ class SlackApp:
                 )
             elif decision.kind == "repo":
                 await run_repo_bind_credential_submission(
+                    self.runtime, value=decision.value, **common
+                )
+            elif decision.kind == "data_source":
+                await run_data_source_credential_submission(
                     self.runtime, value=decision.value, **common
                 )
             else:

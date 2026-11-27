@@ -48,6 +48,7 @@ from daimon.core.continuity.tool_messages import (
     render_tool_refusal_unreachable,
     render_tool_unsaved_work_question,
 )
+from daimon.core.data_reading import AFTER_DATA_REFUSAL, AGENT_REQUEST_REFUSAL, reads_data
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_FORKED_FROM,
@@ -56,13 +57,16 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_NAME,
     forked_in,
 )
+from daimon.core.features.snapshot import FeaturePlace
 from daimon.core.handoff_context import redact_handoff_summary
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.native_admins import AdminCaller
+from daimon.core.ports.gate import data_sources_on
 from daimon.core.relay_scope import agent_has_identity_relay
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores import agent_backends
 from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.data_memory import has_read
 from daimon.core.stores.domain import ChatPlatform, TurnOriginRow
 from daimon.core.stores.task_continuations import record_continuation
 from daimon.core.stores.thread_agent_bindings import set_handoff_summary
@@ -250,6 +254,23 @@ async def _hand_off_task_impl(
             "That agent is not here, or it was recreated and has a new id. "
             "Look it up with list_agents and pass the id it reports now. Nothing was changed."
         )
+    # A data-reading agent takes no conversation from another agent (`daimon.core.data_reading`).
+    destination_place = FeaturePlace.of(
+        auth.tenant_id,
+        platform,
+        origin.parent_channel_id,
+        origin.thread_id,
+        agent_id=destination.id,
+    )
+    if await reads_data(runtime.session_factory, runtime.settings, destination_place):
+        raise ToolError(f"{AGENT_REQUEST_REFUSAL} Nothing was changed.")
+    # Nor does a conversation that read data hand it on.
+    if auth.chat_session_id is not None and data_sources_on(runtime.settings):
+        async with runtime.session_factory() as session:
+            if await has_read(
+                session, tenant_id=auth.tenant_id, chat_session_id=auth.chat_session_id
+            ):
+                raise ToolError(f"{AFTER_DATA_REFUSAL} Nothing was changed.")
     destination_name = destination.metadata.get(MA_METADATA_KEY_NAME)
     if not destination_name:
         raise ToolError(

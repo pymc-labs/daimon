@@ -17,6 +17,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Literal
 
+from daimon.core.data_audience import user_subject
 from daimon.core.stores import (
     account_records,
     accounts,
@@ -33,6 +34,7 @@ from daimon.core.stores import (
     mcp_tokens,
     monitoring,
     ops_events,
+    room_viewers,
     routines,
     secret_shares,
     slack_turn_contexts,
@@ -261,6 +263,16 @@ async def _slack_token(session: AsyncSession, pp: PlatformPrincipalRow, *, delet
         session, team_id=tenant.external_id, slack_user_id=pp.external_id
     )
     return int(token is not None)
+
+
+async def _room_viewer(session: AsyncSession, pp: PlatformPrincipalRow, *, delete: bool) -> int:
+    # Stored as reader subjects, whose workspace is the tenant's external id.
+    tenant = await tenants.get_tenant(session, pp.tenant_id)
+    if tenant is None:
+        return 0
+    viewer = user_subject(pp.platform, tenant.external_id, pp.external_id)
+    fn = room_viewers.forget_viewer if delete else room_viewers.count_viewer
+    return await fn(session, tenant_id=pp.tenant_id, viewer=viewer)
 
 
 def by_imported_user(key: str, count: AccountFn, erase: AccountFn) -> Erasable:
@@ -507,6 +519,12 @@ ERASABLE: tuple[Erasable, ...] = (
         lambda s, pp: _slack_token(s, pp, delete=True),
         "slack",
         count=lambda s, pp: _slack_token(s, pp, delete=False),
+    ),
+    by_user(
+        "room_viewers",
+        lambda s, pp: _room_viewer(s, pp, delete=True),
+        "discord",
+        count=lambda s, pp: _room_viewer(s, pp, delete=False),
     ),
     Erasable(
         "principal_links",

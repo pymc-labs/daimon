@@ -114,7 +114,7 @@ async def test_erasure_removes_a_persons_data_and_a_tenant_purge_removes_the_ten
         assert await _count(conn, f"{d}.audit where account_id = %s", (you,)) == 1, (
             "another's trail goes"
         )
-        assert await _holding(conn, d, str(me)) == [], "a row still names the person"
+        assert await _holding(conn, d, str(me)) == ["erased_accounts"], "only the tombstone stays"
         async with AsyncSession(db_engine) as session, session.begin():
             await erasure_port.erase_tenant(session, tenant_id=tenant)
         for table in ("sources", "scopes", "grants", "audit"):

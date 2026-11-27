@@ -15,6 +15,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Final
 
+from daimon.core.data_tools import DATA_READS, DATA_SOURCES
 from daimon.core.features.session_identity import SessionIdentity
 from daimon.core.features.snapshot import FeatureSnapshot
 from daimon.core.mcp_identity import identity_relay_urls, relay_base
@@ -115,3 +116,24 @@ def without_long_term_memory(snapshot: FeatureSnapshot) -> FeatureSnapshot:
         if key in snapshot.features
     }
     return replace(snapshot, features={**snapshot.features, **forced})
+
+
+def without_data_reads(snapshot: FeatureSnapshot) -> FeatureSnapshot:
+    """The snapshot with `data_reads` Off and locked: a room outsiders may read, or a turn
+    held for an outsider, is offered no data tool (`daimon.core.data_audience`)."""
+    from daimon.core.features.resolver import ResolvedFeature
+
+    if DATA_READS not in snapshot.features:
+        return snapshot
+    forced = ResolvedFeature(DATA_READS, "off", "agent", locked=True)
+    return replace(snapshot, features={**snapshot.features, DATA_READS: forced})
+
+
+def without_data_sources(snapshot: FeatureSnapshot) -> FeatureSnapshot:
+    """The snapshot with `data_sources` and `data_reads` Off: a workspace with no source, or
+    no ready store, is offered no data tool but `DATA_SETUP_TOOLS` (`SessionToolset`)."""
+    from daimon.core.features.resolver import ResolvedFeature
+
+    forced = ResolvedFeature(DATA_SOURCES, "off", "workspace", locked=True, unavailable="no_source")
+    reads = without_data_reads(snapshot)
+    return replace(reads, features={**reads.features, DATA_SOURCES: forced})

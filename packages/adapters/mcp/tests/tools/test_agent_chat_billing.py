@@ -184,6 +184,7 @@ class _World:
             )
         )
         settings = MagicMock()
+        settings.features = {}
         settings.mcp.jwt_secret = None
         settings.github.fallback_pat = None
         settings.billing.markup = _MARKUP

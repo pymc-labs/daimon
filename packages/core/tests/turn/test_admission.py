@@ -22,8 +22,10 @@ from daimon.core.billing import BillingConfig
 from daimon.core.capability_tools import CAPABILITY_TOOLS
 from daimon.core.channel_budget_notice import BudgetNotice, drain_budget_notices
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
+from daimon.core.data_reading import AFTER_DATA_REFUSAL, AGENT_REQUEST_REFUSAL
+from daimon.core.data_tools import DATA_READS
 from daimon.core.direct_messages import start_dm
-from daimon.core.errors import DaimonError
+from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.features.registry import DEFAULT
 from daimon.core.features.service import set_workspace_feature
 from daimon.core.features.snapshot import CACHE
@@ -31,14 +33,19 @@ from daimon.core.features.tool_gate import SESSION_KEPT_TOOLS
 from daimon.core.ma_resolver import MAResolverMissError, ResolverCache, new_resolver_cache
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.scope import ChannelScopeRef
+from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, set_access_policy
 from daimon.core.stores.accounts import set_role
+from daimon.core.stores.data_memory import note_reads
 from daimon.core.stores.domain import FeatureTarget, FundingMode, Role, TenantRow
 from daimon.core.stores.feature_values import set_feature_value
+from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.stores.thread_agent_bindings import upsert_responder_binding
+from daimon.core.stores.thread_session_lineage import request_fresh_start
+from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.turn.admission import (
     Admission,
     AdmissionDenied,
@@ -585,6 +592,95 @@ async def test_admit_happy_path_returns_admission_with_retrieved_agent_and_accou
     assert admission.account_id == principal.account_id, (
         "account_id must match the principal resolved for this (platform, external_id)"
     )
+
+
+async def test_a_failed_data_reads_lookup_runs_the_turn_without_data_tools(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unknown answer reads no data: the turn is admitted with the data tools hidden."""
+    tenant = await make_tenant(db_session)
+    await _tenant_config(db_session, tenant=tenant)
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    await set_workspace_feature(
+        db_session,
+        None,
+        tenant_id=tenant.id,
+        platform="discord",
+        key=DATA_READS,
+        value="on",
+        account_id=None,
+        surface="cli",
+    )
+    await db_session.commit()
+    monkeypatch.setattr(
+        "daimon.core.turn.admission.reads_data", AsyncMock(side_effect=RuntimeError("down"))
+    )
+    router = resolved_agent_env_router(
+        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+    monkeypatch.setenv("DAIMON_FEATURES__DATA_SOURCES", "on")
+
+    admission = await admit_chat(deps, tenant, now=_NOW)
+
+    assert not admission.data_reading
+    assert admission.features is not None and not admission.features.on(DATA_READS)
+
+
+async def test_a_session_that_read_data_stays_data_reading_but_unsealed_until_a_fresh_start(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With `data_reads` Off now, or its lookup failing, a live session that read data stays
+    data-reading until a fresh start, yet is not sealed: no relay scope or hold, so the
+    session is reused, and memory stays on with provider stores mounted read-only."""
+    monkeypatch.setenv("DAIMON_FEATURES__DATA_SOURCES", "on")
+    tenant = await make_tenant(db_session)
+    await _tenant_config(db_session, tenant=tenant)
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    principal = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform="discord", external_id="user-1"
+    )
+    snapshot = SessionSnapshot(
+        ma_agent_id="ag_1", model_id="claude-sonnet-4-6", environment_id="env_1",
+        system_sha256="s", skills_sha256="s", tools_sha256="s", mcp_servers_sha256="s",
+        env_sha256=None, agent_version=1, agent_name="daimon", repo_url=None, repo_branch=None,
+        memory_store_id=None, vault_id=None, data_read=True,
+    )  # fmt: skip
+    row = await create_thread_session(
+        db_session, tenant_id=tenant.id, platform="discord", thread_id="chan-1",
+        account_id=principal.account_id, ma_session_id="ses_1", effective_config=snapshot,
+    )  # fmt: skip
+    await note_reads(db_session, tenant_id=tenant.id, chat_session_id="chat-1", refs=["sql"])
+    await db_session.commit()
+    router = resolved_agent_env_router(
+        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+
+    kept = await admit_chat(deps, tenant, now=_NOW)
+    assert kept.data_reading and kept.stores_read_only, "the read is remembered"
+    assert not kept.relay_scoped and kept.hold is None, "no fresh session, no room hold"
+    assert not kept.memory_read_only, "Daimon's own memory stays writable"
+    with monkeypatch.context() as m:
+        m.setattr("daimon.core.turn.admission.reads_data", AsyncMock(side_effect=RuntimeError))
+        failed = await admit_chat(deps, tenant, now=_NOW)
+    assert failed.data_reading, "a failed lookup keeps it data-reading"
+    with monkeypatch.context() as m:
+        m.setattr("daimon.core.turn.admission.has_sources", AsyncMock(return_value=False))
+        retired = await admit_chat(deps, tenant, now=_NOW)
+    assert retired.data_reading, "with every source retired, the read is still remembered"
+    async with db_session_factory.begin() as session:
+        await request_fresh_start(session, id=row.id, at=_NOW)
+    fresh = await admit_chat(deps, tenant, now=_NOW)
+    assert not fresh.data_reading and not fresh.stores_read_only, "a fresh start ends it"
 
 
 async def test_admission_limits_follow_their_settings(
@@ -3014,3 +3110,59 @@ async def test_a_relay_agents_helper_inherits_its_hold_seal_and_no_memory(
     unchanged = await admit_helper(deps, plain, call, now=_NOW)
     assert unchanged.hold is None and not unchanged.origin_seal_ids
     assert unchanged.identity.shared_memory
+
+
+@pytest.mark.parametrize(
+    ("asker_reads", "helper_reads", "refusal"),
+    [
+        (False, False, None),
+        (True, True, None),
+        (True, False, AFTER_DATA_REFUSAL),
+        (False, True, AGENT_REQUEST_REFUSAL),
+    ],
+    ids=["neither", "both", "data-asker", "data-helper"],
+)
+async def test_only_data_reading_agents_ask_each_other(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    asker_reads: bool,
+    helper_reads: bool,
+    refusal: str | None,
+) -> None:
+    """Data reaches another agent's memory only where that memory records it."""
+    from daimon.core.scope import HelperTarget
+    from daimon.core.turn.admission import HelperCall, admit_helper
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    router = resolved_agent_env_router(
+        ma_agent(id="ag_1", name="daimon", tenant_id=tenant.id),
+        ma_environment(id="env_1", name="default", tenant_id=tenant.id),
+    )
+    router.add_agent(ma_agent(id="ag_2", name="helper", tenant_id=tenant.id))
+    deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
+    CACHE.clear()
+    parent = await admit(
+        deps,
+        origin="chat",
+        tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
+        platform="discord",
+        external_user_id="user-1",
+        channel_id="chan-1",
+        role=Role.ADMIN,
+        now=_NOW,
+    )
+    assert parent.request is not None
+    monkeypatch.setattr(
+        "daimon.core.turn.admission.reads_data", AsyncMock(return_value=helper_reads)
+    )
+    call = HelperCall(target=HelperTarget(ma_agent_id="ag_2", name="helper"), thread_key="h-1")
+    request = replace(parent.request, data_reading=asker_reads)
+    if refusal is None:
+        assert (await admit_helper(deps, request, call, now=_NOW)).agent.id == "ag_2"
+        return
+    with pytest.raises(UserFacingError) as refused:
+        await admit_helper(deps, request, call, now=_NOW)
+    assert str(refused.value) == refusal

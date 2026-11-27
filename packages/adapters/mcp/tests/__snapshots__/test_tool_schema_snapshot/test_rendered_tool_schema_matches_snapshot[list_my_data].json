@@ -1,7 +1,7 @@
 {
   "description": [
-    "List what is held for you: connected accounts and sign-ins, and personal memory per",
-    "agent. Ids feed remove_my_data."
+    "List what is held for you: connected accounts and sign-ins, personal memory per",
+    "agent, and your accounts in the data sources. Ids feed remove_my_data."
   ],
   "parameters": {
     "additionalProperties": false,

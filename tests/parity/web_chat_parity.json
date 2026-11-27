@@ -1,5 +1,11 @@
 {
  "routes": {
+  "DELETE /api/admin/data/scopes/{scope_id}": {
+   "tool": "change_data_access"
+  },
+  "DELETE /api/admin/data/scopes/{scope_id}/grants": {
+   "tool": "change_data_access"
+  },
   "DELETE /api/admin/dm/rules/{position}": {
    "tool": "change_workspace_settings"
   },
@@ -53,6 +59,9 @@
   "DELETE /api/me/accounts/{key}": {
    "exempt": "web sign-in and session (linked account)"
   },
+  "DELETE /api/profile/data/connections/{source_id}": {
+   "tool": "remove_my_data"
+  },
   "DELETE /api/profile/keys/{key_id}": {
    "tool": "remove_my_data"
   },
@@ -100,6 +109,24 @@
   },
   "PATCH /{path:path}": {
    "exempt": "serves the web app's own pages"
+  },
+  "POST /api/admin/data/links": {
+   "tool": "change_data_links"
+  },
+  "POST /api/admin/data/links/reject": {
+   "tool": "change_data_links"
+  },
+  "POST /api/admin/data/links/unlink": {
+   "tool": "change_data_links"
+  },
+  "POST /api/admin/data/redaction/{name}/approve": {
+   "tool": "approve_data_rule_set"
+  },
+  "POST /api/admin/data/scopes": {
+   "tool": "change_data_access"
+  },
+  "POST /api/admin/data/scopes/{scope_id}/grants": {
+   "tool": "change_data_access"
   },
   "POST /api/admin/dm/rules": {
    "tool": "change_workspace_settings"
@@ -246,6 +273,12 @@
   "POST /api/github/connect/{step}": {
    "exempt": "the GitHub connect pages every platform's link opens; the invitation is the authority"
   },
+  "POST /api/integrations/data/sources": {
+   "tool": "change_data_source"
+  },
+  "POST /api/integrations/data/sources/{source_id}/{action}": {
+   "tool": "change_data_source"
+  },
   "POST /api/integrations/tokens": {
    "panel": {
     "discord": "daimon.adapters.discord.agent_setup.operator_tokens_view",
@@ -258,6 +291,12 @@
   },
   "POST /api/profile/connections/disconnect": {
    "tool": "remove_my_data"
+  },
+  "POST /api/profile/data/connect": {
+   "tool": "connect_my_data"
+  },
+  "POST /api/profile/data/connect/{pending_id}/poll": {
+   "tool": "check_my_data_connection"
   },
   "POST /api/profile/delete": {
    "panel": {
@@ -308,6 +347,9 @@
   },
   "POST /{path:path}": {
    "exempt": "serves the web app's own pages"
+  },
+  "PUT /api/admin/data/people/{account_id}/redacted": {
+   "tool": "change_data_links"
   },
   "PUT /api/agents/environments/{environment_id}": {
    "tool": "update_environment"

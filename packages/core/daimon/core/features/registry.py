@@ -1424,6 +1424,26 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "The agent can take in sales leads and look them up. Off removes the lead tools here.",
         page="lead-intake.md#operator-setup",
     ),
+    FeatureSpec(
+        key="data_reads",
+        name="Data source reads",
+        category="model_input",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("workspace", "agent", "channel"),
+        binds="session_mutable",
+        doc=(
+            "The agent can search the team's data sources, showing only what everyone "
+            "who will see the answer may read. Other agents cannot ask it, writes out ask "
+            "first, and its memories show only to people who could read that data."
+        ),
+        platforms=EVERY_PLATFORM,
+        # Writes after a data read must wait for a card: tool safety is what cards them.
+        depends_on=("data_sources", "tool_safety"),
+        authority=_ADMIN_NOT_OWNER,
+        page="features.md#data-source-reads",
+    ),
     _limit(
         "long_jobs_max_usd",
         "Long job dollar cap",
@@ -1672,12 +1692,12 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         category="model_input",
         effect="capability",
         values=_ON_OFF,
-        default="off",
+        default="on",
         tiers=("deployment", "workspace"),
-        binds="turn",
+        binds="session_mutable",
         doc=(
-            "The data store, with its connected sources and search. The operator turns it on; "
-            "a team can turn it off."
+            "The data store, with its sources and search, idle until an admin adds a source. "
+            "The operator or a team can turn it off."
         ),
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,

@@ -62,7 +62,11 @@ from starlette.types import ASGIApp
 SECRET = "a" * 32
 _ADMIN_CARDED_TOOLS = frozenset(
     {
+        "approve_data_rule_set",
         "approve_server_skill_update",
+        "change_data_access",
+        "change_data_links",
+        "change_data_source",
         "change_workspace_settings",
         "delete_allowance",
         "restore_library_skill_version",

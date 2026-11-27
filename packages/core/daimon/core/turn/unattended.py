@@ -369,6 +369,7 @@ def unattended_posture(
     entry_point: UnattendedEntryPoint | None = None,
     routine_sandbox_tools: bool = False,
     relays: RelayCatalogues | None = None,
+    data_read: bool = False,
     owner_tools: frozenset[str] = frozenset(),
 ) -> PolicyApproval:
     """How an unattended turn on `session` answers its pauses.
@@ -381,10 +382,13 @@ def unattended_posture(
     is the seam for operator-trusted MCP hints; it must answer only for
     trusted servers. A built-in or custom call is refused (`capability_posture`)
     unless `routine_sandbox_tools` opts a `routine` in; no other `entry_point`
-    can be opted in. `owner_tools` are protected tools whose owner a verified rule counts
-    as present (`compute_sessions.agent_chat_owner`); every deny and ask still decides
-    them, and the session keeps asking on each, so this posture sees every call.
+    can be opted in. With `data_read` (the agent reads data sources) no write runs and no
+    built-in is opted in (`after_data_read`).
+    `owner_tools` are protected tools whose owner a verified rule counts as present
+    (`compute_sessions.agent_chat_owner`); every deny and ask still decides them, and
+    the session keeps asking on each, so this posture sees every call.
     """
+    routine_sandbox_tools = routine_sandbox_tools and not data_read
     posture = PolicyApproval(
         decide=unattended_decider(
             policy,
@@ -403,6 +407,7 @@ def unattended_posture(
             if session_factory is not None and tenant_id is not None
             else None,
             daimon_rules=True,
+            data_read=data_read,
             owner_tools=owner_tools,
             annotations_for=annotations_for
             or session_annotations(
@@ -599,6 +604,7 @@ async def dm_session_authority(
         fernet=deps.fernet,
         entry_point=entry_point,
         routine_sandbox_tools=builtins,
+        data_read=admission.data_reading,
         relays=await tenant_relay_catalogues(
             deps.settings.mcp_identity,
             public_url=deps.public_url,

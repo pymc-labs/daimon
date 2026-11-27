@@ -79,6 +79,9 @@ from daimon.adapters.mcp.tools.channels import register_channel_tools
 from daimon.adapters.mcp.tools.cli_token import register_cli_token_tool
 from daimon.adapters.mcp.tools.credential_requests import register_credential_request_tools
 from daimon.adapters.mcp.tools.credit_reports import register_credit_report_tools
+from daimon.adapters.mcp.tools.data import register_data_tools
+from daimon.adapters.mcp.tools.data_admin import register_data_admin_tools
+from daimon.adapters.mcp.tools.data_connect import register_data_connect_tools
 from daimon.adapters.mcp.tools.github_app import register_github_app_tools
 from daimon.adapters.mcp.tools.github_connect import register_github_connect_tools
 from daimon.adapters.mcp.tools.github_remove_repo import register_github_remove_repo_tools
@@ -599,6 +602,9 @@ def create_mcp_app(
     long_jobs.register_long_job_tools(mcp, runtime)
     compute.register_compute_tools(mcp, runtime)
     register_lead_intake_tools(mcp, runtime)
+    register_data_tools(mcp, runtime)  # data_* reads, behind data_reads
+    register_data_admin_tools(mcp, runtime)  # the data pages' admin, from chat
+    register_data_connect_tools(mcp, runtime)  # a person's own data sign-ins
     from daimon.adapters.mcp.tools.watches import register_watch_tools
 
     register_watch_tools(mcp, runtime)

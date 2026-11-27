@@ -117,6 +117,7 @@ from daimon.core.stores.thread_session_lineage import (
 from daimon.core.stores.thread_sessions import (
     get_live_thread_session,
     get_thread_session_by_id,
+    mark_data_read,
     record_snapshot,
     set_budget_channel_stamp,
     update_mutable_fingerprint,
@@ -685,7 +686,12 @@ async def prepare_session_for_turn(
                 find_carry_over=find_carry_over,
             )
 
-    return await retry_fences(attempt)
+    result = await retry_fences(attempt)
+    turn = result.prepared if isinstance(result, PreparationDeferred) else result
+    if isinstance(turn, PreparedTurn) and turn.admission.data_reading and turn.mapping_id:
+        async with deps.sessionmaker() as session, session.begin():
+            await mark_data_read(session, id=turn.mapping_id)
+    return result
 
 
 async def _resolve_legacy_budget_stamp(
@@ -891,10 +897,12 @@ async def _prepare_session_for_turn_locked(
             return await from_fresh(fresh, carried or CONTINUED)
 
         fresh_start = row.fresh_start_requested_at is not None
-        # A relay agent's channel turn starts from nothing: an earlier turn's
-        # Grove results must not outlive the audience that was allowed to see them
-        # (`daimon.core.relay_scope`). Channel history still gives continuity.
-        relay_fresh = admission.relay_scoped and admission.hold is not None
+        # A relay or data-reading agent's held turn starts from nothing: earlier relay
+        # results or data reads must not outlive the audience that was allowed to see
+        # them (`daimon.core.relay_scope`). Channel history still gives continuity.
+        relay_fresh = admission.hold is not None and (
+            admission.relay_scoped or admission.data_reading
+        )
         fresh_start = fresh_start or relay_fresh
 
         await _heal_lineage(deps, db, row=row)
@@ -935,7 +943,7 @@ async def _prepare_session_for_turn_locked(
             if (
                 recorded is None
                 and not fresh_start
-                and not admission.memory_read_only
+                and not admission.stores_read_only
                 and admission.hold is None
                 and not admission.relay_scoped
                 and row.budget_channel_id in ("", admission.budget_channel_id)
@@ -1007,7 +1015,7 @@ async def _prepare_session_for_turn_locked(
                 and deps.mcp.jwt_secret is not None
                 and any(server.name == "daimon-mcp" for server in admission.agent.mcp_servers)
             ),
-            memory_read_only=admission.memory_read_only,
+            memory_read_only=admission.stores_read_only,
             asks_before_publishing=admission.asks_before_publishing,
             confirmed_tools=await confirmed_tools_for_tenant(deps, tenant_id, admission.agent.id),
             daimon_rule_tools=admission.daimon_rule_tools,
@@ -1104,7 +1112,7 @@ async def _prepare_session_for_turn_locked(
             model_choice_id(admission.agent.model) if recorded is None else recorded.pricing_id
         )
 
-        tightening_memory = admission.memory_read_only and (
+        tightening_memory = admission.stores_read_only and (
             recorded is None or not recorded.memory_read_only
         )
         # Leaving one memory store for another is a boundary: the old session
@@ -1209,7 +1217,9 @@ async def _prepare_session_for_turn_locked(
             # A fresh start may be a move here from another provider: carry that over.
             seed = (
                 await find_carry_over()
-                if fresh_start and not admission.relay_scoped and find_carry_over is not None
+                if fresh_start
+                and not (admission.relay_scoped or relay_fresh)
+                and find_carry_over is not None
                 else None
             )
             outcome = await _run_replacement(

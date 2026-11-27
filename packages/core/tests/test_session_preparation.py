@@ -3343,6 +3343,7 @@ async def test_concurrent_sends_and_replacement_preserve_pool_headroom(
             mcp=deps.mcp,
             tool_safety=deps.tool_safety,
             billing=SimpleNamespace(markup=Decimal(1)),
+            features={},
         ),
     )
     auth = AuthIdentity(
@@ -3555,6 +3556,7 @@ async def test_sends_complete_while_two_replacements_block_on_ma_io(
             mcp=deps.mcp,
             tool_safety=deps.tool_safety,
             billing=SimpleNamespace(markup=Decimal(1)),
+            features={},
         ),
     )
     recheck = _admission_recheck(
@@ -3740,6 +3742,7 @@ async def test_independent_sends_during_replacements_with_old_session_waiters(
             mcp=deps.mcp,
             tool_safety=deps.tool_safety,
             billing=SimpleNamespace(markup=Decimal(1)),
+            features={},
         ),
     )
     recheck = _admission_recheck(
@@ -4285,6 +4288,7 @@ async def test_old_session_cannot_be_written_after_successor_exists(db_session, 
             mcp=deps.mcp,
             tool_safety=deps.tool_safety,
             billing=SimpleNamespace(markup=Decimal(1)),
+            features={},
         ),
     )
     auth = AuthIdentity(
@@ -5126,6 +5130,31 @@ async def test_a_relay_agents_channel_turns_never_reuse_a_session_or_carry_work(
     again = await _prepare(deps, plain, tenant=tenant, account=account)
     assert isinstance(kept, PreparedTurn) and isinstance(again, PreparedTurn)
     assert again.ma_session_id == kept.ma_session_id and again.reused is True
+
+
+async def test_a_data_reading_agents_held_turns_never_reuse_a_session_or_carry_work(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Held, a data-reading agent's context may hold reads the new audience may not see."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    deps = _deps(db_session_factory, _Transport())
+    held = replace(
+        _admission(account=account),
+        data_reading=True,
+        hold=TurnHold(platform="discord", channel_id="c1", client=False),
+    )
+
+    async def _transfer(**_kwargs: Any) -> PreparedReplacement:
+        raise AssertionError("a held data turn carries nothing from the earlier session")
+
+    first = await _prepare(deps, held, tenant=tenant, account=account, transfer=_transfer)
+    second = await _prepare(deps, held, tenant=tenant, account=account, transfer=_transfer)
+    assert isinstance(first, PreparedTurn) and isinstance(second, PreparedTurn)
+    assert second.ma_session_id != first.ma_session_id and second.reused is False
+    assert second.continuity.transfer_kind is None
 
 
 async def test_a_relay_dm_replaces_a_session_recorded_with_memory_on(

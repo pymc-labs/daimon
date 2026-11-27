@@ -13,6 +13,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.anthropic_guard import anthropic_configured
+from daimon.core.data_reading import reads_data
 from daimon.core.features.snapshot import FeaturePlace, resolve_features
 from daimon.core.host_memory import (
     HOST_MEMORY_TAG,
@@ -25,6 +26,7 @@ from daimon.core.host_memory import (
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.provider_routine import routine_of_scope
 from daimon.core.routines import mounts_personal_memory
+from daimon.core.stores.data_memory import has_read
 from daimon.core.stores.routines import get_routine
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -78,6 +80,16 @@ async def open_host_memory(
                     already_read_only=read_only,
                 )
                 or read_only
+            )
+    # A data-reading agent, or a session that read data, writes no provider memory, which
+    # cannot record what it read.
+    read_only = read_only or await reads_data(
+        runtime.session_factory, runtime.settings, feature_place
+    )
+    if not read_only and origin.chat_session_id:
+        async with runtime.session_factory() as session:
+            read_only = await has_read(
+                session, tenant_id=auth.tenant_id, chat_session_id=origin.chat_session_id
             )
     routine_posts = False
     if personal and (routine_id := routine_of_scope(origin.thread_id)) is not None:

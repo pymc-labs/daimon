@@ -28,6 +28,14 @@ describe("sidebar", () => {
   })
 })
 
+describe("data module", () => {
+  it("shows only when the workspace has the module and the person may view", () => {
+    const on = person({ modules: ["chat", "data"], capabilities: ["chat.use", "data.view"] })
+    expect(sidebarFor(on).map((i) => i.to)).toEqual(["/chat", "/data"])
+    expect(sidebarFor(person({ modules: ["chat"], capabilities: ["chat.use", "data.view"] })).map((i) => i.to)).toEqual(["/chat"])
+  })
+})
+
 describe("redirects", () => {
   it("sends a hidden page to the first page the person may use", () => {
     const me = person()

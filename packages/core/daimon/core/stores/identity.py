@@ -126,6 +126,26 @@ async def mark_principal_foreign(
     )
 
 
+async def accounts_of(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    external_ids: Collection[str],
+) -> dict[str, uuid.UUID]:
+    """The account of each platform user in `external_ids` who has one here. Never creates.
+    A person verified to belong to another organisation is left out."""
+    rows = await session.execute(
+        select(PlatformPrincipal.external_id, PlatformPrincipal.account_id).where(
+            PlatformPrincipal.tenant_id == tenant_id,
+            PlatformPrincipal.platform == platform,
+            PlatformPrincipal.external_id.in_(list(external_ids)),
+            PlatformPrincipal.foreign_home_id.is_(None),
+        )
+    )
+    return dict(rows.tuples().all())
+
+
 async def find_platform_principal(
     session: AsyncSession,
     *,

@@ -128,6 +128,7 @@ from daimon.core.agent_mcp_credentials import sync_agent_mcp_credentials
 from daimon.core.agent_pins import agent_pin_names as core_agent_pin_names
 from daimon.core.billing import BillingConfig
 from daimon.core.config import get_repo_memory_settings
+from daimon.core.data_reading import AFTER_DATA_REFUSAL, AGENT_REQUEST_REFUSAL, reads_data
 from daimon.core.defaults.ma_index import find_environment_by_daimon_tag
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_BUDGET_CHANNEL,
@@ -152,6 +153,7 @@ from daimon.core.mcp_vault import (
 from daimon.core.monitoring import KeptQuestion, capture_question, monitored_notice
 from daimon.core.mux_compat import retrieve_agent, retrieve_agent_version
 from daimon.core.permissions import agent_permissions, channel_permissions, memory_writable
+from daimon.core.ports.gate import data_sources_on
 from daimon.core.pricing import MODEL_PRICING, cost_of
 from daimon.core.scope import ScopeContext
 from daimon.core.session_mutation import session_mutation_fence
@@ -162,6 +164,7 @@ from daimon.core.session_snapshot import (
 )
 from daimon.core.sessions import create_isolated_session, create_session
 from daimon.core.stores import session_settle_state
+from daimon.core.stores.data_memory import has_read
 from daimon.core.stores.github_access import list_live_grant_repositories
 from daimon.core.stores.github_issued_tokens import touch_unmapped_app_session
 from daimon.core.stores.scoped_config_read import resolve
@@ -632,6 +635,22 @@ async def _resolve_ma_agent(
     return agent
 
 
+async def _refuse_data_agent(runtime: McpRuntime, auth: AuthIdentity, ma_agent_id: str) -> None:
+    """Agent chat never drives a data-reading agent, nor any agent from a conversation that
+    read data (`daimon.core.data_reading`)."""
+    if auth.chat_session_id is not None and data_sources_on(runtime.settings):
+        async with runtime.session_factory() as session:
+            if await has_read(
+                session, tenant_id=auth.tenant_id, chat_session_id=auth.chat_session_id
+            ):
+                raise ToolError(AFTER_DATA_REFUSAL)
+    place = FeaturePlace.of(
+        auth.tenant_id, auth.platform or "mcp", auth.bound_channel_id, agent_id=ma_agent_id
+    )
+    if await reads_data(runtime.session_factory, runtime.settings, place):
+        raise ToolError(AGENT_REQUEST_REFUSAL)
+
+
 def agent_pin_names(agent: BetaManagedAgentsAgent) -> tuple[str | None, ...]:
     """Every name a channel pin on ``agent`` may be keyed by (`core.agent_pins`)."""
     return core_agent_pin_names(agent.name, agent.metadata)
@@ -941,6 +960,7 @@ async def _start_turn_impl(
     """
     require_outside_chat_turn(auth)
     ma_agent = await _resolve_ma_agent(runtime, auth)
+    await _refuse_data_agent(runtime, auth, ma_agent.id)
     await _refuse_another_provider(
         runtime,
         auth,
@@ -1155,6 +1175,7 @@ async def _continue_turn_impl(
     require_outside_chat_turn(auth)
     session = await _verify_agent_owns_session(runtime, auth, handle)
     require_session_driver(session, auth)
+    await _refuse_data_agent(runtime, auth, str(session.agent.id))
     if (observation := current_outcome.get()) is not None:
         observation.session_id = handle
         observation.agent_id = str(session.agent.id)

@@ -12,6 +12,8 @@ from typing import Annotated
 from daimon.adapters.web.cookies import session_token, token_sha256
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.config import WebModuleKey
+from daimon.core.features.snapshot import FeaturePlace, feature_in
+from daimon.core.ports.gate import data_sources_on
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import web_identities as identities_store
 from daimon.core.stores import web_invites as invites_store
@@ -32,6 +34,7 @@ from daimon.core.web_roles_rules import (
 from daimon.core.web_roles_rules import (
     role_of as role_of,
 )
+from daimon.data import pool
 from fastapi import Depends, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -99,6 +102,18 @@ async def signin_allowed_in(db: AsyncSession, *, tenant_id: uuid.UUID) -> bool:
     """Whether a sign-in may work in the workspace now: it is still there."""
     tenant = await tenants_store.get_tenant(db, tenant_id)
     return tenant is not None and tenant.archived_at is None
+
+
+async def workspace_data_sources_on(
+    runtime: WebRuntime, db: AsyncSession, tenant_id: uuid.UUID
+) -> bool:
+    """Whether the workspace has data sources on: the deployment's value, then its own, and
+    the store is installed (`pool.ready`)."""
+    if not data_sources_on(runtime.settings) or not await pool.ready(runtime.settings):
+        return False
+    return (
+        await feature_in(db, runtime.settings, FeaturePlace(tenant_id, "web"), "data_sources")
+    ).on
 
 
 #: What every refused capability reads as, whoever asks and whatever they asked for.
@@ -176,6 +191,11 @@ async def _caller(
             enabled: list[WebModuleKey] = [
                 m for m in runtime.web.modules if m not in chosen.modules_off
             ]
+            # The data section follows the data sources feature, which the workspace may turn off.
+            if "data" in enabled and not await workspace_data_sources_on(
+                runtime, db, person.tenant_id
+            ):
+                enabled.remove("data")
             modules = tuple(modules_for(role, enabled))
             return WebCaller(
                 session=live,

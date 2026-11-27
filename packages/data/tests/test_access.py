@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 
 import psycopg
 import pytest
-from daimon.data import acl
+from daimon.data import acl, reads
 from daimon.data.access import ACL_SCOPE, READER_CAP, ReadContext, person, scoped, subject
 from daimon.data.schema import Schemas
 from daimon.testing.data_db import DataDb
@@ -26,6 +26,8 @@ DEFINERS = {
 }
 CALLER_SQL = "caller_sql"
 """The one definer that takes arguments: the text of a caller's query (tested in test_sync)."""
+PARITY = "parity_visible"
+"""Takes a source and a person; only the parity role may run it (`0005_grants.sql`)."""
 
 
 def now() -> datetime:
@@ -196,11 +198,11 @@ async def test_another_tenants_source_is_never_visible_in_rows_or_through_any_de
         " from pg_proc p where p.pronamespace = %s::regnamespace and p.prosecdef",
         (store.d,),
     )
-    assert {r["name"] for r in definers} == DEFINERS | {CALLER_SQL}, (
+    assert {r["name"] for r in definers} == DEFINERS | {CALLER_SQL, PARITY}, (
         "a new definer needs a case here"
     )
     async with scoped(store.conn, store.schemas, ctx) as c:
-        for fn in (f for f in definers if f["name"] != CALLER_SQL):
+        for fn in (f for f in definers if f["name"] not in (CALLER_SQL, PARITY)):
             assert fn["args"] == 0, f"{fn['name']} takes arguments: call it here with hostile ones"
             got = [
                 v
@@ -218,6 +220,16 @@ async def test_another_tenants_source_is_never_visible_in_rows_or_through_any_de
                 assert got == [["public"]], f"{fn['name']} returns more than the context's scopes"
             else:
                 assert fn["type"] in ("text", "double precision"), f"{fn['name']}: unchecked type"
+
+
+async def test_caller_sql_never_reads_a_records_payload(store: Store) -> None:
+    """Ingest redaction never touches the payload, so the reader views leave it out."""
+    cols = await store.rows(
+        "select column_name from information_schema.columns"
+        " where table_schema = %s and table_name = 'records'",
+        (store.schemas.views,),
+    )
+    assert cols and "payload" not in {c["column_name"] for c in cols}
 
 
 async def test_a_shadow_retired_or_disabled_source_shows_nothing(store: Store) -> None:
@@ -542,3 +554,22 @@ async def test_the_set_helpers_sort_dedupe_and_intersect(store: Store) -> None:
         f" {store.d}.arr_and('{{1}}', '{{}}') as e, {store.d}.arr_sort('{{}}') as z"
     )
     assert got == [{"s": [1, 3, 5], "a": [3, 4], "e": [], "z": []}]
+
+
+async def test_a_memorys_data_is_readable_only_if_every_item_is(store: Store) -> None:
+    """A memory recorded these items (`daimon.core.stores.data_memory`); fail closed."""
+    me, you = someone(), someone()
+    src = await store.source()
+    mine = await store.put(src, "doc:me", await store.intern(src, acl.ref(me)))
+    both = await store.put(src, "doc:both", await store.intern(src, acl.ref(me), acl.ref(you)))
+    refs = [f"record:{mine}", f"record:{both}"]
+
+    async def readable(ctx: ReadContext, items: list[str]) -> bool:
+        return await reads.readable(store.conn, store.schemas, ctx, items)
+
+    assert await readable(store.who(me), refs), "every item is readable"
+    assert not await readable(store.who(me, you), refs), "one item is hidden from someone"
+    for unknown in ("live:" + str(src), "sql", "record:nope"):
+        assert not await readable(store.who(me), [unknown]), f"{unknown} cannot be told"
+    await store.conn.execute(f"delete from {store.d}.records where id = %s".encode(), (mine,))
+    assert not await readable(store.who(me), refs), "a deleted item hides the memory"

@@ -1,0 +1,18 @@
+{
+  "description": [
+    "Whether the sign-in started by connect_my_data (pending_id) is finished. Where",
+    "the link opened a page, it finishes there and shows in list_my_data."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "pending_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "pending_id"
+    ],
+    "type": "object"
+  }
+}

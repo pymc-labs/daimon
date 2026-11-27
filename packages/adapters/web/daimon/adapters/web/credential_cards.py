@@ -1,6 +1,7 @@
 """Credential cards in the web chat: raised from the MCP process's notice, answered here.
 
-A saved value goes to the agent's vault and never into a message. A saved key carries the
+A saved value goes to the agent's vault, or straight onto a data source for a `data_source`
+form, and never into a message. A saved key carries the
 chat on in a follow-up turn only when the agent asked for work to be done with it; a skip,
 or a key with no work waiting, only settles the card.
 """
@@ -20,16 +21,24 @@ from daimon.adapters.web.control_cards import show_card
 from daimon.adapters.web.lifecycle import WebTurnLifecycle
 from daimon.core.agent_ownership import owns_agent
 from daimon.core.agent_pins import FormPinRefused, request_pin_refusal
+from daimon.core.config import Settings
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
-from daimon.core.credential_submit import apply_env_submit, env_name_refusal, prepare_env_submit
+from daimon.core.credential_submit import (
+    apply_data_source_submit,
+    apply_env_submit,
+    env_name_refusal,
+    prepare_env_submit,
+)
 from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.env_file import env_name_problem
 from daimon.core.operation_policy import TargetFacts, decide_operation
+from daimon.core.ports.data_credentials import SourceCredentialRefused
 from daimon.core.posted_controls.cards import (
     ALREADY_USED_MESSAGE,
     NO_LONGER_VALID_MESSAGE,
     WRONG_REQUESTER_MESSAGE,
+    data_source_content,
 )
 from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import web_chat as chat_store
@@ -67,6 +76,12 @@ class CredentialAnswered:
 def card_for(
     row: CredentialRequestRow, *, state: Literal["pending", "saved", "skipped"] = "pending"
 ) -> WebCredentialCard:
+    if row.kind == "data_source":
+        headline, facts = data_source_content(row.target)
+        return WebCredentialCard(
+            id=str(row.idempotency_key), state=state, headline=headline.removeprefix("🔑 "),
+            fact=facts[0], key=row.target,
+        )  # fmt: skip
     agent = row.target_name or "This agent"
     return WebCredentialCard(
         id=str(row.idempotency_key),
@@ -92,7 +107,9 @@ class WebCredentialCards:
         sessionmaker: async_sessionmaker[AsyncSession],
         anthropic: AsyncAnthropic,
         lifecycle_of: Callable[[uuid.UUID], WebTurnLifecycle | None],
+        settings: Settings | None = None,
     ) -> None:
+        self._settings = settings
         self._sessionmaker = sessionmaker
         self._anthropic = anthropic
         self._lifecycle_of = lifecycle_of
@@ -125,6 +142,8 @@ class WebCredentialCards:
         row = await self._open_request(thread, card_id, clicker)
         if value is None:
             return CredentialAnswered(await self._skip(row), None)
+        if row.kind == "data_source":
+            return CredentialAnswered(await self._save_data_source(row, value), None)
         message = await self._save(row, value, clicker, clicker_platform, is_admin)
         follow_up = f"[form] {row.target} was saved.\n\n{row.requested_work}"
         return CredentialAnswered(message, follow_up if row.requested_work else None)
@@ -143,7 +162,7 @@ class WebCredentialCards:
         if (
             row is None
             or row.platform != "web"
-            or row.kind != "env"
+            or row.kind not in ("env", "data_source")
             or row.tenant_id != thread.tenant_id
             or row.origin_thread_id != f"web:{thread.id}"
         ):
@@ -167,6 +186,24 @@ class WebCredentialCards:
                 session, token=row.token, outcome="declined"
             )
         return await self._settle_card(row, "skipped")
+
+    async def _save_data_source(
+        self, row: CredentialRequestRow, value: str
+    ) -> WebMessageRow | None:
+        if not value.strip() or len(value.encode()) > MAX_SECRET_VALUE_BYTES:
+            raise CredentialRefused(f"Paste the value, at most {MAX_SECRET_VALUE_BYTES} bytes.")
+        if self._settings is None:
+            raise CredentialRefused(NO_LONGER_VALID_MESSAGE)
+        try:
+            consumed = await apply_data_source_submit(
+                self._sessionmaker, self._settings, row=row, value=value.strip(),
+                now=datetime.now(UTC),
+            )  # fmt: skip
+        except SourceCredentialRefused as refused:
+            raise CredentialRefused(str(refused)) from None
+        if consumed is None:
+            raise CredentialRefused(ALREADY_USED_MESSAGE)
+        return await self._settle_card(row, "saved")
 
     async def _save(
         self,

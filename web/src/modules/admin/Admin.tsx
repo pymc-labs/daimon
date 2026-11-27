@@ -7,6 +7,7 @@ import { Page } from "@/components/shell/Page"
 import { Button } from "@/components/ui/button"
 import { AgentAccessView } from "./AgentAccess"
 import { Audit } from "./Audit"
+import { DataAccess } from "./DataAccess"
 import { Feedback } from "./Feedback"
 import { Invites, NewInvite } from "./Invites"
 import { Issues } from "./Issues"
@@ -19,7 +20,7 @@ import { Workspace } from "./Workspace"
 const TABS: { label: string; to: string; end?: boolean; cap: Capability }[] = [
   { label: "Overview", to: "/admin", end: true, cap: "audit.view" }, { label: "Issues", to: "/admin/issues", cap: "audit.view" },
   { label: "People", to: "/admin/people", cap: "people.manage" }, { label: "Invites", to: "/admin/invites", cap: "people.manage" },
-  { label: "Agent access", to: "/admin/agents", cap: "workspace.manage" }, { label: "Audit log", to: "/admin/audit", cap: "audit.view" }, { label: "Feedback", to: "/admin/feedback", cap: "audit.view" },
+  { label: "Agent access", to: "/admin/agents", cap: "workspace.manage" }, { label: "Data access", to: "/admin/data", cap: "data.manage" }, { label: "Audit log", to: "/admin/audit", cap: "audit.view" }, { label: "Feedback", to: "/admin/feedback", cap: "audit.view" },
   { label: "Monitoring", to: "/admin/monitoring", cap: "workspace.manage" },
   { label: "Support", to: "/admin/support", cap: "workspace.manage" }, { label: "Settings", to: "/admin/settings", cap: "workspace.manage" },
 ]
@@ -50,6 +51,7 @@ export function Admin() {
         {page("people", "people.manage", <People />)}
         {page("invites", "people.manage", <Invites />)}
         {page("agents", "workspace.manage", <AgentAccessView />)}
+        {page("data", "data.manage", <DataAccess />)}
         {page("audit", "audit.view", <Audit />)}
         {page("feedback", "audit.view", <Feedback />)}
         {page("monitoring", "workspace.manage", <Monitoring />)}

@@ -1,8 +1,9 @@
 # Data sources
 
 The data store keeps connected sources and their synced content in their own
-Postgres schemas, apart from Daimon's tables. It is off by default and does nothing
-until you turn it on and set it up.
+Postgres schemas, apart from Daimon's tables. It is on by default and does nothing
+until an admin adds a source and turns [`data_reads`](features.md#data-source-reads) on
+for an agent.
 
 ## Set it up
 
@@ -10,13 +11,17 @@ The data store needs PostgreSQL 16 or later.
 
 Every release migration creates the `data` and `data_views` schemas, the store's tables
 and four cluster-wide roles, `daimon_data_reader`, `daimon_data_sql`, `daimon_data_view_owner`
-and `daimon_data_parity`, whether or not the feature is on. Nothing reads them until you
-set `DAIMON_FEATURES__DATA_SOURCES=on` on every Daimon service; a workspace can then turn
-the [`data_sources` feature](features.md#data-sources) off for itself.
+and `daimon_data_parity`, whether or not the feature is on. `DAIMON_FEATURES__DATA_SOURCES=off` on every Daimon
+service turns the store off, and a workspace can turn the
+[`data_sources` feature](features.md#data-sources) off for itself.
 
 If the database user lacks CREATE on the database or CREATEROLE, the migration logs
-`data_store_skipped` and Daimon starts anyway. With the feature on, run
-`daimon data init` as that user, or with `--admin-url` for one that can.
+`data_store_skipped` and Daimon starts anyway. Run `daimon data init` as that user, or with
+`--admin-url` for one that can.
+
+<!-- knowledge: web -->
+Until then the web app's Data pages are hidden.
+<!-- /knowledge -->
 
 `daimon data init` is safe to run again. Settings are
 [`DAIMON_DATA__*`](configuration.md#daimon_data__schema_name); set
@@ -36,7 +41,9 @@ docker compose -f docker-compose.yml -f docker-compose.data.yml up -d --build da
 A source syncs every hour, or every `sync_minutes` of its config. A run cut off by its
 time budget continues on the next pass, and a failing source backs off from 5 minutes to 6
 hours. A source can also limit its upstream requests with `rate_per_minute`. The worker
-needs `DAIMON_CRYPTO__KEYS` to open source credentials.
+needs `DAIMON_CRYPTO__KEYS` to open source credentials. The GCP deploy workflow recreates
+a VM named `<registry>-data-sync` on each deploy, from `compose.data-sync.yml` in the assets
+bucket, when the deployment has one.
 
 ### External Postgres
 
@@ -60,6 +67,115 @@ failure instead.
 A database off loopback needs `sslmode=require` or stronger in the DSN, and `require` is
 added when it is unset. Connections to private addresses are refused. To reach a database on your own network,
 list its host name or address range in `DAIMON_DATA__PRIVATE_HOSTS`.
+
+## People and their accounts
+
+A record a source shares with some of its users reads for a Daimon account only through a
+link to one of those users. Daimon links an account only on a proof the source or chat
+platform verified. That is a GitHub link or the person signing in to the source.
+
+<!-- knowledge: web -->
+A web app sign-in with Discord, Slack or Microsoft is one too. A person who only chats has
+no link until they sign in to the web app.
+<!-- /knowledge -->
+
+A workspace admin can link any account by hand, their own included, and the
+audit trail records it. A link an admin ends or rejects stays ended when the person signs in again.
+
+Google sign-in for data sources needs a Google OAuth client in
+[`DAIMON_DATA__GOOGLE_OAUTH_CLIENT_ID`](configuration.md#daimon_data__google_oauth_client_id).
+
+## Freshness
+
+A source has a freshness floor and ceiling in minutes. Its lifetime is three sync intervals,
+at least the floor and at most the ceiling. Once its last complete sync is older than that,
+its records are hidden from every read until the next complete sync. Without a ceiling a
+source is never hidden.
+
+A connector can also check a record with the source at read time, and a source that
+cannot is read as stored. A live source is asked at search time instead: it stores nothing,
+only callers holding its scope reach it, and one that fails or is slow is skipped.
+
+## Publishing
+
+A new source starts in shadow, where no one reads it. Publishing it needs evidence. If the
+connector can ask the source whether a person may open a record, Daimon compares a sample
+of linked people and records and needs a clean run no older than 36 hours. Any case of Daimon
+showing more than the source does blocks publishing; showing less only warns. Other sources
+publish after a complete sync.
+
+<!-- knowledge: web -->
+## In the web app
+
+With the feature on, the web app has a Data section for search and browsing, which shows each
+person only what they may read. Owners and admins add, pause, publish and retire sources under
+Integrations > Data sources. Workspace admins manage scopes, grants, identity links and
+redaction sets under Admin > Data access, or from chat. Granting oneself a scope or linking an
+account to oneself is allowed and marked in the audit trail. Declared sources show as bound and are read-only there. People link and
+connect their own accounts on their Profile.
+<!-- /knowledge -->
+
+## From chat
+
+From chat, admins can add a source, even the first, or refresh its credential. The value
+goes through a private form only the asker opens, straight onto the source. In a room, emails,
+sign-ins and redaction rules reach the agent sealed; it sends them to the asker by direct message.
+
+## Who sees an answer
+
+An answer shows only what everyone who will see it may read: the asker and, in a room, its
+members. Discord rooms keep their members; Slack and Teams rooms are read on each call. A
+Slack room whose members cannot be read gets answers that hold only what everyone may read.
+
+Teams reads members with `ChannelMember.Read.Group` and `ChatMember.Read.Chat`, which a team
+owner or chat member grants when adding or updating the app, or `ChannelMember.Read.All` and
+`ChatMember.Read.All`, which a tenant admin grants once ([Teams](teams.md)). Where members
+cannot be read, answers hold only what everyone may read, and say when consent is missing.
+A Teams room with a guest, another organisation's member or a shared channel gets no data
+and is held from then on, so an agent that read data starts afresh there.
+
+After a data read, a conversation asks only agents that read data too, and their reads count
+as its own. A memory saved after a data read records what was read; recalling it counts as
+reading that, and an update keeps it. It shows only where everyone could read all of it. After a live result or SQL, it shows only in that room or
+private chat, while everyone there was already a reader.
+
+## Redaction sets
+
+A set's `at` says when it applies. Unset, as before, regex, aliases and removals rewrite text
+at ingest, and entity names hide at read time. `storage` applies all of them at ingest,
+entity names becoming their label for everyone. `answer` stores text as the source has it
+and rewrites answers instead, entity names hiding as when unset. `exclude_ids` always keeps records out of the store.
+
+A set applies to the sources that name it. When its rules change, answers from those sources
+apply them too until each source syncs again. Answer-time rules reach SQL values and file text
+best effort; a file under them shows only its text, so one with none is not shown.
+
+## Declared config
+
+Set `DAIMON_DATA__DECLARED` to a YAML or JSON file to declare sources, scopes and grants
+for each workspace. Daimon applies it at start and every 10 minutes.
+
+```yaml
+revision: 4
+tenants:
+  - workspace: discord:<server id>
+    scopes: [{id: shared:eng, kind: shared, name: Engineering}]
+    sources:
+      - {id: wiki, kind: postgres, name: Wiki, credentials: {dsn: "env:WIKI_DSN"}, publish: true}
+```
+
+A `workspace` is Daimon's workspace id, or `<platform>:<id>` with the platform's own id for
+it, so one file serves every deployment; one not found is skipped. Declared rows are
+read-only in the app. Daimon never deletes one: a removed entry stays, and
+`retire: true` retires a source for good. A source is created in shadow and published only
+with `publish: true` and a clean run. `replaces` retires the sources it names, by declared id or name. A `revision`
+below the last applied one is ignored. Credentials are `env:NAME` or `file:/path`, never values.
+
+## Who can read a record
+
+`daimon data access-check --tenant <id> --source <id>` shows a source's state and freshness.
+Add `--record <id>` for the record's holders, and `--account <id>` to say whether that account
+can read it, and why not.
 
 ## Vector search
 
@@ -100,10 +216,34 @@ bounds a search; it returns what the arms have found when time runs out, and not
 cut.
 
 Callers browse a source's records, read one with its text and files, and run read-only SQL
-over `data_views`. That SQL runs as `daimon_data_sql`, which reaches the views and nothing
-else, so it never sees an access list, a credential or another workspace's rows. Like any
-role, it can read the system catalogs, so it can see roughly how many rows each of the
-store's tables holds across every workspace, though not what they say.
+over `data_views`. That SQL runs as `daimon_data_sql`, which reaches the views only: no access
+list, credential or other team's rows. Like any role it reads the system catalogs, so it sees
+rough row counts of the store's tables, not what they say. SQL leaves out sources that check
+reads with the source. While names are hidden from someone the answer is for, files and SQL
+are refused, and a search naming a hidden name finds nothing.
+
+## Evals and probes
+
+`daimon data eval GOLD...` runs a gold set (JSON or YAML) through search. Each question names
+its caller (`tenant_id`, and an `account_id` or explicit `scopes` and `readers`) and the
+records that answer it (`source` name or id, `external_id`, a `grade` of 1 to 3). The search
+runs as that caller.
+
+Recall and nDCG at 5 and 10 are scored for the fused list and for each arm (`fts`, `vec`,
+`time`, read from the hits' ranks before any rerank). Only records the caller can read count.
+An unreadable record is not a miss, and a question with none readable is left out and counted.
+The estimated spend prints first and the run refuses above `--max-usd`. It stops once the
+metered spend reaches that cap. Query spend bills the caller's tenant. `--out` writes the
+JSON report; the text summary prints either way.
+
+`daimon data probe NAME --tenant ID` runs one read-only check and prints JSON. It never
+writes the store. The checks:
+
+- `grants`: each scope's holders.
+- `scopes`: records by source and scope, and those in a scope nobody defined.
+- `person` (`--account`): what that person holds and reads.
+- `health`: each source's state, last sync and embedding coverage.
+- `drift`: chunks off their record, records without chunks, sources not synced in 48 hours or failing.
 
 ## After a restore
 

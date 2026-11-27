@@ -1973,7 +1973,7 @@ class CredentialRequest(Base):
         ),
         CheckConstraint(
             "kind IN ('env', 'env_file', 'mcp', 'mcp_oauth', 'repo', 'skill_repo', "
-            "'watch_credential')",
+            "'watch_credential', 'data_source')",
             name="ck_credential_requests_kind",
         ),
         UniqueConstraint("idempotency_key", name="uq_credential_requests_idempotency_key"),
@@ -5328,8 +5328,21 @@ class RepoMemory(Base):
     # survives with its attribution removed.
     created_by_account_id: Mapped[AccountSetNull]
     source_id: Mapped[str | None]
+    # The data items read before it was saved (`daimon.core.stores.data_memory`); None: none.
+    data_refs: Mapped[list[str] | None]
     created_at: Mapped[TsNow]
     updated_at: Mapped[TsNow]
+
+
+class SessionDataRead(Base):
+    """One data item a chat session read (`daimon.core.stores.data_memory`)."""
+
+    __tablename__ = "session_data_reads"
+
+    tenant_id: Mapped[TenantPk]
+    chat_session_id: Mapped[str] = mapped_column(primary_key=True)
+    ref: Mapped[str] = mapped_column(primary_key=True)
+    read_at: Mapped[TsNow]
 
 
 class RepoMemorySession(Base):
@@ -5675,6 +5688,22 @@ class DiscordChannelAudience(Base):
     parent_id: Mapped[str | None]
     contained: Mapped[bool]
     narrow: Mapped[bool]
+    generation: Mapped[int] = mapped_column(BigInteger)
+    computed_at: Mapped[datetime]
+
+
+class DiscordRoomViewers(Base):
+    """Who can view one room, from the generation `DiscordAudienceState` names.
+
+    Written only while the workspace has `data_sources` on, for rooms with at most the
+    data audience cap of viewers: a data read answers for exactly these people.
+    """
+
+    __tablename__ = "discord_room_viewers"
+
+    tenant_id: Mapped[TenantPk]
+    channel_id: Mapped[str] = mapped_column(primary_key=True)
+    user_ids: Mapped[list[str]]
     generation: Mapped[int] = mapped_column(BigInteger)
     computed_at: Mapped[datetime]
 

@@ -253,7 +253,7 @@ jobs:
           uv run alembic upgrade head
           test "$(psql -h localhost -U daimon -d daimon_test -tAc \
             "SELECT string_agg(file, ' ' ORDER BY file) FROM data.schema_version")" \
-            = "0001_store.sql 0002_sync.sql 0003_store.sql"
+            = "$(uv run python -c "from daimon.data.migrate import STORE_FILES as f; print(*sorted(f))")"
       - name: pytest (data)
         run: >-
           uv run pytest packages/data -n 4 --dist worksteal --timeout=300

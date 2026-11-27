@@ -17,6 +17,8 @@ import { plural, shortDate } from "@/lib/format"
 import { useMe } from "@/lib/hooks"
 import { Pill } from "@/modules/agents/bits"
 import { clientName } from "@/modules/agents/setup/clients"
+import { useDataAccounts } from "./ProfileData"
+import { Empty, Row, Section } from "./profile-parts"
 
 type AgentRef = { id: string; name: string }
 export type Profile = {
@@ -42,18 +44,6 @@ export function ProfilePage() {
   )
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section aria-label={title}>
-      <h2 className="mb-3 text-sm font-semibold">{title}</h2>
-      <div className="divide-y rounded-lg border">{children}</div>
-    </section>
-  )
-}
-
-const Empty = ({ children }: { children: React.ReactNode }) => <div className="px-4 py-6 text-center text-sm text-muted-foreground">{children}</div>
-const Row = ({ children }: { children: React.ReactNode }) => <div className="flex min-h-14 items-center gap-3 px-4 py-3 text-sm">{children}</div>
-
 function Body({ d }: { d: Profile }) {
   const qc = useQueryClient()
   const confirm = useConfirm()
@@ -67,6 +57,7 @@ function Body({ d }: { d: Profile }) {
     onSuccess: () => done("Disconnected"),
   })
   const me = useMe()
+  const data = useDataAccounts(!!me.data?.modules.includes("data"))
   const accounts = me.data?.accounts ?? []
   const platforms = new Set(accounts.map((a) => (a.provider === "microsoft" ? "teams" : a.provider)))
   const chatAccounts = d.chat_accounts.filter((a) => !platforms.has(a.platform))
@@ -134,8 +125,10 @@ function Body({ d }: { d: Profile }) {
             }}>Disconnect</Button>
           </Row>
         ))}
-        {!d.connections.length && <Empty>Nothing is connected</Empty>}
+        {data.rows}
+        {!d.connections.length && !data.count && <Empty>Nothing is connected</Empty>}
       </Section>
+      {data.dialog}
 
       <Section title="Access via MCP">
         {!d.keys.length ? <Empty>No keys</Empty> : d.keys.map((k) => (

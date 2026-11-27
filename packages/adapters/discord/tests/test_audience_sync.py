@@ -20,6 +20,7 @@ from daimon.adapters.discord.member_sync import tenant_of
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.audience_facts import UNKNOWN_FACTS, RoomFacts
 from daimon.core.stores import audience_facts as store
+from daimon.core.stores import room_viewers
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, set_access_policy
 from daimon.testing.factories import make_tenant
 from sqlalchemy import event as sa_event
@@ -1572,3 +1573,40 @@ async def test_an_event_that_is_not_an_update_blocks_the_read_that_is_running(
         gate.set()
         await audience.settle()
     assert _outcomes(logs)[0] == "discord.audience.read_crossed"
+
+
+@pytest.mark.parametrize(
+    ("on", "reads"),
+    [(True, True), (True, False), (False, True)],
+    ids=["data sources and reads on", "default: no agent reads data", "data sources off"],
+)
+async def test_room_viewers_are_kept_as_reader_subjects_only_while_something_reads_data(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    on: bool,
+    reads: bool,
+) -> None:
+    """Data sources are on by default, yet inert: no viewers are kept until data reads are on
+    somewhere in the workspace."""
+    await _setup(db_session)
+
+    async def data_sources(*_args: object, **_kwargs: object) -> types.SimpleNamespace:
+        return types.SimpleNamespace(on=on)
+
+    async def rows(*_args: object, **_kwargs: object) -> list[types.SimpleNamespace]:
+        return [types.SimpleNamespace(value="on")] if reads else []
+
+    monkeypatch.setattr(audience_sync, "feature_in", data_sources)
+    monkeypatch.setattr(audience_sync, "list_feature_values", rows)
+    clock, world = Clock(), World()
+    assert await world.sync(db_session_factory, clock).reconcile(world.guild)
+    async with db_session_factory() as session:
+        viewers = await room_viewers.read_viewers(
+            session, tenant_id=TENANT, channel_id="1", now=clock.now
+        )
+    if not (on and reads):
+        assert viewers is None, "no viewers kept while nothing reads data"
+        return
+    assert viewers, "room 1 has viewers"
+    assert all(v.startswith(f"discord/{fake.GUILD}:user:") for v in viewers), viewers

@@ -187,6 +187,7 @@ class _World:
             lambda _r, m: httpx.Response(200, json=self.sessions[m.group(1)]),
         )
         settings = MagicMock()
+        settings.features = {}
         settings.mcp.public_url = None
         settings.mcp.jwt_secret = None
         return McpRuntime(

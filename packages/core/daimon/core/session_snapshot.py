@@ -69,6 +69,7 @@ from daimon.core.tool_safety import (
     session_tools_for_policy,
     trusted_servers_for,
     with_current_tool_names,
+    with_sandbox_egress_asking,
 )
 from pydantic import (
     BaseModel,
@@ -153,6 +154,7 @@ class SessionSnapshot(BaseModel):
             "memory_scope",
             "model_effort",
             "identity_features",
+            "data_read",
         ):
             if not data.get(name):
                 data.pop(name, None)
@@ -225,6 +227,10 @@ class SessionSnapshot(BaseModel):
     # desired `mcp_servers` follow the recorded mode, so turning the router
     # setting off later never flips a routed session (or the reverse).
     github_transport: GithubTransport = "direct"
+    # A turn of this session read data sources: every later turn keeps that posture
+    # (`tool_safety.after_data_read`), whatever `data_reads` says now. Set by
+    # `mark_data_read`, never cleared, never fingerprinted.
+    data_read: bool = False
 
     # Mutable axis — a difference here can be applied to the live session.
     tools_sha256: str
@@ -662,6 +668,8 @@ def session_tools(
         daimon_rule_tools=daimon_rule_tools,
     )
     payload = gated if gated is not None else named
+    if toolset is not None and toolset.data_reads:
+        payload = with_sandbox_egress_asking(payload)
     hidden_tools = frozenset[str]() if toolset is None else toolset.hidden_daimon_tools
     if not legacy_memory_servers and not hidden_tools:
         return visible if payload is dumped else _retyped(visible, dumped, payload)

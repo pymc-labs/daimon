@@ -7,6 +7,7 @@ from typing import Final
 
 from daimon.core import ports
 from daimon.core.capability_tools import CAPABILITY_KEYS, CAPABILITY_TOOLS
+from daimon.core.data_tools import DATA_READS
 from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
 
@@ -86,6 +87,9 @@ def hides_tools(found: ResolvedFeature) -> bool:
     locked Off, so a gap or a lock there leaves nothing to hide; any other Off hides them."""
     if found.on:
         return False
+    if found.key == DATA_READS:
+        # Data is never offered by default: any Off, a missing dependency too, hides it.
+        return True
     if found.key == "repo_memory":
         return found.unavailable is None and not (found.tier == "deployment" and found.locked)
     return found.tier != "default" or found.unavailable in (None, "requires")

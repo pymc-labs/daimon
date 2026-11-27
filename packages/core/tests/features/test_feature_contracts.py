@@ -131,6 +131,7 @@ _NARROWED: dict[str, str] = {
     "tool_server_names": "a workspace or agent display choice, read when the turn starts",
     "turn_time_limit": "a workspace or agent limit, read once when the turn starts",
     "unattended_time_limit": "a workspace or agent limit, read once when the run starts",
+    "data_reads": "an admin's choice for the team, an agent or a room; a thread shares its room's readers",
     **{f"web.{module}": "workspace-only web app surface" for module in WEB_MODULES},
 }
 
@@ -438,7 +439,7 @@ _WEB_KEPT = {
 
 def _link_builders() -> list[str]:
     """`path::function` of each function that builds web links without asking a gate."""
-    found = []
+    found: list[str] = []
     for path in _PRODUCT:
         for fn in ast.walk(ast.parse(path.read_text())):
             if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):

@@ -75,6 +75,7 @@ __all__ = [
     "PERMISSION_SETTER_TOOLS",
     "SERVER_SEPARATOR",
     "PermissionPolicyType",
+    "SANDBOX_EGRESS_TOOLS",
     "ToolAnnotations",
     "ToolCall",
     "ToolEffect",
@@ -86,6 +87,7 @@ __all__ = [
     "ProviderMoveTool",
     "get_mcp_server_name_rejection",
     "microsoft_send_tools",
+    "after_data_read",
     "classify_tool",
     "daimon_endpoint",
     "decide_tool_call",
@@ -98,6 +100,7 @@ __all__ = [
     "session_tools_for_policy",
     "toolset_permission_policy",
     "with_current_tool_names",
+    "with_sandbox_egress_asking",
     "trusted_servers_for",
 ]
 
@@ -138,10 +141,16 @@ VerdictReason = Literal[
     #: A confirmed write whose card an admin's approval setting skips, in an attended
     #: turn, after every deny and ask rule had its say (`approval_skipped_tools`).
     "approval_skipped",
+    #: A session that reads data sources: what could carry data out asks, or is refused
+    #: with nobody to ask (`after_data_read`).
+    "data_read",
     #: A confirmed write in a run nobody watches, whose owner the agent-chat rule counts as
     #: present (`owner_tools`), after every deny and ask rule had its say.
     "agent_chat_owner",
 ]
+
+#: Sandbox tools that reach outside the session: in a data-reading session they ask.
+SANDBOX_EGRESS_TOOLS: Final = frozenset({"bash", "web_fetch"})
 
 
 class ResolvedAgentToolRule(BaseModel):
@@ -189,6 +198,11 @@ SERVER_SEPARATOR: Final[str] = "/"
 #: Each is a write whatever it is given, so every call asks.
 CARDED_TOOLS: Final[Mapping[str, str]] = {
     "remove_my_data": "kind",
+    "change_data_source": "action",
+    "change_data_access": "action",
+    "change_data_links": "action",
+    "approve_data_rule_set": "name",
+    "connect_my_data": "source_id",
     "revoke_web_link": "kind",
     "delete_allowance": "allowance_id",
     "update_web_person": "person_id",
@@ -1121,6 +1135,41 @@ def _decide_tool_call(
     ):
         return ToolVerdict(outcome="allow", effect=effect, reason="unattended_write_allowed")
     return ToolVerdict(outcome="deny", effect=effect, reason="unattended_write")
+
+
+def after_data_read(verdict: ToolVerdict, call: ToolCall, *, attended: bool) -> ToolVerdict:
+    """`verdict` in a session that reads data sources, where any call may carry data out.
+
+    What would run unasked and can reach outside the conversation asks instead, or is
+    refused with nobody to ask: a write that an `unattended_writes` entry, an agent allow
+    rule or a skipped card lets through, and a sandbox `bash` or `web_fetch`. Reads run."""
+    egress = call.server_name is None and call.tool_name in SANDBOX_EGRESS_TOOLS
+    if verdict.outcome != "allow" or not (egress or verdict.effect == "write"):
+        return verdict
+    return ToolVerdict(outcome="ask" if attended else "deny", effect="write", reason="data_read")
+
+
+def with_sandbox_egress_asking(tools: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """`tools` with the sandbox's `SANDBOX_EGRESS_TOOLS` set to ask, so each call pauses for
+    `after_data_read`. Each config written is complete, as `session_tools_for_policy`'s are."""
+    out: list[dict[str, Any]] = []
+    for tool in tools:
+        entry = dict(tool)
+        if entry.get("type") == "agent_toolset_20260401":
+            default = cast(Mapping[str, Any], entry.get("default_config") or {})
+            on = default.get("enabled")
+            configs = {c["name"]: dict(c) for c in entry.get("configs") or ()}
+            for name in sorted(SANDBOX_EGRESS_TOOLS):
+                config = configs.get(name, {"name": name})
+                enabled = config.get("enabled")
+                configs[name] = {
+                    **config,
+                    "enabled": enabled if enabled is not None else on is not False,
+                    "permission_policy": {"type": "always_ask"},
+                }
+            entry["configs"] = list(configs.values())
+        out.append(entry)
+    return out
 
 
 def _owner_verdict(

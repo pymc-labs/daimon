@@ -1,0 +1,20 @@
+{
+  "description": [
+    "Read-only SQL over the data views and datasets (`data_sources` lists them), by plain",
+    "names. One statement, at most 500 rows, five seconds. Values go through every",
+    "source's redaction rules best effort. Refused when names are hidden from someone the",
+    "answer is for."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "query": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "type": "object"
+  }
+}

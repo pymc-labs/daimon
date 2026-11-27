@@ -412,7 +412,7 @@ async def capture_preparation_source(
         # A shared thread's copy is its owner's; personal sign-ins stay off it.
         account_id=UUID(preparation_account(request)),
         resource_scope=request.scope,
-        memory_read_only=request.admission.memory_read_only,
+        memory_read_only=request.admission.stores_read_only,
         fernet=request.deps.fernet,
         channel_skills=request.admission.channel_skills,
         tool_safety=request.deps.tool_safety,

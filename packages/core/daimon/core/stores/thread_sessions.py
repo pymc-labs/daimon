@@ -35,6 +35,7 @@ from daimon.core.session_snapshot import (
     refreshed_unavailable_state,
 )
 from daimon.core.stores.access_policy import lock_access_policy
+from daimon.core.stores.data_memory import carry_reads
 from daimon.core.stores.domain import ThreadSessionRow, TransferKind, UnsavedWorkChoice
 from daimon.core.stores.worker_ownership import owner_is_alive
 from pydantic import JsonValue
@@ -434,11 +435,37 @@ async def create_thread_session(
     await session.flush()
     await session.refresh(orm)
     row = ThreadSessionRow.model_validate(orm)
+    if predecessor_id is not None and effective_config is not None:
+        await _carry_data_reads(
+            session, tenant_id=tenant_id, predecessor_id=predecessor_id, config=effective_config
+        )
     # Imported here: the watch store reads live sessions from this module.
     from daimon.core.stores.watches import follow_live_session
 
     await follow_live_session(session, row)
     return row
+
+
+async def _carry_data_reads(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    predecessor_id: _uuid.UUID,
+    config: SessionSnapshot,
+) -> None:
+    """A session that continues another keeps what the other read from data sources, which
+    a memory saved later records (`daimon.core.stores.data_memory`)."""
+    if config.chat_session_id is None:
+        return
+    before = await session.scalar(
+        select(ThreadSession.effective_config["chat_session_id"].as_string()).where(
+            ThreadSession.id == predecessor_id, ThreadSession.tenant_id == tenant_id
+        )
+    )
+    if before:
+        await carry_reads(
+            session, tenant_id=tenant_id, source=before, target=config.chat_session_id
+        )
 
 
 async def set_budget_channel_stamp(
@@ -734,6 +761,19 @@ async def invalidate_session_tools(session: AsyncSession, *, ma_session_id: str)
         )
     )
     await session.flush()
+
+
+async def mark_data_read(session: AsyncSession, *, id: _uuid.UUID) -> None:
+    """Record that this session read data sources (`SessionSnapshot.data_read`); it is never
+    cleared. Legacy NULL snapshots stay unknown."""
+    await session.execute(
+        update(ThreadSession)
+        .where(
+            ThreadSession.id == id,
+            func.jsonb_typeof(ThreadSession.effective_config) == "object",
+        )
+        .values(effective_config=ThreadSession.effective_config.op("||")({"data_read": True}))
+    )
 
 
 async def record_snapshot(

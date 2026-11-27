@@ -1496,6 +1496,27 @@ async def _sweep_lead_intake(sm: async_sessionmaker[AsyncSession]) -> None:
         log.error("scheduler.lead_retention_failed")
 
 
+_DATA_READS_PRUNE_INTERVAL = timedelta(hours=1)
+_last_data_reads_prune: dict[str, datetime] = {}
+
+
+@scheduler_step
+async def _sweep_data_reads(sm: async_sessionmaker[AsyncSession]) -> None:
+    """Forget what old, ended chat sessions read from data sources, hourly as ops events."""
+    from daimon.core.stores.data_memory import READS_RETENTION, prune_reads
+
+    now = datetime.now(UTC)
+    last = _last_data_reads_prune.get("started")
+    if last is not None and now - last < _DATA_READS_PRUNE_INTERVAL:
+        return
+    _last_data_reads_prune["started"] = now
+    try:
+        async with sm.begin() as session:
+            await prune_reads(session, cutoff=now - READS_RETENTION)
+    except SQLAlchemyError:
+        log.exception("scheduler.data_reads_sweep.failed")
+
+
 @scheduler_step
 async def _sweep_mcp_tokens(sm: async_sessionmaker[AsyncSession]) -> None:
     """Bound ephemeral credential history without pruning operator/external keys."""
@@ -2527,6 +2548,7 @@ async def run(
             await _sweep_pending_carry_overs(sm)
             await _sweep_hub_oauth_kv(sm)
             await _sweep_mcp_tokens(sm)
+            await _sweep_data_reads(sm)
             await _sweep_lead_intake(sm)
             await _sweep_github_connect_flows(sm)
             await _sweep_routine_outputs(sm)
@@ -2572,6 +2594,7 @@ async def run(
             await _sweep_pending_carry_overs(sm)
             await _sweep_hub_oauth_kv(sm)
             await _sweep_mcp_tokens(sm)
+            await _sweep_data_reads(sm)
             await _sweep_lead_intake(sm)
             await _sweep_github_connect_flows(sm)
             await _sweep_routine_outputs(sm)

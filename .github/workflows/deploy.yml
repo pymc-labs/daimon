@@ -751,6 +751,50 @@ jobs:
           fi
           date +%s > "$RUNNER_TEMP/workers-refreshed-at"
 
+      - name: Refresh data-sync VM (when the deployment has one)
+        if: steps.fresh.outputs.superseded != 'true'
+        run: |
+          # Optional: a deployment that syncs data sources on its own VM names it
+          # <repo>-data-sync and puts compose.data-sync.yml in the assets bucket.
+          # Recreated like the workers above; skipped when absent, stopped or not ours to see.
+          set -o pipefail
+          if ! STATUS=$(gcloud compute instances describe ${{ vars.GCP_AR_REPO }}-data-sync --zone "$ZONE" \
+            --format='value(status)' 2>"$RUNNER_TEMP/data-sync-describe.err"); then
+            grep -qiE "not found|permission|forbidden" "$RUNNER_TEMP/data-sync-describe.err" || { cat "$RUNNER_TEMP/data-sync-describe.err" >&2; exit 1; }
+            STATUS=none
+          fi
+          if [ "$STATUS" != "RUNNING" ]; then
+            echo "::notice::no running data-sync VM ($STATUS): skipping its refresh"
+            exit 0
+          fi
+          # A new runner key reaches each VM on its own; wait for this one.
+          for i in $(seq 1 6); do
+            gcloud compute ssh ${{ vars.GCP_AR_REPO }}-data-sync --zone "$ZONE" --tunnel-through-iap --command true && break
+            [ "$i" = 6 ] && { echo "data-sync VM did not accept the SSH key" >&2; exit 1; }
+            sleep 10
+          done
+          gcloud compute ssh ${{ vars.GCP_AR_REPO }}-data-sync --zone "$ZONE" --tunnel-through-iap --command '
+              set -euo pipefail
+              export DAIMON_IMAGE="${{ steps.images.outputs.daimon }}"
+              export DOCKER_CONFIG=/root/.docker
+              sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/daimon-refresh-env /usr/local/bin/daimon-refresh-env
+              sudo chmod 755 /usr/local/bin/daimon-refresh-env
+              sudo /usr/local/bin/daimon-refresh-env
+              sudo gcloud storage cp gs://${{ vars.GCP_AR_REPO }}-assets/compose.data-sync.yml /etc/daimon/compose.data-sync.yml
+              cd /etc/daimon
+              sudo -E docker compose -f compose.data-sync.yml pull
+              # Time for a sync in flight to stop cleanly on SIGTERM.
+              sudo -E docker compose -f compose.data-sync.yml up -d --remove-orphans --timeout 95
+              sleep 20
+              # No service may be restarting, dead or failed after the refresh.
+              states=$(sudo -E docker compose -f compose.data-sync.yml ps -a --format "{{.Service}} {{.State}} {{.ExitCode}}")
+              if grep -E " (restarting|dead) | exited [1-9]" <<<"$states"; then
+                echo "a data-sync service failed after the refresh" >&2
+                exit 1
+              fi
+              sudo docker image prune -af || true
+          '
+
       - name: Wait for notebook-host VM refresh
         # Also after a failed worker refresh, so the notebook-host outcome is
         # always on record; not after a cancel, which ends the job anyway.

@@ -34,6 +34,7 @@ from daimon.adapters.mcp.tools._session_access import (
     session_belongs_to_caller,
     sessions_outside_seals,
 )
+from daimon.core.data_tools import redact_data_results
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.turn_origin import redact_turn_origin_ids
@@ -100,12 +101,13 @@ class SessionEventOut(BaseModel):
 
     @classmethod
     def from_event(cls, event: BaseModel) -> SessionEventOut:
-        """An event as the model may read it: turn-origin ids redacted.
+        """An event as the model may read it: turn-origin ids and data results redacted.
 
         An origin id proves a call comes from one live turn, and it sits in that turn's
-        prompt and its tool calls. Another session's transcript must not hand it over.
+        prompt and its tool calls. Another session's transcript must not hand it over,
+        nor a data tool's result, which only its own conversation may read.
         """
-        raw = redact_turn_origin_ids(event.model_dump(mode="json"))
+        raw = redact_data_results(redact_turn_origin_ids(event.model_dump(mode="json")))
         return cls.model_validate(raw)
 
 

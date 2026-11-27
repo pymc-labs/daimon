@@ -122,6 +122,7 @@ class PurgePreview(BaseModel):
     mux_release_requests: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     mux_operations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     host_call_cards: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    room_viewers: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     # What stays, so the confirmation can say so: conversations other people share with
     # the person (and the person's requests in them), and settlement records.
     retained_shared_conversations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
@@ -169,6 +170,7 @@ def held_lines(preview: PurgePreview) -> list[str]:
         (preview.mux_slots, "saved conversation"),
         (preview.mux_journal_events, "saved conversation message"),
         (preview.host_call_cards, "approval request"),
+        (preview.room_viewers, "room member list"),
         (preview.monitored_events, "record admins can read"),
         (preview.ops_events, "failure record"),
     )
