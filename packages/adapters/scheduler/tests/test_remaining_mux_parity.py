@@ -90,7 +90,9 @@ def mapped() -> tokens.LiveAppSession:
             effective_config=snapshot,
         ),
         agent_id=AGENT,
-        expires_at=NOW,
+        # A live token: an idle session whose token lapsed is left to its next turn.
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        last_expires_at=datetime.now(UTC) + timedelta(minutes=30),
         has_linked_requester=True,
         permissions_by_repo={},
     )

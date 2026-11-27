@@ -579,6 +579,7 @@ def _mapped_app_session(
     started_ago: timedelta = timedelta(hours=1),
     expires_in: timedelta = timedelta(minutes=10),
 ) -> SimpleNamespace:
+    expires_at = datetime.now(UTC) + expires_in
     url = "https://github.com/acme/repo"
     return SimpleNamespace(
         mapping=SimpleNamespace(
@@ -597,7 +598,8 @@ def _mapped_app_session(
             ),
         ),
         agent_id=uuid.UUID(int=4),
-        expires_at=datetime.now(UTC) + expires_in,
+        expires_at=expires_at,
+        last_expires_at=expires_at,
         permissions_by_repo={11: {"contents": "read"}},
     )
 
@@ -739,12 +741,14 @@ async def test_mapped_pending_notice_is_left_to_the_turn_boundary(
     archive.assert_not_awaited()
 
 
-async def test_mapped_session_with_only_revoked_token_is_refreshed(
+async def test_idle_mapped_session_renews_only_for_a_turn_or_a_narrowed_live_token(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     fresh_refresh_state: dict[str, tuple[int, datetime]],
 ) -> None:
+    # Idle, nothing can use a token, and the next turn renews a revoked one at
+    # its start; renewing every idle session made one pass outgrow the token.
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
     ma_agent_id = "agent_revoked_token"
@@ -811,18 +815,71 @@ async def test_mapped_session_with_only_revoked_token_is_refreshed(
         unittest.mock.AsyncMock(return_value=((url,), {11: {"contents": "write"}})),
     )
     anthropic = SimpleNamespace(beta=SimpleNamespace(sessions=SimpleNamespace()))
+    settings = Settings.model_validate(
+        {
+            "database": {"url": "postgresql+asyncpg://localhost/test"},
+            "anthropic": {"api_key": "test"},
+        }
+    )
     await _refresh_github_app_sessions(
-        anthropic,
-        db_session_factory,
-        settings=Settings.model_validate(
-            {
-                "database": {"url": "postgresql+asyncpg://localhost/test"},
-                "anthropic": {"api_key": "test"},
-            }
+        anthropic, db_session_factory, settings=settings, fernet=fernet
+    )
+    rotate.assert_not_awaited()
+    await db_session.execute(
+        text(
+            "UPDATE thread_sessions SET active_turn_message_id = 'turn-1', "
+            "active_turn_started_at = now() WHERE ma_session_id = :sid"
         ),
-        fernet=fernet,
+        {"sid": session_id},
+    )
+    await db_session.commit()
+    await _refresh_github_app_sessions(
+        anthropic, db_session_factory, settings=settings, fernet=fernet
     )
     rotate.assert_awaited_once()
+    # Idle again, holding one expired and one live token from two installations:
+    # the live one still gets its access check, and narrowed access replaces it.
+    await db_session.execute(
+        text(
+            "UPDATE thread_sessions SET active_turn_message_id = NULL, "
+            "active_turn_started_at = NULL WHERE ma_session_id = :sid"
+        ),
+        {"sid": session_id},
+    )
+    for installation_id, repo_id, expires_in in ((2, 12, -1), (3, 13, 30)):
+        row = await github_issued_tokens.create_pending(
+            db_session,
+            tenant_id=tenant.id,
+            agent_id=agent_id,
+            session_id=session_id,
+            installation_id=installation_id,
+            repo_ids=[repo_id],
+            permissions={"contents": "write"},
+            grant_versions={f"grant:{repo_id}": 1, f"authorization:{repo_id}": 1},
+            expires_at=datetime.now(UTC) + timedelta(minutes=45),
+        )
+        await github_issued_tokens.store_token(
+            db_session, token_id=row.token_id, token="live", fernet=fernet
+        )
+        await github_issued_tokens.mark_delivered(db_session, token_id=row.token_id)
+        await db_session.execute(
+            text("UPDATE github_issued_tokens SET expires_at = :at WHERE token_id = :id"),
+            {"at": datetime.now(UTC) + timedelta(minutes=expires_in), "id": row.token_id},
+        )
+    await db_session.commit()
+    async with db_session_factory() as session:
+        [discovered] = await github_issued_tokens.list_live_app_sessions(session)
+    assert discovered.expires_at is not None and discovered.expires_at < datetime.now(UTC)
+    assert discovered.last_expires_at is not None
+    assert discovered.last_expires_at > datetime.now(UTC)
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.effective_repo_state",
+        unittest.mock.AsyncMock(return_value=((url,), {12: {"contents": "read"}})),
+    )
+    await _refresh_github_app_sessions(
+        anthropic, db_session_factory, settings=settings, fernet=fernet
+    )
+    assert rotate.await_count == 2
 
 
 async def test_mapped_refresh_rereads_turn_state_inside_the_fence(
@@ -850,6 +907,95 @@ async def test_mapped_turn_older_than_twelve_hours_stops_refreshing(
     _, rotate, archive = await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]])
     rotate.assert_not_awaited()
     archive.assert_not_awaited()
+
+
+_SAME_ACCESS = (("https://github.com/acme/repo",), {11: {"contents": "read"}})
+_NARROWED_ACCESS = (("https://github.com/acme/repo",), {11: {"contents": "none"}})
+
+
+@pytest.mark.parametrize(
+    ("active_turn", "desired", "renewed"),
+    [
+        (True, _SAME_ACCESS, True),
+        # Idle: the token lapses and the next turn renews it at its start.
+        (False, _SAME_ACCESS, False),
+        # Idle with a live token whose access narrowed: still narrowed now.
+        (False, _NARROWED_ACCESS, True),
+    ],
+    ids=["running-turn", "idle", "idle-narrowed"],
+)
+async def test_mapped_token_is_renewed_only_for_a_running_turn_or_lost_access(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+    active_turn: bool,
+    desired: tuple[tuple[str, ...], dict[int, dict[str, str]]],
+    renewed: bool,
+) -> None:
+    item = _mapped_app_session(active_turn=active_turn, expires_in=timedelta(minutes=10))
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.session_token_needs_rotation",
+        unittest.mock.AsyncMock(return_value=False),
+    )
+    _, rotate, archive = await _refresh_mapped(
+        db_session_factory, monkeypatch, [[item], [item]], desired=desired
+    )
+    assert rotate.await_count == int(renewed)
+    archive.assert_not_awaited()
+
+
+async def test_mapped_refresh_reads_the_clock_per_session(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_refresh_state: dict[str, tuple[int, datetime]],
+) -> None:
+    # The second token was not due when the pass began, but is by the time the
+    # pass reaches it; a pass-wide clock left it to expire before the next pass.
+    clock = {"now": datetime.now(UTC)}
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            return clock["now"]
+
+    first = _mapped_app_session(expires_in=timedelta(minutes=50))
+    first.mapping.ma_session_id = "first"
+    second = _mapped_app_session(expires_in=timedelta(minutes=20))
+    second.mapping.ma_session_id = "second"
+
+    async def slow_access_check(*_args: object, **_kwargs: object) -> object:
+        clock["now"] += timedelta(minutes=10)
+        return _SAME_ACCESS
+
+    monkeypatch.setattr("daimon.adapters.scheduler.main.datetime", Clock)
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.session_token_needs_rotation",
+        unittest.mock.AsyncMock(return_value=False),
+    )
+    rotate = unittest.mock.AsyncMock()
+    lister = unittest.mock.AsyncMock(side_effect=[[first, second], [first], [second], []])
+    monkeypatch.setattr("daimon.adapters.scheduler.main.list_live_app_sessions", lister)
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.list_live_mcp_app_sessions",
+        unittest.mock.AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        "daimon.adapters.scheduler.main.effective_repo_state",
+        unittest.mock.AsyncMock(side_effect=slow_access_check),
+    )
+    monkeypatch.setattr("daimon.adapters.scheduler.main.rotate_live_app_tokens", rotate)
+    await _refresh_github_app_sessions(
+        SimpleNamespace(),
+        db_session_factory,
+        settings=Settings.model_validate(
+            {
+                "database": {"url": "postgresql+asyncpg://localhost/test"},
+                "anthropic": {"api_key": "test"},
+            }
+        ),
+        fernet=build_multifernet((Fernet.generate_key().decode(),)),
+    )
+    assert [call.kwargs["session_id"] for call in rotate.await_args_list] == ["second"]
 
 
 async def test_failed_refresh_backs_off_exponentially(
@@ -1184,19 +1330,35 @@ async def test_refresh_defers_a_transient_mint_cause(
     assert _events(logs, "scheduler.github_app_session_refresh.failed") == []
 
 
-async def test_refresh_alerts_after_a_restart_when_the_token_is_about_to_expire(
+@pytest.mark.parametrize(
+    ("active_turn", "event"),
+    [
+        (True, "scheduler.github_app_session_refresh.failed"),
+        # Idle: nothing uses the token, so its expiry is no reason to alert.
+        (False, "scheduler.github_app_session_refresh.deferred"),
+    ],
+    ids=["running-turn", "idle"],
+)
+async def test_refresh_alerts_after_a_restart_only_when_a_running_turn_token_is_about_to_expire(
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     retired_refresh_state: dict[str, str],
     fresh_refresh_state: dict[str, tuple[int, datetime]],
+    active_turn: bool,
+    event: str,
 ) -> None:
     # No failure history (a restart reset it), but the token has 2 minutes left.
-    item = _mapped_app_session(expires_in=timedelta(minutes=2))
+    item = _mapped_app_session(active_turn=active_turn, expires_in=timedelta(minutes=2))
     rotate = unittest.mock.AsyncMock(side_effect=_mint_unavailable())
     with structlog.testing.capture_logs() as logs:
-        await _refresh_mapped(db_session_factory, monkeypatch, [[item], [item]], rotate=rotate)
-    assert len(_events(logs, "scheduler.github_app_session_refresh.failed")) == 1
-    assert _events(logs, "scheduler.github_app_session_refresh.deferred") == []
+        await _refresh_mapped(
+            db_session_factory,
+            monkeypatch,
+            [[item], [item]],
+            rotate=rotate,
+            desired=_NARROWED_ACCESS,
+        )
+    assert [entry["event"] for entry in logs if "session_refresh." in entry["event"]] == [event]
 
 
 async def test_retired_session_does_not_stop_the_others_in_the_sweep(

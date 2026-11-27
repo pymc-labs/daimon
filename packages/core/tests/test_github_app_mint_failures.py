@@ -67,7 +67,7 @@ from daimon.core.turn.termination import TerminationReason
 from daimon.testing.builders import new_thread_session
 from daimon.testing.ma_models import ma_agent
 from pydantic import SecretStr
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _upsert_github_app = partial(
@@ -412,7 +412,7 @@ def test_combine_refuses_single_vault_with_retained_multi_label() -> None:
 
 
 @pytest.mark.asyncio
-async def test_revoked_installation_with_live_grants_forces_rotation(
+async def test_revoked_or_expired_installation_token_forces_rotation(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tenant_id, agent_id = await _seed_multi_installation_grants(
@@ -459,6 +459,16 @@ async def test_revoked_installation_with_live_grants_forces_rotation(
         assert await session_installations_needing_rotation(session, session_id="live-revoked") == (
             771,
         )
+        assert await session_token_needs_rotation(session, session_id="live-revoked")
+    # The scheduler lets an idle session's token lapse; the next turn start must
+    # renew an expired token as it does a revoked one.
+    async with db_session_factory.begin() as session:
+        await session.execute(
+            update(GitHubIssuedToken)
+            .where(GitHubIssuedToken.session_id == "live-revoked")
+            .values(status="delivered", revoked_at=None, expires_at=datetime.now(UTC))
+        )
+    async with db_session_factory() as session:
         assert await session_token_needs_rotation(session, session_id="live-revoked")
 
 
