@@ -5,6 +5,7 @@ columns carry what queries filter on. Blob bytes live in the artifact store; `co
 them only where none is set up. Additive only.
 
 downgrade: destructive
+schema: expand
 """
 
 from collections.abc import Sequence
@@ -14,8 +15,8 @@ from alembic import op
 from sqlalchemy import Text
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0234_evals_foundation"
-down_revision: str | None = "0233_turn_origin_public_thread"
+revision: str = "0239_evals_foundation"
+down_revision: str | None = "0238_dm_activity"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
