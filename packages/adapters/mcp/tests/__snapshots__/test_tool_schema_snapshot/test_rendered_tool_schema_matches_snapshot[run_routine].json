@@ -2,6 +2,8 @@
   "description": [
     "Run a routine now, ahead of its schedule; its own schedule continues after.",
     "",
+    "Legacy: prefer the workflow tools (list_workflows, run_workflow).",
+    "",
     "The routine's owner or an admin. A paused routine is refused: resume it first."
   ],
   "parameters": {

@@ -126,7 +126,7 @@ async def _dm_fallback(
             notice=notice,
             may_post=may_post,
             sessions=sessionmaker,
-            tenant_id=row.tenant_id,
+            tenant_id=job.tenant_id,
         )
     except SlackApiError as err:
         log.warning(
@@ -444,7 +444,7 @@ def make_slack_poster(runtime: SlackRuntime) -> Poster:
             notice=notice,
             may_post=may_post,
             sessions=runtime.sessionmaker,
-            tenant_id=row.tenant_id,
+            tenant_id=job.tenant_id,
         )
         return DeliveryOutcome(status="delivered")
 

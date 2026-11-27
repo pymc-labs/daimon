@@ -1,0 +1,37 @@
+{
+  "description": [
+    "End your workflow step as failed, with why.",
+    "",
+    "`kind` is missing_tool, missing_data, blocked or other, so the owner sees why without",
+    "reading the transcript. End your turn afterwards."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "kind": {
+        "enum": [
+          "missing_tool",
+          "missing_data",
+          "blocked",
+          "other"
+        ],
+        "type": "string"
+      },
+      "reason": {
+        "maxLength": 1000,
+        "minLength": 1,
+        "type": "string"
+      },
+      "step": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "step",
+      "reason",
+      "kind"
+    ],
+    "type": "object"
+  }
+}

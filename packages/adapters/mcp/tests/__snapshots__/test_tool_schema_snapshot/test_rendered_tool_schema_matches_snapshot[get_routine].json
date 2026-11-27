@@ -1,7 +1,9 @@
 {
   "description": [
     "Get a routine by id. Raises if not found, cross-tenant, or someone else's and you",
-    "are not an admin."
+    "are not an admin.",
+    "",
+    "Legacy: prefer the workflow tools (list_workflows, run_workflow)."
   ],
   "parameters": {
     "additionalProperties": false,

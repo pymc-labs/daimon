@@ -1,0 +1,240 @@
+{
+  "description": [
+    "Change a workflow's draft from the revision you read; nothing goes live.",
+    "",
+    "Pass `edits` (add_node, update_node, remove_node, connect, set_trigger, set_inputs,",
+    "set_start), applied in order, or a whole `spec`. A draft may have problems; they come",
+    "back for you to fix. If the draft moved on, you are told its revision: read it again."
+  ],
+  "parameters": {
+    "$defs": {
+      "AddNode": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "The new node's id, unique in the workflow.",
+            "type": "string"
+          },
+          "node": {
+            "additionalProperties": true,
+            "description": "The node: kind, title and its kind's fields.",
+            "type": "object"
+          },
+          "op": {
+            "const": "add_node",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "id",
+          "node"
+        ],
+        "type": "object"
+      },
+      "Connect": {
+        "additionalProperties": false,
+        "properties": {
+          "from_node": {
+            "type": "string"
+          },
+          "op": {
+            "const": "connect",
+            "type": "string"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The route to set (approval, branch, wait); empty sets `next`."
+          },
+          "to": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "from_node",
+          "to"
+        ],
+        "type": "object"
+      },
+      "RemoveNode": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "op": {
+            "const": "remove_node",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "id"
+        ],
+        "type": "object"
+      },
+      "SetInputs": {
+        "additionalProperties": false,
+        "properties": {
+          "inputs": {
+            "additionalProperties": true,
+            "description": "The workflow's inputs schema, replacing the old.",
+            "type": "object"
+          },
+          "op": {
+            "const": "set_inputs",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "inputs"
+        ],
+        "type": "object"
+      },
+      "SetStart": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "op": {
+            "const": "set_start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "id"
+        ],
+        "type": "object"
+      },
+      "SetTrigger": {
+        "additionalProperties": false,
+        "properties": {
+          "op": {
+            "const": "set_trigger",
+            "type": "string"
+          },
+          "trigger": {
+            "additionalProperties": true,
+            "description": "A trigger with an id; one with that id is replaced.",
+            "type": "object"
+          }
+        },
+        "required": [
+          "op",
+          "trigger"
+        ],
+        "type": "object"
+      },
+      "UpdateNode": {
+        "additionalProperties": false,
+        "properties": {
+          "fields": {
+            "additionalProperties": true,
+            "description": "Fields to set on the node; null removes one.",
+            "type": "object"
+          },
+          "id": {
+            "type": "string"
+          },
+          "op": {
+            "const": "update_node",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "id",
+          "fields"
+        ],
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "base_revision": {
+        "type": "integer"
+      },
+      "edits": {
+        "anyOf": [
+          {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "add_node": "#/$defs/AddNode",
+                  "connect": "#/$defs/Connect",
+                  "remove_node": "#/$defs/RemoveNode",
+                  "set_inputs": "#/$defs/SetInputs",
+                  "set_start": "#/$defs/SetStart",
+                  "set_trigger": "#/$defs/SetTrigger",
+                  "update_node": "#/$defs/UpdateNode"
+                },
+                "propertyName": "op"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/AddNode"
+                },
+                {
+                  "$ref": "#/$defs/UpdateNode"
+                },
+                {
+                  "$ref": "#/$defs/RemoveNode"
+                },
+                {
+                  "$ref": "#/$defs/Connect"
+                },
+                {
+                  "$ref": "#/$defs/SetTrigger"
+                },
+                {
+                  "$ref": "#/$defs/SetInputs"
+                },
+                {
+                  "$ref": "#/$defs/SetStart"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "spec": {
+        "anyOf": [
+          {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "workflow_id": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "workflow_id",
+      "base_revision"
+    ],
+    "type": "object"
+  }
+}

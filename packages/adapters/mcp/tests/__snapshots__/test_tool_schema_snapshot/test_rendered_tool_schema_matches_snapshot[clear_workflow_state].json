@@ -1,0 +1,18 @@
+{
+  "description": [
+    "Clear what a workflow's runs saved between runs (`workflow.state`). Owner or editor."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "workflow_id": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "workflow_id"
+    ],
+    "type": "object"
+  }
+}

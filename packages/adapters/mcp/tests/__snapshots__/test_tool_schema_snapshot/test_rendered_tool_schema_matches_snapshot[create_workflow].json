@@ -1,0 +1,48 @@
+{
+  "description": [
+    "Create a workflow as a private draft owned by this person.",
+    "",
+    "Pass a name for a blank one, a starter `template` id, or a whole `spec` (the",
+    "daimon.workflow/v1 document). The result is the new workflow as get_workflow shows it."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "name": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "spec": {
+        "anyOf": [
+          {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "template": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

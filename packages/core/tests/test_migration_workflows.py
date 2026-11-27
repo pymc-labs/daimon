@@ -1,7 +1,5 @@
 """The workflows migration: down/up cycle, and its DDL matches the models."""
 
-import importlib.util
-from pathlib import Path
 from types import ModuleType
 
 import pytest
@@ -10,17 +8,13 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from daimon.core import _workflow_ledger_guard
 from daimon.core._models import Base
+from daimon.testing.migrations import load_migration
 from sqlalchemy import Connection, inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def migration() -> ModuleType:
-    path = Path(__file__).parents[1] / "alembic/versions/0239_workflows.py"
-    spec = importlib.util.spec_from_file_location("workflows_migration", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_migration("workflows")
 
 
 def test_the_migration_creates_every_workflow_table() -> None:

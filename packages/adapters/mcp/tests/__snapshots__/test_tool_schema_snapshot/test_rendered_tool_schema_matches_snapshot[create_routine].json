@@ -2,6 +2,8 @@
   "description": [
     "Create a recurring routine; owner DMs run as unattended live-DM turns.",
     "",
+    "Legacy: prefer the workflow tools (list_workflows, run_workflow).",
+    "",
     "Owner-DM routines are scheduled live-DM turns, using the owner's normal",
     "personal/shared memory, credentials and DM tool authority in a fresh private",
     "scope. They support Managed Agents only and run unattended: calls needing",
