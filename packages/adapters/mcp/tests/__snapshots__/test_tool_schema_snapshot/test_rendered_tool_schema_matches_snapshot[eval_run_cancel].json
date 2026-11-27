@@ -1,0 +1,17 @@
+{
+  "description": [
+    "Stop an eval run: no more items start, and running ones are interrupted."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "run_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "run_id"
+    ],
+    "type": "object"
+  }
+}

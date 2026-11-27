@@ -1,0 +1,17 @@
+{
+  "description": [
+    "Read an eval run: its status, spend so far and estimate."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "run_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "run_id"
+    ],
+    "type": "object"
+  }
+}
