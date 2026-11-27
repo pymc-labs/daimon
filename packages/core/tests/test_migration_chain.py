@@ -192,6 +192,7 @@ AFTER_MERGE_COLUMNS = {
     ("routines", "owner_notice"),
     ("compute_tasks", "wait_until"),
     ("compute_sessions", "wake_turns"),
+    ("mcp_tokens", "eval_item_id"),
 }
 AFTER_MERGE_OBJECTS = {
     "ix_usage_observation_provider_observed_at",

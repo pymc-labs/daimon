@@ -5,6 +5,7 @@ gateway uses to reach the item's world) and `mcp_tokens.eval_item_id` (the item 
 answers for). Additive only.
 
 downgrade: destructive
+schema: contract
 """
 
 from collections.abc import Sequence
@@ -15,8 +16,8 @@ from alembic import op
 from sqlalchemy import Text
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0236_eval_world"
-down_revision: str | None = "0235_eval_scrub_entities"
+revision: str = "0241_eval_world"
+down_revision: str | None = "0240_eval_scrub_entities"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
