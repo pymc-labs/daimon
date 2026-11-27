@@ -1,0 +1,87 @@
+{
+  "description": [
+    "Search the data sources for `query`; only what everyone who will see the answer may",
+    "read. Filter by source ids (`data_sources`), record kind and date range. Each hit has a",
+    "`record_id` to open with `data_get`; `live` holds what live sources answered now. No",
+    "hit is not proof that nothing exists.",
+    "",
+    "`workspace`: the chat space to use, by name or id as `list_daimons` shows them; leave it out when you reach only one."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "kind": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "limit": {
+        "default": 10,
+        "type": "integer"
+      },
+      "query": {
+        "type": "string"
+      },
+      "since": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "source_ids": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "until": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "workspace": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "The workspace to use."
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "type": "object"
+  }
+}

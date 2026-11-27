@@ -1,0 +1,36 @@
+{
+  "description": [
+    "Open one record by its `record_id`: its text (12,000 characters from `start`; a",
+    "`next_start` says where the rest continues) and its attached files for `data_file`.",
+    "",
+    "`workspace`: the chat space to use, by name or id as `list_daimons` shows them; leave it out when you reach only one."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "record_id": {
+        "type": "string"
+      },
+      "start": {
+        "default": 0,
+        "type": "integer"
+      },
+      "workspace": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "The workspace to use."
+      }
+    },
+    "required": [
+      "record_id"
+    ],
+    "type": "object"
+  }
+}

@@ -172,8 +172,6 @@ read-only in the app. Daimon never deletes one: a removed entry stays, and
 with `publish: true` and a clean run. `replaces` retires the sources it names, by declared id or name. A `revision`
 below the last applied one is ignored. Credentials are `env:NAME` or `file:/path`, never values.
 
-`skill_repos` adds each repository's skills to the library with that scope.
-
 ## Who can read a record
 
 `daimon data access-check --tenant <id> --source <id>` shows a source's state and freshness.
@@ -247,14 +245,6 @@ writes the store. The checks:
 - `person` (`--account`): what that person holds and reads.
 - `health`: each source's state, last sync and embedding coverage.
 - `drift`: chunks off their record, records without chunks, sources not synced in 48 hours or failing.
-
-A coding key reads data as its maker, keeping its channel's rule. The hub lists data tools
-only where `data_reads` is On.
-
-`library_skills` serves `list_library_skills` and `read_library_skill` to coding keys, the hub and
-other clients. A scoped skill, in `list_skills`, `get_skill` or on an agent or channel,
-reaches only an audience holding its scope: everyone in the room, or in a direct message the
-asker and the agent's owner. On an agent or channel, Slack and Teams rooms never load it.
 
 ## After a restore
 

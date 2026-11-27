@@ -1,0 +1,62 @@
+{
+  "description": [
+    "Bring a GitHub repository's folders (``owner/name``) into the library, limited to",
+    "``paths`` when given, readable by ``scope``. Ones already brought in are kept. A person",
+    "confirms on a card first. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "branch": {
+        "default": "main",
+        "maxLength": 200,
+        "minLength": 1,
+        "type": "string"
+      },
+      "origin_context_id": {
+        "maxLength": 200,
+        "minLength": 1,
+        "type": "string"
+      },
+      "paths": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "repo": {
+        "maxLength": 200,
+        "minLength": 3,
+        "pattern": "^[\\w.-]+/[\\w.-]+$",
+        "type": "string"
+      },
+      "scope": {
+        "anyOf": [
+          {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "repo",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

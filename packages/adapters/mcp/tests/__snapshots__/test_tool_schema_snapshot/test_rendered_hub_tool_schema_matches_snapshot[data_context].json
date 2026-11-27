@@ -1,0 +1,26 @@
+{
+  "description": [
+    "What you can read here: the scopes you hold and each data source with its status,",
+    "how many records you may read and when the newest one happened. Start here.",
+    "",
+    "`workspace`: the chat space to use, by name or id as `list_daimons` shows them; leave it out when you reach only one."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "workspace": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "The workspace to use."
+      }
+    },
+    "type": "object"
+  }
+}

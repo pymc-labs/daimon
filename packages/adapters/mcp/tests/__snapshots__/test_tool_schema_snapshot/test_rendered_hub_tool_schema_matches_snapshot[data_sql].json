@@ -1,0 +1,34 @@
+{
+  "description": [
+    "Read-only SQL over the data views and datasets (`data_sources` lists them), by plain",
+    "names. One statement, at most 500 rows, five seconds. Values go through every",
+    "source's redaction rules best effort. Refused when names are hidden from someone the",
+    "answer is for.",
+    "",
+    "`workspace`: the chat space to use, by name or id as `list_daimons` shows them; leave it out when you reach only one."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "query": {
+        "type": "string"
+      },
+      "workspace": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "The workspace to use."
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "type": "object"
+  }
+}

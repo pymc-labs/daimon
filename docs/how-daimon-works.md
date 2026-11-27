@@ -42,6 +42,13 @@ matches. Skills come from the seeded defaults, a library, a GitHub repo an agent
 follows, a connected server or a channel. Admins and owners attach them to an agent;
 a channel can add its own.
 
+`library_skills` serves `list_library_skills` and `read_library_skill` to coding keys, the hub and
+other clients. A scoped skill, in `list_skills`, `get_skill` or on an agent or channel,
+reaches only an audience holding its scope: everyone in the room, or in a direct message the
+asker and the agent's owner. On an agent or channel, Slack and Teams rooms never load it.
+A declared `skill_repos` entry adds a repository's skills to the library with its scope
+([Data sources](data-sources.md#declared-config)).
+
 See [Defaults](defaults.md#skills), [GitHub](github.md) and
 [MCP servers](mcp-servers.md#add-a-skill-a-server-serves).
 
@@ -61,6 +68,8 @@ it shares. See [Isolation](isolation.md#agent-memory) and
 A **key** is a secret an agent uses for a service, such as a token for a data API.
 Agent keys are shared by everyone who uses the agent, and a member may add one but
 only an admin may replace it. A **coding key** lets Claude Code talk to one agent.
+It reads data as its maker, keeping its channel's rule. The hub lists data tools only
+where `data_reads` is On.
 
 An **MCP server** gives an agent more tools, such as Notion or Linear. A server
 that signs people in lets each person connect their own account. See

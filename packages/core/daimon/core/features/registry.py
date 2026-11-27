@@ -1456,6 +1456,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         doc=("Chat agents see a scoped skill only where everyone in the room holds its scope."),
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,
+        page="how-daimon-works.md#skills",
     ),
     _limit(
         "long_jobs_max_usd",
