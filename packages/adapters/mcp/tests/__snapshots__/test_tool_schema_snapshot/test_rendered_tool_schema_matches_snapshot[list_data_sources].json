@@ -1,0 +1,16 @@
+{
+  "description": [
+    "List the workspace's data sources with their state, or one source's latest sync",
+    "runs (source_id). The kinds of source that can be added are listed too. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "source_id": {
+        "default": "",
+        "type": "string"
+      }
+    },
+    "type": "object"
+  }
+}

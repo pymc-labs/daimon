@@ -1,0 +1,11 @@
+{
+  "description": [
+    "The data sources you can read here, with their ids and how many records each holds,",
+    "and the datasets `data_sql` can query."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

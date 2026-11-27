@@ -1,0 +1,50 @@
+{
+  "description": [
+    "Change who may read what in the data sources. create_scope (scope_id, kind, name,",
+    "description), delete_scope (scope_id), grant or revoke a scope (scope_id, holder: a",
+    "person's name or account id, or a holder as listed). Runs on the asker's Approve card.",
+    "Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "action": {
+        "enum": [
+          "create_scope",
+          "delete_scope",
+          "grant",
+          "revoke"
+        ],
+        "type": "string"
+      },
+      "description": {
+        "default": "",
+        "type": "string"
+      },
+      "holder": {
+        "default": "",
+        "type": "string"
+      },
+      "kind": {
+        "default": "",
+        "type": "string"
+      },
+      "name": {
+        "default": "",
+        "type": "string"
+      },
+      "origin_context_id": {
+        "type": "string"
+      },
+      "scope_id": {
+        "default": "",
+        "type": "string"
+      }
+    },
+    "required": [
+      "action",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}
