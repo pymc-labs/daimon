@@ -2450,8 +2450,8 @@ class ArtifactsSettings(BaseModel):
 
 
 class ArtifactPagesSettings(BaseModel):
-    """Caps for artifact pages (web app pages agents publish). Data caps are per page,
-    times its data scale (1-10)."""
+    """Caps for artifact pages, the pages agents publish. Data caps are per page, times its
+    data scale (1-10)."""
 
     model_config = ConfigDict(frozen=True)
 

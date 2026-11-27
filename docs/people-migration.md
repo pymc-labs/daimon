@@ -144,6 +144,7 @@ paused in the old system; rerun `go-live` to schedule released timers.
 one once, or writes it to `--urls-out` (mode 0600), keyed by the old id as
 `import --urls-out` is.
 
+<!-- knowledge: web -->
 ## Pages
 
 ```bash
@@ -201,6 +202,8 @@ The dry run also warns about what the page loads from hosts [this deployment blo
 frames that need a content domain, browser storage without one, and links to
 pages outside the import. To send old links to the new pages, list the old host in
 [`DAIMON_WEB__ARTIFACT_LEGACY_HOSTS`](configuration.md#daimon_web__artifact_legacy_hosts).
+
+<!-- /knowledge -->
 
 ## Repository memory
 

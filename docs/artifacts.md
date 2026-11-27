@@ -1,3 +1,6 @@
+---
+knowledge: web
+---
 # Artifacts
 
 An artifact is an HTML page an agent publishes and Daimon hosts: a dashboard, a form, a planner or a report. It can keep shared data, send events to the agent and let viewers ask it questions. Read this to publish pages, share them and connect them to an agent.

@@ -9,6 +9,7 @@ Watches are off by default. Polling works for Discord `read_thread` and
 `artifact_db_query` on a page's data. A callback watch wakes on posts to a
 private link instead of polling; see [Callback watches](#callback-watches).
 
+<!-- knowledge: web -->
 ## Page watches
 
 A page-event watch wakes on the events an
@@ -32,6 +33,8 @@ Activity tab. Only the watch's owner can resume it.
 
 Before every report on Slack or Teams, Daimon rechecks that the owner can still
 post in the destination, and pauses the watch if not.
+
+<!-- /knowledge -->
 
 ## How a watch works
 
@@ -69,7 +72,10 @@ the conversation, never from the request.
   fresh DM turn under the same read-only rules.
 - **A new thread per report** (`delivery="new_thread"`). On Discord it is a
   public thread, and Daimon checks the owner may create threads in the parent.
-  On the web app it is a new chat of the owner's own.
+<!-- knowledge: web -->
+- **A new web chat per report** (`delivery="new_thread"` from the web app), a
+  chat of the owner's own.
+<!-- /knowledge -->
 
 Turned-off DMs or lost thread rights pause the watch.
 
