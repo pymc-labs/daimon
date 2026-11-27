@@ -18,7 +18,7 @@ separately; they are Off by default.
 DAIMON_FEATURES__WORKFLOW_WEBHOOKS=on
 ```
 
-While `workflows` is Off, every path refuses: the web pages, the workflow
+While `workflows` is Off, every path refuses: the workflow pages, the workflow
 tools, `/workflows` in chat, webhooks and the `daimon workflows` commands.
 Runs already started stop at their next step without spending.
 
@@ -76,10 +76,13 @@ has a test URL that captures one delivery as a test run.
 
 ## Asks in chat
 
-An Approval step asks people by direct message, in a thread, or in the web app's
-inbox. On Discord, the person answers by reply; on Slack, in the thread under
+An Approval step asks people by direct message or in a thread. On Discord, the person answers by reply; on Slack, in the thread under
 the message; on Teams, with the card's button. In a thread, an answer from
 someone who was not asked is refused.
+
+<!-- knowledge: web -->
+The web app's inbox shows the same asks.
+<!-- /knowledge -->
 
 An answer can be approve or reject, a choice, or text. In a thread, a reply that
 names no option goes to the step's `otherwise` route, with its text. Several approvers
@@ -89,11 +92,15 @@ unless the step allows it. An unanswered ask times out to its own route.
 An agent step can also ask a question. The step waits, and the answer resumes the
 agent's session.
 
-## In chat and the web app
+## Build and run
 
+<!-- knowledge: web -->
 In the web app, you build a workflow on a canvas from a blank draft or a
 starter. Ask Daimon, beside the canvas, edits the draft with you through the
-workflow tools. A private workflow is hidden from other members until you share it.
+workflow tools.
+<!-- /knowledge -->
+
+A private workflow is hidden from other members until you share it.
 
 `/workflows` opens the workflows panel on Discord, Slack and Teams. In chat, the
 agent does not publish or start a live run itself. It posts a card for you to
@@ -108,7 +115,7 @@ streak of failures.
 ## Grants and the Rule of Two
 
 A step that sees outside input must not also write. Outside input is a webhook
-body, an answer from someone who cannot edit the workflow, or a page from the web.
+body, an answer from someone who cannot edit the workflow, or a fetched web page.
 Validation refuses such a step unless an Approval before it binds the write. A write inside a
 [scope](workflows-advanced.md#writes-inside-a-scope) is the one exception.
 
@@ -131,13 +138,17 @@ Each step's spend counts against the allowance of the person the run is for.
 
 ## Routines and workflows
 
-An admin can move a routine to a workflow and back, from the web app or the CLI.
+An admin can move a routine to a workflow and back from the CLI.
 The workflow takes over the routine's schedule, posts waiting to go out and
 settings, and a paused routine moves paused. A routine that posts to its
 owner's direct messages keeps posting there. A routine that is
 running, or already moved, stays. A copy made while migrating from another
 system moves like any other and keeps its link to its source. A workflow on a
 one-time or multi-week schedule cannot move back.
+
+<!-- knowledge: web -->
+The web app can move one too.
+<!-- /knowledge -->
 
 A moved routine's step writes as the routine did: it runs the routine's own
 turn, under the same tool policy. The preview lists what the admin approves by
@@ -171,7 +182,9 @@ name each routine.
 
 - Workflows run only on the Anthropic backend.
 - A run form in chat holds 5 fields on Discord and 10 on Slack and Teams.
-  Longer forms open in the web app.
+<!-- knowledge: web -->
+- A longer form opens in the web app.
+<!-- /knowledge -->
 - A draft card does not refresh: an older card's Test run and Publish are refused.
 - Publishing from chat records no note.
 - On Teams, a run confirmation card cannot start a run. Teams also replaces the

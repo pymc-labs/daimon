@@ -2,7 +2,7 @@
 
 Post to chat, start runs from mentions and polls, save state between runs, write
 without asking inside a scope, and follow runs on a board. Each is a field of the
-workflow spec, set in the web app or in YAML.
+workflow spec.
 
 ## Post to chat
 
@@ -72,7 +72,11 @@ run started in the workflow's timezone. `last(list, n)` takes a list's final ite
 
 A test run or a failed run saves nothing. State over 64 KiB fails the run and
 changes nothing. State is untrusted input, so a step that reads it and writes needs an
-approval. In the web app, viewers see the State tab and editors clear it.
+approval.
+
+<!-- knowledge: web -->
+In the web app, viewers see the State tab and editors clear it.
+<!-- /knowledge -->
 
 ## Writes inside a scope
 
