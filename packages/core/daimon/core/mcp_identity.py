@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import re
 import uuid
@@ -377,6 +378,10 @@ class IdentityClaims:
     #: Why the call runs (`WakeReason`): `turn` with `sub` and `msg`, any other reason with
     #: `channel` and `room` and no `sub` or `msg`. Never with `routine`.
     wake: str | None = None
+    #: With `routine` only: what a server's approval of the routine is bound to
+    #: (`routine_revision`), and its name, for the server's own pages.
+    rev: str | None = None
+    routine_name: str | None = None
 
     def payload(self, *, now: datetime, ttl: timedelta = TOKEN_TTL) -> dict[str, str | int]:
         issued = int(now.timestamp())
@@ -396,6 +401,8 @@ class IdentityClaims:
             ("room", self.room),
             ("routine", self.routine),
             ("wake", self.wake),
+            ("rev", self.rev),
+            ("routine_name", self.routine_name),
         ):
             if value:
                 claims[name] = value
@@ -415,6 +422,8 @@ def caller_claims(
     room: SignedRoom | None = None,
     routine: str | None = None,
     wake: WakeReason | None = None,
+    rev: str | None = None,
+    routine_name: str | None = None,
 ) -> IdentityClaims:
     """Claims for one relayed request.
 
@@ -434,8 +443,14 @@ def caller_claims(
     `wake` says why a call with no fresh message runs: `turn` is the person's live turn
     and keeps its `sub` and `msg`; any other reason is a continuation posting to `place`,
     signed like a routine with that room's kind and no person or message.
+
+    `rev` and `routine_name` come only with `routine` (`routine_revision`).
     """
     owned = routine is not None and room == "dm"
+    if routine is None and (rev is not None or routine_name is not None):
+        raise ValueError("a routine's revision and name come only with its routine")
+    if rev is not None and not re.fullmatch(r"[0-9a-f]{64}", rev):
+        raise ValueError("a routine's revision is a SHA-256 hex digest")
     if routine is not None and not (
         0 < len(routine) <= ROUTINE_CLAIM_MAX
         and place is not None
@@ -473,7 +488,42 @@ def caller_claims(
         room=room if channel else None,
         routine=routine,
         wake=wake,
+        rev=rev,
+        routine_name=routine_name[:ROUTINE_CLAIM_MAX] if routine_name else None,
     )
+
+
+#: The layout `routine_revision` hashes; a new layout takes a new number.
+ROUTINE_REVISION_VERSION: Final = 1
+
+
+def routine_revision(row: RoutineFacts, *, workspace: str | None) -> str:
+    """What a server's approval of a routine is bound to, signed as `rev`.
+
+    The SHA-256 hex of a fixed, versioned text: the tenant, the workspace as signed in
+    `ws`, the routine's id and owner, and what an admin approves (`stores.routines.
+    _SANDBOX_MATERIAL`) with the agent's name in place of its id, so healing a stale
+    agent id keeps it. A pause, a resume, a new schedule or name keep it too; a new
+    prompt, agent, owner or destination change it.
+    """
+    text = json.dumps(
+        {
+            "v": ROUTINE_REVISION_VERSION,
+            "tenant": str(row.tenant_id),
+            "ws": workspace or "",
+            "routine": str(row.id),
+            "owner": row.created_by_user_id or "",
+            "agent": row.agent_name,
+            "prompt": row.trigger_message,
+            "destination_kind": row.destination_kind or "",
+            "destination_id": row.destination_id or "",
+            "channel_id": row.channel_id or "",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def sign_identity(

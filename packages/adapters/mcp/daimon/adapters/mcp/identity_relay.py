@@ -29,7 +29,7 @@ from daimon.core.config import SignedIdentityServer, load_watches_settings
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.defaults.builtin_agent import find_agent_or_builtin
 from daimon.core.defaults.metadata import BUILTIN_AGENT_NAMES, MA_METADATA_KEY_MANAGED
-from daimon.core.fire.subject import RoutineFacts, Subject
+from daimon.core.fire.subject import Subject
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
 from daimon.core.mcp_identity import (
@@ -53,6 +53,7 @@ from daimon.core.mcp_identity import (
     requester_conversation,
     routine_conversation,
     routine_destination_key,
+    routine_revision,
     stamp_parsed,
     watch_conversation,
 )
@@ -366,8 +367,9 @@ async def _dm_routine_run(
     agent_id: uuid.UUID,
     person: str,
     now: datetime,
-) -> uuid.UUID | None:
-    """The routine (or workflow) a call's live fire posting to its owner's DM is for, or None.
+) -> RoutineRow | Subject | None:
+    """The routine (or workflow step) whose live fire posting to its owner's DM a call
+    comes from, or None.
 
     `origin` is the turn holding the credential's own grant. It must be that routine's
     unattended turn in a fresh `dm:` scope: no person's message, not a helper's, not a
@@ -398,6 +400,7 @@ async def _dm_routine_run(
     ):
         return None
     async with sessionmaker() as session:
+        facts: RoutineRow | Subject | None
         if binding.workflow_run_id is not None:
             run = binding.workflow_run_id
             step = await bound_step(session, tenant_id=tenant_id, run_id=run)
@@ -428,7 +431,7 @@ async def _dm_routine_run(
         or routine_destination_key(facts) != DM_ROUTINE_DESTINATION
     ):
         return None
-    return facts.id
+    return facts
 
 
 async def _watch_poll(
@@ -778,7 +781,7 @@ def build_identity_relay_route(
                 else None
             )
             routine_id: str | None = None
-            dm_routine: uuid.UUID | None = None
+            signed_routine: RoutineRow | Subject | None = None
             if (
                 server.routine_claims
                 and origin is None
@@ -791,7 +794,7 @@ def build_identity_relay_route(
                 # own row, never from the request. A credential minted before runs kept
                 # their destination names none, so it signs no routine claim. A workflow's
                 # routine step is the same run, read from its workflow run (`bound_step`).
-                routine: RoutineFacts | None = (
+                routine: RoutineRow | Subject | None = (
                     await _routine_run(
                         sessionmaker, binding, tenant_id=tenant_id, agent_id=agent_id
                     )
@@ -812,7 +815,7 @@ def build_identity_relay_route(
                     else None
                 )
                 if routine is not None and destination is not None:
-                    routine_id = str(routine.id)
+                    routine_id, signed_routine = str(routine.id), routine
                     place, room = (
                         TurnPlace(channel_id=destination[0], message_id=None),
                         destination[1],
@@ -842,7 +845,7 @@ def build_identity_relay_route(
                 # A routine posting to its owner's DM, in a live fire: the owner, their DM
                 # (opened by the fire, never the origin's) and room `dm`. Any check failing
                 # leaves the call as it is without the setting.
-                routine_id = str(dm_routine)
+                routine_id, signed_routine = str(dm_routine.id), dm_routine
                 place, room = TurnPlace(channel_id=binding.dm_channel, message_id=None), "dm"
             wake: WakeReason | None = None
             if (
@@ -883,6 +886,16 @@ def build_identity_relay_route(
                 room=room,
                 routine=routine_id,
                 wake=wake,
+                # What a server's approval of this routine is bound to, from the row just
+                # checked; none for a routine that is paused, so no approval counts there.
+                rev=(
+                    routine_revision(
+                        signed_routine, workspace=f"{platform}:{workspace}" if workspace else None
+                    )
+                    if signed_routine is not None and signed_routine.enabled
+                    else None
+                ),
+                routine_name=signed_routine.name if signed_routine is not None else None,
             )
             headers["authorization"] = f"Bearer {tokens.token(identity, now=now)}"
         if request.method in ("GET", "DELETE"):

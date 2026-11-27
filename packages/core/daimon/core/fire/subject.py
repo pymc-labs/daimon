@@ -76,6 +76,8 @@ class Subject:
     #: What a DM fire's relay checks is unedited (ISO 8601): a routine's `updated_at`, a
     #: workflow's live version's `published_at`.
     revision: str | None = None
+    #: Whether it runs now: a routine enabled, a workflow active. A paused one signs no `rev`.
+    enabled: bool = True
     #: A workflow's routine step: `id` is the workflow's (a result carried by a move has no run).
     workflow: bool = False
 
@@ -121,6 +123,7 @@ def workflow_subject(
         source_thread_id=made_in["thread_id"] if made_in else None,
         workflow_run_id=run_id,
         revision=revision,
+        enabled=workflow.status == "active",
         workflow=True,
     )
 
@@ -144,4 +147,5 @@ def routine_subject(row: RoutineRow) -> Subject:
         source_channel_id=row.source_channel_id,
         source_thread_id=row.source_thread_id,
         revision=row.updated_at.isoformat(),
+        enabled=row.enabled,
     )

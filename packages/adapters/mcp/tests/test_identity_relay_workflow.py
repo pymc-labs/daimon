@@ -12,13 +12,14 @@ from typing import Any
 import pytest
 from daimon.core.audience_facts import RoomFacts
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_identity import RelayBinding, routine_destination_key
-from daimon.core.stores import identity, workflows
+from daimon.core.mcp_identity import RelayBinding, routine_destination_key, routine_revision
+from daimon.core.stores import identity
 from daimon.core.stores.domain import Role
 from daimon.core.stores.lead_intake import workflow_execution
 from daimon.core.stores.routines import create_routine
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.stores.turn_origins import bind_origin_session, create_origin
+from daimon.core.workflows.fire_store import bound_step
 from daimon.testing.workflows import make_world
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -29,6 +30,7 @@ from .test_identity_relay_room import _facts, _signed
 DM_SERVER = SERVER.model_copy(
     update={"routine_claims": True, "dm_routine_claims": True, "requester_meta": True}
 )
+WS = "discord:guild-1"
 TARGETS: dict[str, dict[str, Any]] = {
     "channel": {"kind": "channel", "id": "555"},
     "dm": {"kind": "dm"},
@@ -86,10 +88,9 @@ async def test_a_routine_step_signs_the_claims_its_routine_would(
     await _facts(sm, person, {"555": RoomFacts(contained=False, narrow=False)})
     run = await world.run()
     async with sm() as s:
-        version = await workflows.get_version(
-            s, tenant_id=world.tenant_id, workflow_id=world.workflow_id, number=run.version
-        )
-    assert version is not None
+        step = await bound_step(s, tenant_id=world.tenant_id, run_id=run.id)
+    assert step is not None and step.subject.revision is not None
+    subject = step.subject
     destination = routine_destination_key(row)
     body = _tool_call(requester_platform_user_id="666", requester_kind="person")
     if target == "channel":
@@ -126,11 +127,13 @@ async def test_a_routine_step_signs_the_claims_its_routine_would(
         async with workflow_execution(sm, world.tenant_id, run.id, lifetime_s=60) as grant:
             stepped = dm(
                 await _dm_turn(sm, person, "g-step"), "g-step", grant,
-                version.published_at.isoformat(), workflow_run_id=run.id,
+                subject.revision, workflow_run_id=run.id,
             )  # fmt: skip
             as_step = await _signed(sm, await _token(sm, person, stepped), DM_SERVER, body)
     claims, stamp = as_routine
-    assert claims["routine"] == str(row.id) and claims["room"] in ("team", "dm"), claims
-    assert as_step == ({**claims, "routine": str(world.workflow_id)}, stamp), (
+    assert claims["room"] in ("team", "dm"), claims
+    assert (claims["routine"], claims["rev"]) == (str(row.id), routine_revision(row, workspace=WS))
+    named = {"routine": str(subject.id), "rev": routine_revision(subject, workspace=WS)}
+    assert as_step == ({**claims, **named, "routine_name": subject.name}, stamp), (
         "the same claims and requester stamp, naming its workflow as the routine"
     )
