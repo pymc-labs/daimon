@@ -1,0 +1,29 @@
+{
+  "description": [
+    "Revoke an explicit Daimon admin grant immediately (platform admins only).",
+    "",
+    "Requires a personal CLI credential; chat and routines are refused.",
+    "Deletes the grant and records its audit atomically; delegated authority is never cached.",
+    "Platform authority cannot be revoked; remaining grants still apply."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "subject_id": {
+        "type": "string"
+      },
+      "subject_kind": {
+        "default": "user",
+        "enum": [
+          "user",
+          "role"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "subject_id"
+    ],
+    "type": "object"
+  }
+}

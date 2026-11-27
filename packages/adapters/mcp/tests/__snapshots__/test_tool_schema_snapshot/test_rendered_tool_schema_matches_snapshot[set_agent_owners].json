@@ -1,0 +1,46 @@
+{
+  "description": [
+    "Set an agent's owner and co-owners to exactly these person or account ids."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_id": {
+        "type": "string"
+      },
+      "co_owners": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "origin_context_id": {
+        "type": "string"
+      },
+      "owner": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "agent_id",
+      "owner",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

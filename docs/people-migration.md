@@ -18,7 +18,7 @@ The file lists the Discord ids of people who never want to be tagged:
 ```
 
 Each person is opted out as if they had asked Daimon never to tag them, and gets an identity
-if they have none yet. The command prints how many were new and how many had
+if they have none yet. The command prints how many it added and how many had
 already opted out.
 
 ## Earlier private conversations
@@ -87,7 +87,7 @@ Check each owner, channel and thread, which the import prints, then run
 must be a live Discord server. An `import` with timers or callback watches
 needs `--agent-id` and `--agent-name` and checks them too. Held timers belong to
 that agent: only its `go-live` schedules them and only its `--full` run cancels
-them. `daimon watches confirm` is removed; use `go-live`.
+them.
 
 `go-live` makes every watch imported for that agent live on the owner, channel
 and thread the import printed: polled and callback watches resume. A page watch

@@ -1,0 +1,29 @@
+{
+  "description": [
+    "Make a user or role a Daimon admin, a role of its own beside any sign-in role.",
+    "",
+    "Platform admins only, via a personal CLI credential; chat, routines and agent",
+    "credentials are refused. Delegates cannot delegate. Billing and spend caps stay",
+    "platform-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "subject_id": {
+        "type": "string"
+      },
+      "subject_kind": {
+        "default": "user",
+        "enum": [
+          "user",
+          "role"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "subject_id"
+    ],
+    "type": "object"
+  }
+}

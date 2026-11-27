@@ -1,0 +1,50 @@
+{
+  "description": [
+    "Choose the one repo in this agent's filesystem, or pass 'none' to clear it.",
+    "",
+    "A clear ask is enough: set it right away and reply with the returned",
+    "line. Ask once in plain words during agent setup. Use an owner/repo already on",
+    "this agent's list. Other repos have token access; clone one with gh repo clone when",
+    "asked. Only an admin or an owner of the agent may change this setting.",
+    "Pass the current turn origin and the selected agent's name and MA id.",
+    "If the repo is not on its list, offer the single Connect GitHub link."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_name": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "expected_ma_agent_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "origin_context_id": {
+        "default": "",
+        "type": "string"
+      },
+      "repo_name": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "repo_name"
+    ],
+    "type": "object"
+  }
+}

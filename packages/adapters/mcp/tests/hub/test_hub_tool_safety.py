@@ -119,7 +119,11 @@ class _Paused:
         router.add("POST", rf"/v1/sessions/{_SESSION}/events$", self._send)
 
     def _list(self, request: httpx.Request, _m: re.Match[str]) -> httpx.Response:
-        events = list(self.events)
+        # Processed in log order, one second apart, as Managed Agents stamps them.
+        events = [
+            {"processed_at": f"2026-11-26T00:{i // 60:02d}:{i % 60:02d}+00:00", **event}
+            for i, event in enumerate(self.events)
+        ]
         types = request.url.params.get_list("types[]")
         if types:
             events = [e for e in events if e["type"] in types]
@@ -255,7 +259,9 @@ async def test_hub_get_session_reports_the_pause_and_answers_nothing(
 async def test_hub_continue_turn_resumes_the_owners_agent_chat_turn(
     db_session: AsyncSession, db_nullpool_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(safety, "_POLL_S", 0.01)
+    monkeypatch.setattr(safety, "_REOPEN_S", 0.01)
+    # This fake's stream brings an idle event its event list never shows.
+    monkeypatch.setattr(safety, "_CATCH_UP_GAP_S", 0.001)
     app, daimon_id, paused, _ = await _hub(
         db_session, db_nullpool_engine, owner_is_caller=True, recorded=True
     )
@@ -272,6 +278,53 @@ async def test_hub_continue_turn_resumes_the_owners_agent_chat_turn(
     assert [(e["type"], e.get("result")) for e in paused.sent] == [
         ("user.tool_confirmation", "deny")
     ]
+
+
+async def test_hub_await_turn_resumes_the_owners_paused_turn_and_returns_its_answer(
+    db_session: AsyncSession, db_nullpool_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue 1894, through the registered tool, admission included: the caller that
+    waits needs no `get_session` loop and no `continue_turn`."""
+    monkeypatch.setattr(safety, "_REOPEN_S", 0.01)
+    # This fake's stream brings an idle event its event list never shows.
+    monkeypatch.setattr(safety, "_CATCH_UP_GAP_S", 0.001)
+    app, daimon_id, paused, _ = await _hub(
+        db_session, db_nullpool_engine, owner_is_caller=True, recorded=True
+    )
+    result = _payload(
+        await call_mcp_tool(
+            app,
+            token=_TOKEN,
+            name="await_turn",
+            arguments={"daimon_id": daimon_id, "handle": _SESSION},
+        )
+    )
+    assert not result.get("isError"), result
+    news = result.get("structuredContent") or {}
+    assert (news.get("status"), news.get("messages")) == ("idle", ["done"]), result
+    assert [(e["type"], e.get("result")) for e in paused.sent] == [
+        ("user.tool_confirmation", "deny")
+    ]
+
+
+async def test_hub_await_turn_leaves_an_approval_card_to_its_person(
+    db_session: AsyncSession, db_nullpool_engine: AsyncEngine
+) -> None:
+    app, daimon_id, paused, _ = await _hub(
+        db_session, db_nullpool_engine, owner_is_caller=True, recorded=False
+    )
+    result = _payload(
+        await call_mcp_tool(
+            app,
+            token=_TOKEN,
+            name="await_turn",
+            arguments={"daimon_id": daimon_id, "handle": _SESSION},
+        )
+    )
+    news = result.get("structuredContent") or {}
+    assert (news.get("status"), news.get("hint")) == ("paused", safety.AWAITING_CARD_HINT), result
+    assert paused.sent == []
+    assert not safety._workers  # pyright: ignore[reportPrivateUsage]
 
 
 @pytest.mark.parametrize(
@@ -310,7 +363,9 @@ async def test_hub_start_turn_gates_the_new_session_and_refuses_its_write(
 
     from daimon.adapters.mcp.tools import agent_chat
 
-    monkeypatch.setattr(safety, "_POLL_S", 0.01)
+    monkeypatch.setattr(safety, "_REOPEN_S", 0.01)
+    # This fake's stream brings an idle event its event list never shows.
+    monkeypatch.setattr(safety, "_CATCH_UP_GAP_S", 0.001)
     app, daimon_id, paused, _ = await _hub(
         db_session, db_nullpool_engine, owner_is_caller=True, recorded=False, fresh=True
     )
@@ -334,7 +389,9 @@ async def test_hub_start_turn_gates_the_new_session_and_refuses_its_write(
 async def test_hub_ask_with_a_handle_resumes_then_answers_the_new_message(
     db_session: AsyncSession, db_nullpool_engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(safety, "_POLL_S", 0.01)
+    monkeypatch.setattr(safety, "_REOPEN_S", 0.01)
+    # This fake's stream brings an idle event its event list never shows.
+    monkeypatch.setattr(safety, "_CATCH_UP_GAP_S", 0.001)
     app, daimon_id, paused, _ = await _hub(
         db_session, db_nullpool_engine, owner_is_caller=True, recorded=True
     )

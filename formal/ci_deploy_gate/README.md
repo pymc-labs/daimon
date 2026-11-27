@@ -1,7 +1,7 @@
 # CI deploy gate
 
 Question: can a failed or still-running main build acquire the canonical
-seven-character SHA tag that `promote.yml` accepts?
+full-SHA tag that `promote.yml` accepts?
 
 | Model action | Workflow boundary |
 | --- | --- |
@@ -9,7 +9,7 @@ seven-character SHA tag that `promote.yml` accepts?
 | `PassTests` / `FailTests` | All jobs in `ci.yml` `deploy-gcp.needs` resolve; any failure or skip makes the verdict fail. |
 | `StartDeploy` | GitHub Actions starts `deploy-gcp` only if all `needs` succeeded. |
 | `FinishDeploy` / `FailDeploy` | `deploy.yml` migrations, VM refresh, health, smoke, settle and defaults gates finish or fail. |
-| `TagCanonical` | Final `deploy.yml` step writes the three short-SHA tags, daimon last. `promote.yml` recognizes the daimon tag. |
+| `TagCanonical` | Final `deploy.yml` step writes the three full-SHA tags, daimon last; no build writes them. `promote.yml` resolves all three. |
 
 The invariant requires a promotable tag only after successful tests and staging
 gates.

@@ -216,6 +216,30 @@ async def send_discord_dm(
     await _send_dm(bot_token, user_id, {"content": text[:2000]}, transport)
 
 
+async def open_discord_dm(
+    bot_token: str,
+    user_id: str,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> str:
+    """The bot's DM channel with `user_id`, opened if it was not: Discord returns the
+    existing one, and sends nothing. Raises as `send_discord_error_dm`."""
+    async with discord_client(bot_token, transport) as client:
+        return await _open_dm(client, user_id)
+
+
+async def _open_dm(client: httpx.AsyncClient, user_id: str) -> str:
+    if not user_id.isascii() or not user_id.isdecimal():
+        raise ValueError("a user id is a decimal number")
+    opened = await client.post("users/@me/channels", json={"recipient_id": user_id})
+    opened.raise_for_status()
+    reply: object = opened.json()
+    channel = cast("dict[str, object]", reply).get("id") if isinstance(reply, dict) else None
+    if not isinstance(channel, str) or not channel.isascii() or not channel.isdecimal():
+        raise ValueError("no DM channel id in the reply")
+    return channel
+
+
 async def _send_dm(
     bot_token: str,
     user_id: str,
@@ -225,12 +249,7 @@ async def _send_dm(
     if not user_id.isascii() or not user_id.isdecimal():
         raise ValueError("a user id is a decimal number")
     async with discord_client(bot_token, transport) as client:
-        opened = await client.post("users/@me/channels", json={"recipient_id": user_id})
-        opened.raise_for_status()
-        reply: object = opened.json()
-        channel = cast("dict[str, object]", reply).get("id") if isinstance(reply, dict) else None
-        if not isinstance(channel, str) or not channel.isascii() or not channel.isdecimal():
-            raise ValueError("no DM channel id in the reply")
+        channel = await _open_dm(client, user_id)
         sent = await client.post(
             f"channels/{channel}/messages",
             json={**message, "allowed_mentions": {"parse": []}},

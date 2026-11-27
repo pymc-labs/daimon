@@ -19,6 +19,7 @@ import pytest
 from cryptography.fernet import Fernet
 from daimon.adapters.mcp import oauth_github
 from daimon.adapters.mcp.oauth_github import build_oauth_github_routes
+from daimon.core import github_connect_flow
 from daimon.core.config import (
     AnthropicSettings,
     CryptoSettings,
@@ -27,6 +28,10 @@ from daimon.core.config import (
     McpSettings,
     Settings,
     TeamsSettings,
+)
+from daimon.core.github_connect_views import (
+    ConnectRepo,
+    repo_confirmation,
 )
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
@@ -159,7 +164,7 @@ async def _editor(
     platform: Literal["discord", "slack"] = "discord",
     requester: Literal["admin", "owner", "co_owner", "member"] = "admin",
 ) -> AsyncIterator[_Editor]:
-    monkeypatch.setattr(oauth_github, "_attest_native_admin", AsyncMock(return_value=True))
+    monkeypatch.setattr(github_connect_flow, "attest_native_admin", AsyncMock(return_value=True))
     tenant_id, account_id = uuid.uuid4(), uuid.uuid4()
     agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id="ag_editor")
     async with sessionmaker.begin() as session:
@@ -248,8 +253,8 @@ async def _editor(
     ) -> object:
         return SimpleNamespace(name="Editor", metadata={})
 
-    monkeypatch.setattr(oauth_github, "find_agent_by_derived_uuid", find_agent)
-    monkeypatch.setattr(oauth_github, "build_app_jwt", lambda *_args, **_kwargs: "app-jwt")
+    monkeypatch.setattr(github_connect_flow, "find_agent_by_derived_uuid", find_agent)
+    monkeypatch.setattr(github_connect_flow, "build_app_jwt", lambda *_args, **_kwargs: "app-jwt")
     key = Fernet.generate_key().decode()
     connect, callback, setup, confirm = build_oauth_github_routes(
         settings=_settings(key),
@@ -284,7 +289,7 @@ async def test_agent_save_requires_live_admin(
     async with _editor(committing_sessionmaker, monkeypatch, [org], platform=platform) as editor:
         hidden, _ = await editor.page()
         live = AsyncMock(side_effect=[False, AdminAttestationUnavailable("lookup failed"), True])
-        monkeypatch.setattr(oauth_github, "_attest_native_admin", live)
+        monkeypatch.setattr(github_connect_flow, "attest_native_admin", live)
         denied = await editor.save(hidden, repo="101")
         assert denied.status_code == 403
         assert "You can no longer manage this agent." in denied.text
@@ -315,7 +320,7 @@ async def test_agent_save_rejects_mismatched_requester_platform_user_id(
     async with _editor(committing_sessionmaker, monkeypatch, [org]) as editor:
         hidden, _ = await editor.page(requester_platform_user_id="someone-else")
         live = AsyncMock(return_value=True)
-        monkeypatch.setattr(oauth_github, "_attest_native_admin", live)
+        monkeypatch.setattr(github_connect_flow, "attest_native_admin", live)
         denied = await editor.save(hidden, repo="101")
         assert denied.status_code == 403
         assert await editor.grants() == {}
@@ -344,7 +349,7 @@ async def test_slack_uses_live_workspace_role(
     deleted: bool,
     expected: bool,
 ) -> None:
-    live_attestation = oauth_github._attest_native_admin
+    live_attestation = github_connect_flow.attest_native_admin
     org = _Org(77, 55, "alpha", WRITE_INSTALLATION, [(101, "admin")])
     async with _editor(committing_sessionmaker, monkeypatch, [org], platform="slack") as editor:
         key = Fernet.generate_key().decode()
@@ -403,7 +408,7 @@ async def test_slack_rejects_unbound_or_malformed_admin_facts(
     monkeypatch: pytest.MonkeyPatch,
     user: dict[str, object],
 ) -> None:
-    live_attestation = oauth_github._attest_native_admin
+    live_attestation = github_connect_flow.attest_native_admin
     org = _Org(77, 55, "alpha", WRITE_INSTALLATION, [(101, "admin")])
     async with _editor(committing_sessionmaker, monkeypatch, [org], platform="slack") as editor:
         key = Fernet.generate_key().decode()
@@ -438,7 +443,7 @@ async def test_slack_requires_valid_workspace_bot_token(
     monkeypatch: pytest.MonkeyPatch,
     token_state: str,
 ) -> None:
-    live_attestation = oauth_github._attest_native_admin
+    live_attestation = github_connect_flow.attest_native_admin
     org = _Org(77, 55, "alpha", WRITE_INSTALLATION, [(101, "admin")])
     async with _editor(committing_sessionmaker, monkeypatch, [org], platform="slack") as editor:
         key = Fernet.generate_key().decode()
@@ -466,7 +471,7 @@ async def test_slack_lookup_failure_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
 ) -> None:
-    live_attestation = oauth_github._attest_native_admin
+    live_attestation = github_connect_flow.attest_native_admin
     org = _Org(77, 55, "alpha", WRITE_INSTALLATION, [(101, "admin")])
     async with _editor(committing_sessionmaker, monkeypatch, [org], platform="slack") as editor:
         key = Fernet.generate_key().decode()
@@ -542,12 +547,13 @@ async def test_teams_uses_live_admin_team_owners(
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         assert (
-            await oauth_github._attest_native_admin(
+            await github_connect_flow.attest_native_admin(
                 requester=requester,
                 settings=settings,
                 sessionmaker=committing_sessionmaker,
                 fernet=build_multifernet((key,)),
                 http_client=client,
+                teams_owner_ids=oauth_github.teams_admin_owner_ids,
             )
             is expected
         )
@@ -581,12 +587,13 @@ async def test_teams_rejects_different_tenant_without_graph_lookup(
         raise AssertionError(f"Unexpected Graph request: {request.url}")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected_request)) as client:
-        assert not await oauth_github._attest_native_admin(
+        assert not await github_connect_flow.attest_native_admin(
             requester=requester,
             settings=settings,
             sessionmaker=committing_sessionmaker,
             fernet=build_multifernet((key,)),
             http_client=client,
+            teams_owner_ids=oauth_github.teams_admin_owner_ids,
         )
 
 
@@ -700,13 +707,13 @@ async def test_removing_or_adding_a_repo_with_no_permission_is_refused(
 
 
 def test_repo_confirmation_uses_app_write_for_read_level_people() -> None:
-    def repo(level: github_connect.GitHubPermission) -> oauth_github._Repo:
-        return oauth_github._Repo(1, 2, 3, "o/r", level)
+    def repo(level: github_connect.GitHubPermission) -> ConnectRepo:
+        return ConnectRepo(1, 2, 3, "o/r", level)
 
     def confirm(
         level: github_connect.GitHubPermission, *, needs_write: bool, installation: bool = True
     ) -> str:
-        return oauth_github._repo_confirmation(
+        return repo_confirmation(
             repo(level),
             requested="read",
             needs_write=needs_write,
@@ -775,7 +782,7 @@ async def test_an_owner_saves_repos_for_their_agent_without_being_a_platform_adm
         hidden, page = await editor.page()
         assert "People also need their own" not in page
         live = AsyncMock(return_value=False)
-        monkeypatch.setattr(oauth_github, "_attest_native_admin", live)
+        monkeypatch.setattr(github_connect_flow, "attest_native_admin", live)
         saved = await editor.save(hidden, repo="101")
         assert saved.status_code == 200
         # Any repo GitHub shows the signer connects, and the grant is write by default.
@@ -843,7 +850,7 @@ async def test_newer_installation_refresh_during_save_requires_reload(
         hidden, page = await editor.page()
         assert "alpha/repo-101" in page
 
-        original_installations = oauth_github._installations  # pyright: ignore[reportPrivateUsage]
+        original_installations = github_connect_flow.list_installations
         refresh_completed = False
 
         async def refresh_after_repo_fetch(*args: Any, **kwargs: Any) -> object:
@@ -860,7 +867,7 @@ async def test_newer_installation_refresh_during_save_requires_reload(
                 refresh_completed = True
             return installations
 
-        monkeypatch.setattr(oauth_github, "_installations", refresh_after_repo_fetch)
+        monkeypatch.setattr(github_connect_flow, "list_installations", refresh_after_repo_fetch)
         response = await editor.save(hidden, repo="101")
         assert refresh_completed
         assert response.status_code == 409
@@ -920,7 +927,9 @@ async def test_an_owner_removed_between_mint_and_save_is_refused(
     async with _editor(committing_sessionmaker, monkeypatch, [org], requester="owner") as editor:
         hidden, _ = await editor.page()
         await _remove_ownership(editor)
-        monkeypatch.setattr(oauth_github, "_attest_native_admin", AsyncMock(return_value=False))
+        monkeypatch.setattr(
+            github_connect_flow, "attest_native_admin", AsyncMock(return_value=False)
+        )
         denied = await editor.save(hidden, repo="101")
         assert denied.status_code == 403
         assert "You can no longer manage this agent." in denied.text
@@ -941,9 +950,11 @@ async def test_an_owner_removed_during_the_save_is_refused_inside_the_transactio
         async with editor.sessionmaker.begin() as session:
             await set_role(session, editor.account_id, Role.ADMIN)  # stale stored role
         hidden, _ = await editor.page()
-        monkeypatch.setattr(oauth_github, "_attest_native_admin", AsyncMock(return_value=False))
+        monkeypatch.setattr(
+            github_connect_flow, "attest_native_admin", AsyncMock(return_value=False)
+        )
         reads = AsyncMock(side_effect=[True, False])  # owner at the first check, gone by the save
-        monkeypatch.setattr(oauth_github, "owns_agent", reads)
+        monkeypatch.setattr(github_connect_flow, "owns_agent", reads)
         denied = await editor.save(hidden, repo="101")
         assert denied.status_code == 403
         assert reads.await_count == 2
@@ -956,7 +967,9 @@ async def test_a_member_cannot_open_or_save_the_agent_editor(
 ) -> None:
     org = _Org(77, 55, "alpha", WRITE_INSTALLATION, [(101, "admin")])
     async with _editor(committing_sessionmaker, monkeypatch, [org], requester="member") as editor:
-        monkeypatch.setattr(oauth_github, "_attest_native_admin", AsyncMock(return_value=False))
+        monkeypatch.setattr(
+            github_connect_flow, "attest_native_admin", AsyncMock(return_value=False)
+        )
         # The page itself is refused, and so is a save posted without it.
         hidden, refused = await editor.page(status=403)
         assert "You can no longer manage this agent." in refused
@@ -972,7 +985,9 @@ async def test_a_person_from_another_organisation_cannot_save_as_an_owner(
         hidden, _ = await editor.page()
         async with editor.sessionmaker.begin() as session:
             await mark_principal_foreign(session, account_id=editor.account_id)
-        monkeypatch.setattr(oauth_github, "_attest_native_admin", AsyncMock(return_value=False))
+        monkeypatch.setattr(
+            github_connect_flow, "attest_native_admin", AsyncMock(return_value=False)
+        )
         denied = await editor.save(hidden, repo="101")
         assert denied.status_code == 403
         assert await editor.grants() == {}

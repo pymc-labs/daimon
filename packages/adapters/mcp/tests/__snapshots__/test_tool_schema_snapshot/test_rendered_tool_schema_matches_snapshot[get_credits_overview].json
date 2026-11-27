@@ -1,0 +1,11 @@
+{
+  "description": [
+    "The workspace's credit balance, spend over the last 30 days and this month with",
+    "a projection, daily spend and the credit history. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

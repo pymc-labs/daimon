@@ -1,0 +1,23 @@
+{
+  "description": [
+    "Un-publish a notebook or blog you published (deletes it from the host).",
+    "",
+    "slug is the bare name — the same one you passed to",
+    "create_notebook_upload_url, and the same one list_notebooks reports.",
+    "",
+    "Returns {slug, deleted}. deleted=false means nothing by that name existed:",
+    "check list_notebooks for the right slug rather than retrying."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "slug": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "slug"
+    ],
+    "type": "object"
+  }
+}

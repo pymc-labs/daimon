@@ -58,8 +58,8 @@ post only there and never DM their results. Only the channel's setup thread may
 still configure its own agent.
 
 **Publishing** puts content behind a link that whoever holds it opens. From a
-channel whose content is kept inside, or by an agent with a rule, it waits for
-the requester to press Approve on a card (see [Publishing](#publishing)).
+channel whose content is kept inside, or by an agent with a rule, it waits for the
+requester's [Approve](#publishing).
 
 **Listed** covers agents, their skills, environments, routines, timers and
 defaults. From outside, a channel's own agents are hidden everywhere.
@@ -150,19 +150,16 @@ a card in chat and is refused in routines. Other agents cannot ask it.
 
 ## Approval overrides
 
-Admins choose whether attended chat asks before a third-party MCP write, per
-server, channel or thread. Each takes ask, allow writes or
-inherit, and the most specific choice wins. An inherited server default asks.
-They apply while `DAIMON_TOOL_SAFETY__ENABLED` is on.
+Admins choose whether attended chat asks before a third-party MCP write, for the
+workspace, an agent, a channel or a thread. The most specific choice wins, and an
+inherited default asks. [Approvals](approvals.md) covers the values, per-agent
+settings, direct messages and who may change them. They apply while `DAIMON_TOOL_SAFETY__ENABLED` is on.
 
-Only platform admins change them, in `/settings` (`settings` on Teams), the
-web app, or by asking Daimon behind an Approve card, and each change rechecks
-their standing live. On Slack, ask Daimon in a thread.
-
-An override relaxes only a third-party write. Deny and `ask` rules
-still apply, and Daimon's own confirmed actions, publishing and permission
-changes always ask. Allow writes covers chat replies only; DMs ignore it, and
-routines and watches follow the
+An override relaxes only a third-party write. Deny and `ask` rules still apply,
+and Daimon's own confirmed actions, publishing and permission changes always ask.
+Allow writes covers chat replies only. A DM ignores it unless
+[`dm_approvals`](approvals.md#approvals-in-direct-messages) is on, and routines and
+watches follow the
 [unattended rule](configuration.md#daimon_tool_safety__unattended_writes). An
 unreadable setting asks.
 
@@ -233,11 +230,9 @@ every key for the agent.
 ## Publishing
 
 A turn whose admission would refuse publishing gets its publish tools set to
-ask first. The platform shows an Approve card naming the action and who may
-answer, with the consequence and a few plain inputs behind Details. Approve and
-Deny work only for the requester. The card expires after ten minutes. Agent
-keys, runs nobody watches and sessions without the card are refused, so a
-failure refuses rather than publishes.
+ask first, on an [Approve card](approvals.md#when-daimon-asks). Agent keys, runs
+nobody watches and sessions without the card are refused, so a failure refuses
+rather than publishes.
 
 ## Held turns
 
@@ -290,6 +285,18 @@ daimon tenants access-policy set discord GUILD_ID --team-role ROLE_ID
 daimon tenants access-policy set discord GUILD_ID --clear-internal-roles
 ```
 
+**Rooms with outside people** (`audience_hold`, Discord only) decides what Daimon
+does about such a room. Off changes nothing. Report only logs what On would do. On
+holds turns in a room that outsiders can read, and offers an internal asker a
+private answer in a DM. A room is held when an outsider can see it or Daimon cannot
+tell, and it opens again when the outsider leaves. Set it with
+`daimon features set audience_hold on --tier workspace`. To see the stored facts
+for a server:
+
+```bash
+daimon tenants audience-report discord GUILD_ID
+```
+
 On Slack the warning follows the channel's sharing flags, read fresh each
 time. Slack guests are never checked, so the screen always says so when readers
 are not `own`. If Slack cannot answer, it says **Outsider check skipped**.
@@ -316,8 +323,7 @@ agent's home. To list the Discord channels where Daimon may answer at all:
 daimon channels answerable discord GUILD_ID --expect handed-over.txt --json
 ```
 
-It counts every channel not under `writers: none`, plus bound threads, and
-writes nothing. With `--expect`, a file of channel ids one per line, any
+It writes nothing. With `--expect`, a file of channel ids one per line, any
 difference exits 1. Use it when another bot hands some channels to Daimon.
 
 Setting `readers: own` makes the channel's default agent its own, or copies an
@@ -326,5 +332,4 @@ they still run only there, unless `release_agents` drops them. A write that no
 rule would enforce is refused.
 
 The [invoker allowlist](admins.md#who-may-start-a-turn), read-only DM memory,
-environments, budgets and operator tokens are not channel or agent rules. They say who may act and who may change
-the rules.
+environments, budgets and operator tokens are not channel or agent rules.

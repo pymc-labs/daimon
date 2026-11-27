@@ -15,6 +15,7 @@ export const coreHandlers = [
     { id: "slack", label: "Slack", kind: "redirect" },
     { id: "microsoft", label: "Microsoft", kind: "redirect" },
   ])),
+  http.get("/auth/legal", () => HttpResponse.json({ privacy: "https://example.com/privacy", terms: "https://example.com/terms" })),
   // Every provider signs in the same demo admin; the dev panel passes `email` to switch people.
   http.post("/auth/mock", async ({ request }) => {
     const { email } = (await request.json()) as { email?: string }

@@ -5,7 +5,9 @@ Handles two display-name formats:
   - Per-agent (current): ``daimon-mcp:<account_uuid>:<agent_uuid>``
 
 Also archives a session's own relay vault (``daimon-relay:<account>:<agent>``)
-once no live session mounts it (``archive_idle_relay_vaults``, scheduled).
+once no live session mounts it, and deletes a shared thread's vault
+(``daimon-shared:<owner>:<agent>``) once its thread has no binding slot left
+(``archive_idle_relay_vaults``, scheduled).
 
 In both cases the *account id* is the first ':'-delimited segment after
 the ``daimon-mcp:`` prefix. Orphan classification is at account granularity
@@ -36,10 +38,11 @@ from typing import cast
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsVault
-from daimon.core.mcp_vault import RELAY_VAULT_PREFIX
+from daimon.core.mcp_vault import RELAY_VAULT_PREFIX, SHARED_VAULT_PREFIX
 from daimon.core.mux_backend import platform_scope
-from daimon.core.mux_compat import archive_vault, list_vaults
+from daimon.core.mux_compat import archive_vault, delete_vault, list_vaults
 from daimon.core.session_ports_compat import mounted_live_vault_ids
+from daimon.core.shared_threads import bound_shared_owners
 from daimon.core.stores.accounts import load_live_account_ids
 from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -142,14 +145,48 @@ async def _idle_relay_vault_ids(
     return [vault_id for vault_id in candidates if vault_id not in mounted]
 
 
-async def archive_idle_relay_vaults(client: AsyncAnthropic, *, now: dt.datetime) -> list[str]:
-    """Archive relay vaults no live session mounts; returns their ids."""
+async def _unbound_shared_vault_ids(
+    vaults: Sequence[BetaManagedAgentsVault],
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    now: dt.datetime,
+) -> list[str]:
+    """Old shared-thread vaults whose thread has no binding slot (swept or erased).
+    Matched by owner only, never by agent. They mirror stored tokens, so a thread
+    that comes back gets a fresh one."""
+    shared = [
+        v
+        for v in vaults
+        if v.display_name.startswith(SHARED_VAULT_PREFIX)
+        and _created_at(v) <= now - RELAY_VAULT_GRACE
+    ]
+    if not shared:
+        return []
+    async with session_factory() as session:
+        owners = await bound_shared_owners(session)
+    return [v.id for v in shared if v.display_name.split(":")[1] not in owners]
+
+
+async def archive_idle_relay_vaults(
+    client: AsyncAnthropic, *, session_factory: async_sessionmaker[AsyncSession], now: dt.datetime
+) -> list[str]:
+    """Archive relay vaults no live session mounts, and delete shared-thread vaults with
+    no binding slot that none mounts; returns the archived relay vaults' ids."""
     scope = platform_scope("mcp_vault_janitor.archive_idle_relay_vaults")
     vaults = [v async for v in list_vaults(client, scope=scope)]
-    idle = await _idle_relay_vault_ids(client, vaults, now=now, scope=scope)
+    relay = relay_vault_candidates(vaults, now=now)
+    shared = await _unbound_shared_vault_ids(vaults, session_factory=session_factory, now=now)
+    if not relay and not shared:
+        return []
+    mounted = await mounted_live_vault_ids(client, scope=scope)
+    idle = [vault_id for vault_id in relay if vault_id not in mounted]
     for vault_id in idle:
         _log.info("mcp_vault_janitor.archive_relay", vault_id=vault_id)
         await archive_vault(client, vault_id, scope=scope)
+    for vault_id in shared:
+        if vault_id not in mounted:
+            _log.info("mcp_vault_janitor.delete_shared", vault_id=vault_id)
+            await delete_vault(client, vault_id, scope=scope)
     return idle
 
 

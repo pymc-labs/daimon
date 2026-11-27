@@ -1,0 +1,36 @@
+{
+  "description": [
+    "Fetch a single message by channel and message id.",
+    "",
+    "Pass the ids as turn_controls or a read tool gives them. A reply is addressed",
+    "under its thread: use the thread id as channel_id. Sealed channels need",
+    "origin_context_id, as read_channel does."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "channel_id": {
+        "type": "string"
+      },
+      "message_id": {
+        "type": "string"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "channel_id",
+      "message_id"
+    ],
+    "type": "object"
+  }
+}

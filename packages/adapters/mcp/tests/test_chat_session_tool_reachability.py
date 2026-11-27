@@ -298,6 +298,7 @@ async def test_agent_id_claim_session_discovers_agent_chat_and_self_edit_tools_o
 
     expected_agent_chat_tools = {
         "ask",
+        "await_turn",
         "deliver_turn_charts",
         "describe_agent",
         "list_my_sessions",

@@ -23,6 +23,7 @@ from fastapi import FastAPI
 
 from notebook_host.admin import AdminState, create_admin_router
 from notebook_host.config import Settings
+from notebook_host.headers import ReferrerPolicyMiddleware
 from notebook_host.jail import JailUnavailableError, SlugPaths, can_apply_jail
 from notebook_host.lazy_spawn import sweep_once
 from notebook_host.lifecycle import (
@@ -209,6 +210,7 @@ def create_app(settings: Settings) -> FastAPI:
             state.snapshot_pids()
 
     app = FastAPI(lifespan=lifespan)
+    app.add_middleware(ReferrerPolicyMiddleware)
     app.include_router(create_admin_router(state))
     app.include_router(create_proxy_router(state))
     app.state.admin_state = state

@@ -1,0 +1,81 @@
+{
+  "description": [
+    "Set who can read a channel and who can post there. Requires an",
+    "admin. Leave one out to keep it.",
+    "",
+    "``readers``: ``any``; ``inside``, only turns in this channel read its messages",
+    "and conversations; or ``own``, which also keeps it to its own agents: only they",
+    "run and show there, and they run and show nowhere else. ``writers``: ``any``;",
+    "``own`` (only with readers ``own``); or ``none``, nothing posts there, daimon",
+    "included.",
+    "",
+    "To isolate a channel so nothing leaks in or out, set readers and writers",
+    "``own``. Its default agent becomes its own agent, by an agent rule naming the",
+    "channel alone; it must be custom and answer nowhere else. Otherwise pass",
+    "``copy_from`` (an agent name, usually the one answering there) to copy that",
+    "agent, without credentials, as the channel's default. To make agent X the only",
+    "agent in a channel, set the channel's default to X first. ``release_agents``",
+    "drops the rules of the agents kept to the channel, once readers aren't ``own``.",
+    "Rules are per channel: ``channel_id`` names a channel, never a thread. Pass",
+    "the parent channel's id from turn_controls (``parent_channel_id``)."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "channel_id": {
+        "type": "string"
+      },
+      "copy_from": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "readers": {
+        "anyOf": [
+          {
+            "enum": [
+              "any",
+              "inside",
+              "own"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "release_agents": {
+        "default": false,
+        "type": "boolean"
+      },
+      "writers": {
+        "anyOf": [
+          {
+            "enum": [
+              "any",
+              "own",
+              "none"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "channel_id"
+    ],
+    "type": "object"
+  }
+}
