@@ -560,7 +560,7 @@ class ProgressPlansSettings(BaseModel):
     """
 
     mode: CascadeMode = Field(
-        default=CascadeMode.OFF,
+        default=CascadeMode.ON,
         description=(
             "Deprecated: use DAIMON_FEATURES__PROGRESS_PLANS. "
             'Deployment default for progress plans on the "Working on it…" card (Discord, '
