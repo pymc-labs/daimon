@@ -450,6 +450,8 @@ def create_teams_http_service(
             tenant_id=installs.tenant_id,
             settings=runtime.settings,
             links=workflow_cards.web_at(runtime),
+            client=runtime.anthropic,
+            default_agent_name=runtime.deployment_default.agent_name,
         ),
         run_cards=chat_cards.follower(
             runtime.sessionmaker,

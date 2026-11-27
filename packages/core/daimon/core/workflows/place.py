@@ -65,9 +65,12 @@ def workflow_subject(
 ) -> Subject:
     """The step's facts: `run_as` (their platform id) runs `agent_name` at `at`.
 
-    A Slack or Teams thread names its channel. A Discord id other than home is a thread
-    under home, as the routine it was moved from saved it; without home, a channel. No
-    `at`: no place, so no origin stamp and no hold.
+    A Slack or Teams thread names its channel. On Discord, home is a channel and the run's
+    start thread sits under its channel. The destination of the routine the workflow was
+    moved from is placed as that routine saved it: a channel as itself, a thread under its
+    saved channel, which the routine fire admits it at. Any other Discord id is taken as a
+    thread under home (the stricter reading), else a channel. No `at`: no place, so no
+    origin stamp and no hold.
     """
     place = step_place(node.at, home=home, origin=origin)
     kind: RoutineDestinationKind | None = None
@@ -75,8 +78,8 @@ def workflow_subject(
     if place is not None:
         target = target_for(place, home=home, mode="live", run_as=None, owner=None)
         kind, channel = target["kind"], target["channel_id"]
-        if kind == "channel" and platform == "discord" and home is not None and place != home:
-            kind, channel = "thread", home
+        if kind == "channel" and platform == "discord" and place != home:
+            kind, channel = _discord_place(workflow, place, home=home, origin=origin)
     made = workflow.made_in
     return Subject(
         id=workflow.id,
@@ -96,6 +99,19 @@ def workflow_subject(
         source_thread_id=made["thread_id"] if made is not None else None,
         revision=workflow.updated_at.isoformat(),
     )
+
+
+def _discord_place(
+    workflow: WorkflowRow, place: str, *, home: str | None, origin: Mapping[str, Any] | None
+) -> tuple[RoutineDestinationKind, str | None]:
+    """A Discord id's kind and the channel admission places it in (`workflow_subject`)."""
+    moved = workflow.converted_from or {}
+    to = moved.get("to") or {}
+    if to.get("id") == place and to.get("kind") in ("channel", "thread"):
+        return to["kind"], moved.get("channel_id")
+    if origin and origin.get("thread") == place and origin.get("channel"):
+        return "thread", str(origin["channel"])
+    return ("thread", home) if home is not None else ("channel", place)
 
 
 @dataclass(frozen=True)

@@ -759,11 +759,13 @@ async def resolve_post_identity(
     tenant_id: uuid.UUID,
     agent_name: str,
     agent_id: str | None,
-    platform: Literal["discord", "slack"],
+    platform: Literal["discord", "slack", "teams"],
     workspace_id: str,
     default_agent_name: str | None,
 ) -> AgentIdentity:
     """The identity an unattended post (a routine's result, a workflow Post) goes out under.
+
+    Teams has no per-message face: its identity is the agent's name over the message.
 
     The built-in agent, identity switched off, or a failed lookup all come back
     built-in, so the post reads exactly as it did before agent identity. Any
@@ -785,17 +787,20 @@ async def resolve_post_identity(
             if shown_id
             else agent_name
         )
+        builtin = is_builtin_agent(
+            name=agent_name,
+            metadata=agent.metadata if agent is not None else None,
+            default_agent_name=default_agent_name,
+        )
+        if platform == "teams":
+            return AgentIdentity(name=display, avatar_url=None, builtin=builtin)
         async with sessionmaker.begin() as session:
             return await resolve_agent_identity(
                 session,
                 tenant_id=tenant_id,
                 agent_name=agent_name,
                 display_name=display,
-                is_builtin=is_builtin_agent(
-                    name=agent_name,
-                    metadata=agent.metadata if agent is not None else None,
-                    default_agent_name=default_agent_name,
-                ),
+                is_builtin=builtin,
                 public_base_url=settings.mcp.app_root_url,
                 enabled=True,
                 background_sessionmaker=sessionmaker,

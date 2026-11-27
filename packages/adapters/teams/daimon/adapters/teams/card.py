@@ -58,6 +58,13 @@ from microsoft_teams.cards import (
 # A Teams message is capped by payload size (about 28 KB), not characters;
 # 4 000 stays under it at 4 UTF-8 bytes each, the widest (an emoji).
 TEAMS_LIMIT = 4_000
+
+
+def agent_named(name: str | None, text: str) -> str:
+    """A message under an agent's name, Teams' agent identity (no per-message face)."""
+    return text if name is None else f"**{name}**\n\n{text}"
+
+
 CANCEL_VERB = "cancel_turn"
 INTERRUPTED_NOTICE = (
     "Daimon restarted before this request finished.\n"

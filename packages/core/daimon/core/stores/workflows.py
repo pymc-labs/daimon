@@ -66,6 +66,8 @@ class ConvertedFrom(TypedDict, total=False):
     owner: str | None
     owner_account_id: str | None
     to: dict[str, Any] | None
+    #: The routine's saved channel: its spend's, and a thread destination's parent.
+    channel_id: str | None
     fired_at: str | None
     finished_at: str | None
     error: str | None

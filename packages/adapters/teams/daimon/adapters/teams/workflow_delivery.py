@@ -19,14 +19,22 @@ import uuid
 from datetime import UTC, datetime
 
 import httpx
-from daimon.adapters.teams.card import TEAMS_LIMIT, notice_adaptive_card, notice_card
+from anthropic import AsyncAnthropic
+from daimon.adapters.teams.card import (
+    TEAMS_LIMIT,
+    agent_named,
+    notice_adaptive_card,
+    notice_card,
+)
 from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.workflow_asks import ask_card
 from daimon.core.config import Settings
 from daimon.core.delivery import DeliveryOutcome, WorkflowPoster, files_envelope, job_payload
 from daimon.core.message_split import split_fenced
+from daimon.core.routine_delivery import resolve_post_identity
 from daimon.core.routine_files import unsupported_files_note
+from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.workflow_deliveries import DeliveryRow
 from daimon.core.web_links import WebAt
 from daimon.core.workflows import asks
@@ -70,7 +78,30 @@ def make_teams_workflow_poster(
     tenant_id: uuid.UUID,
     settings: Settings,
     links: WebAt,
+    client: AsyncAnthropic | None = None,
+    default_agent_name: str | None = None,
 ) -> WorkflowPoster:
+    async def speaker(post: WorkflowPost) -> str | None:
+        """The Post's `as_agent` name to post under where agent identity is on, else None."""
+        if post.as_agent is None or client is None:
+            return None
+        async with sessionmaker() as session:
+            tenant = await get_tenant(session, post.row.tenant_id)
+        if tenant is None:
+            return None
+        identity = await resolve_post_identity(
+            sessionmaker,
+            client,
+            settings,
+            tenant_id=post.row.tenant_id,
+            agent_name=post.as_agent,
+            agent_id=None,
+            platform="teams",
+            workspace_id=tenant.external_id,
+            default_agent_name=default_agent_name,
+        )
+        return None if identity.builtin else identity.name
+
     async def place(post: WorkflowPost) -> str | DeliveryOutcome:
         """The conversation to post in, or why the post is skipped."""
         if post.dm_to is not None:
@@ -118,8 +149,11 @@ def make_teams_workflow_poster(
                 await teams.post_card(conversation, card)
                 return DeliveryOutcome(status="delivered")
             ask = asks.ask_of(row.payload) if row.kind == "ask" else None
+            words = rendered.text + _files_note(cleared)
             chunks = split_fenced(
-                rendered.text + _files_note(cleared), TEAMS_LIMIT, word_boundary=True
+                words if ask else agent_named(await speaker(cleared), words),
+                TEAMS_LIMIT,
+                word_boundary=True,
             )
             titled = (
                 cleared.title is not None
