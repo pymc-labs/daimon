@@ -246,8 +246,10 @@ class ProviderWorld:
                     self.interrupts.append(session_id)
                 if event.get("type") == "user.message":
                     text = "".join(block.get("text", "") for block in event.get("content", []))
-                    # Daimon frames a routine's input; the matrix names inputs by their payload.
+                    # Daimon frames a routine's input and a chat turn's progress plans; the
+                    # matrix names inputs by their payload.
                     text = text.split("</turn_context>\n\n", 1)[-1]
+                    text = text.split("</progress_plans>", 1)[-1].lstrip("\n")
                     self.accepted_inputs.append((session_id, text))
                     self._answer(session_id, text)
             await self._notify()
