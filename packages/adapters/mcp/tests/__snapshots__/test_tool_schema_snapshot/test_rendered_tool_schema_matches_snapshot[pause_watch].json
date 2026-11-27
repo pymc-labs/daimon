@@ -1,6 +1,6 @@
 {
   "description": [
-    "Pause your watch and cancel its queued wakes. Workspace admins may pause another",
+    "Pause your watch and cancel its queued wakes. Admins may pause another",
     "owner's watch."
   ],
   "parameters": {

@@ -1,0 +1,63 @@
+{
+  "description": [
+    "Write or delete one document in a page's data; the page shows it within seconds.",
+    "",
+    "`mode` \"set\" replaces the document, \"merge\" replaces the top-level fields you pass,",
+    "\"update\" does the same to a document that must exist. Without `data` the document",
+    "is deleted (also from `_events`). Collections starting with `_` are Daimon's and",
+    "cannot be written. If people outside the team can read the page, write nothing",
+    "internal to it; when an event from such a page woke you, you cannot write to one.",
+    "Returns the new data revision.",
+    "`daimon_id` (from list_daimons) is the Daimon that holds the page."
+  ],
+  "parameters": {
+    "$defs": {
+      "JsonValue": {}
+    },
+    "additionalProperties": false,
+    "properties": {
+      "collection": {
+        "type": "string"
+      },
+      "daimon_id": {
+        "type": "string"
+      },
+      "data": {
+        "anyOf": [
+          {
+            "additionalProperties": {
+              "$ref": "#/$defs/JsonValue"
+            },
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "doc_id": {
+        "type": "string"
+      },
+      "mode": {
+        "default": "set",
+        "enum": [
+          "set",
+          "merge",
+          "update"
+        ],
+        "type": "string"
+      },
+      "slug": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "daimon_id",
+      "slug",
+      "collection",
+      "doc_id"
+    ],
+    "type": "object"
+  }
+}

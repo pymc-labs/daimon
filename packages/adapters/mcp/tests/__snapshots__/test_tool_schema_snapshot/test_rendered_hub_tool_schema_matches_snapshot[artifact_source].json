@@ -1,0 +1,35 @@
+{
+  "description": [
+    "Get a 15-minute URL to download a page's HTML (the current version, or `version`).",
+    "",
+    "Fetch it with curl from your sandbox before changing a page, then republish with",
+    "artifact_upload_url and artifact_publish. `daimon_id` (from list_daimons) is the Daimon that holds the page."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "daimon_id": {
+        "type": "string"
+      },
+      "slug": {
+        "type": "string"
+      },
+      "version": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "daimon_id",
+      "slug"
+    ],
+    "type": "object"
+  }
+}

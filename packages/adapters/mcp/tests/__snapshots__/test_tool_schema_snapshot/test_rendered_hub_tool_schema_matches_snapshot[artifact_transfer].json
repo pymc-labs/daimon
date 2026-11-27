@@ -1,0 +1,27 @@
+{
+  "description": [
+    "Give a page to one of its editors (named by their id in the app, a chat user id or",
+    "an @mention); the old owner stays an editor. Only its owner or an admin may.",
+    "`daimon_id` (from list_daimons) is the Daimon that holds the page."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "daimon_id": {
+        "type": "string"
+      },
+      "person": {
+        "type": "string"
+      },
+      "slug": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "daimon_id",
+      "slug",
+      "person"
+    ],
+    "type": "object"
+  }
+}

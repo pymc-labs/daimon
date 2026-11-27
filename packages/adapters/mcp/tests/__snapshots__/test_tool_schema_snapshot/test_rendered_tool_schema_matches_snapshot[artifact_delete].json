@@ -1,0 +1,22 @@
+{
+  "description": [
+    "Delete a page with its versions, data and watches. Only its owner or an admin may.",
+    "Pass your active `origin_context_id`."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "type": "string"
+      },
+      "slug": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "slug",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

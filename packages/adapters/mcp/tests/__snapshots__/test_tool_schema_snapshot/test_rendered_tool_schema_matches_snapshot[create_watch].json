@@ -1,6 +1,7 @@
 {
   "description": [
-    "Watch a listed read tool from this conversation, or wake on posts to a secret link.",
+    "Watch a listed read tool from this conversation, wake on posts to a secret link, or",
+    "wake on a page's events.",
     "",
     "With source \"callback\" nothing is polled: Daimon DMs the owner a private link, and",
     "each POST to it (UTF-8 text, 4 KiB unless the deployment allows more) wakes the agent",
@@ -10,8 +11,20 @@
     "Daimon allows (30 days unless they changed it, or permanent), so",
     "`lifetime_days` and `permanent` do not apply to it.",
     "The tool, server, arguments, projection, rule, interval and key fields are for polls.",
+    "With source \"page_event\", `page` names a page you can use that sends events: each",
+    "event its viewers send wakes the agent, and no key is shown or needed. `select` (such",
+    "as `.data.vote`) keeps only that part of each event and skips events where it is",
+    "empty. `where` wakes it only for events whose top-level fields match: each key",
+    "maps to one allowed value or a list of up to 20, at most 8 keys, and every key must",
+    "match, as in `{\"event\": [\"vote\", \"undo\"], \"sender\": \"member\"}`. The event's fields",
+    "are `event`, `data`, `by`, `sender`, `page_visible_outside_workspace` and `at`.",
+    "A page watch reports in this thread, or with \"new_thread\" in a new thread",
+    "per report. `permanent=true` needs no admin for a page watch, which still ends",
+    "with its page. A page holds up to 5 watches; someone who does not manage it holds",
+    "one. Page watches work in every chat. Other sources are offered only where the",
+    "deployment supports them, and a poll of artifact_db_query also works in the Daimon app.",
     "",
-    "Binds the current human owner, tenant, agent and exact Discord thread.",
+    "Binds the current human owner, tenant, agent and exact thread.",
     "`delivery` says where each report goes: \"thread\" (this thread, the default),",
     "\"dm\" (the owner's DM, never anyone else's) or \"new_thread\" (a new public thread",
     "under this thread's channel for each report). A watch made in a DM reports there,",
@@ -22,7 +35,8 @@
     "Polls run without an AI turn; firings",
     "use unattended read-and-report turns and current access/spend checks.",
     "Only tools on this deployment's watch list (set by whoever runs Daimon) can be",
-    "checked; by default that is read_thread and read_channel on daimon-mcp. An",
+    "checked; by default that is read_thread, read_channel and artifact_db_query (a",
+    "page's data, read as the owner) on daimon-mcp. An",
     "unlisted tool is refused, and a watch whose tool is taken off the list pauses",
     "and its owner is told. For read_thread and read_channel the arguments must name",
     "a source different from the reporting thread.",
@@ -49,9 +63,12 @@
     "and an owner has at most 5. `max_turns_per_day` (default 24) is how many",
     "reports a day this watch may make, up to the ceiling whoever runs Daimon sets;",
     "above 24 also needs an admin. Producers remain disabled until both operator",
-    "gates are enabled. Page-event watches are refused until a producer exists."
+    "gates are enabled."
   ],
   "parameters": {
+    "$defs": {
+      "JsonValue": {}
+    },
     "additionalProperties": false,
     "properties": {
       "arguments": {
@@ -125,6 +142,17 @@
       "origin_context_id": {
         "type": "string"
       },
+      "page": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
       "permanent": {
         "default": false,
         "type": "boolean"
@@ -142,6 +170,17 @@
         ],
         "type": "string"
       },
+      "select": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
       "server": {
         "default": "daimon-mcp",
         "type": "string"
@@ -149,13 +188,28 @@
       "source": {
         "enum": [
           "poll",
-          "callback"
+          "callback",
+          "page_event"
         ],
         "type": "string"
       },
       "tool": {
         "default": "read_thread",
         "type": "string"
+      },
+      "where": {
+        "anyOf": [
+          {
+            "additionalProperties": {
+              "$ref": "#/$defs/JsonValue"
+            },
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
       }
     },
     "required": [

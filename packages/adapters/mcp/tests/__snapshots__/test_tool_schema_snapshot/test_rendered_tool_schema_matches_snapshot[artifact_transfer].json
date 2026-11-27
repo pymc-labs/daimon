@@ -1,0 +1,27 @@
+{
+  "description": [
+    "Give a page to one of its editors (named by their id in the app, a chat user id or",
+    "an @mention); the old owner stays an editor. Only its owner or an admin may.",
+    "Pass your active `origin_context_id`."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "type": "string"
+      },
+      "person": {
+        "type": "string"
+      },
+      "slug": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "slug",
+      "person",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

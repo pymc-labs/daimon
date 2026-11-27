@@ -1,0 +1,22 @@
+{
+  "description": [
+    "Delete a page with its versions, data and watches. Only its owner or an admin may.",
+    "`daimon_id` (from list_daimons) is the Daimon that holds the page."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "daimon_id": {
+        "type": "string"
+      },
+      "slug": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "daimon_id",
+      "slug"
+    ],
+    "type": "object"
+  }
+}
