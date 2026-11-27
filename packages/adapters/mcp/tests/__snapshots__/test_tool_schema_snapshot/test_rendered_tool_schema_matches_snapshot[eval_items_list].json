@@ -1,0 +1,30 @@
+{
+  "description": [
+    "List the items of an eval run, a page at a time (at most 500). `blind` names the",
+    "arms by neutral labels; reviewers always see them so."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "blind": {
+        "default": false,
+        "type": "boolean"
+      },
+      "limit": {
+        "default": 50,
+        "type": "integer"
+      },
+      "offset": {
+        "default": 0,
+        "type": "integer"
+      },
+      "run_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "run_id"
+    ],
+    "type": "object"
+  }
+}

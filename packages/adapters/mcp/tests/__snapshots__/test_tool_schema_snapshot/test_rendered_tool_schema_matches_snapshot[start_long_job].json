@@ -1,0 +1,53 @@
+{
+  "description": [
+    "Run an exact human-approved shell command in a fresh isolated Managed Agents worker.",
+    "",
+    "Requires an attended owner turn and approval card. The parent thread goes idle;",
+    "completion wakes it to read and report. Worker waits are bounded to 280 seconds.",
+    "The long_jobs feature must be on here. Omitted limits use the feature limits;",
+    "a deadline or dollar cap above its maximum is refused. No connectors, skills,",
+    "shared memory or credentials are mounted. Jobs are billed to the owner."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "command": {
+        "type": "string"
+      },
+      "deadline_minutes": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "max_usd": {
+        "anyOf": [
+          {
+            "type": "number"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "origin_context_id": {
+        "type": "string"
+      },
+      "title": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "command",
+      "title",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

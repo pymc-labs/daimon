@@ -1,5 +1,5 @@
-"""The workspace's audit log, from chat: what admins changed in the web app and the
-chat tool calls and panel writes, newest first."""
+"""The workspace's audit log, from chat: what admins changed and the chat
+tool calls and panel writes, newest first."""
 
 from __future__ import annotations
 

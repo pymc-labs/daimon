@@ -1,0 +1,32 @@
+{
+  "description": [
+    "Tell the admins this routine run could not do its task, and why.",
+    "",
+    "Only inside a routine run, once, when something kept you from the task. `note` is",
+    "one short line on what blocked you (at most 300 characters), with no private",
+    "content; admins see it on their issues page. Still put the blocker in your reply."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "category": {
+        "enum": [
+          "blocked_access",
+          "missing_input",
+          "source_unavailable",
+          "partial_result",
+          "other"
+        ],
+        "type": "string"
+      },
+      "note": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "category",
+      "note"
+    ],
+    "type": "object"
+  }
+}

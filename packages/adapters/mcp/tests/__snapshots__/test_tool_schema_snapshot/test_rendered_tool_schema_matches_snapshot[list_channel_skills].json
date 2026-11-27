@@ -1,0 +1,17 @@
+{
+  "description": [
+    "List the extra skills a channel's turns run with, on top of its agent's. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "channel_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "channel_id"
+    ],
+    "type": "object"
+  }
+}

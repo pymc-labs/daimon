@@ -1,0 +1,22 @@
+{
+  "description": [
+    "Return the newest completed reply with its chart images and optional links. Use",
+    "after ``get_my_session`` reports ``idle`` or ``terminated``; calls made",
+    "while a turn is running or rescheduling are refused. This tool does not",
+    "start a turn or send an event, but optional link delivery writes the",
+    "chart to the configured private artifact store. The handle must belong",
+    "to the agent in this token."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "handle": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "handle"
+    ],
+    "type": "object"
+  }
+}

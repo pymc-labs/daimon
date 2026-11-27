@@ -1,0 +1,24 @@
+{
+  "description": [
+    "Show one support menu by key, or every menu with no key. Admin-only.",
+    "",
+    "An unknown key is refused, naming the keys there are. Example: ``key=\"support\"``."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "key": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

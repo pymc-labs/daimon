@@ -1,0 +1,26 @@
+{
+  "description": [
+    "Extract IDs from a channel or message link.",
+    "",
+    "- If link_type is \"channel\": use read_channel(channel_id)",
+    "- If link_type is \"message_or_thread\": try read_thread(thread_id) first; if",
+    "  read_thread fails, it is a message: use get_message(channel_id, message_id)",
+    "- If the result carries channel_id, a message ts and maybe a thread_ts, try",
+    "  read_thread(thread_id=f\"{channel_id}:{thread_ts or message_ts}\") first; if",
+    "  that fails, use get_message(channel_id, message_ts).",
+    "- If a message link returns a thread_id, pass it to read_thread and",
+    "  get_message."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "url": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "url"
+    ],
+    "type": "object"
+  }
+}

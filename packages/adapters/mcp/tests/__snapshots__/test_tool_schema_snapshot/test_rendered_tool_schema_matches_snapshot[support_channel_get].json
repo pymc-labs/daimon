@@ -1,0 +1,13 @@
+{
+  "description": [
+    "Show where this workspace's support requests go. Admin-only.",
+    "",
+    "``own_allowed`` is false when the deployment keeps its own request channel;",
+    "then ``destination`` is that channel and ``channel_id`` is ignored."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

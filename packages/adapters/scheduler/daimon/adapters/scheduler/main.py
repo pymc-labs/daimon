@@ -39,6 +39,7 @@ import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from cryptography.fernet import MultiFernet
 from daimon.adapters.scheduler.settings import SchedulerSettings
+from daimon.core import tenant_retirement
 from daimon.core.access_policy import TenantAccessPolicy, agent_invoker_roles
 from daimon.core.authz import (
     Action,
@@ -72,9 +73,11 @@ from daimon.core.defaults.provisioning import reconcile_tenant_defaults
 from daimon.core.direct_messages import DirectMessageAccessRevoked, run_dm_routine
 from daimon.core.discord_membership import (
     DiscordRestMembershipResolver,
+    open_discord_dm,
     send_discord_error_dm,
 )
 from daimon.core.dm_access import roles_by_membership, sender_admits
+from daimon.core.features.model_input import is_isolated
 from daimon.core.github_app_session import (
     GitHubTokenMintUnavailable,
     archive_app_vault,
@@ -89,6 +92,7 @@ from daimon.core.github_issued_token_sweep import sweep_closed_github_issued_tok
 from daimon.core.headless_runner import run_turn
 from daimon.core.health import start_liveness_responder
 from daimon.core.hub_oauth_kv_sweep import sweep_expired_hub_oauth_kv
+from daimon.core.lead_intake_execution import current_intake_execution
 from daimon.core.logging_setup import configure_logging, mark_shutting_down
 from daimon.core.long_jobs import LongJobExecutor
 from daimon.core.long_jobs_ma import ManagedLongJobPort
@@ -98,17 +102,16 @@ from daimon.core.ma_resolver import (
     new_resolver_cache,
     resolve_agent,
     resolve_environment,
+    retrieve_agent_cached,
 )
-from daimon.core.mcp_identity import routine_destination_key
+from daimon.core.mcp_identity import DmRoutineRelay, routine_destination_key
 from daimon.core.mcp_vault_janitor import archive_idle_relay_vaults
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
-from daimon.core.monitoring_sweep import sweep_monitored_events
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_session, retrieve_agent
 from daimon.core.observability import init_sentry
 from daimon.core.ops_events import drain_ops_events
-from daimon.core.ops_events_sweep import sweep_ops_events
 from daimon.core.owner_notices import build_owner_notifier, discord_owner_dm
 from daimon.core.pending_carry_over_sweep import sweep_stale_pending_carry_overs
 from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
@@ -121,6 +124,7 @@ from daimon.core.provider_routine import (
     run_provider_routine,
 )
 from daimon.core.purge import sweep_privacy_session_deletes
+from daimon.core.retention import sweep as retention_sweep
 from daimon.core.routine_delivery import (
     OWNER_LACKS_ROLE_ERROR,
     DirectPost,
@@ -132,6 +136,7 @@ from daimon.core.routine_delivery import (
     record_routine_failure,
     render_routine_controls,
     routine_agent_name,
+    routine_knows,
     routine_links,
     split_run_text,
 )
@@ -512,6 +517,18 @@ async def _build_fire(
         tell_owner(notify_owner, row, reason, channel_told=told)
         return True
 
+    async def _has_daimon_tools(row: RoutineRow, agent_id: str | None) -> bool:
+        """Whether the agent that runs this fire has Daimon's tools; an isolated one has none.
+        Unreadable: the fire's controls carry no hint about them."""
+        if agent_id is None:
+            return False
+        try:
+            agent = await retrieve_agent_cached(client, resolver_cache, row.tenant_id, agent_id)
+        except Exception:
+            log.warning("routine.agent_unreadable", routine_id=str(row.id), exc_info=True)
+            return False
+        return not is_isolated(agent)
+
     async def _fire_dm(row: RoutineRow, owner_user_id: str, *, direct_post: DirectPost) -> None:
         """Run an explicit owner-DM routine as a fresh private DM turn of its owner.
 
@@ -539,6 +556,8 @@ async def _build_fire(
                 platform="discord",
                 direct_post=direct_post,
                 web=await routine_links(sm, settings, row, "discord"),
+                knows=await routine_knows(sm, settings, row, "discord"),
+                daimon_tools=await _has_daimon_tools(row, row.agent_id),
             )
             + "\n"
             + row.trigger_message
@@ -561,6 +580,7 @@ async def _build_fire(
                     is_dm=True,
                     resolver=deps.membership_resolver,
                 )
+            relay, open_dm = _dm_routine_relay(row, owner_user_id)
             reply = await run_dm_routine(
                 deps,
                 requester_org=standing,
@@ -573,6 +593,8 @@ async def _build_fire(
                 # Built-ins only under an operator's opt-in for the agent: a DM
                 # routine takes no On of its own.
                 sandbox=await routine_sandbox(sm, settings, row, platform="discord"),
+                relay=relay,
+                open_dm=open_dm,
             )
         except (AdmissionDenied, DirectMessageAccessRevoked) as error:
             log.info(
@@ -614,6 +636,29 @@ async def _build_fire(
                 expected_private=row,
                 expected_row=row,
             )
+
+    def _dm_routine_relay(
+        row: RoutineRow, owner: str
+    ) -> tuple[DmRoutineRelay | None, Callable[[], Awaitable[str]] | None]:
+        """What this fire binds into its turn's relay credential, and how to open the
+        owner's DM, when a server signs DM routines: this routine, its owner, this fire's
+        execution and the routine's revision now. (None, None) otherwise: today's turn."""
+        execution = current_intake_execution.get()
+        if (
+            not settings.mcp_identity.names_dm_routine
+            or settings.discord is None
+            or execution is None
+            or execution[0] != row.id
+        ):
+            return None, None
+        relay = DmRoutineRelay(
+            routine_id=row.id,
+            owner=owner,
+            execution=execution[1],
+            revision=row.updated_at.isoformat(),
+        )
+        token = settings.discord.bot_token.get_secret_value()
+        return relay, functools.partial(open_discord_dm, token, owner)
 
     async def _owner_granted(row: RoutineRow, owner: str) -> bool:
         """The routine agent's DM grant admits the owner, by their current server roles.
@@ -850,7 +895,9 @@ async def _build_fire(
                 platform=platform,
                 direct_post=direct_post,
                 web=await routine_links(sm, settings, row, platform),
+                knows=await routine_knows(sm, settings, row, platform),
                 held=hold is not None,
+                daimon_tools=await _has_daimon_tools(row, ran.id),
             )
             + "\n"
             + row.trigger_message
@@ -1215,7 +1262,9 @@ async def _build_fire(
                     platform=platform,
                     direct_post=direct_post,
                     web=await routine_links(sm, settings, row, platform),
+                    knows=await routine_knows(sm, settings, row, platform),
                     held=fire_hold is not None,
+                    daimon_tools=await _has_daimon_tools(row, resolved_agent_id),
                 )
                 + "\n"
                 + row.trigger_message
@@ -1323,13 +1372,17 @@ async def _sweep_pending_files(
 
 @scheduler_step
 async def _sweep_privacy_deletes(
-    client: AsyncAnthropic, sm: async_sessionmaker[AsyncSession]
+    client: AsyncAnthropic, sm: async_sessionmaker[AsyncSession], settings: Settings
 ) -> None:
-    """Retain failed MA erasures for the next tick."""
+    """Retry failed account erasures and retired tenants' upstream cleanup."""
     try:
         await sweep_privacy_session_deletes(client, sm)
     except Exception:
         log.exception("scheduler.privacy_delete_sweep.failed")
+    try:
+        await tenant_retirement.sweep(client, sm, settings)
+    except Exception:
+        log.exception("scheduler.tenant_retirement_sweep.failed")
 
 
 @scheduler_step
@@ -1529,79 +1582,26 @@ async def _sweep_github_issued_tokens(
         log.exception("scheduler.github_issued_token_sweep.failed")
 
 
-# Retention is counted in days, so an hourly run deletes a row at most an hour late.
-_MONITORING_PRUNE_INTERVAL = timedelta(hours=1)
-_last_monitoring_prune: dict[str, datetime] = {}
+# How often the loop asks which rules are due; each rule's own day is kept in the database.
+_RETENTION_POLL = timedelta(minutes=10)
+_last_retention_poll: dict[str, datetime] = {}
 
 
 @scheduler_step
-async def _sweep_monitored_events(
-    sm: async_sessionmaker[AsyncSession], *, retention_days: int, now: datetime | None = None
+async def _sweep_retention(
+    sm: async_sessionmaker[AsyncSession], settings: Settings, *, now: datetime | None = None
 ) -> None:
-    """Delete monitored-agent rows past retention at most once per interval. Boundary
-    catch: a sweep failure must not kill the scheduler loop; a failed run waits too."""
+    """Run the retention rules that are due. Boundary catch: a database failure is
+    logged and the loop goes on; each rule's own failure is handled in the sweep."""
     current = now or datetime.now(UTC)
-    last = _last_monitoring_prune.get("started")
-    if last is not None and current - last < _MONITORING_PRUNE_INTERVAL:
+    last = _last_retention_poll.get("started")
+    if last is not None and current - last < _RETENTION_POLL:
         return
-    _last_monitoring_prune["started"] = current
+    _last_retention_poll["started"] = current
     try:
-        await sweep_monitored_events(sm, now=current, retention_days=retention_days)
+        await retention_sweep(sm, settings, now=current)
     except SQLAlchemyError:
-        log.exception("scheduler.monitoring_sweep.failed")
-
-
-# Retention is counted in days, so an hourly run deletes a row at most an hour late.
-_OPS_EVENTS_PRUNE_INTERVAL = timedelta(hours=1)
-_last_ops_events_prune: dict[str, datetime] = {}
-
-
-@scheduler_step
-async def _sweep_ops_events(
-    sm: async_sessionmaker[AsyncSession], *, retention_days: int, now: datetime | None = None
-) -> None:
-    """Delete ops events past retention at most once per interval. Boundary catch: a sweep
-    failure must not kill the scheduler loop; a failed run waits too."""
-    current = now or datetime.now(UTC)
-    last = _last_ops_events_prune.get("started")
-    if last is not None and current - last < _OPS_EVENTS_PRUNE_INTERVAL:
-        return
-    _last_ops_events_prune["started"] = current
-    try:
-        await sweep_ops_events(sm, now=current, retention_days=retention_days)
-    except SQLAlchemyError:
-        log.exception("scheduler.ops_events_sweep.failed")
-
-
-# Each run reads every idle Gemini row; idleness is counted in days.
-_GEMINI_RETENTION_INTERVAL = timedelta(hours=1)
-_last_gemini_retention: dict[str, datetime] = {}
-
-
-@scheduler_step
-async def _prune_gemini_records(
-    sm: async_sessionmaker[AsyncSession], *, retention_days: int, now: datetime | None = None
-) -> None:
-    """Prune idle Gemini conversations at most once per interval. Boundary catch:
-    a sweep failure must not kill the scheduler loop; the next interval retries.
-    """
-    current = now or datetime.now(UTC)
-    last = _last_gemini_retention.get("started")
-    if last is not None and current - last < _GEMINI_RETENTION_INTERVAL:
-        return
-    _last_gemini_retention["started"] = current
-    # Lazy: the sweep pulls the Gemini SDK, which an Anthropic-only install lacks.
-    try:
-        from daimon.core.turn.gemini_retention import prune_idle_records
-    except ImportError:
-        return
-    try:
-        counts = await prune_idle_records(sm, now=current, window=timedelta(days=retention_days))
-    except SQLAlchemyError:
-        log.exception("scheduler.gemini_retention.failed")
-        return
-    if counts:
-        log.info("scheduler.gemini_retention", **counts)
+        log.exception("scheduler.retention.failed")
 
 
 # Each run lists every vault, and live sessions once a relay vault is old enough.
@@ -1612,9 +1612,9 @@ _last_relay_vault_archive: dict[str, datetime] = {"started": datetime.now(UTC)}
 
 @scheduler_step
 async def _archive_idle_relay_vaults(
-    client: AsyncAnthropic, *, now: datetime | None = None
+    client: AsyncAnthropic, sm: async_sessionmaker[AsyncSession], *, now: datetime | None = None
 ) -> None:
-    """Archive relay vaults no live session mounts, at most once per interval.
+    """Archive idle relay vaults and delete unbound shared ones, at most once per interval.
     Boundary catch: a failure must not kill the scheduler loop; the next run retries.
     """
     current = now or datetime.now(UTC)
@@ -1623,7 +1623,7 @@ async def _archive_idle_relay_vaults(
         return
     _last_relay_vault_archive["started"] = current
     try:
-        await archive_idle_relay_vaults(client, now=current)
+        await archive_idle_relay_vaults(client, session_factory=sm, now=current)
     except (anthropic.APIError, ValueError) as error:
         log.exception("scheduler.relay_vault_archive.failed", causes=backend_refusal_causes(error))
 
@@ -2285,6 +2285,7 @@ async def _run_loops(
     compute_task_poll: Callable[[], Awaitable[None]],
     interval_s: float,
     stop_event: asyncio.Event,
+    retention_sweep: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     """Run routine dispatch, housekeeping and upstream sweeps on separate loops until stopped.
 
@@ -2299,6 +2300,9 @@ async def _run_loops(
     it has no total sweep timeout, so growing inventory cannot starve cleanup.
     Background command polling has its own loop, so a slow machine delays
     neither cleanup nor dispatch.
+
+    The retention sweep has its own loop too: it deletes in batches and can run long,
+    and usage settlement and routine claims must not wait on it.
 
     A usage pass settles whole session histories and can outlast many ticks;
     inline, routine claims waited for it. On stop the usage, privacy and compute
@@ -2331,6 +2335,14 @@ async def _run_loops(
                 )
             ),
         ]
+        if retention_sweep is not None:
+            background.append(
+                loops.create_task(
+                    _repeat_until_stopped(
+                        retention_sweep, interval_s=interval_s, stop_event=stop_event
+                    )
+                )
+            )
         if usage_sweep is not None:
             background.append(
                 loops.create_task(
@@ -2503,7 +2515,7 @@ async def run(
             await _poll_compute_tasks(compute)
             await _drain_pending_usage(sm, markup=settings.billing.markup)
             await _sweep_pending_files(client, sm)
-            await _sweep_privacy_deletes(client, sm)
+            await _sweep_privacy_deletes(client, sm, settings)
             await _usage_sweep_once(
                 enabled=scheduler_settings.usage_sweep_enabled,
                 sweep=lambda: _sweep_headless_usage(client, sm, markup=settings.billing.markup),
@@ -2519,10 +2531,8 @@ async def run(
             await _sweep_github_connect_flows(sm)
             await _sweep_routine_outputs(sm)
             await _sweep_github_issued_tokens(sm)
-            await _sweep_monitored_events(sm, retention_days=settings.monitoring.retention_days)
-            await _sweep_ops_events(sm, retention_days=settings.ops_events.retention_days)
-            await _prune_gemini_records(sm, retention_days=settings.gemini.records_retention_days)
-            await _archive_idle_relay_vaults(client)
+            await _sweep_retention(sm, settings)
+            await _archive_idle_relay_vaults(client, sm)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
             await _refresh_github_app_sessions(
                 client, sm, settings=settings, fernet=push_resync_fernet
@@ -2566,10 +2576,7 @@ async def run(
             await _sweep_github_connect_flows(sm)
             await _sweep_routine_outputs(sm)
             await _sweep_github_issued_tokens(sm)
-            await _sweep_monitored_events(sm, retention_days=settings.monitoring.retention_days)
-            await _sweep_ops_events(sm, retention_days=settings.ops_events.retention_days)
-            await _prune_gemini_records(sm, retention_days=settings.gemini.records_retention_days)
-            await _archive_idle_relay_vaults(client)
+            await _archive_idle_relay_vaults(client, sm)
             await _settle_promo_credit(sm)
             await _drain_github_push_resync(
                 engine=engine,
@@ -2599,7 +2606,10 @@ async def run(
             await _sweep_headless_usage(client, sm, markup=settings.billing.markup)
 
         async def privacy_sweep() -> None:
-            await _sweep_privacy_deletes(client, sm)
+            await _sweep_privacy_deletes(client, sm, settings)
+
+        async def retention_sweep_loop() -> None:
+            await _sweep_retention(sm, settings)
 
         async with runtime_health(
             "scheduler", engine, settings.observability.health_interval_s, current_turn_counts
@@ -2612,6 +2622,7 @@ async def run(
                 github_sessions=github_sessions,
                 usage_sweep=usage_sweep if scheduler_settings.usage_sweep_enabled else None,
                 privacy_sweep=privacy_sweep,
+                retention_sweep=retention_sweep_loop,
                 compute_sweep=lambda: _sweep_compute(compute),
                 compute_task_poll=lambda: _poll_compute_tasks(compute),
                 interval_s=scheduler_settings.tick_interval_s,

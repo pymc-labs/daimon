@@ -1,0 +1,47 @@
+{
+  "description": [
+    "Change one setting where you are, after the person presses Approve.",
+    "",
+    "``key`` and ``value`` are one of ``get_settings``' keys and its values, or",
+    "``default`` to clear the level's own value. ``tier`` is the ``workspace``,",
+    "``agent``, ``channel`` or ``thread`` level of this conversation; other places cannot be",
+    "named. ``locked`` (an admin's, not at the thread tier) makes the value final",
+    "below. Approvals, and approvals in direct messages, need a live admin of the chat",
+    "platform; a thread's participation or progress plans are anyone's; the rest an",
+    "admin's. Read the returned ``note`` back."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "key": {
+        "type": "string"
+      },
+      "locked": {
+        "default": false,
+        "type": "boolean"
+      },
+      "origin_context_id": {
+        "type": "string"
+      },
+      "tier": {
+        "enum": [
+          "workspace",
+          "agent",
+          "channel",
+          "thread"
+        ],
+        "type": "string"
+      },
+      "value": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "origin_context_id",
+      "key",
+      "tier",
+      "value"
+    ],
+    "type": "object"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "description": [
+    "Send the person a private Connect Microsoft card so Daimon can use their Microsoft 365.",
+    "",
+    "Call this only when the person asks to connect (or reconnect) Microsoft,",
+    "or agrees to after a microsoft_* tool says they are not connected. The",
+    "card goes to their 1:1 chat with Daimon; nothing is connected until they",
+    "sign in there. While a card is unexpired no new one is sent."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "default": "",
+        "type": "string"
+      }
+    },
+    "type": "object"
+  }
+}

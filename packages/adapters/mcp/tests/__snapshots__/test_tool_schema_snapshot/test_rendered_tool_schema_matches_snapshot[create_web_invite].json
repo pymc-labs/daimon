@@ -1,0 +1,72 @@
+{
+  "description": [
+    "Invite someone to the web app by email as a member, or as a visitor of the given",
+    "agents (at most 50). The link is sent to the caller by direct message, never shown",
+    "here. Pass this active turn's origin_context_id. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_ids": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "allow_files": {
+        "default": false,
+        "type": "boolean"
+      },
+      "credit_usd": {
+        "anyOf": [
+          {
+            "type": "number"
+          },
+          {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "type": "string"
+          }
+        ],
+        "default": "0"
+      },
+      "days": {
+        "default": 7,
+        "type": "integer"
+      },
+      "email": {
+        "type": "string"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "role": {
+        "enum": [
+          "visitor",
+          "member"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "email",
+      "role"
+    ],
+    "type": "object"
+  }
+}
