@@ -113,6 +113,7 @@ The token carries these claims:
 | `room` | on Discord, with `channel`: the kind of place the answer goes to |
 | `routine` | with `"routine_claims": true`: the routine whose run posts to `channel` |
 | `wake` | with `"wake_claims": true`: why a call with no new message runs |
+| `rev`, `routine_name` | with `routine`: what a server's approval of that routine is bound to, and its name |
 
 `room` is `dm` for a direct message. In a room it is `contained` or `narrow` as
 [Rooms with outside people](outside-people.md#contained-and-narrow-rooms) defines them,
@@ -129,6 +130,14 @@ to a Discord room carries `routine`, that room as `channel` and its `room`; a ru
 nowhere carries none. A DM run needs
 [`dm_routine_claims`](unattended.md#a-routine-in-its-owners-dm) too. Agent chat and
 senders from another organisation name no person either.
+
+With `routine`, Daimon also signs `routine_name` and, while the routine is enabled,
+`rev`: the SHA-256 hex of a fixed text of the tenant, the workspace, the routine's id
+and owner, its agent's name, its prompt and where it posts. A server can bind an
+approval for that routine to `rev` ([Routines](routines.md#approvals-on-signed-servers)):
+pausing, resuming, renaming or rescheduling it keeps `rev`; a new prompt, agent name,
+owner or destination changes it. A person's turn and a queued turn never carry either.
+A server that does not know the two claims ignores them.
 
 <!-- knowledge: web -->
 The web app's tool list names no person either.

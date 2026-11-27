@@ -252,6 +252,16 @@ In a `readers: own` channel, a routine of that channel's own agent is visible
 and editable only from inside it. Each run re-checks the agent's rule at the
 destination and skips a run that would cross the line (`own_agents_only`).
 
+### Approvals on signed servers
+
+A [signed-identity server](mcp-servers.md) may let an admin approve that one routine
+uses one of its tools. That approval holds while the routine keeps its prompt, owner,
+agent name and destination: Daimon signs them as `rev` on each call. Pausing, resuming,
+renaming or rescheduling keeps it. Editing the prompt, changing the agent, the owner or
+where it posts ends it, and the admin approves again. A paused routine signs no `rev`.
+Daimon's own rules for writes with nobody watching still apply
+([unattended turns](unattended.md)).
+
 ## When a run fails
 
 A failing routine is not retried; it tries again at its next slot. It pauses when its
