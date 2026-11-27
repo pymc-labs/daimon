@@ -27,7 +27,7 @@ from daimon.core.stores.domain import (
     ContinuationReason,
     TaskContinuationRow,
 )
-from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy import and_, func, or_, select, text, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -445,13 +445,15 @@ async def get_running_wake_row(
     *,
     tenant_id: _uuid.UUID,
     platform: str,
-    thread_id: str,
+    thread_id: str | None,
     owner: str,
     now: datetime,
 ) -> TaskContinuationRow | None:
-    """The row whose turn `owner` is running in this thread now, or None: claimed under
-    that owner, started, and inside its lease. A release, a takeover or a settled row has
-    another owner or none, so an old attempt finds nothing. Reads only."""
+    """The row whose turn `owner` is running now, or None: claimed under that owner,
+    started, and inside its lease; in `thread_id`, or in any thread when it is None (a
+    watch report runs in a new thread or a DM, not the thread its row names). A release, a
+    takeover or a settled row has another owner or none, so an old attempt finds nothing.
+    Reads only."""
     rows = list(
         await session.scalars(
             select(TaskContinuation)
@@ -459,7 +461,7 @@ async def get_running_wake_row(
                 _READABLE_REASON,
                 TaskContinuation.tenant_id == tenant_id,
                 TaskContinuation.platform == platform,
-                TaskContinuation.thread_id == thread_id,
+                true() if thread_id is None else TaskContinuation.thread_id == thread_id,
                 TaskContinuation.status == "claimed",
                 TaskContinuation.lease_owner == owner,
                 TaskContinuation.started_at.is_not(None),

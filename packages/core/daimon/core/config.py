@@ -2570,6 +2570,12 @@ class McpIdentitySettings(BaseModel):
         return any(server.dm_routine_claims for server in self.servers)
 
     @property
+    def names_dm_watch_report(self) -> bool:
+        """Whether any server is sent a DM watch report's claims: one with both
+        `dm_routine_claims` and `wake_claims`."""
+        return any(server.dm_routine_claims and server.wake_claims for server in self.servers)
+
+    @property
     def names_agent_chat_requester(self) -> bool:
         """Whether any server is sent the person behind an agent-chat turn."""
         return any(server.agent_chat_requester for server in self.servers)

@@ -724,7 +724,10 @@ async def refresh_relay_vault(
                 agent_chat=agent_chat if rebind else bound,
                 execution=None if raw_execution is None else uuid.UUID(raw_execution),
                 revision=metadata.get(RELAY_REVISION_METADATA_KEY) if dm_turn else None,
-                dm_channel=metadata.get(RELAY_DM_CHANNEL_METADATA_KEY) if dm_turn else None,
+                # A DM routine's turn, or a watch report's in its owner's DM (session alone).
+                dm_channel=metadata.get(RELAY_DM_CHANNEL_METADATA_KEY)
+                if dm_turn or (raw_key is not None and raw_routine is None)
+                else None,
             ),
         )
     # Registered before the provider write, as for the shared vault.

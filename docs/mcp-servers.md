@@ -141,8 +141,9 @@ On a server with `"wake_claims": true`, Daimon signs `wake` only for these turns
 | Turn | `wake` | Signed with it |
 | --- | --- | --- |
 | A person's turn that is still running | `turn` | `sub`, `channel`, `msg` and `room`, as without the setting |
-| A queued turn that runs in its own thread | its reason: `timer`, `watch_fired`, `watch_report`, `job_finished`, `task_handoff`, `private_input_applied`, `github_access_ready` or `confirmed_call` | that thread as `channel`, its `room` judged as for a routine, no `sub` or `msg` |
-| A helper, a watch report into a new thread, a timer in a DM or channel, a sender from another organisation | none | what it signs without the setting |
+| A queued turn that runs in its own thread, or a watch report in the new thread it opened | its reason: `timer`, `watch_fired`, `watch_report`, `job_finished`, `task_handoff`, `private_input_applied`, `github_access_ready` or `confirmed_call` | that thread as `channel`, its `room` judged as for a routine, no `sub` or `msg` |
+| A watch report in its owner's DM, with `dm_routine_claims` too | `watch_report` | the owner as `sub`, their DM as `channel`, `room: dm`, no `msg` |
+| A helper, a timer in a DM or channel, a sender from another organisation | none | what it signs without the setting |
 
 The settings are independent: `wake_claims` allows calls with no new message even with
 `routine_claims` off:
