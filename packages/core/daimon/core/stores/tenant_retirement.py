@@ -37,6 +37,7 @@ from daimon.core._models import (
     UserSkill,
 )
 from daimon.core.errors import SettlePending
+from daimon.core.ports import erasure as ports_erasure
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import mux_erasure
 from daimon.core.stores.security_audit import erase_tenant
@@ -304,6 +305,7 @@ async def begin_retirement(
     await mux_erasure.detach_tenant_accounting(session, tenant_id=tenant_id)
     await delete_settle_state(session, tenant_id=tenant_id)
     await erase_tenant(session, tenant_id=tenant_id)
+    await ports_erasure.erase_tenant(session, tenant_id=tenant_id)
     # Its accounts' ids in agent-chat session records have no FK to cascade with.
     await erase_agent_chat_provenance_for_tenant(session, tenant_id=tenant_id)
     await session.execute(

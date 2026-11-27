@@ -12,6 +12,7 @@ it later.
 Downgrading drops both store schemas and everything in them, as 0233 does.
 
 downgrade: destructive
+schema: contract
 """
 
 from __future__ import annotations

@@ -11,6 +11,7 @@ Its list holds the earlier files too, as 0235's does. Downgrading drops what thi
 (`0003_store_down.sql`); 0234's downgrade drops the store.
 
 downgrade: destructive
+schema: contract
 """
 
 from __future__ import annotations

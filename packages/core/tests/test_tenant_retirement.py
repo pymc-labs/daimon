@@ -35,6 +35,7 @@ from daimon.core._models import (
 from daimon.core.config import Settings, load_settings
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.errors import SettlePending
+from daimon.core.ports import erasure as ports_erasure
 from daimon.core.stores import slack_bot_tokens, support_escalation, tenant_ledger, tenants
 from daimon.core.stores import tenant_retirement as store
 from daimon.core.stores.domain import TenantRow
@@ -320,6 +321,29 @@ async def test_slack_tokens_go_only_for_the_leaving_workspace(
     assert ("T_B", "U_B") in users, "another workspace's user token stays"
     assert "T_B" in bots, "another workspace's bot token stays"
     assert ("T_A", "U_STRANGER") in users, "a token for someone this tenant never knew stays"
+
+
+@pytest.mark.parametrize("how", ["retire", "delete"])
+async def test_rows_outside_the_orm_go_with_the_tenant(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    how: str,
+) -> None:
+    erased: list[uuid.UUID] = []
+
+    async def record(_: AsyncSession, *, tenant_id: uuid.UUID) -> int:
+        erased.append(tenant_id)
+        return 0
+
+    monkeypatch.setattr(ports_erasure, "erase_tenant", record)
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="ports-guild")
+    await db_session.flush()
+    if how == "retire":
+        await tenant_retirement.retire(db_session_factory, tenant_id=tenant.id)
+    else:
+        await tenants.delete_tenant(db_session, tenant_id=tenant.id)
+    assert erased == [tenant.id], "the registered erasure runs once for the leaving tenant"
 
 
 async def _archive(db_session: AsyncSession, tenant_id: uuid.UUID, at: datetime) -> None:

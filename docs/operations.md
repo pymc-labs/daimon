@@ -177,14 +177,13 @@ With local client tools instead:
 DAIMON_RESTORE_DATABASE="$PGDATABASE" sh scripts/backup/postgres.sh restore backups/<timestamp>
 ```
 
-The command checks the checksum, requires the target name, refuses any database
-that already has tables, and restores in one transaction. It never drops data.
+The command checks the checksum, requires the target name, refuses a database
+with tables, and restores in one transaction. It never drops data.
 Restore only trusted archives, because dumps contain executable SQL. On
 failure, find the cause before retrying.
 
-With [data sources](data-sources.md#after-a-restore) on, the restore also needs a repair step.
-
-Then restore file stores and the original keys, point the application at the
+Then restore file stores, the original keys and
+[data store grants](data-sources.md#after-a-restore), point the application at the
 recovered database and start the matching release. Check `alembic_version`,
 row counts, and a sample of tenant, credential, routine and usage records.
 Confirm decryption and platform IDs before enabling traffic. If the original

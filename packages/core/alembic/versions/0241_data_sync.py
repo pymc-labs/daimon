@@ -11,6 +11,7 @@ Its list holds `0001_store.sql` too, so a store that 0234 skipped is set up here
 drops the sync tables only (`0002_sync_down.sql`); 0234's downgrade drops the store.
 
 downgrade: destructive
+schema: contract
 """
 
 from __future__ import annotations

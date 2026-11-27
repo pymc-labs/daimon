@@ -14,6 +14,7 @@ Downgrading drops both schemas and everything in them. The roles stay: other dat
 on the same server may use them.
 
 downgrade: destructive
+schema: contract
 """
 
 from __future__ import annotations
