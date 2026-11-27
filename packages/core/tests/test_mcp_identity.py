@@ -33,6 +33,7 @@ from daimon.core.mcp_identity import (
     relay_url,
     requester_conversation,
     routine_conversation,
+    routine_revision,
     sign_identity,
     stamp_requester,
     watch_conversation,
@@ -802,3 +803,64 @@ def test_an_agent_chat_stamp_names_the_person_with_no_place_and_no_wake_link() -
         "requester_platform_user_id": "42",
         "requester_kind": "agent_chat",
     }, "forged fields are replaced; no place is sent even if one is passed"
+
+
+def test_a_routines_revision_moves_with_its_text_owner_agent_name_and_place_only() -> None:
+    row = _routine_row(
+        destination_kind="channel", destination_id="5", channel_id="5", name="Weekly"
+    )
+    rev = routine_revision(row, workspace="discord:1")
+    assert len(rev) == 64 and int(rev, 16) >= 0, "a SHA-256 hex digest"
+    for kept in (
+        {"enabled": False},
+        {"cron_expr": "0 8 * * 1", "timezone": "Asia/Manila"},
+        {"name": "Renamed"},
+        {"agent_id": "agent_healed"},
+        {"updated_at": dt.datetime(2026, 2, 1, tzinfo=dt.UTC)},
+    ):
+        assert routine_revision(row.model_copy(update=kept), workspace="discord:1") == rev, kept
+    for moved in (
+        {"trigger_message": "go now"},
+        {"agent_name": "another"},
+        {"created_by_user_id": "43"},
+        {"destination_id": "6", "channel_id": "6"},
+        {"destination_kind": "thread", "destination_id": "9"},
+        {"tenant_id": uuid.uuid4()},
+        {"id": uuid.uuid4()},
+    ):
+        assert routine_revision(row.model_copy(update=moved), workspace="discord:1") != rev, moved
+    assert routine_revision(row, workspace="discord:2") != rev, "another workspace"
+
+
+def test_a_routines_revision_and_name_are_signed_only_with_its_routine() -> None:
+    now = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+    base: dict[str, Any] = {
+        "issuer": "i", "audience": "a", "agent_id": "ag", "platform": "discord",
+        "workspace_id": "1", "agent_name": "Agent",
+    }  # fmt: skip
+    rev = "a" * 64
+    routine = caller_claims(
+        **base, platform_user_id=None, place=TurnPlace("5", None), room="team",
+        routine="r1", rev=rev, routine_name="Weekly " * 20,
+    )  # fmt: skip
+    payload = routine.payload(now=now)
+    assert payload["rev"] == rev and payload["routine_name"] == ("Weekly " * 20)[:80]
+    assert "rev" not in caller_claims(
+        **base, platform_user_id=None, place=TurnPlace("5", None), room="team", routine="r1"
+    ).payload(now=now), "no revision unless the relay gives one"
+    extras: list[dict[str, Any]] = [{"rev": rev}, {"routine_name": "Weekly"}]
+    for extra in extras:
+        with pytest.raises(ValueError, match="only with its routine"):
+            caller_claims(  # a person's turn
+                **base, platform_user_id="7", place=TurnPlace("5", "m"), room="team", **extra
+            )
+        with pytest.raises(ValueError, match="only with its routine"):
+            caller_claims(  # a queued turn
+                **base, platform_user_id="7", place=TurnPlace("5", None), room="team",
+                wake="timer", **extra,
+            )  # fmt: skip
+    with pytest.raises(ValueError, match="hex"):
+        caller_claims(
+            **base, platform_user_id=None, place=TurnPlace("5", None), room="team",
+            routine="r1", rev="A" * 64,
+        )  # fmt: skip
