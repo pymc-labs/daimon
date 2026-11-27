@@ -313,24 +313,33 @@ async def _routine_run(
     *,
     tenant_id: uuid.UUID,
     agent_id: uuid.UUID,
+    live: bool = False,
 ) -> RoutineRow | None:
     """The routine a scheduled run's credential names, or None.
 
     Only a routine of this tenant that runs this agent (by id) and is still owned by
     the user the run started for counts; a routine since deleted, handed to someone
-    else or aimed at another agent names nobody.
+    else or aimed at another agent names nobody. With `live`, also only while the fire
+    the credential was minted in still runs (`routine_execution`): a finished, timed-out
+    or cancelled run, or a credential that names no fire, names nobody.
     """
-    if binding.routine_id is None:
+    if binding.routine_id is None or (live and binding.execution is None):
         return None
     async with sessionmaker() as session:
         row = await get_routine(session, binding.routine_id, tenant_id=tenant_id)
-    if (
-        row is None
-        or not row.created_by_user_id
-        or row.created_by_user_id != binding.owner
-        or derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=row.agent_id) != agent_id
-    ):
-        return None
+        if (
+            row is None
+            or not row.created_by_user_id
+            or row.created_by_user_id != binding.owner
+            or derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=row.agent_id) != agent_id
+        ):
+            return None
+        if live:
+            assert binding.execution is not None
+            if not await execution_is_active(
+                session, tenant_id, binding.routine_id, binding.execution
+            ):
+                return None
     return row
 
 
@@ -745,12 +754,13 @@ def build_identity_relay_route(
                 and binding.session_key is None
                 and FOREIGN_HOME_CLAIM not in claims
             ):
-                # Only a run the routine check passes, still posting where it did when the
-                # run started, and only for that room: the channel comes from the routine's
-                # own row, never from the request. A credential minted before runs kept
-                # their destination names none, so it signs no routine claim.
+                # Only a run the routine check passes, in a fire still running, still
+                # posting where it did when the run started, and only for that room: the
+                # channel comes from the routine's own row, never from the request. A
+                # credential minted before runs kept their destination or their fire
+                # names neither, so it signs no routine claim.
                 routine = await _routine_run(
-                    sessionmaker, binding, tenant_id=tenant_id, agent_id=agent_id
+                    sessionmaker, binding, tenant_id=tenant_id, agent_id=agent_id, live=True
                 )
                 if routine is not None and routine_destination_key(routine) != binding.destination:
                     routine = None
@@ -847,6 +857,10 @@ def build_identity_relay_route(
                     else None
                 ),
                 routine_name=signed_routine.name if signed_routine is not None else None,
+                # A channel or thread routine's owner, for what the run makes for them.
+                routine_owner=signed_routine.created_by_user_id
+                if signed_routine is not None and room != "dm"
+                else None,
             )
             headers["authorization"] = f"Bearer {tokens.token(identity, now=now)}"
         if request.method in ("GET", "DELETE"):

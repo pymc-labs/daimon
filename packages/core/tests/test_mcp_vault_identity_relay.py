@@ -195,8 +195,10 @@ async def test_headless_relay_credential_names_no_session(
 async def test_refresh_keeps_a_routines_signed_owner_and_destination(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    routine_id = uuid.uuid4()
-    binding = RelayBinding("Helper", routine_id=routine_id, owner="42", destination="channel:9:")
+    routine_id, execution = uuid.uuid4(), uuid.uuid4()
+    binding = RelayBinding(
+        "Helper", routine_id=routine_id, owner="42", destination="channel:9:", execution=execution
+    )
     vault, account_id, agent_id = await _relay_vault(db_session_factory, binding, RELAY)
     assert _signed(vault.by_url(RELAY))[RELAY_CLAIM]["owner"] == "42"
     await _refresh(
@@ -205,11 +207,12 @@ async def test_refresh_keeps_a_routines_signed_owner_and_destination(
     )  # fmt: skip
     for url in (RELAY, OTHER):
         claim = _signed(vault.by_url(url))[RELAY_CLAIM]
-        assert (claim["routine"], claim["owner"], claim["destination"]) == (
+        assert (claim["routine"], claim["owner"], claim["destination"], claim["execution"]) == (
             str(routine_id),
             "42",
             "channel:9:",
-        ), "kept on refresh"
+            str(execution),
+        ), "kept on refresh, with the fire the run was bound to"
 
 
 async def test_refresh_keeps_the_binding_and_adds_a_relay_attached_since(

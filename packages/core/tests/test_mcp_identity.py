@@ -864,3 +864,50 @@ def test_a_routines_revision_and_name_are_signed_only_with_its_routine() -> None
             **base, platform_user_id=None, place=TurnPlace("5", None), room="team",
             routine="r1", rev="A" * 64,
         )  # fmt: skip
+
+
+def test_a_channel_routines_owner_is_signed_apart_from_sub_and_only_with_its_routine() -> None:
+    now = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+    base: dict[str, Any] = {
+        "issuer": "i", "audience": "a", "agent_id": "ag", "platform": "discord",
+        "workspace_id": "1", "agent_name": "Agent",
+    }  # fmt: skip
+    payload = caller_claims(
+        **base, platform_user_id=None, place=TurnPlace("5", None), room="team",
+        routine="r1", routine_owner="42",
+    ).payload(now=now)  # fmt: skip
+    assert payload["owner"] == "discord:42" and "sub" not in payload, "an owner, never an asker"
+    wrongs: list[dict[str, Any]] = [
+        {"platform_user_id": "7", "place": TurnPlace("5", "m"), "room": "team"},  # a person
+        {"platform_user_id": None, "place": TurnPlace("5", None), "room": "team",
+         "wake": "timer"},  # a queued turn
+        {"platform_user_id": "42", "place": TurnPlace("dm-1", None), "room": "dm",
+         "routine": "r1"},  # a DM routine's owner is `sub`
+    ]  # fmt: skip
+    for wrong in wrongs:
+        with pytest.raises(ValueError, match="owner claim"):
+            caller_claims(**base, **wrong, routine_owner="42")
+
+
+def test_a_channel_routines_run_carries_its_fire_through_the_relay_claim() -> None:
+    """A channel or thread routine's run binds the fire it runs in, with no session; the
+    old fire-less shape still reads, and a fire with a stray or missing part is refused."""
+    routine_id = uuid.uuid4()
+    bound = RelayBinding(
+        "Helper", routine_id=routine_id, owner="42", destination="channel:9:",
+        execution=uuid.uuid4(),
+    )  # fmt: skip
+    assert parse_relay_claim(bound.claim()) == bound, "the fire reads back"
+    whole = bound.claim()
+    for key in ("routine", "owner", "destination"):
+        with pytest.raises(ValueError):
+            parse_relay_claim({k: v for k, v in whole.items() if k != key})
+    for wrong in (
+        {"execution": "not-a-uuid"},
+        {"watch": str(uuid.uuid4())},
+        {"grant": "g-1"},
+        {"revision": "2026-10-01T12:00:00+00:00"},
+        {"dm_channel": "77"},
+    ):
+        with pytest.raises(ValueError):
+            parse_relay_claim({**whole, **wrong})

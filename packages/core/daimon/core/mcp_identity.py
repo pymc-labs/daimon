@@ -182,11 +182,14 @@ class RelayBinding:
     #: started; only with `routine_id`. The relay signs routine claims only while the
     #: routine still posts there.
     destination: str | None = None
-    #: A routine posting to its owner's DM, in the owner's DM turn (`session_key`,
-    #: `grant`, `routine_id`, `owner`, destination `dm::`): the fire's execution
-    #: (`routine_execution`), the routine's `updated_at` when it began, as ISO 8601, and
-    #: the owner's DM channel. All three or none; the relay signs only while that fire is
-    #: live and the routine enabled and unedited (`identity_relay._dm_routine_run`).
+    #: The fire a routine's run belongs to (`routine_execution`). A channel or thread
+    #: routine's run (`routine_id`, `owner`, `destination`, no `session_key`) carries it
+    #: alone, and the relay signs routine claims only while that fire is live
+    #: (`identity_relay._routine_run`). A routine posting to its owner's DM, in the
+    #: owner's DM turn (`session_key`, `grant`, `routine_id`, `owner`, destination
+    #: `dm::`), carries it with the routine's `updated_at` when the fire began, as ISO
+    #: 8601, and the owner's DM channel: all three or none; the relay signs only while
+    #: that fire is live and the routine enabled and unedited (`_dm_routine_run`).
     execution: uuid.UUID | None = None
     revision: str | None = None
     dm_channel: str | None = None
@@ -259,7 +262,13 @@ def parse_relay_claim(raw: object) -> RelayBinding:
     unattended = routine is not None or watch is not None
     # A routine in its owner's DM turn: the session, its grant and the routine together,
     # with every field the relay checks it by; any of them alone is a wrong shape.
-    dm = execution is not None or revision is not None or dm_channel is not None
+    dm = (
+        revision is not None
+        or dm_channel is not None
+        or (execution is not None and key is not None)
+    )
+    # A channel or thread routine's run: its fire alone beside the routine and its room.
+    fire = execution is not None and not dm
     if (
         not set(claim)
         <= {
@@ -276,6 +285,7 @@ def parse_relay_claim(raw: object) -> RelayBinding:
             "dm_channel",
         }
         or (dm and not _dm_routine_shape(claim))
+        or (fire and not _routine_fire_shape(claim))
         or not (destination is None or (isinstance(destination, str) and routine is not None))
         or not (owner is None or (isinstance(owner, str) and owner and unattended))
         or not (grant is None or (isinstance(grant, str) and grant and key is not None))
@@ -329,6 +339,20 @@ def _dm_routine_shape(claim: Mapping[str, object]) -> bool:
     return at.tzinfo is not None
 
 
+def _routine_fire_shape(claim: Mapping[str, object]) -> bool:
+    """Whether a relay claim is whole as a channel or thread routine's run bound to its
+    fire: the routine, its owner, its destination and the fire's execution, no session."""
+    if not all(isinstance(claim.get(k), str) and claim.get(k) for k in ("routine", "owner")):
+        return False
+    if not isinstance(claim.get("destination"), str) or {"session", "grant", "watch"} & set(claim):
+        return False
+    try:
+        uuid.UUID(cast("str", claim["execution"]))
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 @dataclass(frozen=True)
 class TurnPlace:
     """Where a person's turn came from, as the platform's own API names it.
@@ -363,6 +387,9 @@ class IdentityClaims:
     #: (`routine_revision`), and its name, for the server's own pages.
     rev: str | None = None
     routine_name: str | None = None
+    #: With a channel or thread `routine` only: its owner, `<platform>:<user id>`. Not
+    #: `sub`: it names who receives what the run makes for its owner, and reads nothing.
+    owner: str | None = None
 
     def payload(self, *, now: datetime, ttl: timedelta = TOKEN_TTL) -> dict[str, str | int]:
         issued = int(now.timestamp())
@@ -384,6 +411,7 @@ class IdentityClaims:
             ("wake", self.wake),
             ("rev", self.rev),
             ("routine_name", self.routine_name),
+            ("owner", self.owner),
         ):
             if value:
                 claims[name] = value
@@ -405,6 +433,7 @@ def caller_claims(
     wake: WakeReason | None = None,
     rev: str | None = None,
     routine_name: str | None = None,
+    routine_owner: str | None = None,
 ) -> IdentityClaims:
     """Claims for one relayed request.
 
@@ -426,10 +455,15 @@ def caller_claims(
     signed like a routine with that room's kind and no person or message.
 
     `rev` and `routine_name` come only with `routine` (`routine_revision`).
+    `routine_owner`, a channel or thread routine's owner, is signed as `owner`: who
+    receives a file the run makes for its owner. It never makes the owner the person
+    asking; a DM routine's owner is already `sub`.
     """
     owned = routine is not None and room == "dm"
     if routine is None and (rev is not None or routine_name is not None):
         raise ValueError("a routine's revision and name come only with its routine")
+    if routine_owner is not None and (routine is None or owned or not routine_owner):
+        raise ValueError("an owner claim comes only with a channel or thread routine")
     if rev is not None and not re.fullmatch(r"[0-9a-f]{64}", rev):
         raise ValueError("a routine's revision is a SHA-256 hex digest")
     if routine is not None and not (
@@ -471,6 +505,7 @@ def caller_claims(
         wake=wake,
         rev=rev,
         routine_name=routine_name[:ROUTINE_CLAIM_MAX] if routine_name else None,
+        owner=f"{platform}:{routine_owner}" if routine_owner else None,
     )
 
 

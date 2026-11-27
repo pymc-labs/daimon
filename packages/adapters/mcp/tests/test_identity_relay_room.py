@@ -172,8 +172,22 @@ async def _routine_token(
     *,
     owner: str,
     destination: str | None,
+    fire: bool = True,
 ) -> str:
-    binding = RelayBinding("Agent A", routine_id=routine_id, owner=owner, destination=destination)
+    """A run's credential; with `fire` and a destination, bound to a live fire of it."""
+    execution = uuid.uuid4() if fire and destination is not None else None
+    if execution is not None:
+        await _sql(
+            factory,
+            "INSERT INTO lead_intake_executions (tenant_id, id, routine_id, expires_at)"
+            " VALUES (:tenant, :id, :routine, now() + interval '5 minutes')",
+            tenant=person.tenant_id,
+            id=execution,
+            routine=routine_id,
+        )
+    binding = RelayBinding(
+        "Agent A", routine_id=routine_id, owner=owner, destination=destination, execution=execution
+    )
     return await _token(factory, person, binding)
 
 
@@ -237,6 +251,53 @@ async def test_a_routine_run_names_its_routine_the_room_it_posts_to_and_its_kind
     )
     assert claims["ws"] == "discord:guild-1", "the workspace is named"
     assert not {"sub", "msg"} & set(claims), "a routine names no person and no message"
+    assert claims["owner"] == "discord:user-1", "its owner, apart from `sub`"
+
+
+@pytest.mark.parametrize(
+    "ended",
+    [
+        "DELETE FROM lead_intake_executions",
+        "UPDATE lead_intake_executions SET expires_at = now() - interval '1 second'",
+        "UPDATE lead_intake_executions SET routine_id = :other",
+        None,
+    ],
+    ids=["finished", "expired", "another-routines-fire", "no-fire"],
+)
+async def test_a_channel_routines_run_signs_its_routine_only_while_its_fire_runs(
+    db_session_factory: async_sessionmaker[AsyncSession], ended: str | None
+) -> None:
+    """Finding: a finished run's credential still signed the routine. Now its fire must be
+    live; once it ends the call signs what any call with no room signs."""
+    factory = db_session_factory
+    person = await _person(factory)
+    await _facts(factory, person, {"chan-1": TEAM})
+    routine_id = await _routine(factory, person, **_CHANNEL)
+    other = await _routine(factory, person, **_CHANNEL)
+    async with factory() as db:
+        row = await get_routine(db, routine_id, tenant_id=person.tenant_id)
+    assert row is not None
+    token = await _routine_token(
+        factory,
+        person,
+        routine_id,
+        owner="user-1",
+        destination=routine_destination_key(row),
+        fire=ended is not None,
+    )
+    if ended is not None:
+        live = await _claims_of(factory, token, ROUTINE_SERVER)
+        assert live["routine"] == str(routine_id), "signed while the fire runs"
+        await _sql(factory, ended, **({"other": other} if ":other" in ended else {}))
+    after = await _claims_of(factory, token, ROUTINE_SERVER)
+    assert not {"routine", "channel", "room", "rev", "routine_name", "owner"} & set(after), (
+        "no routine authority outside its fire"
+    )
+    off = await _claims_of(factory, token, SERVER)
+    fresh = {"jti", "iat", "exp"}
+    assert {k: v for k, v in after.items() if k not in fresh} == {
+        k: v for k, v in off.items() if k not in fresh
+    }, "what it signs without the setting"
 
 
 _CHANNEL = {"destination_kind": "channel", "destination_id": "chan-1"}
