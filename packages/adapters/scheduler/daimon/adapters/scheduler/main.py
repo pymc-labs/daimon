@@ -128,7 +128,7 @@ from daimon.core.retention import sweep as retention_sweep
 from daimon.core.routine_delivery import (
     OWNER_LACKS_ROLE_ERROR,
     DirectPost,
-    agent_posted_to,
+    agent_delivered_itself,
     delivery_target,
     lapsed_role,
     lapsed_role_card,
@@ -804,9 +804,9 @@ async def _build_fire(
             async with sm() as s, s.begin():
                 await record_result(s, row.id, tail=result, error=None, expected_row=row)
             return
-        # Fallback post: only when the agent did not deliver to the
-        # destination itself. The chat adapter for `platform` posts it.
-        posted = state is not None and agent_posted_to(state, row)
+        # Fallback post: only when the agent did not deliver to the destination,
+        # or a thread under it, itself. The chat adapter for `platform` posts it.
+        posted = state is not None and await agent_delivered_itself(sm, state, row)
         run_text = split_run_text(result)
         payload = run_text.post
         needs_delivery = not posted
