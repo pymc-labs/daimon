@@ -20,6 +20,7 @@ from daimon.core.routine_delivery import (
     DeliveryTarget,
     DirectPost,
     RunText,
+    agent_delivered_itself,
     agent_posted_to,
     clear_creator,
     delivery_refusal,
@@ -35,6 +36,7 @@ from daimon.core.routine_delivery import (
     teams_thread_id,
 )
 from daimon.core.stores.access_policy import set_access_policy
+from daimon.core.stores.agent_posts import record_post
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import (
     claim_routine_deliveries,
@@ -148,7 +150,14 @@ def test_routine_controls_name_the_destination_and_schedule() -> None:
     assert text.startswith("<turn_controls>\n{")
     assert '"channel_id": "C1"' in text and '"schedule": "0 9 * * 1"' in text
     assert "posts your full final reply there" in text
+    assert "or to a thread under it yourself, daimon posts nothing more there" in text
+    assert "post everything meant for it yourself" in text, "a report it wants there too"
     assert text.endswith("</turn_controls>")
+    in_thread = render_routine_controls(
+        _row(destination_kind="thread", destination_id="555"), platform="discord"
+    )
+    assert "posts your full final reply there" in in_thread
+    assert "thread under it" not in in_thread
 
 
 @pytest.mark.parametrize(
@@ -184,14 +193,18 @@ def _post_block(
     is_error: bool = False,
     via_call_tool: bool = False,
     server: str = "daimon-mcp",
+    tool: str = "send_message",
+    batch: list[str] | None = None,
 ) -> ToolUseBlock:
     arguments: dict[str, object] = {"channel_id": channel_id, "content": "done"}
+    if batch is not None:
+        arguments["batch"] = [{"channel_id": place, "content": "more"} for place in batch]
     return ToolUseBlock(
         kind="tool_use",
         id="tu",
         type="agent.mcp_tool_use",
-        name="call_tool" if via_call_tool else "send_message",
-        input={"name": "send_message", "arguments": arguments} if via_call_tool else arguments,
+        name="call_tool" if via_call_tool else tool,
+        input={"name": tool, "arguments": arguments} if via_call_tool else arguments,
         mcp_server_name=server,
         status=status,  # type: ignore[arg-type]
         is_error=is_error,
@@ -214,6 +227,74 @@ def test_a_post_through_call_tool_counts() -> None:
     assert not agent_posted_to(
         TurnState(content=[_post_block("C1", via_call_tool=True, is_error=True)]), row
     )
+
+
+def test_a_thread_the_agent_opened_under_the_channel_counts() -> None:
+    row = _row()
+    opened = partial(_post_block, tool="create_thread")
+    assert agent_posted_to(TurnState(content=[opened("C1")]), row)
+    assert agent_posted_to(TurnState(content=[opened("C1", via_call_tool=True)]), row)
+    assert not agent_posted_to(TurnState(content=[opened("C9")]), row), "another channel"
+    assert not agent_posted_to(TurnState(content=[opened("C1", is_error=True)]), row)
+    assert not agent_posted_to(TurnState(content=[opened("C1", status="failed")]), row)
+
+
+@pytest.mark.parametrize(
+    ("channel", "thread"),
+    [
+        pytest.param("C1", "C1:1717.5", id="slack"),
+        pytest.param(
+            "19:abc@thread.tacv2", "19:abc@thread.tacv2;messageid=1700000000000", id="teams"
+        ),
+    ],
+)
+def test_a_post_into_a_thread_of_the_channel_counts(channel: str, thread: str) -> None:
+    row = _row(destination_id=channel)
+    assert agent_posted_to(TurnState(content=[_post_block(thread)]), row)
+    assert agent_posted_to(TurnState(content=[_post_block("C9", batch=[thread])]), row)
+    other = _row(destination_id=f"{channel}9")
+    assert not agent_posted_to(TurnState(content=[_post_block(thread)]), other)
+
+
+def test_a_batched_post_to_the_destination_counts() -> None:
+    assert agent_posted_to(TurnState(content=[_post_block("C9", batch=["C1"])]), _row())
+    assert not agent_posted_to(TurnState(content=[_post_block("C9", batch=["C8"])]), _row())
+
+
+def test_a_thread_destination_is_not_met_by_a_new_thread_in_its_channel() -> None:
+    row = _row(destination_kind="thread", destination_id="C1:1717.5")
+    opened = _post_block("C1", tool="create_thread")
+    assert not agent_posted_to(TurnState(content=[opened]), row)
+
+
+async def test_a_post_into_a_discord_thread_under_the_channel_counts(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """A Discord thread has its own id: the agent's recorded post names its parent."""
+    row = await _routine(db_session)
+    agent = uuid.uuid4()
+    for thread, parent in (("777", "123"), ("888", "456")):
+        await record_post(
+            db_session,
+            tenant_id=row.tenant_id,
+            platform="discord",
+            channel_id=thread,
+            message_id=f"m{thread}",
+            agent_id=agent,
+            parent_channel_id=parent,
+        )
+    await db_session.commit()
+    delivered = partial(agent_delivered_itself, db_session_factory)
+
+    assert await delivered(TurnState(content=[_post_block("777")]), row)
+    assert await delivered(TurnState(content=[_post_block("123")]), row)
+    assert not await delivered(TurnState(content=[_post_block("888")]), row), "another parent"
+    assert not await delivered(TurnState(content=[_post_block("999")]), row), "no record"
+    assert not await delivered(TurnState(), row)
+    dm = row.model_copy(update={"destination_kind": "dm"})
+    assert not await delivered(TurnState(content=[_post_block("777")]), dm)
+    thread_row = row.model_copy(update={"destination_kind": "thread"})
+    assert not await delivered(TurnState(content=[_post_block("777")]), thread_row)
 
 
 def test_a_slack_thread_destination_needs_a_post_into_that_thread() -> None:

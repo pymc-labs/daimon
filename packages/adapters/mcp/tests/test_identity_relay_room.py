@@ -11,7 +11,12 @@ import uuid
 import pytest
 from daimon.core.audience_facts import RoomFacts
 from daimon.core.config import SignedIdentityServer
-from daimon.core.mcp_identity import RelayBinding, generate_signing_key, routine_destination_key
+from daimon.core.mcp_identity import (
+    RelayBinding,
+    generate_signing_key,
+    routine_destination_key,
+    routine_revision,
+)
 from daimon.core.stores.audience_facts import StoredRoom, publish_facts
 from daimon.core.stores.routines import get_routine
 from sqlalchemy import text
@@ -265,6 +270,50 @@ async def test_a_routine_run_names_no_routine_or_room_unless_the_run_check_passe
     )
 
 
+async def test_a_routine_run_signs_its_revision_and_name_and_no_revision_while_paused(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """`rev` binds a server's approval of the routine: kept across a pause, a resume, a new
+    schedule and name; moved by a new prompt or agent name; never on a paused run, a
+    person's turn, or a server without `routine_claims`."""
+    factory = db_session_factory
+    person = await _person(factory)
+    await _facts(factory, person, {"chan-1": TEAM})
+    routine_id = await _routine(factory, person, **_CHANNEL, name="Weekly links")
+    async with factory() as db:
+        row = await get_routine(db, routine_id, tenant_id=person.tenant_id)
+    assert row is not None
+    token = await _routine_token(
+        factory, person, routine_id, owner="user-1", destination=routine_destination_key(row)
+    )
+    first = await _claims_of(factory, token, ROUTINE_SERVER)
+    assert first["rev"] == routine_revision(row, workspace="discord:guild-1")
+    assert first["routine_name"] == "Weekly links"
+    await _sql(factory, "UPDATE routines SET enabled = false WHERE id = :r", r=routine_id)
+    paused = await _claims_of(factory, token, ROUTINE_SERVER)
+    assert paused["routine"] == str(routine_id) and "rev" not in paused, "paused: no revision"
+    await _sql(
+        factory,
+        "UPDATE routines SET enabled = true, cron_expr = '0 8 * * 1', name = 'Links' WHERE id = :r",
+        r=routine_id,
+    )
+    resumed = await _claims_of(factory, token, ROUTINE_SERVER)
+    assert (resumed["rev"], resumed["routine_name"]) == (first["rev"], "Links")
+    off = await _claims_of(factory, token, SERVER)
+    assert not {"routine", "rev", "routine_name"} & set(off), "without the setting, nothing new"
+    for edit in ("trigger_message = 'go now'", "agent_name = 'Agent B'"):
+        await _sql(factory, f"UPDATE routines SET {edit} WHERE id = :r", r=routine_id)
+        moved = await _claims_of(factory, token, ROUTINE_SERVER)
+        assert moved["rev"] != first["rev"], edit
+    await _sql(
+        factory, "UPDATE routines SET created_by_user_id = 'user-2' WHERE id = :r", r=routine_id
+    )
+    handed = await _claims_of(factory, token, ROUTINE_SERVER)
+    assert not {"routine", "rev"} & set(handed), "the old owner's run signs no routine"
+    turn, _ = await _chat_session(factory, person, "chan-1", message="m-1")
+    assert not {"rev", "routine_name"} & set(await _claims_of(factory, turn, ROUTINE_SERVER))
+
+
 @pytest.mark.parametrize(
     ("started", "now"),
     [
@@ -382,8 +431,12 @@ async def test_a_live_dm_routine_fire_names_its_routine_owner_and_dm(
     routine_id, token, _ = await _dm_fire(db_session_factory, person)
     on, _ = await _signed(db_session_factory, token, DM_SERVER)
     off, _ = await _signed(db_session_factory, token, SERVER)
-    assert on == {**off, "routine": str(routine_id), "channel": "555", "room": "dm"}, (
-        "today's claims, with the routine, the owner's DM and room dm"
+    async with db_session_factory() as db:
+        row = await get_routine(db, routine_id, tenant_id=person.tenant_id)
+    assert row is not None
+    rev = routine_revision(row, workspace="discord:guild-1")
+    assert on == {**off, "routine": str(routine_id), "channel": "555", "room": "dm", "rev": rev}, (
+        "today's claims, with the routine, the owner's DM, room dm and the routine's revision"
     )
     assert (on["sub"], on["ws"]) == (f"discord:{OWNER}", "discord:guild-1"), "the owner"
     assert not {"msg", "wake"} & set(on), "no message and no wake"
@@ -451,12 +504,16 @@ async def test_a_dm_routines_credential_stamps_as_today_and_signs_more_only_with
     signs DM routines; the requester fields it is stamped with never change."""
     person = await _owner(db_session_factory)
     routine_id, combined, today = await _dm_fire(db_session_factory, person)
+    async with db_session_factory() as db:
+        row = await get_routine(db, routine_id, tenant_id=person.tenant_id)
+    assert row is not None
+    on_rev = routine_revision(row, workspace="discord:guild-1")
     body = _tool_call(requester_platform_user_id="666", requester_kind="person")
     new, new_body = await _signed(db_session_factory, combined, server, body)
     old, old_body = await _signed(db_session_factory, today, server, body)
     assert new_body == old_body, "byte for byte today's body and requester stamp"
     assert json.loads(new_body)["params"]["_meta"]["requester_kind"] == "routine"
-    added = {"routine": str(routine_id), "channel": "555", "room": "dm"}
+    added = {"routine": str(routine_id), "channel": "555", "room": "dm", "rev": on_rev}
     assert new == ({**old, **added} if server.dm_routine_claims else old), (
         "only a server signing DM routines gets more"
     )

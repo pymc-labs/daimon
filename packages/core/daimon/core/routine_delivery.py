@@ -6,11 +6,12 @@ things follow from it, and nothing changes for a routine without one:
 1. The fire's first message opens with host-supplied `<turn_controls>`
    (`render_routine_controls`): the routine's schedule and where its result
    goes, so the agent writes for someone reading later without context.
-2. After a successful fire the scheduler checks the turn for a `send_message`
-   the agent made to that destination itself (`agent_posted_to`). If it did,
-   nothing more is posted; if not, the row's outbox goes `pending` and the
-   result tail is posted for it. The first failed fire in a row queues a
-   short failure notice the same way (`record_failure`).
+2. After a successful fire the scheduler checks the turn for a post the agent
+   made to that destination itself, or to a thread under a channel destination
+   (`agent_delivered_itself`). If it did, nothing more is posted; if not, the
+   row's outbox goes `pending` and the result tail is posted for it. The first
+   failed fire in a row queues a short failure notice the same way
+   (`record_failure`).
 3. The post happens in the chat adapter for the tenant's platform — the
    scheduler has no platform client. Each adapter runs
    `run_delivery_poller` with its own `RoutinePoster`; an adapter that runs
@@ -30,10 +31,10 @@ import asyncio
 import json
 import re
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, cast
 
 import structlog
 from anthropic import AsyncAnthropic
@@ -71,6 +72,7 @@ from daimon.core.routine_files import decode_payload, payload_for
 from daimon.core.self_knowledge import controls_hint
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
+from daimon.core.stores.agent_posts import posted_under
 from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import CHAT_PLATFORMS, Role, RoutineRow
 from daimon.core.stores.identity import find_platform_principal
@@ -100,6 +102,7 @@ __all__ = [
     "DeliveryOutcome",
     "DeliveryTarget",
     "RoutinePoster",
+    "agent_delivered_itself",
     "agent_posted_to",
     "claim_still_current",
     "destination_shape_error",
@@ -133,9 +136,10 @@ log = structlog.get_logger(__name__)
 DELIVERY_LEASE: Final[timedelta] = timedelta(minutes=2)
 DELIVERY_POLL_INTERVAL_S: Final[float] = 15.0
 
-#: daimon's own posting tool: a call to it naming the destination is the
-#: agent delivering the result itself.
+#: daimon's own posting tools: a call to one that lands in the destination is
+#: the agent delivering the result itself.
 _POST_TOOL: Final[str] = "send_message"
+_THREAD_TOOL: Final[str] = "create_thread"
 
 _SLACK_CHANNEL: Final[re.Pattern[str]] = re.compile(r"[CG][A-Z0-9]{2,}")
 _SLACK_THREAD: Final[re.Pattern[str]] = re.compile(r"[CG][A-Z0-9]{2,}:[0-9]+\.[0-9]+")
@@ -335,6 +339,12 @@ def render_routine_controls(
             "Daimon delivers your final reply privately to the routine owner. "
             "Do not call messaging tools to deliver this result yourself."
         )
+    elif direct_post == "allowed" and row.destination_kind == "channel":
+        delivery = (
+            "If you post to the destination or to a thread under it yourself, daimon posts "
+            "nothing more there: post everything meant for it yourself. If you do not, daimon "
+            "posts your full final reply there for you."
+        )
     elif direct_post == "allowed":
         delivery = (
             "If you do not post it to the destination yourself with send_message, daimon "
@@ -368,28 +378,94 @@ def render_routine_controls(
     )
 
 
-def _posted_channel(block: ToolUseBlock) -> str | None:
-    """The `channel_id` a successful daimon `send_message` posted to, or None."""
-    arguments = daimon_tool_arguments(block, _POST_TOOL)
-    channel_id = None if arguments is None else arguments.get("channel_id")
-    return channel_id if isinstance(channel_id, str) else None
+@dataclass(frozen=True)
+class _OwnPosts:
+    """Where the agent's own successful posts of one turn went."""
+
+    #: Every place `send_message` posted to, as the call named it.
+    sent: frozenset[str]
+    #: Every channel `create_thread` opened a thread in.
+    opened_in: frozenset[str]
+
+
+def _own_posts(state: TurnState) -> _OwnPosts:
+    sent: set[str] = set()
+    opened_in: set[str] = set()
+    for block in state.content:
+        if not isinstance(block, ToolUseBlock):
+            continue
+        if (arguments := daimon_tool_arguments(block, _POST_TOOL)) is not None:
+            batch = arguments.get("batch")
+            more = cast("list[object]", batch) if isinstance(batch, list) else []
+            for draft in (arguments, *more):
+                if not isinstance(draft, Mapping):
+                    continue
+                place = cast("Mapping[str, object]", draft).get("channel_id")
+                if isinstance(place, str):
+                    sent.add(place)
+        elif (arguments := daimon_tool_arguments(block, _THREAD_TOOL)) is not None:
+            channel_id = arguments.get("channel_id")
+            if isinstance(channel_id, str):
+                opened_in.add(channel_id)
+    return _OwnPosts(sent=frozenset(sent), opened_in=frozenset(opened_in))
+
+
+def _thread_of(place: str, channel_id: str) -> bool:
+    """Whether `place` names a thread of `channel_id` by a composite id.
+
+    Slack addresses a thread as `<channel>:<ts>` and Teams as
+    `<channel>;messageid=<root>`. A Discord thread has an id of its own.
+    """
+    return place.startswith((f"{channel_id}:", f"{channel_id};messageid="))
 
 
 def agent_posted_to(state: TurnState, row: RoutineRow) -> bool:
-    """Whether the agent itself posted to the destination during the turn.
+    """Whether the turn's own tool calls show the agent posted to the destination.
 
-    The comparison is on the full destination as `send_message` names it: a
-    channel id, a Discord thread id, or a Slack thread's `<channel>:<ts>`. A
-    post to the bare channel of a Slack thread destination is not the thread,
-    and does not count.
+    A `send_message` counts on the full destination as it names it: a channel
+    id, a Discord thread id, or a Slack thread's `<channel>:<ts>`. A post to
+    the bare channel of a thread destination is not the thread, and does not
+    count. Under a channel destination a thread counts too: one the agent
+    opened there with `create_thread`, or one addressed by its composite id.
+    A Discord thread that was already there has only its own id:
+    `agent_delivered_itself` looks its parent up.
     """
     if row.destination_kind == "dm" or row.destination_id is None:
         return False
-    return any(
-        _posted_channel(block) == row.destination_id
-        for block in state.content
-        if isinstance(block, ToolUseBlock)
+    posts = _own_posts(state)
+    if row.destination_id in posts.sent:
+        return True
+    if row.destination_kind != "channel":
+        return False
+    return row.destination_id in posts.opened_in or any(
+        _thread_of(place, row.destination_id) for place in posts.sent
     )
+
+
+async def agent_delivered_itself(
+    sessions: async_sessionmaker[AsyncSession], state: TurnState, row: RoutineRow
+) -> bool:
+    """Whether the agent posted to the destination, or to a thread under it, during the turn.
+
+    The one rule for the fallback post: the routine posts for itself or daimon
+    posts its final reply, never both. `agent_posted_to` answers from the tool
+    calls alone. What is left is a post into a Discord thread the turn did not
+    open: the record of the agent's own posts names that thread's parent.
+    """
+    if agent_posted_to(state, row):
+        return True
+    if row.destination_kind != "channel" or row.destination_id is None:
+        return False
+    sent = _own_posts(state).sent
+    if not sent:
+        return False
+    async with sessions() as session:
+        return await posted_under(
+            session,
+            tenant_id=row.tenant_id,
+            parent_channel_id=row.destination_id,
+            channel_ids=sent,
+        )
 
 
 def destination_shape_error(platform: str, kind: str, destination_id: str) -> str | None:
