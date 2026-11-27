@@ -11,8 +11,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0244_data_memory"
-down_revision: str | None = "0243_data_redaction"
+revision: str = "0247_data_memory"
+down_revision: str | None = "0246_data_redaction"
 branch_labels: str | None = None
 depends_on: str | None = None
 

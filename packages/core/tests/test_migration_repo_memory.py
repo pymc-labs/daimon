@@ -25,7 +25,7 @@ def _migration(name: str) -> ModuleType:
 @pytest.mark.fresh_schema
 async def test_repository_memory_migration_matches_model(db_session: AsyncSession) -> None:
     module = _migration("0153_repo_memory")
-    later = _migration("0244_data_memory")  # adds repo_memory.data_refs
+    later = _migration("0247_data_memory")  # adds repo_memory.data_refs
     assert len(module.revision) <= 32
     connection = await db_session.connection()
 
