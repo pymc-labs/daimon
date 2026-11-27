@@ -21,7 +21,16 @@ config:
     # place needs `sqlalchemy` plus that vendor's driver; the data-ingestion
     # skill installs both on the turn that needs them, because which vendor it
     # is depends on the deployment, and network access is unrestricted.
+    #
+    # `python-docx`, `python-pptx`, `pypdf`, `pdfplumber` and `reportlab` are what the
+    # open office skills (`defaults/skills/open-*`) use on OpenAI and Gemini, whose
+    # sandboxes build from these packages. Anthropic's own built-in skills don't need them.
     pip:
       - typst
       - duckdb
       - pyarrow
+      - python-docx
+      - python-pptx
+      - pypdf
+      - pdfplumber
+      - reportlab

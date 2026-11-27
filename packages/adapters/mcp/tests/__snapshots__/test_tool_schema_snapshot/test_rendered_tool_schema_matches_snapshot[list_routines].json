@@ -1,0 +1,10 @@
+{
+  "description": [
+    "List the routines you created (an admin sees every routine in the workspace)."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

@@ -69,6 +69,8 @@ async def test_dispatch_keeps_ticking_and_shutdown_cancels_stalled_compute():
     async with asyncio.timeout(5):
         await main._run_loops(
             tick=tick,
+            housekeeping=AsyncMock(),
+            github_sessions=AsyncMock(),
             usage_sweep=AsyncMock(),
             privacy_sweep=AsyncMock(),
             compute_sweep=stalled,
@@ -118,6 +120,8 @@ async def test_stalled_task_polling_blocks_neither_dispatch_nor_cleanup():
     async with asyncio.timeout(5):
         await main._run_loops(
             tick=tick,
+            housekeeping=AsyncMock(),
+            github_sessions=AsyncMock(),
             usage_sweep=None,
             privacy_sweep=AsyncMock(),
             compute_sweep=cleanup,
@@ -248,6 +252,8 @@ async def test_many_expired_apps_are_deleted_without_delaying_dispatch(monkeypat
     async with asyncio.timeout(30):
         await main._run_loops(
             tick=tick,
+            housekeeping=AsyncMock(),
+            github_sessions=AsyncMock(),
             usage_sweep=AsyncMock(),
             privacy_sweep=AsyncMock(),
             compute_sweep=sweep,

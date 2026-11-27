@@ -5,7 +5,7 @@ import { useNavigate } from "react-router"
 import { reset } from "@/modules/chat/turns"
 import { api } from "./api"
 import { isServerPage } from "./safe-next"
-import type { AgentRef, Capability, ChatSession, Group, Me, Person, Provider } from "./types"
+import type { AgentRef, Capability, ChatSession, Group, Legal, Me, Person, Provider } from "./types"
 
 /** `value` once it has held still for `ms`. */
 export function useDebounced<T>(value: T, ms: number) {
@@ -29,6 +29,7 @@ export function useSwitchWorkspace(next: string, { replace = false, onError }: {
   })
 }
 export const useProviders = () => useQuery({ queryKey: ["auth", "providers"], queryFn: () => api.get<Provider[]>("/auth/providers") })
+export const useLegal = () => useQuery({ queryKey: ["auth", "legal"], queryFn: () => api.get<Legal>("/auth/legal"), staleTime: Infinity })
 
 /** A list the server pages: `data` is every row loaded so far, `loadMore` fetches the next page. */
 export function usePaged<T>(key: readonly unknown[], path: string, { refetchInterval }: { refetchInterval?: number } = {}) {

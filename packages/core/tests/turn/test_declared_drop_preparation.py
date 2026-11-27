@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.channel_backend import (
     AgentBackendRefused,
     AgentBackendService,
@@ -84,7 +85,10 @@ async def switched_request(owned, request):
     now = datetime(2026, 10, 14, tzinfo=UTC)
     native = ma_agent(
         tenant_id=identity.tenant_id,
-        system="Authoritative source instructions",
+        # `guided`: under the shipped guidance, as a default agent's prompt is.
+        system=apply_credential_guidance("Authoritative source instructions")
+        if params.get("guided")
+        else "Authoritative source instructions",
         tools=params.get("tools", ()),
         mcp_servers=params.get("mcp_servers", ()),
         skills=params.get("skills", ()),
@@ -171,6 +175,18 @@ async def switched_request(owned, request):
             deadline=now + timedelta(seconds=30),
             now=lambda: now,
         )
+        if params.get("keys"):  # a saved agent key, so the source needs a keys file
+            from daimon.core.stores.agent_files import put_agent_file
+
+            async with sessions.begin() as db:
+                await put_agent_file(
+                    db,
+                    tenant_id=identity.tenant_id,
+                    agent_id=derive_agent_uuid(tenant_id=identity.tenant_id, ma_agent_id=native.id),
+                    key="API_KEY",
+                    content="s3cret",
+                    set_by_account_id=None,
+                )
         source = await capture_preparation_source(request, fresh=True)
         assert source.agent_id == derive_agent_uuid(
             tenant_id=identity.tenant_id, ma_agent_id=native.id

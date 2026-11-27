@@ -1,0 +1,29 @@
+{
+  "description": [
+    "Change the dollar amount of an existing allowance or cap. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "allowance_id": {
+        "type": "string"
+      },
+      "amount_usd": {
+        "anyOf": [
+          {
+            "type": "number"
+          },
+          {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "required": [
+      "allowance_id",
+      "amount_usd"
+    ],
+    "type": "object"
+  }
+}

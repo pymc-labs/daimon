@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import discord
 import pytest
 from daimon.adapters.discord import routine_delivery as poster_mod
+from daimon.adapters.discord.output_delivery import DEFAULT_MAX_BYTES_PER_FILE
 from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.agent_identity import AgentIdentity
@@ -46,7 +47,10 @@ def _guild(*, guild_id: int = _GUILD, member: object | None = _MEMBER) -> object
         raise discord.NotFound(MagicMock(status=404, reason="Not Found"), "Unknown Member")
 
     return SimpleNamespace(
-        id=guild_id, get_member=lambda user_id: member, fetch_member=fetch_member
+        id=guild_id,
+        get_member=lambda user_id: member,
+        fetch_member=fetch_member,
+        filesize_limit=DEFAULT_MAX_BYTES_PER_FILE,
     )
 
 

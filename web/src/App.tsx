@@ -6,6 +6,7 @@ import { ApiError } from "@/lib/api"
 import { useMe } from "@/lib/hooks"
 import type { ModuleKey } from "@/lib/types"
 import { homeFor, MODULES, redirectFor } from "@/modules/registry"
+import { GithubCallback, GithubConfirm, GithubConnect, GithubSetup } from "@/pages/github/Flow"
 import { InviteLanding } from "@/pages/Invite"
 import { ProfilePage } from "@/pages/Profile"
 import { SignIn } from "@/pages/SignIn"
@@ -36,6 +37,10 @@ export default function App() {
       <Route path="/signin" element={<SignIn />} />
       <Route path="/signed-out" element={<SignedOut />} />
       <Route path="/invite/:token" element={<InviteLanding />} />
+      <Route path="/oauth/github/connect/:token" element={<GithubConnect />} />
+      <Route path="/oauth/github/callback" element={<GithubCallback />} />
+      <Route path="/oauth/github/setup" element={<GithubSetup />} />
+      <Route path="/oauth/github/confirm" element={<GithubConfirm />} />
       <Route element={<RequireAuth />}>
         <Route path="/workspaces" element={<Workspaces />} />
         <Route path="/w/:workspace/*" element={<WorkspaceLink />} />

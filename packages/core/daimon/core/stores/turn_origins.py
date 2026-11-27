@@ -39,10 +39,13 @@ async def create_origin(
     helper_of: uuid.UUID | None = None,
     helper_key: str | None = None,
     own_dm_reach: bool = False,
+    public_thread: bool = False,
+    origin_id: uuid.UUID | None = None,
 ) -> TurnOriginRow:
+    """``origin_id`` is given only for a wake's turn (`daimon.core.turn_origin.wake_turn`)."""
     await session.execute(delete(TurnOrigin).where(TurnOrigin.expires_at <= now))
     origin = TurnOrigin(
-        id=uuid.uuid4(),
+        id=origin_id or uuid.uuid4(),
         is_setup=is_setup,
         attended=attended,
         chat_session_id=chat_session_id,
@@ -65,6 +68,7 @@ async def create_origin(
         helper_of=helper_of,
         helper_key=helper_key,
         own_dm_reach=own_dm_reach,
+        public_thread=public_thread,
     )
     session.add(origin)
     await session.flush()

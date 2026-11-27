@@ -1,0 +1,25 @@
+{
+  "description": [
+    "List the web app's invites: open, accepted or expired, newest first. Emails show",
+    "only in a direct message with the admin; elsewhere ``private_details`` is",
+    "``direct_message`` and they are null. Pass this active turn's origin_context_id.",
+    "Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

@@ -1,0 +1,116 @@
+{
+  "description": [
+    "Turn an agent's web chat on or off and set who may use it: everyone or up to 100",
+    "groups or invitees. ``dm_who`` sets who may DM it: ``members`` (everyone), ``listed``",
+    "or ``excluded``, with platform user and group ids."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_id": {
+        "type": "string"
+      },
+      "dm_group_ids": {
+        "anyOf": [
+          {
+            "items": {
+              "maxLength": 100,
+              "minLength": 1,
+              "pattern": "^[\\w:.@-]+$",
+              "type": "string"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "dm_user_ids": {
+        "anyOf": [
+          {
+            "items": {
+              "maxLength": 100,
+              "minLength": 1,
+              "pattern": "^[\\w:.@-]+$",
+              "type": "string"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "dm_who": {
+        "anyOf": [
+          {
+            "enum": [
+              "members",
+              "listed",
+              "excluded"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "groups": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "origin_context_id": {
+        "type": "string"
+      },
+      "web": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "who": {
+        "anyOf": [
+          {
+            "enum": [
+              "everyone",
+              "groups",
+              "invites"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "agent_id",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

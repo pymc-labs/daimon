@@ -42,10 +42,10 @@ Postgres backups and upgrades are in [operations](operations.md).
 
 ## Run a published image
 
-Every tagged release is published as `ghcr.io/pymc-labs/daimon`. All seven
-application services (`init`, `mcp`, `discord`, `slack`, `teams`, `scheduler`,
-`web`) run that one image. Set the `image:` line for each in
-`docker-compose.override.yml`, which Compose reads automatically:
+Every tagged release is published as `ghcr.io/pymc-labs/daimon`. The application
+services (`init`, `mcp`, `discord`, `slack`, `teams`, `scheduler`) run that one
+image. Set the `image:` line for each in `docker-compose.override.yml`, which
+Compose reads automatically:
 
 ```yaml
 services:
@@ -61,9 +61,17 @@ services:
     image: ghcr.io/pymc-labs/daimon:0.2.0
   scheduler:
     image: ghcr.io/pymc-labs/daimon:0.2.0
+```
+
+<!-- knowledge: web -->
+The `web` service runs the same image:
+
+```yaml
+services:
   web:
     image: ghcr.io/pymc-labs/daimon:0.2.0
 ```
+<!-- /knowledge -->
 
 Then pull and start:
 
@@ -127,7 +135,7 @@ Each of these is off until you set it up:
 | Service | Needs | Page |
 | --- | --- | --- |
 | Watches | the `sidecar` and `watch-executor` services and their own database login | [Watches](watches.md) |
-| Compute sessions | a Google Cloud project and a session service account, on the MCP service and scheduler | [Compute sessions](compute.md) |
+| Compute sessions | a Google Cloud project and a session service account, on the MCP service and scheduler, then the `compute` feature turned on | [Compute sessions](compute.md) |
 | Long jobs | a tenant policy set by an admin | [Long jobs](long-jobs.md) |
 | Repository memory | an import of existing memory, then a switch on every process | [Repository memory](repo-memory.md) |
 | Context providers | a binding per tenant and an HTTPS provider | [Context providers](context-providers.md) |

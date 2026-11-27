@@ -13,7 +13,7 @@ from daimon.core.access_policy import AgentRule, TenantAccessPolicy
 from daimon.core.audience_facts import RoomFacts
 from daimon.core.channel_audience import audience_mode as _real_audience_mode
 from daimon.core.features.snapshot import CACHE, FeaturePlace
-from daimon.core.stores.audience_facts import StoredRoom, publish_facts
+from daimon.core.stores.audience_facts import StoredRoom, publish_facts, retire_facts
 from daimon.core.stores.direct_messages import set_dm_enabled
 from daimon.core.stores.domain import Role, TenantRow
 from daimon.core.stores.shared_channels import is_channel_shared
@@ -155,6 +155,257 @@ async def test_a_thread_under_a_contained_room_is_held_to_the_room(
     admission = await _admit(db_session_factory, tmp_path, tenant, thread_id=THREAD)
 
     assert admission.hold == TurnHold("discord", ROOM, client=False)
+
+
+@pytest.mark.parametrize(
+    ("parent", "public", "read_only", "seals"),
+    [
+        (OPEN, True, False, set[str]()),
+        (NARROW, True, True, {ROOM, THREAD}),
+        (OPEN, False, True, {THREAD}),  # private, or a kind the adapter did not know
+        (None, True, True, {ROOM, THREAD}),  # the parent has no fact: unknown, narrow
+    ],
+)
+async def test_a_new_thread_with_no_row_is_judged_by_its_parent_only_when_public(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    parent: RoomFacts | None,
+    public: bool,
+    read_only: bool,
+    seals: set[str],
+) -> None:
+    """The row of a thread made seconds ago is not there yet: no seal, no read-only memory."""
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    await _mode(db_session, tenant, "on")
+    await _facts(db_session, tenant, {} if parent is None else {ROOM: parent, "7099": OPEN})
+
+    admission = await _admit(
+        db_session_factory, tmp_path, tenant, thread_id=THREAD, public_thread=public
+    )
+
+    assert admission.memory_read_only is read_only
+    assert admission.origin_seal_ids == seals
+
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+    again = await reauthorize(deps, admission)
+    assert again.memory_read_only is read_only
+    assert again.origin_seal_ids == seals
+
+
+class _Pauses:
+    """Stands in for the wait's sleep: no real time passes. `then` runs on the first pause."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, then: object = None) -> None:
+        self.count = 0
+        self.now = 1000.0
+        self._then = then
+        monkeypatch.setattr("daimon.core.stores.audience_facts._pause", self)
+        monkeypatch.setattr("daimon.core.stores.audience_facts._clock", lambda: self.now)
+        monkeypatch.setattr("daimon.core.stores.audience_facts.FACTS_WAIT_S", 2.0)
+        monkeypatch.setattr("daimon.core.turn.admission.FACTS_WAIT_S", 2.0)
+
+    async def __call__(self, seconds: float) -> None:
+        self.count += 1
+        self.now += seconds
+        if self.count == 1 and self._then is not None:
+            await self._then()  # type: ignore[operator]
+
+
+async def _retire(db_session: AsyncSession, tenant: TenantRow, *, ago_s: float = 3.0) -> None:
+    await retire_facts(
+        db_session, tenant_id=tenant.id, now=datetime.now(UTC) - timedelta(seconds=ago_s)
+    )
+    await db_session.commit()
+
+
+async def test_a_turn_in_a_short_gap_waits_for_the_facts_and_is_not_sealed(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    await _mode(db_session, tenant, "on")
+    await _facts(db_session, tenant, {ROOM: OPEN})
+    await _retire(db_session, tenant)
+
+    async def publish() -> None:
+        await _facts(db_session, tenant, {ROOM: OPEN})
+
+    pauses = _Pauses(monkeypatch, publish)
+
+    with structlog.testing.capture_logs() as logs:
+        admission = await _admit(db_session_factory, tmp_path, tenant)
+
+    assert pauses.count == 1
+    assert admission.hold is None and not admission.memory_read_only
+    assert admission.origin_seal_ids == set()
+    waits = [e for e in logs if e["event"] == "audience.facts_wait"]
+    assert [(e["result"], e["waited_s"]) for e in waits] == [("usable", 0.5)]
+    assert set(waits[0]) == {"event", "log_level", "tenant_id", "waited_s", "result"}
+
+
+async def test_facts_that_never_come_back_fail_closed_after_the_bound(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    await _mode(db_session, tenant, "on")
+    await _facts(db_session, tenant, {ROOM: OPEN})
+    await _retire(db_session, tenant)
+    pauses = _Pauses(monkeypatch)
+
+    with structlog.testing.capture_logs() as logs:
+        admission = await _admit(db_session_factory, tmp_path, tenant)
+
+    assert pauses.count == 4, "2 s in 0.5 s steps"
+    assert admission.hold is not None and admission.memory_read_only
+    assert [e["result"] for e in logs if e["event"] == "audience.facts_wait"] == ["gave_up"]
+
+
+@pytest.mark.parametrize("mode", ["on", "off", "shadow"])
+async def test_no_wait_in_a_long_outage_and_none_outside_mode_on(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    """Retired five minutes ago is an outage; modes `off` and `shadow` never wait."""
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    await _mode(db_session, tenant, mode)
+    await _facts(db_session, tenant, {ROOM: OPEN})
+    pauses = _Pauses(monkeypatch)
+    await _retire(db_session, tenant, ago_s=300 if mode == "on" else 3)
+
+    await _admit(db_session_factory, tmp_path, tenant)
+
+    assert pauses.count == 0
+
+
+async def test_a_server_with_no_state_row_is_not_waited_for(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    await _mode(db_session, tenant, "on")
+    pauses = _Pauses(monkeypatch)
+
+    await _admit(db_session_factory, tmp_path, tenant)
+
+    assert pauses.count == 0
+
+
+async def test_one_wait_budget_covers_admission_and_every_reauthorize(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    await _mode(db_session, tenant, "on")
+    await _facts(db_session, tenant, {ROOM: OPEN})
+    await _retire(db_session, tenant)
+    pauses = _Pauses(monkeypatch)
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+    called: list[int] = []
+
+    async def on_wait() -> None:
+        called.append(1)
+
+    admission = await _admit(db_session_factory, tmp_path, tenant, on_facts_wait=on_wait)
+    assert (pauses.count, admission.facts_wait.waited_s, called) == (4, 2.0, [1])
+
+    again = await reauthorize(deps, admission)
+
+    assert pauses.count == 4, "the budget is spent: no second wait"
+    assert again.hold is not None and again.facts_wait is admission.facts_wait
+    assert admission.facts_wait.waited_s == 2.0, (
+        "a reference kept by a caller sees the spent budget"
+    )
+
+
+async def test_two_short_waits_share_the_budget(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    await _mode(db_session, tenant, "on")
+    await _facts(db_session, tenant, {ROOM: OPEN})
+    admission = await _admit(db_session_factory, tmp_path, tenant)
+    await _retire(db_session, tenant)
+    pauses = _Pauses(monkeypatch)
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+    admission = replace(admission)
+    admission.facts_wait.waited_s = 1.0
+
+    again = await reauthorize(deps, admission)
+
+    assert pauses.count == 2, "1 s left of 2 s, in 0.5 s steps"
+    assert again.facts_wait is admission.facts_wait and admission.facts_wait.waited_s == 2.0
+
+
+async def test_reauthorize_does_not_wait_for_a_turn_already_held_and_narrow(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    await _mode(db_session, tenant, "on")
+    await _facts(db_session, tenant, {ROOM: RoomFacts(contained=True, narrow=True)})
+    admission = await _admit(db_session_factory, tmp_path, tenant)
+    assert admission.grant is not None and admission.grant.narrow_room and admission.hold
+    await _retire(db_session, tenant)
+    pauses = _Pauses(monkeypatch)
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+
+    await reauthorize(deps, admission)
+
+    assert pauses.count == 0
+
+
+async def test_reauthorize_waits_for_the_facts_before_it_tightens(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    await _mode(db_session, tenant, "on")
+    await _facts(db_session, tenant, {ROOM: OPEN})
+    admission = await _admit(db_session_factory, tmp_path, tenant)
+    await _retire(db_session, tenant)
+
+    async def publish() -> None:
+        await _facts(db_session, tenant, {ROOM: OPEN})
+
+    pauses = _Pauses(monkeypatch, publish)
+    deps = _deps(
+        sessionmaker=db_session_factory, defaults_root=tmp_path, router=_admittable_router(tenant)
+    )
+
+    again = await reauthorize(deps, admission)
+
+    assert pauses.count == 1
+    assert again is admission, "a wait alone changes nothing: the same admission comes back"
+    assert admission.facts_wait.waited_s == 0.5
+    assert again.hold is None and not again.memory_read_only
 
 
 @pytest.mark.parametrize("mode", ["off", "shadow"])

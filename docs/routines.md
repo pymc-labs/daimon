@@ -5,22 +5,21 @@ what happens when a run fails.
 
 A routine is a recurring [unattended](unattended.md) turn: a cron expression,
 a timezone, an agent and one prompt. The scheduler fires it, the agent runs
-with no human in the thread, and the tail of its final message is saved on the
-routine. An agent in GitHub App mode gets only its baseline repository grants.
+with no human present, and the tail of its final message is saved. An agent in GitHub App mode gets only its baseline repository grants.
 
 A routine runs as the person who last changed its message, agent or target.
 Such an edit moves the routine to that person and erases its saved output and
 pending delivery. Pausing, resuming and deleting move nothing.
 
-A routine may name a **destination**: a channel, a thread or its owner's
+A routine may name a **destination**: a channel, a thread or the owner's
 Discord DM. With one, Daimon posts the agent's full final reply and its
 [generated files](#generated-files) there, unless the agent posted there
 itself. Without one, the result is only recorded, and files stay in the
 workspace.
 
 For a one-off "remind me in two hours", use a timer (`create_timer`,
-[mcp-tools.md](mcp-tools.md#timers)). It fires once, runs in the conversation it
-was set in and needs no cleanup.
+[mcp-tools.md](mcp-tools.md#timers)). It fires once, in the conversation it
+was set in, and needs no cleanup.
 
 ## Create a routine
 
@@ -31,16 +30,18 @@ Five MCP tools manage routines: `create_routine`, `list_routines`,
 `get_routine` returns.
 
 Ask the agent in chat ("every weekday at 9am, post the sales
-numbers"). Each platform has a panel:
+numbers"), or use a panel:
 
 - **Slack** `/routines` and **Teams** `routines` (in a 1:1 chat): workspace
   admins create and delete. The form's schedule field takes cron, such as
   `0 9 * * 1-5`, and the panel shows schedules in words.
+- **Discord** `/routines` lists your routines, or all for an admin. Admins
+  create; the creator or an admin can pause, resume or delete.
+<!-- knowledge: web -->
 - **Web app** Routines page: members manage their own, admins all. Changing one
   needs a linked chat account. **Run now** makes an active routine
   due at once.
-- **Discord** `/routines` lists your routines, or all for an admin. Admins
-  create; the creator or an admin can pause, resume or delete.
+<!-- /knowledge -->
 
 The CLI creates routines for an owner (`daimon routines create`), sets
 [sandbox tools](unattended.md#opt-a-routine-into-sandbox-tools), checks
@@ -48,12 +49,12 @@ The CLI creates routines for an owner (`daimon routines create`), sets
 [moves routines in from another system](routine-migration.md).
 
 `--destination dm|channel|thread` (with `--destination-id`) runs the checks
-below; `--dry-run` saves nothing. The operator may name any agent; it counts as the
+below; `--dry-run` saves nothing. The operator may name any agent, counted as the
 owner's own.
 
 `create_routine` refuses a caller with no platform identity (a CLI-only
 token), an unknown IANA timezone, an unparseable cron expression and an
-`agent_name` that is not an agent in the tenant. The tenant is the caller's.
+`agent_name` outside the caller's tenant.
 
 ### Set a destination
 
@@ -70,7 +71,7 @@ tool checks that:
 - the tenant's access policy does not protect it ([permissions.md](permissions.md)).
 
 For the owner's DM, set `destination_kind="dm"` and leave out the id. Daimon
-uses the caller's own Discord id; nobody can send another person's routine to
+uses the caller's own Discord id, so nobody can send another person's routine to
 their DM. Slack and Teams refuse it. A DM routine runs as a live DM turn, with
 the owner's personal memory, and needs the server's DMs on and the agent's
 [DM grant](direct-messages.md#choose-who-may-dm-which-agent) for the owner.
@@ -93,10 +94,11 @@ Slots that pass while the same routine is still running are skipped under both
 policies. `get_routine` and `list_routines` show the latest skipped range and
 reason (`stale` or `in_flight`), not a history.
 
-A routine whose agent, channel or thread is on another provider is not run. The
-self-hosted backend stops with `last_error=selfhosted_routines_unsupported`;
-OpenAI and Gemini stop with a message saying routines run only on Anthropic.
-Headless routines need Anthropic Managed Agents. A thread destination with an unknown parent
+On OpenAI or Gemini a routine runs as an unattended reply, a DM routine as
+the owner's private turn. On OpenAI it stops with `backend_unsupported` unless
+sandbox tools are on. A routine into a thread runs on the provider that thread
+kept. Self-hosted stops with
+`last_error=selfhosted_routines_unsupported`. A thread destination with an unknown parent
 channel stops with `routine_destination_parent_unknown`. Set the destination
 again to record the parent.
 
@@ -131,10 +133,9 @@ run survives the run's completion.
 
 ## What a run does
 
-A run resolves the tenant, finds or creates the creator's account, checks the
-invoker allowlist and the balance, and resolves the agent. It then creates a
-session the way chat does and drives it with the same turn driver. It is not
-a chat turn: there is no thread binding, continuity, handoff or dead-session
+A run resolves the creator's account, checks the invoker allowlist and the
+balance, and resolves the agent. It then runs a session with chat's turn driver.
+It is not a chat turn: there is no thread binding, continuity, handoff or dead-session
 recovery.
 
 Nobody can click a confirmation, so tool calls follow the
@@ -180,15 +181,15 @@ one routine.
 Delivery is at most once and checks first:
 
 - **Newest only.** A new run replaces a queued result, so no backlog posts.
-- **Creator first.** If the access policy cannot be read, or the creator may no
-  longer invoke the agent (admins pass unless the admin bypass is off),
+- **Creator first.** If the access policy cannot be read, or the creator may not
+  invoke the agent (admins pass unless the admin bypass is off),
   nothing is sent anywhere.
 - **Policy at post time.** A `writers: none` channel, a thread under one or a
   Discord channel in such a category is refused as `protected_channel`.
 - **Only where the creator could post.** A creator who lost view or send access,
   or is not in a private channel, gets the result by direct message instead.
-- **Live workspace only.** A channel in another server, or one that no longer
-  exists or is archived, is `destination_unavailable`.
+- **Live workspace only.** A channel in another server, or one that does not
+  exist or is archived, is `destination_unavailable`.
 - **Never silently nowhere.** When nobody may write in the destination, the
   result goes to the creator by DM, under the tenant's DM policy
   ([configuration.md](configuration.md#daimon_direct_message_policies)). If
@@ -199,7 +200,7 @@ Delivery is at most once and checks first:
 - **Never tag me.** Someone who opted out shows as a plain name and gets no
   Teams notice.
 
-An expired claim or a raising poster is not retried, as it may have posted. An empty result is skipped. With [agent identity](agent-identity.md) on, Slack and Discord post as
+An expired claim or a raising poster is not retried, as it may have posted. A run with no final text, or a `NO_POST:` line, posts no text. With [agent identity](agent-identity.md) on, Slack and Discord post as
 the agent. On Discord a reply to any delivered message starts a turn.
 
 ### Generated files
@@ -208,7 +209,7 @@ After a successful run, Daimon collects the session's output files and
 delivers up to ten with the reply. Discord and Slack attach them, and a Teams
 post says files are not supported there. A file over 200 MB or the
 destination's limit (10 MB in a Discord DM) is named in text and stays in the
-workspace.
+workspace. On OpenAI and Gemini the limit is 24 MB.
 
 Files share the result's at-most-once claim, and each send rechecks the
 destination and the owner's access. Changing the destination cancels pending
@@ -223,7 +224,7 @@ files. Failure notices never carry files.
 | `DAIMON_SCHEDULER__TICK_INTERVAL_S` | 30 s |
 | `DAIMON_SCHEDULER__MAX_AGE_S` | 900 s |
 | `DAIMON_SCHEDULER__MAX_CONCURRENT_FIRES` | 10 |
-| Read timeout per call | 120 s |
+| Read timeout per call | 120 s; for Gemini, 15 minutes, with a status check every minute |
 
 The ceiling covers session assembly and the run. The dispatch
 timeout cannot be set below it. Settings are in [configuration.md](configuration.md#scheduler).
@@ -236,7 +237,11 @@ timeout cannot be set below it. Settings are in [configuration.md](configuration
 | list and read last output | admin or the creator | admin or the creator | admin or the creator |
 | pause and resume | admin or the creator | admin or the creator | admin or the creator |
 | delete | admin or the creator | admin or the creator, after a confirmation | admin or the creator |
-| run now | admin or the creator, web app only | not offered | not offered |
+| run now | admin or the creator | not offered | not offered |
+
+<!-- knowledge: web -->
+**Run now** is offered on the web app's Routines page.
+<!-- /knowledge -->
 
 Ownerless routines are admin-only, and a refusal reads as "not found".
 Non-admins see only their own routines. A routine runs with its agent's repo, keys and connectors, so a member

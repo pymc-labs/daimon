@@ -56,7 +56,8 @@ field paths) picks what each new item reports. Projections accept `.`,
 A firing queues a turn that may only read and report. Shell, built-in tools,
 skills, management tools and writes are unavailable. Every model call,
 approval card and report rechecks the owner's access, balance, spend allowance
-and channel budget.
+and channel budget. Reports run only on Anthropic, which enforces this on the
+session: an agent on OpenAI or Gemini has its reports refused.
 
 ## Where a watch reports
 
@@ -82,8 +83,8 @@ owner, even with tool safety off.
 A server admin can set `watch_approval` to skip for the team or one agent.
 Creating and resuming then run without the card, but only as the default
 watch: it reports in the same thread for 7 days and reads Daimon's own tools,
-and any other choice is refused, a callback watch included. Editing, rotating a key, long jobs and machine
-launches keep asking, and a turn nobody is watching still cannot enroll a watch.
+and any other choice is refused, a callback watch included. Editing, rotating a key and long
+jobs keep asking, and a turn nobody is watching still cannot enroll a watch.
 
 An edit shows each change as old and new on its card. Queued reports from
 before it are dropped, and the next poll saves a new baseline. Admins may

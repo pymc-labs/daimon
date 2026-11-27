@@ -1,0 +1,66 @@
+{
+  "description": [
+    "Preview and confirm the server's allowed model providers. Admin-only.",
+    "",
+    "providers is the complete replacement list, not an addition. A server no",
+    "admin configured uses Anthropic and this install's keyed providers; saving a list",
+    "narrows or widens that, and decides which companies get this server's conversations.",
+    "Preview first, explain the server-wide scope and full list, then call with",
+    "the same providers and returned expected_revision and preview_digest for",
+    "the admin's Confirm card. Pass this active turn's origin_context_id."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "expected_revision": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "preview_digest": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "providers": {
+        "items": {
+          "enum": [
+            "anthropic",
+            "openai",
+            "gemini",
+            "selfhosted"
+          ],
+          "type": "string"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "providers"
+    ],
+    "type": "object"
+  }
+}

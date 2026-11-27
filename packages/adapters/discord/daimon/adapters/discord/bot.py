@@ -67,6 +67,7 @@ from daimon.adapters.discord.names import (
 )
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.output_delivery import Conversation, deliver_session_outputs
+from daimon.adapters.discord.outsiders import is_public_thread
 from daimon.adapters.discord.permissions import check_missing_permissions
 from daimon.adapters.discord.post_transport import (
     DiscordPostTransport,
@@ -251,6 +252,7 @@ from daimon.core.turn.protection import (
     protection_state,
 )
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
+from daimon.core.turn.shown_model import shown_model
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT, holding, release_turn_slot, wait_for_slot
 from daimon.core.turn.state import ToolUseBlock
 from daimon.core.turn.thread_queue import (
@@ -263,7 +265,7 @@ from daimon.core.turn.thread_queue import (
     release_thread,
 )
 from daimon.core.turn_hold import RequesterOrg
-from daimon.core.turn_keys import list_mounted_key_names
+from daimon.core.turn_keys import answering_env_sha256, list_mounted_key_names
 from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
 from daimon.core.turn_queue import TurnQueue
 from mux.contracts.config import DEFAULT_BACKEND
@@ -393,6 +395,18 @@ def _capture_turn_error(
         scope.set_tag("tenant_id", str(tenant_id))
         scope.set_tag("guild_id", guild_id)
         sentry_sdk.capture_exception(exc)
+
+
+def turn_model(admission: Admission) -> tuple[str | None, object]:
+    """The model and effort a turn runs on: a non-default backend's own, else the agent's.
+
+    An agent copied onto another backend keeps its original agent's model id, so labelling
+    the card from the agent showed a Gemini turn as the Claude model it was copied from.
+    """
+    backend = admission.backend_revision
+    if backend is not None and backend.backend not in (None, DEFAULT_BACKEND):
+        return backend.model, backend.effort
+    return admission.agent.model.id, (admission.agent.model.model_extra or {}).get("effort")
 
 
 class _ThreadOpenFailed(Exception):
@@ -4146,12 +4160,7 @@ class DaimonBot(commands.Bot):
         is on and they differ from the pair last shown in this thread."""
         if not admission.shown("model_reactions", "discord"):
             return ()
-        backend = admission.backend_revision
-        if backend is not None and backend.backend not in (None, DEFAULT_BACKEND):
-            model_id, effort = backend.model, backend.effort
-        else:
-            model_id = admission.agent.model.id
-            effort = (admission.agent.model.model_extra or {}).get("effort")
+        model_id, effort = turn_model(admission)
         marks = model_marks(model_id, effort if isinstance(effort, str) else None)
         if not marks:
             return ()
@@ -4777,6 +4786,7 @@ class DaimonBot(commands.Bot):
             now=datetime.now(UTC),
             category_id=category_id,
             category_unresolved=category_unresolved,
+            public_thread=is_public_thread(thread),
         )
         if (
             row.reason in ("watch_fired", "watch_report", "job_finished")
@@ -4902,7 +4912,7 @@ class DaimonBot(commands.Bot):
                 agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
-                model_id=agent.model.id,
+                model_id=shown_model(admission).id,
                 turn_id=turn_id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
@@ -4961,6 +4971,7 @@ class DaimonBot(commands.Bot):
             parent_channel_id=row.parent_channel_id,
             thread_id=row.thread_id,
             platform_channel_id=row.thread_id,
+            public_thread=is_public_thread(thread),
             responder_ma_agent_id=str(agent.id),
             responder_name=admission.config.agent_name or agent.name,
             configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
@@ -5085,7 +5096,7 @@ class DaimonBot(commands.Bot):
                 agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
-                model_id=agent.model.id,
+                model_id=shown_model(admission).id,
                 turn_id=turn_card_intent.id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
@@ -5677,6 +5688,14 @@ class DaimonBot(commands.Bot):
 
         # --- Stage one: admission (identity, config cascade, missing-config
         # bail, MA resolve/retrieve, balance gate, cap gate) -- admit(). ---
+        async def show_typing_while_waiting() -> None:
+            # Admission waits for room facts: show activity once; a failure changes nothing.
+            try:
+                async with message.channel.typing():
+                    pass
+            except Exception as exc:
+                log.debug("discord.facts_wait_typing_failed", error=str(exc))
+
         try:
             admission = await admit(
                 self.runtime.turn_deps,
@@ -5695,6 +5714,8 @@ class DaimonBot(commands.Bot):
                 now=self._ingress_clock() if self._ingress_clock is not None else datetime.now(UTC),
                 category_id=category_id,
                 category_unresolved=category_unresolved,
+                public_thread=is_public_thread(thread),
+                on_facts_wait=show_typing_while_waiting,
             )
         except MissingTurnConfigError as err:
             log.info(
@@ -6050,7 +6071,7 @@ class DaimonBot(commands.Bot):
                 agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
-                model_id=agent.model.id,
+                model_id=shown_model(admission).id,
                 turn_id=turn_id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(
@@ -6197,6 +6218,7 @@ class DaimonBot(commands.Bot):
             platform="discord",
             parent_channel_id=parent_channel_id,
             thread_id=str(thread.id),
+            public_thread=is_public_thread(thread),
             responder_ma_agent_id=str(agent.id),
             responder_name=admission.config.agent_name or agent.name,
             configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
@@ -6385,15 +6407,11 @@ class DaimonBot(commands.Bot):
                 thread_id=str(thread.id),
                 account_id=session_account_id,
             )
-            _live_config = (
-                None if _live_row_for_keys is None else _live_row_for_keys.effective_config
-            )
-            _env_sha256 = None if _live_config is None else _live_config.env_sha256
             key_names = await list_mounted_key_names(
                 _keys_session,
                 tenant_id=tenant_id,
                 agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)),
-                env_sha256=_env_sha256,
+                env_sha256=answering_env_sha256(prepared, _live_row_for_keys),
             )
 
         # Split trigger-message attachments: API-consumable images → vision
@@ -6525,8 +6543,8 @@ class DaimonBot(commands.Bot):
             the agent curls the URL, ``read``s it at full size, and MA
             terminates the session. Reseeding that same URL into the fresh
             session just repeats it, so the thread recovers, dies, recovers,
-            dies -- each cycle billing a full agentic run. Observed on staging
-            thread 1535185295245582356: two consecutive recoveries burned 243k
+            dies -- each cycle billing a full agentic run. Observed on a staging
+            thread: two consecutive recoveries burned 243k
             then 62k input tokens and both ended terminated. Withholding the
             URL (rather than only warning about it, which the model may ignore)
             is what actually breaks the loop.
@@ -6599,7 +6617,7 @@ class DaimonBot(commands.Bot):
                 agent_name=admission.display_name(agent.name),
                 fallback_active=lambda: transport.fallback_used,
                 thread_stopped=watch.is_stopped,
-                model_id=agent.model.id,
+                model_id=shown_model(admission).id,
                 turn_id=turn_card_intent.id,
                 markup=self.runtime.turn_deps.markup,
                 cancel_view=CancelView(

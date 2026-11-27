@@ -129,7 +129,7 @@ dropped duplicate order_ids move every count by under 3%.
 
 One finding answers in the chat reply; a client deliverable is a PDF report
 styled by `pymc-artifact-style`; to poke at the data they want a notebook
-(`marimo_notebooks`). Both land in `/mnt/session/outputs/`, per `file-handling`.
+(`marimo_notebooks`). Both land in the outputs directory, per `file-handling`.
 
 ## Common failure modes
 

@@ -415,11 +415,13 @@ async def cancel_wake_row(
     *,
     tenant_id: _uuid.UUID,
     idempotency_key: _uuid.UUID,
+    skip_reason: str = "cancelled",
 ) -> bool:
     """Withdraw a wake nobody has claimed yet; False once it is claimed or settled.
 
     A status flip, never a delete: a claim is a conditional UPDATE on
     `status = 'pending'`, so a cancelled row can never be claimed afterwards.
+    `skip_reason` says why, for the record.
     """
     cancelled = (
         await session.execute(
@@ -430,12 +432,43 @@ async def cancel_wake_row(
                 TaskContinuation.idempotency_key == idempotency_key,
                 TaskContinuation.status == "pending",
             )
-            .values(status="cancelled", skip_reason="cancelled")
+            .values(status="cancelled", skip_reason=skip_reason)
             .returning(TaskContinuation.id)
         )
     ).scalar_one_or_none()
     await session.flush()
     return cancelled is not None
+
+
+async def get_running_wake_row(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    platform: str,
+    thread_id: str,
+    owner: str,
+    now: datetime,
+) -> TaskContinuationRow | None:
+    """The row whose turn `owner` is running in this thread now, or None: claimed under
+    that owner, started, and inside its lease. A release, a takeover or a settled row has
+    another owner or none, so an old attempt finds nothing. Reads only."""
+    rows = list(
+        await session.scalars(
+            select(TaskContinuation)
+            .where(
+                _READABLE_REASON,
+                TaskContinuation.tenant_id == tenant_id,
+                TaskContinuation.platform == platform,
+                TaskContinuation.thread_id == thread_id,
+                TaskContinuation.status == "claimed",
+                TaskContinuation.lease_owner == owner,
+                TaskContinuation.started_at.is_not(None),
+                TaskContinuation.lease_expires_at > now,
+            )
+            .limit(2)
+        )
+    )
+    return TaskContinuationRow.model_validate(rows[0]) if len(rows) == 1 else None
 
 
 async def list_dispatchable_continuations(

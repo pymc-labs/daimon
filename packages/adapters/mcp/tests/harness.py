@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import uuid
+from collections.abc import Awaitable, Callable, Collection
 from contextlib import AbstractAsyncContextManager
 from typing import Any
 
@@ -33,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
     "stop_confirmation_workers",
+    "QuietFeed",
     "auth_identity",
     "discord_turn_origin",
     "make_identity",
@@ -196,13 +198,42 @@ async def registered_account_token(
 async def stop_confirmation_workers() -> None:
     """Cancel the confirmation workers agent-chat sends started and wait them out.
 
-    A worker reads through the test's database connection, so a test that holds
-    one must call this before its database fixture tears down.
+    A worker reads through the test's database connection, so the database
+    fixtures call this before they tear down (``add_background_drain``). A worker
+    the test already cancelled is only waited for: a second cancel can land while
+    SQLAlchemy closes the connection the first one invalidated, and its pool then
+    keeps that closed connection for the next test.
     """
     from daimon.adapters.mcp.tools import _agent_chat_safety
 
     workers = [w.task for w in _agent_chat_safety._workers.values()]  # pyright: ignore[reportPrivateUsage]
     _agent_chat_safety._workers.clear()  # pyright: ignore[reportPrivateUsage]
     for worker in workers:
-        worker.cancel()
+        if not worker.cancelling():
+            worker.cancel()
     await asyncio.gather(*workers, return_exceptions=True)
+
+
+class QuietFeed:
+    """A turn feed for tests of a waiting loop: its stream never has news.
+
+    `next` returns at once, as a stream that went quiet does, after `on_wait` (a
+    test's clock advance). `waits` counts them. Pass it as ``feed=``.
+    """
+
+    def __init__(self, on_wait: Callable[[], Awaitable[None]] | None = None) -> None:
+        self._on_wait = on_wait
+        self.waits = 0
+
+    async def open(self) -> None:
+        return None
+
+    async def next(self, kinds: Collection[str], **_wait: object) -> None:
+        del kinds
+        self.waits += 1
+        if self._on_wait is not None:
+            await self._on_wait()
+        return None
+
+    async def close(self) -> None:
+        return None

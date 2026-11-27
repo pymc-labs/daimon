@@ -15,12 +15,12 @@ from urllib.parse import urlencode
 import httpx
 from cryptography.fernet import MultiFernet
 from daimon.adapters.mcp.branded_pages import branded_page
-from daimon.adapters.mcp.oauth_github import host_cookie
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools.github_request_delivery import deliver_private_request_card
 from daimon.adapters.mcp.web_icons import icon
 from daimon.core.config import Settings
 from daimon.core.github_app_session import effective_repo_state
+from daimon.core.github_connect_views import host_cookie
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.github_request_cards import RequestCard
 from daimon.core.stores.github_access import list_authorized_repos

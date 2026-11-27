@@ -30,6 +30,7 @@ const MODELS: CatalogModel[] = [
   { id: "gemini-4-argon", label: "Gemini 4 Argon", backend: "gemini", in_usd: 2, out_usd: 10, efforts: LEVELS },
   { id: "gemini-4-carbon", label: "Gemini 4 Carbon", backend: "gemini", in_usd: 2, out_usd: 10, efforts: LEVELS },
   { id: "gemini-4-hydrogen", label: "Gemini 4 Hydrogen", backend: "gemini", in_usd: 1.5, out_usd: 7.5, efforts: LEVELS },
+  { id: "gemini-4-neon", label: "Gemini 4 Neon", backend: "gemini", in_usd: 3, out_usd: 15, efforts: LEVELS },
   { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", backend: "gemini", in_usd: 0.75, out_usd: 3.75, efforts: LEVELS },
 ]
 const modelLabel = (m: ModelChoice) => {

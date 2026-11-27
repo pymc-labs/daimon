@@ -10,6 +10,9 @@ from collections.abc import Iterable, Mapping
 from typing import Any, Final
 
 from daimon.core.ma_metadata_keys import MA_METADATA_KEY_ACCOUNT as MA_METADATA_KEY_ACCOUNT
+from daimon.core.ma_metadata_keys import (
+    MA_METADATA_KEY_CHAT_SESSION as MA_METADATA_KEY_CHAT_SESSION,
+)
 from daimon.core.ma_metadata_keys import MA_METADATA_KEY_MANAGED as MA_METADATA_KEY_MANAGED
 from daimon.core.ma_metadata_keys import MA_METADATA_KEY_NAME as MA_METADATA_KEY_NAME
 from daimon.core.ma_metadata_keys import MA_METADATA_KEY_TENANT as MA_METADATA_KEY_TENANT

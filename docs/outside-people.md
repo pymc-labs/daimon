@@ -18,11 +18,14 @@ A room is narrow in these cases:
   internal person who cannot read it by any other route. This is seal by name;
 - it is a private thread;
 - Daimon does not know who can view it. An unknown room counts as contained
-  and narrow until the next check.
+  and narrow until the next check. A turn that arrives in the seconds after a
+  change or a restart waits about 20 seconds for that check, then goes on with
+  what it has.
 
 Admins and owners never count. A person with no internal role is an outsider,
 so a block on that person makes no room narrow. A public thread and a forum
-post follow their parent room. A change to a role or an overwrite makes Daimon
+post follow their parent room, also in the first seconds before the check has
+listed them; a private thread is narrow until then. A change to a role or an overwrite makes Daimon
 check the server again.
 
 ## Read a narrow room from your own DM
@@ -35,8 +38,12 @@ your own DM, Daimon reads a narrow room for you when Discord lets you view it
 and read its history. This covers your DM chats and your own DM routines.
 
 Daimon checks your access on every read, so a removed person loses it at once.
-Private threads need membership. Watches, timers, helpers, web chat, agent keys
-and Slack get no exception.
+Private threads need membership. Watches, timers, helpers, agent keys and Slack
+get no exception.
+
+<!-- knowledge: web -->
+Web chat gets no exception either.
+<!-- /knowledge -->
 
 The exception covers only rooms that this feature made narrow. A room whose
 readers an admin limited by hand ([Permissions](permissions.md)) keeps its rule:

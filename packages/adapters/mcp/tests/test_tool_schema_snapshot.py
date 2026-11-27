@@ -2,8 +2,10 @@
 parameter schema the server renders to the model, so a change to any of them
 shows up as a reviewable snapshot diff instead of shipping unreviewed.
 
-To intentionally update the snapshot after a deliberate schema/docstring
-change, run:
+Each tool is its own JSON file under ``__snapshots__/``, so two changes to
+different tools never conflict. A removed tool leaves an unused snapshot, which
+fails the run. To intentionally update the snapshots after a deliberate
+schema/docstring change, run:
     uv run pytest packages/adapters/mcp/tests/test_tool_schema_snapshot.py --snapshot-update
 then review the diff in ``__snapshots__/`` before committing.
 
@@ -15,7 +17,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import AsyncIterator
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from cryptography.fernet import Fernet
@@ -43,6 +45,7 @@ from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from syrupy.assertion import SnapshotAssertion
+from syrupy.extensions.json import JSONSnapshotExtension
 
 # Tool names whose absence would mean a whole registration group silently
 # failed to register (e.g. a Settings regression that drops discord/slack or
@@ -113,37 +116,22 @@ def _fully_configured_settings() -> Settings:
     )
 
 
-def _strip_trailing_whitespace(description: str | None) -> str | None:
-    """Strip trailing whitespace from each line of a tool description.
-
-    Several tool docstrings carry incidental trailing spaces on otherwise
-    blank lines between paragraphs — invisible to the model, but the repo's
-    trailing-whitespace pre-commit hook rewrites the committed ``.ambr`` file
-    to remove exactly that whitespace. Normalizing here keeps the snapshot
-    comparison stable against a file the hook itself would otherwise mutate
-    out from under it.
-    """
-    if description is None:
-        return None
-    # Syrupy indents blank lines differently across Python versions. Keep a
-    # visible placeholder so pre-commit whitespace trimming cannot change the
-    # committed snapshot's meaning.
-    return "\n".join(
-        line.rstrip() if line.strip() else "<blank line>" for line in description.split("\n")
-    )
+def _snapshot_value(tool: Any) -> dict[str, object]:
+    """One tool as its snapshot file holds it. The description is a list of
+    lines so a wording change is a line diff, not one escaped string."""
+    description: str | None = tool.description
+    return {
+        "description": None if description is None else description.split("\n"),
+        "parameters": tool.parameters,
+    }
 
 
-def _normalize_snapshot_value[T](value: T) -> T:
-    """Render multiline blanks without serializer-dependent indentation."""
-    if isinstance(value, str):
-        return cast(T, _strip_trailing_whitespace(value) if "\n" in value else value)
-    if isinstance(value, dict):
-        mapping = cast(dict[str, object], value)
-        return cast(T, {key: _normalize_snapshot_value(item) for key, item in mapping.items()})
-    if isinstance(value, list):
-        items = cast(list[object], value)
-        return cast(T, [_normalize_snapshot_value(item) for item in items])
-    return value
+def _assert_each_matches_snapshot(values: dict[str, object], snapshot: SnapshotAssertion) -> None:
+    """Compare every value with its own snapshot file, named after the tool."""
+    for name, value in values.items():
+        assert value == snapshot(name=name, extension_class=JSONSnapshotExtension), (
+            f"{name} drifted from its committed snapshot"
+        )
 
 
 @pytest.fixture
@@ -173,14 +161,7 @@ async def test_rendered_tool_schema_matches_snapshot(
     mcp = app.state.mcp
     tools = await mcp.local_provider.list_tools()
 
-    rendered: dict[str, dict[str, object]] = {
-        tool.name: {
-            "description": _strip_trailing_whitespace(tool.description),
-            "parameters": tool.parameters,
-        }
-        for tool in tools
-    }
-    rendered = _normalize_snapshot_value(dict(sorted(rendered.items())))
+    rendered: dict[str, object] = {tool.name: _snapshot_value(tool) for tool in tools}
 
     assert rendered, "rendered tool registry must not be empty"
     missing = _MUST_CONTAIN - rendered.keys()
@@ -200,7 +181,7 @@ async def test_rendered_tool_schema_matches_snapshot(
         "WEB_APP_TOOLS (hidden while web_awareness is Off), word them without it, or list them "
         "in _WEB_WORDS with a reason"
     )
-    assert rendered == snapshot, "rendered tool schema drifted from the committed snapshot"
+    _assert_each_matches_snapshot(rendered, snapshot)
 
 
 async def test_rendered_hub_tool_schema_matches_snapshot(
@@ -225,25 +206,11 @@ async def test_rendered_hub_tool_schema_matches_snapshot(
     )
     tools = await mcp.local_provider.list_tools()
 
-    rendered: dict[str, object] = {
-        "instructions": mcp.instructions,
-        "tools": dict(
-            sorted(
-                (
-                    tool.name,
-                    {
-                        "description": _strip_trailing_whitespace(tool.description),
-                        "parameters": tool.parameters,
-                    },
-                )
-                for tool in tools
-            )
-        ),
-    }
-
-    rendered = _normalize_snapshot_value(rendered)
-    assert rendered["tools"], "the hub tool registry must not be empty"
-    assert rendered == snapshot, "rendered hub tool schema drifted from the committed snapshot"
+    rendered: dict[str, object] = {tool.name: _snapshot_value(tool) for tool in tools}
+    assert rendered, "the hub tool registry must not be empty"
+    assert mcp.instructions is not None, "the hub must tell clients to call list_daimons first"
+    rendered["instructions"] = mcp.instructions.split("\n")
+    _assert_each_matches_snapshot(rendered, snapshot)
 
 
 def _non_null_branch(container: dict[str, Any]) -> dict[str, Any]:

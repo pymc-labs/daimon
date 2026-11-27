@@ -6,7 +6,8 @@ import httpx
 from daimon.adapters.web.chat_model import model_on
 from daimon.adapters.web.refusals import backend_refusal
 from daimon.core.stores import web_chat as chat_store
-from daimon.core.stores.domain import AgentBackendRevision
+from daimon.core.stores.domain import AgentBackendRevision, FeatureTarget
+from daimon.core.stores.feature_values import set_feature_value
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.testing.ma_models import ma_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -116,7 +117,19 @@ async def test_a_chat_keeps_its_own_model_and_a_member_cannot_move_it_off_the_pr
         await client.get("/api/chat/agents", headers=_OWN)  # the roster the header reads
         header = (await client.get(base, headers=_OWN)).json()["session"]
         assert header["agent"]["model"] == "claude-haiku-5-5", header
+        listed = (await client.get("/api/chat/sessions", headers=_OWN)).json()
+        assert [row["agent"]["model"] for row in listed] == ["claude-haiku-5-5"], listed
 
+    async with db_session_factory.begin() as db:  # on by default; this agent turns it off
+        await set_feature_value(
+            db,
+            tenant_id=owner.tenant_id,
+            target=FeatureTarget("agent", agent_id="ag_w"),
+            key="thread_providers",
+            value="off",
+            set_by=None,
+            surface="chat",
+        )
     token = await _token(db_session_factory, member)
     async with _client(
         agents, owner.tenant_id, db_session_factory, token, settings=settings, with_turns=True

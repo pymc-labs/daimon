@@ -31,6 +31,8 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
     "watch_inbox": "globally unique watch_id FK to tenant-scoped registration",
     "watch_firings": "globally unique watch_id FK; dispatch verifies tenant and conversation binding",
     "watch_controls": "operator-only global/tenant/owner stop scopes; no tenant-facing enumeration",
+    # One row per retention rule for the whole deployment: when a sweep last ran.
+    "retention_runs": "sweep clock keyed by rule name; holds no tenant data",
     # The tenant identity table itself; its `id` IS the tenant_id.
     "tenants": "identity table — `id` is the tenant_id",
     # One row per running Discord worker process, not per tenant.
@@ -91,7 +93,8 @@ _TENANT_ID_EXEMPT: dict[str, str] = {
         "keyed by provider account and month; a deployment-wide count with no tenant data"
     ),
     "usage_reconcile_progress": (
-        "keyed by MA session id (globally unique); a read cursor holding no tenant data"
+        "keyed by MA session id (globally unique); its settle cursor and, for an agent-chat "
+        "session, who drives it and where it came from, read only by that session id or grant"
     ),
     # A signed Stripe refund/dispute can arrive before Checkout completion.
     # The event has no tenant identity yet; the verified payment_intent links

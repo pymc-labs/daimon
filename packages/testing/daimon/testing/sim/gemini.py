@@ -15,11 +15,12 @@ import json
 import re
 import tarfile
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import Any, Required, TypedDict
+from typing import Any, Required, TypedDict, cast
 
 import httpx
+from daimon.core.mcp_rpc import mcp_headers, mcp_request, open_mcp_session
 from daimon.testing.sim.network import StrictFake
 from daimon.testing.sim.script import Script, Turn
 from google.genai._interactions.types.agent_create_params import AgentCreateParams
@@ -79,6 +80,7 @@ class GeminiAPI(StrictFake):
     environments: dict[str, dict[str, int]] = field(default_factory=dict[str, dict[str, int]])
     interactions: dict[str, _Interaction] = field(default_factory=dict[str, _Interaction])
     _ids: itertools.count[int] = field(default_factory=itertools.count)
+    _calls: set[asyncio.Task[None]] = field(default_factory=set[asyncio.Task[None]])
 
     def __post_init__(self) -> None:
         one = "/v1beta/interactions/([^/]+)"
@@ -179,8 +181,41 @@ class GeminiAPI(StrictFake):
             **{k: v for k, v in body.items() if k not in ("input", "background", "store")},
         }
         self.interactions[id_] = _Interaction(raw)
-        asyncio.get_running_loop().call_later(_LATENCY_S, self._finish, id_, self.script.next())
+        turn = self.script.next()
+        if turn.tool is not None and turn.tool.live:
+            call = asyncio.get_running_loop().create_task(self._call(id_, turn, body))
+            self._calls.add(call)
+            call.add_done_callback(self._calls.discard)
+        else:
+            asyncio.get_running_loop().call_later(_LATENCY_S, self._finish, id_, turn)
         return httpx.Response(200, json=raw)
+
+    async def _call(self, id_: str, turn: Turn, body: dict[str, Json]) -> None:
+        """Call the turn's tool on the MCP server the request names (by its native
+        name), as Gemini does, and answer with what it returned."""
+        tool = turn.tool
+        assert tool is not None
+        tools: list[dict[str, Json]] = body.get("tools") or []
+        servers = [t for t in tools if t.get("type") == "mcp_server"]
+        server = next((t for t in servers if t.get("name") == tool.server), None)
+        if server is None:
+            self.violations.append(f"no MCP server {tool.server} in {servers}")
+            text = "no such server"
+        else:
+            given: dict[str, str] = server.get("headers") or {}
+            headers = {**mcp_headers(""), **given}
+            call = {"name": tool.name, "arguments": tool.input}
+            request = {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": call}
+            try:
+                async with httpx.AsyncClient(follow_redirects=False) as http:
+                    await open_mcp_session(http, server["url"], headers)
+                    result = await mcp_request(http, server["url"], headers, request)
+            except ValueError as error:
+                text = f"The call failed: {error}"
+            else:
+                content: list[dict[str, Json]] = cast(Any, result.get("content")) or []
+                text = "\n".join(str(c.get("text", "")) for c in content)
+        self._finish(id_, replace(turn, tool=replace(tool, result=text)))
 
     def _workspace(self, environment: Json) -> str:
         """A named environment is reused; an inline or absent one gets a new workspace."""

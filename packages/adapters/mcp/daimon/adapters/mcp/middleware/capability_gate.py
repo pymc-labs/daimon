@@ -7,19 +7,22 @@ external MCP clients and agent keys reach the server directly, so the server ref
 tools/list is filtered for every caller except a chat-execution credential: the native turn
 checks this catalogue against its consent, less the tools Off at its place, which a template's
 allowlist leaves out (`turn/template_mcp.py`); Claude sessions hide them in their session
-config. Such a caller is refused at call time.
+config. Such a caller is refused at call time, and `search_tools` leaves them out of its
+results, so a feature that is Off here is not found (`_SEARCHING`).
 
 A tool whose setup this server lacks (`SERVER_SETUP`) leaves every list, that credential's too,
 and its call is refused as not set up: a worker can't judge that setup, and the server's
 settings, so that catalogue, stay fixed while it runs. So does a tool whose feature does not
-exist in the caller's workspace (`in_workspace`). Where pages are absent or off, the watch
-tools are listed without their page source and words (`without_pages`).
+exist in the caller's workspace (`in_workspace`). Where pages are absent, or off for any other
+caller, the watch tools are listed without their page source and words (`without_pages`).
 """
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Final
 
 import structlog
@@ -28,9 +31,11 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, list_running_origins
 from daimon.adapters.mcp.tools._pageless import without_pages
 from daimon.core.anthropic_guard import anthropic_disabled
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.features.deployment import in_workspace
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.snapshot import FeaturePlace, resolve_features, server_setup_met
+from daimon.core.features.surface import ask_to_turn_on
 from daimon.core.features.tool_gate import (
     GATED_KEYS,
     gated_tools,
@@ -44,6 +49,7 @@ from daimon.core.security_audit import record_denial
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.stores.routines import get_routine
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
+from daimon.core.stores.session_settle_state import AgentChatSession, find_agent_chat_session
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.tool_safety import RENAMED_DAIMON_TOOLS
 from fastmcp.exceptions import ToolError
@@ -63,7 +69,7 @@ UNSET_REASON: Final = "capability_unset"
 def _refusal(tool: str, key: str) -> str:
     return (
         f"{FEATURES[key].name} is turned off here, so {tool} can't run. Nothing was done. "
-        "Ask an admin or an owner to turn it on."
+        f"{ask_to_turn_on(FEATURES[key])}"
     )
 
 
@@ -98,11 +104,14 @@ async def caller_places(
     runtime: McpRuntime, auth: AuthIdentity, origin_context_id: object
 ) -> list[FeaturePlace]:
     """Where the call may run, from verified facts only: its turn origin, its routine, an
-    agent key's agent and channel, or else the workspace.
+    agent-chat session's channel and agent, an agent key's agent and channel, or else the
+    workspace.
 
     Several running turns of one session, when none is named, cannot be told apart. Turns
     in one channel and thread are one place; otherwise each place is returned and a gate
-    treats the feature as Off if any of them has it Off."""
+    treats the feature as Off if any of them has it Off.
+
+    Raises when an agent-chat session's agent can't be found: a gate then refuses."""
     named = origin_context_id if isinstance(origin_context_id, str) else None
     origin = await get_verified_origin(runtime, auth, named)
     if origin is None:
@@ -118,39 +127,103 @@ async def caller_places(
         if routine is not None and tenant is not None:
             # As its session's toolset reads it (`headless_runner.py`).
             return [routine_feature_place(routine, platform=tenant.platform)]
+    if (chat := await _agent_chat_session(runtime, auth)) is not None:
+        found, derived = chat
+        # As its session's tools were chosen (`agent_chat.py`, `place_session`).
+        agent_id = await _chat_agent_id(runtime, auth, derived)
+        platform = auth.platform or "mcp"
+        return [FeaturePlace.of(auth.tenant_id, platform, found.channel_id, agent_id=agent_id)]
     agent_id = None if auth.agent_id is None else await _key_agent_id(runtime, auth, auth.agent_id)
     return [
         FeaturePlace(auth.tenant_id, auth.platform or "", token_channel_id(auth), agent_id=agent_id)
     ]
 
 
+async def _agent_chat_session(
+    runtime: McpRuntime, auth: AuthIdentity
+) -> tuple[AgentChatSession, uuid.UUID] | None:
+    """The agent-chat session of a chat-execution credential, with its derived agent: the
+    session whose recorded grant is the credential's, created by its account
+    (`find_agent_chat_session`). None for every other caller, a chat thread's credential
+    after its turn ended included, and for a session no send recorded yet."""
+    own = auth.agent_id is None and auth.routine_id is None and auth.execution_id is None
+    derived = auth.chat_agent_id
+    if not (auth.is_chat_execution and own and derived is not None and auth.chat_session_id):
+        return None
+    async with runtime.session_factory() as db:
+        found = await find_agent_chat_session(
+            db, grant=auth.chat_session_id, account_id=auth.account_id
+        )
+    return None if found is None else (found, derived)
+
+
+async def _chat_agent_id(runtime: McpRuntime, auth: AuthIdentity, derived: uuid.UUID) -> str:
+    """The agent an agent-chat session runs. Unlike an agent key's, a failed or empty lookup
+    raises: its session's tools were chosen with that agent's tier, and leaving it out would
+    drop an agent-tier Off without a word."""
+    found = await _derived_agent_id(runtime, auth, derived)
+    if found is None:
+        raise LookupError("the agent of this agent-chat session wasn't found")
+    return found
+
+
 async def _key_agent_id(runtime: McpRuntime, auth: AuthIdentity, derived: uuid.UUID) -> str | None:
     """An agent key's own agent id, so its agent-tier values apply rather than the channel's.
-    Cached; a failed lookup is logged and leaves the agent tier out, never refusing."""
-    key = (auth.tenant_id, derived)
-    if (cached := runtime.resolver_cache.derived_agent_ids.get(key)) is not None:
-        return cached
+    A failed lookup is logged and leaves the agent tier out, never refusing."""
     try:
-        if auth.anthropic_disabled or anthropic_disabled():
-            record = await SelfHostedAgents(runtime.session_factory).find_by_derived_uuid(
-                resource_scope(tenant_id=str(auth.tenant_id)), derived
-            )
-            found = None if record is None else record.ref.id
-        else:
-            agent = await find_agent_by_derived_uuid_cached(
-                runtime.client,
-                runtime.resolver_cache,
-                tenant_id=auth.tenant_id,
-                agent_id=derived,
-                records=runtime.session_factory,
-            )
-            found = None if agent is None else agent.id
+        return await _derived_agent_id(runtime, auth, derived)
     except Exception:  # named boundary: the agent tier is extra; its lookup never refuses
         log.warning("capability_gate.key_agent_lookup_failed", exc_info=True)
         return None
-    if found is not None:
-        runtime.resolver_cache.derived_agent_ids[key] = found
-    return found
+
+
+@dataclass(frozen=True)
+class ExecutingAgent:
+    """The provider agent behind a derived agent uuid: its id and its name."""
+
+    id: str
+    name: str
+
+
+async def find_executing_agent(
+    runtime: McpRuntime, auth: AuthIdentity, derived: uuid.UUID
+) -> ExecutingAgent | None:
+    """The agent behind `derived`, read as fresh as the provider listing; None when there is
+    none (deleted, archived or another tenant's)."""
+    if auth.anthropic_disabled or anthropic_disabled():
+        record = await SelfHostedAgents(runtime.session_factory).find_by_derived_uuid(
+            resource_scope(tenant_id=str(auth.tenant_id)), derived
+        )
+        return None if record is None else ExecutingAgent(record.ref.id, record.spec.name)
+    agent = await find_agent_by_derived_uuid_cached(
+        runtime.client,
+        runtime.resolver_cache,
+        tenant_id=auth.tenant_id,
+        agent_id=derived,
+        records=runtime.session_factory,
+    )
+    if agent is None:
+        return None
+    return ExecutingAgent(agent.id, agent.metadata.get(MA_METADATA_KEY_NAME) or agent.name)
+
+
+async def _derived_agent_id(
+    runtime: McpRuntime, auth: AuthIdentity, derived: uuid.UUID
+) -> str | None:
+    """The provider agent id behind a derived agent uuid, or None when there is none. Cached."""
+    key = (auth.tenant_id, derived)
+    if (cached := runtime.resolver_cache.derived_agent_ids.get(key)) is not None:
+        return cached
+    agent = await find_executing_agent(runtime, auth, derived)
+    if agent is not None:
+        runtime.resolver_cache.derived_agent_ids[key] = agent.id
+    return None if agent is None else agent.id
+
+
+_SEARCH_TOOL: Final = "search_tools"
+#: True while `search_tools` reads the catalogue it ranks: it offers a chat-execution credential
+#: only what its place allows, though `tools/list` stays whole for that credential.
+_SEARCHING: Final[ContextVar[bool]] = ContextVar("capability_gate_searching", default=False)
 
 
 def _lists_everything(auth: AuthIdentity) -> bool:
@@ -175,6 +248,12 @@ class CapabilityGateMiddleware(Middleware):
             # A conversation that began before the rename can still ask for the old
             # name. Say where the tool went instead of "unknown tool".
             raise ToolError(f"{tool} is now called {renamed}. Call {renamed} instead.")
+        if tool == _SEARCH_TOOL:
+            token = _SEARCHING.set(True)
+            try:
+                return await call_next(context)
+            finally:
+                _SEARCHING.reset(token)
         key = server_gate_key(tool)
         ctx = context.fastmcp_context
         auth = await ctx.get_state("auth") if key is not None and ctx is not None else None
@@ -226,6 +305,8 @@ class CapabilityGateMiddleware(Middleware):
         )
         tools = [t for t in tools if t.name not in unset or server_gate_key(t.name) is None]
         pageless = not in_workspace(FEATURES["artifacts"], settings, auth.tenant_id)
+        if _lists_everything(auth) and not _SEARCHING.get():
+            return [without_pages(t) for t in tools] if pageless else tools
         try:
             places = await caller_places(self._runtime, auth, None)
             found = [

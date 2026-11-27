@@ -2,11 +2,13 @@
 
 import asyncio
 import copy
+import hashlib
 import logging
+import posixpath
 import random
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
-from typing import NoReturn, Protocol
+from typing import Final, NoReturn, Protocol
 from uuid import uuid4
 
 from pydantic import JsonValue
@@ -56,8 +58,10 @@ from mux.contracts.resources import (
 )
 from mux.drivers.gemini.bundles import (
     UPLOAD_ROOT,
+    file_archive,
     inline_files,
     owned_skill,
+    relative_path,
     skill_archive,
     skill_sources,
     target_path,
@@ -113,6 +117,7 @@ from mux.errors import (
 )
 from mux.profiles import PACKAGE_MANAGERS, network_effect
 from mux.profiles.gemini import INLINE_REUSE as PROFILE
+from mux.profiles.gemini import SESSION_NAMESPACE, WITHHOLD_BUILTINS
 from mux.state.operations import SendClaimed, request_digest
 from mux.state.store import StateStore
 
@@ -228,6 +233,16 @@ class Base:
             max_output_tokens=self._max_output_tokens,
             thinking_level=self._thinking_level,
         )
+        session = spec.extensions.get(SESSION_NAMESPACE)
+        if session is not None and session.value.get(WITHHOLD_BUILTINS) is True:
+            # Each interaction sends its tools, so a session leaves its agent's out.
+            tools = request["tools"]
+            kept = [
+                t
+                for t in (tools if isinstance(tools, list) else [])
+                if _tool_type(t) not in BUILTIN_TOOLS
+            ]
+            request["tools"] = kept or [copy.deepcopy(NO_TOOLS_TOOL)]
         if self._max_output_tokens is not None:
             if (
                 self._native_agent is not None
@@ -641,6 +656,14 @@ class GeminiAgents(Base):
         refuse("agent_delete")
 
 
+BUILTIN_TOOLS: Final = ("code_execution", "google_search", "url_context")
+"""Gemini's own tools an agent may name; the rest are functions and MCP servers."""
+
+
+def _tool_type(tool: JsonValue) -> JsonValue:
+    return tool.get("type") if isinstance(tool, dict) else None
+
+
 def compile_agent(
     spec: AgentSpec,
     *,
@@ -681,11 +704,7 @@ def compile_agent(
         for tool in spec.tools or ():
             if tool.permission != "auto":
                 refuse("tool_confirmation")
-            if tool.kind == "builtin" and tool.name in (
-                "code_execution",
-                "google_search",
-                "url_context",
-            ):
+            if tool.kind == "builtin" and tool.name in BUILTIN_TOOLS:
                 tools.append({"type": tool.name})
             elif tool.kind == "mcp_toolset" and any(
                 connection.name == tool.name for connection in spec.mcp_servers or ()
@@ -842,13 +861,22 @@ class GeminiSessions(Base):
         self._check(scope, spec.agent, "agent")
         if spec.resources or spec.state_mode != "continue" or initial is not None:
             refuse("session_resources", "initial_input_or_fresh_state")
-        ext = spec.extensions.get("gemini.session")
-        if set(spec.extensions) != {"gemini.session"} or ext is None:
+        ext = spec.extensions.get(SESSION_NAMESPACE)
+        if set(spec.extensions) != {SESSION_NAMESPACE} or ext is None:
             refuse("gemini.session")
         if ext.version != 1:
             raise ExtensionVersionError("gemini.session", ext.version, (1,))
-        if set(ext.value) != {"thread", "binding_id"}:
-            raise ValueError("gemini.session accepts only thread and binding_id")
+        if (
+            not {"thread", "binding_id"}
+            <= set(ext.value)
+            <= {
+                "thread",
+                "binding_id",
+                WITHHOLD_BUILTINS,
+            }
+            or ext.value.get(WITHHOLD_BUILTINS, True) is not True
+        ):
+            raise ValueError("gemini.session accepts thread, binding_id and withhold_builtins")
         thread = ThreadRef.model_validate(ext.value["thread"])
         if thread.channel.tenant_id != scope.tenant_id:
             raise ScopeViolation(thread.thread_id, "thread is outside tenant scope")
@@ -1166,6 +1194,66 @@ class GeminiSessions(Base):
             if delay is not None:
                 await asyncio.sleep(random.uniform(delay / 2, delay))
         return False
+
+    async def place_file(
+        self, scope: Scope, ref: ResourceRef, path: str, content: bytes | None
+    ) -> bool:
+        """Put a private file at this workspace path before the next send; False: not there.
+
+        Never in the environment config, which interactions echo and the record keeps;
+        only its hash is recorded, so an unchanged file is not sent again. A first
+        turn's environment is made here, as `_prepare` makes one, where its sources
+        allow. `None` empties a file placed before. Snapshots never offer it as an output.
+        """
+        environments = (
+            self._transport if isinstance(self._transport, EnvironmentTransport) else None
+        )
+        if environments is None or self._max_output_tokens is not None:
+            return False
+        directory, name = posixpath.split(relative_path(path))
+        async with self._storage.read(session_keys(ref.id)) as records:
+            record = self._record(records, scope, ref)
+            environment_id, placed = record.environment_id, record.placed.get(path)
+            config, fresh = self._environment_config(record), record.current is None
+        if content is None and (placed is None or environment_id is None):
+            return False
+        mark = f"{environment_id}:{hashlib.sha256(content or b'').hexdigest()}"
+        if placed == mark:
+            return content is not None
+        if environment_id is None:
+            if not fresh or not (self._plain_sources(config) and self._valid_network(config)):
+                return False
+            try:
+                made = await environments.create_environment(config)
+            except ProviderError as error:
+                if error.retryable:
+                    raise
+                log.warning("gemini_environment_create_refused category=%s", error.category)
+                return False
+            async with self._storage.transaction(session_keys(ref.id, lock=True)) as records:
+                record = self._record(records, scope, ref)
+                saved = (
+                    record.environment_id is None
+                    and record.current is None
+                    and self._environment_config(record) == config
+                )
+                if saved:
+                    record.environment_id = made
+                    record.workspace_expires_at = now() + timedelta(days=7)
+                environment_id = record.environment_id
+            if not saved:
+                await self._discard(environments, made)
+            if environment_id is None:
+                return False
+            return await self.place_file(scope, ref, path, content)
+        archive = file_archive({name: content or b""}, mode=0o600)
+        await environments.upload_archive(environment_id, directory, archive, overwrite=True)
+        async with self._storage.transaction(session_keys(ref.id, lock=True)) as records:
+            record = self._record(records, scope, ref)
+            if record.environment_id != environment_id:
+                return False
+            record.placed[path] = mark
+        return content is not None
 
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Session:
         return await self.retrying(lambda: self._retrieve(scope, ref))

@@ -18,7 +18,7 @@ from daimon.core.ops_catalog import OpsArea, OpsCode, OpsSeverity
 from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.support_rows import SupportEscalationRow as SupportEscalationRow
 from daimon.core.windows import BudgetWindow as BudgetWindow
-from mux.contracts.config import CapabilityRequirement, ThreadMode
+from mux.contracts.config import DEFAULT_BACKEND, CapabilityRequirement, ThreadMode
 from mux.contracts.ids import PROVIDERS, Provider, Scope, SkillRef
 from mux.contracts.profile import Capability, Effort
 from mux.contracts.resources import (
@@ -204,6 +204,7 @@ class TenantRow(BaseModel):
     turn_cap: int | None = None
     last_reconcile_error: str | None = None
     archived_at: datetime | None = None
+    retired_at: datetime | None = None
     registered_at: datetime
     created_at: datetime
 
@@ -265,6 +266,8 @@ class SandboxPin:
     environment_id: str
     #: Environments are edited in place; their `updated_at` is their revision.
     environment_updated_at: datetime
+    #: The provider the routine ran on when opted in; another needs a new opt-in.
+    provider: str = DEFAULT_BACKEND
 
 
 @dataclass(frozen=True)
@@ -274,6 +277,8 @@ class AgentSandboxPin:
     agent_id: str
     #: The environment's `daimon` name, resolved at each fire; edits to it are not drift.
     environment_name: str
+    #: The provider the agent ran on when opted in; another needs a new opt-in.
+    provider: str = DEFAULT_BACKEND
 
 
 AnySandboxPin = SandboxPin | AgentSandboxPin
@@ -286,10 +291,16 @@ _ROUTINE_PIN: Final = TypeAdapter(SandboxPin)
 
 
 def pin_json(pin: AnySandboxPin) -> dict[str, JsonValue]:
-    """A pin as its feature value and the change record keep it."""
-    if isinstance(pin, AgentSandboxPin):
-        return _AGENT_PIN.dump_python(pin, mode="json")
-    return _ROUTINE_PIN.dump_python(pin, mode="json")
+    """A pin as its feature value and the change record keep it; Anthropic is unnamed,
+    as in every pin stored before others existed."""
+    data: dict[str, JsonValue] = (
+        _AGENT_PIN.dump_python(pin, mode="json")
+        if isinstance(pin, AgentSandboxPin)
+        else _ROUTINE_PIN.dump_python(pin, mode="json")
+    )
+    if data.get("provider") == DEFAULT_BACKEND:
+        del data["provider"]
+    return data
 
 
 def stored_pin(row: FeatureValueRow) -> AnySandboxPin | None:
@@ -1345,6 +1356,7 @@ class TurnOriginRow(BaseModel):
     helper_key: str | None = None
     own_dm_reach: bool = False
     reach_read: bool = False
+    public_thread: bool = False
 
     @property
     def session_thread_id(self) -> str:

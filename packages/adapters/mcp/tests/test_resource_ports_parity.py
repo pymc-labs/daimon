@@ -76,6 +76,15 @@ MESSAGE = [{"type": "user.message", "content": [{"type": "text", "text": 'hi "ä¸
 ECHO = {"data": [{"id": "accepted", "type": "user.message", "processed_at": None}]}
 
 
+# Where a turn stands is read from its newest status event of any kind.
+_STATUS_EVENTS = [
+    "session.status_idle",
+    "session.status_running",
+    "session.status_rescheduled",
+    "session.status_terminated",
+]
+
+
 def script(replies: list[tuple[str, str, int, dict[str, Any]]]) -> ScriptedTransport:
     return ScriptedTransport(
         deque(
@@ -402,13 +411,14 @@ def host_guards(monkeypatch: pytest.MonkeyPatch) -> list[Scope]:
     # A send's confirmation worker polls on its own schedule; its reads are
     # covered in test_agent_chat_safety.py, not in this request-order script.
     monkeypatch.setattr(agent_chat, "watch_turn", MagicMock())
-    # The settle request written before a headless send is database-only; its own
-    # tests cover it, and it sends no provider request.
+    # The settle request and the driver record written before a headless send are
+    # database-only; their own tests cover them, and they send no provider request.
     settle = agent_chat.session_settle_state
     requested = (None, dt.datetime(2026, 1, 1, tzinfo=dt.UTC))
     monkeypatch.setattr(settle, "request_settle", AsyncMock(return_value=requested))
     monkeypatch.setattr(settle, "withdraw_settle_request", AsyncMock())
     monkeypatch.setattr(settle, "name_settle_turn", AsyncMock())
+    monkeypatch.setattr(settle, "record_agent_chat_driver", AsyncMock())
     return scopes
 
 
@@ -446,7 +456,7 @@ async def test_agent_session_tools_keep_ownership_then_mutation_order(
             await _archive_my_session_impl(runtime(after), AUTH, "session")  # pyright: ignore[reportPrivateUsage]
         else:
             await before.beta.sessions.events.list(
-                "session", order="desc", limit=1, types=["session.status_idle"]
+                "session", order="desc", limit=1, types=_STATUS_EVENTS
             )
             actual = await _get_session_impl(runtime(after), AUTH, "session")  # pyright: ignore[reportPrivateUsage]
             assert actual == sessions.SessionInfo.from_ma(expected)
@@ -622,7 +632,7 @@ async def test_public_continue_turn_keeps_ownership_recheck_send_and_clock(
         await before.beta.sessions.retrieve("session")
         await before.beta.agents.retrieve("agent")
         await before.beta.sessions.events.list(
-            "session", order="desc", limit=1, types=["session.status_idle"]
+            "session", order="desc", limit=1, types=_STATUS_EVENTS
         )
         await before.beta.sessions.events.send("session", events=cast(Any, MESSAGE))
 

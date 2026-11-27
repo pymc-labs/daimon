@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Literal
 
 from daimon.core.access_policy import DM_SCOPE_PREFIX
 from daimon.core.platform_words import Place, turn_words, works_in_sentence
+from daimon.core.self_knowledge import controls_hint
 from daimon.core.stores.domain import (
     CHAT_PLATFORMS,
     ChatPlatform,
@@ -90,6 +91,33 @@ def execution_origin(
     finally:
         current_execution_flags.reset(flags_token)
         current_execution_origin_id.reset(token)
+
+
+#: The claim owner of the wake whose turn this task runs, until that turn's origin takes it.
+_wake_owner: ContextVar[list[str] | None] = ContextVar("wake_owner", default=None)
+
+
+@contextmanager
+def wake_turn(owner: str) -> Iterator[None]:
+    """Run a started wake's turn: its origin takes the claim's ``owner`` as its id.
+
+    A dispatcher claims a wake row under a fresh owner (`continuity.wakes.claim_wake`),
+    kept on the row as ``lease_owner``. The first origin `turn_origin` creates inside
+    this block gets that owner as its id, so the row names the exact turn it started,
+    and no other turn. A read that only a wake's own turn may make checks the pair
+    (`daimon.core.stores.compute_tasks.wake_turn_of`). A turn started outside the
+    block, or a second origin inside it, gets an ordinary id and no such read.
+    """
+    token = _wake_owner.set([owner])
+    try:
+        yield
+    finally:
+        _wake_owner.reset(token)
+
+
+def _wake_origin_id() -> uuid.UUID | None:
+    owner = _wake_owner.get()
+    return uuid.UUID(owner.pop()) if owner else None
 
 
 class SessionState(BaseModel):
@@ -207,6 +235,7 @@ async def turn_origin(
     helper_of: uuid.UUID | None = None,
     helper_key: str | None = None,
     own_dm_reach: bool = False,
+    public_thread: bool = False,
 ) -> AsyncIterator[TurnOriginRow]:
     """Commit a distinct origin for this execution and remove it after execution.
 
@@ -228,6 +257,7 @@ async def turn_origin(
     `own_dm_reach` is the admission's decision that the turn may read a limited room its
     person can read themselves: true only for an interactive owner DM turn and a routine the
     scheduler fires into its owner's DM. A helper's turn never has it.
+    `public_thread` is the platform's word that `thread_id` is a public thread.
     """
     now = datetime.now(UTC)
     async with sessionmaker.begin() as session:
@@ -255,6 +285,9 @@ async def turn_origin(
             helper_of=helper_of,
             helper_key=helper_key,
             own_dm_reach=own_dm_reach,
+            public_thread=public_thread,
+            # A helper works inside the turn that asked it: never a wake's own turn.
+            origin_id=None if helper_of is not None else _wake_origin_id(),
         )
         if message_text is not None:
             if not queued_message:
@@ -329,6 +362,7 @@ def render_turn_origin(
     web: TenantLinks | None = None,
     features: FeatureSnapshot | None = None,
     page: PageOrigin | None = None,
+    daimon_tools: bool = True,
 ) -> str:
     """Render server-provided location and identity separately from user history.
 
@@ -372,7 +406,9 @@ def render_turn_origin(
     is the person's own words — it is truncated to `MAX_REQUESTED_WORK_CHARS`
     and JSON-encoded like everything else, never interpolated into the prose.
 
-    `features` sets `web_awareness`; None renders everything.
+    `features` sets `web_awareness`, and `self_knowledge` adds its hint (`controls_hint`) where
+    it is On, the turn is not held and the agent has Daimon's tools (`daimon_tools`, from
+    `SessionToolset`); None renders everything but that hint.
 
     `page` is the artifact page the message was sent from, for a viewer's ask thread.
     """
@@ -424,6 +460,12 @@ def render_turn_origin(
         web = None
     if page is not None:
         controls["page"] = page.model_dump()
+    knows = None if features is None else features.features.get("self_knowledge")
+    held = origin.sender_foreign or origin.shared_channel
+    if hint := controls_hint(
+        on=knows is not None and knows.on, held=held, daimon_tools=daimon_tools
+    ):
+        controls["self_knowledge"] = hint
     if handoff is not None:
         controls["handoff"] = {
             "from_name": handoff.from_name,

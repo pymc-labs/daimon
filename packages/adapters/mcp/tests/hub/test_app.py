@@ -36,6 +36,7 @@ _HUB_TOOLS = {
     "ask",
     "start_turn",
     "continue_turn",
+    "await_turn",
     "get_session",
     "list_events",
     "list_my_sessions",

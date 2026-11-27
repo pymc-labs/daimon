@@ -68,6 +68,7 @@ async def test_no_hub_caller_reaches_a_home_channel(hub: _Hub, live_admin: bool)
         ("list_my_sessions", {}),
         ("list_events", {"handle": "ses_theirs_home"}),
         ("get_session", {"handle": "ses_theirs_home"}),
+        ("await_turn", {"handle": "ses_theirs_home"}),
         ("ask", {"message": "what did the channel decide?"}),
     ):
         result = await hub.call(tool, **args)

@@ -1,0 +1,33 @@
+{
+  "description": [
+    "Replace the one occurrence of `old_str` in a memory file with `new_str`."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "new_str": {
+        "type": "string"
+      },
+      "old_str": {
+        "type": "string"
+      },
+      "origin_context_id": {
+        "type": "string"
+      },
+      "path": {
+        "type": "string"
+      },
+      "personal": {
+        "default": false,
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "origin_context_id",
+      "path",
+      "old_str",
+      "new_str"
+    ],
+    "type": "object"
+  }
+}

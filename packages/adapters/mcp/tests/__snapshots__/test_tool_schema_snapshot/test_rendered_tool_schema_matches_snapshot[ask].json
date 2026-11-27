@@ -1,0 +1,39 @@
+{
+  "description": [
+    "Ask one question and wait for the final answer and any chart images. Starts a",
+    "persistent turn, waits up to about 120 seconds for it to end, and",
+    "returns the final text plus a resumable handle. A reply that takes longer",
+    "ends this call with an error naming the handle while the agent keeps",
+    "working: wait for it with ``await_turn``. Callers need current",
+    "membership and invoker-policy access before reply delivery where required. Chart",
+    "images are embedded by default; short-lived download links are added when private",
+    "artifact storage is configured. Pass ``handle`` from a previous result to",
+    "continue that conversation instead of starting a new one. Show the person",
+    "``monitoring`` when it is set; the text result leads with it.",
+    "Use a handle opened through agent chat. Platform conversations and",
+    "older sessions without headless creation provenance cannot be driven here."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "handle": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "message": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "message"
+    ],
+    "type": "object"
+  }
+}

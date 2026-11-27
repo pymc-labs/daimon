@@ -8,6 +8,7 @@ No try/except -- exceptions propagate to the adapter boundary.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 
 from daimon.core._models import ThreadModelConsent, ThreadModelSetting
 from daimon.core.stores.domain import AgentBackendRevision
@@ -52,6 +53,30 @@ async def get_thread_choice(
         return None
     provider = _PROVIDER.validate_python(row.provider or DEFAULT_BACKEND)
     return ModelRef(provider=provider, id=row.model)
+
+
+async def get_thread_choices(
+    session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, thread_ids: Sequence[str]
+) -> dict[str, ModelRef]:
+    """`get_thread_choice` for many conversations in one read; one with no pick is absent."""
+    if not thread_ids:
+        return {}
+    rows = await session.execute(
+        select(
+            ThreadModelSetting.thread_id, ThreadModelSetting.model, ThreadModelSetting.provider
+        ).where(
+            ThreadModelSetting.tenant_id == tenant_id,
+            ThreadModelSetting.platform == platform,
+            ThreadModelSetting.thread_id.in_(list(thread_ids)),
+            ThreadModelSetting.model.is_not(None),
+        )
+    )
+    return {
+        row.thread_id: ModelRef(
+            provider=_PROVIDER.validate_python(row.provider or DEFAULT_BACKEND), id=row.model
+        )
+        for row in rows
+    }
 
 
 async def get_thread_effort(

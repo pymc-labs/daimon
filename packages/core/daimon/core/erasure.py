@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Literal
 
 from daimon.core.stores import (
+    account_records,
     accounts,
     agent_posts,
     artifact_pages,
@@ -52,8 +53,10 @@ from daimon.core.stores import message_feedback as feedback
 from daimon.core.stores import microsoft_user_tokens as microsoft
 from daimon.core.stores import platform_names as names
 from daimon.core.stores import selfhosted_resources as selfhosted
+from daimon.core.stores import session_settle_state as settle_state
 from daimon.core.stores import support_escalation as escalations
 from daimon.core.stores import teams_message_admissions as teams_messages
+from daimon.core.stores.account_records import AccountTable
 from daimon.core.stores.domain import CliPrincipalRow, PlatformPrincipalRow
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -167,6 +170,44 @@ def by_requester(key: str, count: AccountFn, erase: AccountFn) -> Erasable:
         return await erase(session, platform_user_id=_requester(p), tenant_id=p.tenant_id)
 
     return Erasable(key, count=total, principal=one)
+
+
+def by_account_record(key: AccountTable) -> Erasable:
+    """Rows naming the account by id in any tenant, with no foreign key to cascade them."""
+
+    async def count(session: AsyncSession, subject: Subject) -> int:
+        return await account_records.count_for_account(
+            session, table=key, account_id=subject.account_id
+        )
+
+    async def erase(session: AsyncSession, subject: Subject) -> int:
+        return await account_records.delete_for_account(
+            session, table=key, account_id=subject.account_id
+        )
+
+    return Erasable(key, count=count, account=erase)
+
+
+def _credential_requests() -> Erasable:
+    """By requester in each principal's tenant, then any other request naming the account."""
+    base = by_requester(
+        "credential_requests",
+        credential_requests.count_credential_requests_for_platform_user,
+        credential_requests.delete_credential_requests_for_platform_user,
+    )
+    rest = by_account_record("credential_requests")
+
+    async def count(session: AsyncSession, subject: Subject) -> int:
+        assert base.count is not None
+        keys = {(p.tenant_id, _requester(p)) for p in subject.principals}
+        return await base.count(session, subject) + await account_records.count_for_account(
+            session,
+            table="credential_requests",
+            account_id=subject.account_id,
+            requester_keys=keys,
+        )
+
+    return replace(base, count=count, account=rest.account)
 
 
 def _tpu(fn: AccountFn) -> UserFn:
@@ -389,11 +430,12 @@ ERASABLE: tuple[Erasable, ...] = (
         count=_te(routines.count_routines_for_principal),
         example=_first_routine,
     ),
-    by_requester(
-        "credential_requests",
-        credential_requests.count_credential_requests_for_platform_user,
-        credential_requests.delete_credential_requests_for_platform_user,
-    ),
+    _credential_requests(),
+    by_account_record("task_continuations"),
+    by_account_record("turn_outcomes"),
+    by_account_record("thread_sessions"),
+    by_account_record("switch_cards"),
+    by_account_record("long_job_cancel_audit"),
     by_user(
         "secret_shares",
         _tpu(secret_shares.delete_shares_for_platform_user),
@@ -446,6 +488,15 @@ ERASABLE: tuple[Erasable, ...] = (
         count=_tpu(agent_posts.count_requester),
     ),
     by_user("host_call_cards", _tpu(host_call_cards.delete_for_platform_user), total=_count_cards),
+    # An agent-chat session keeps its driver record, which names no one; where it came
+    # from names its creator's account, so that is cleared and the session is not found.
+    by_account(
+        "agent_chat_session_links",
+        (
+            settle_state.count_agent_chat_provenance_for_account,
+            settle_state.erase_agent_chat_provenance_for_account,
+        ),
+    ),
     Erasable(
         "user_skills",
         count=_count_skills,

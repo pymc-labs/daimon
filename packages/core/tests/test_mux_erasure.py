@@ -29,7 +29,12 @@ from daimon.core.stores import selfhosted_usage as billing_contexts
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.stores.tenants import delete_tenant, get_tenant, set_provision_status
 from daimon.core.usage_outbox_drain import drain_pending_usage
-from daimon.testing.factories import make_account, make_platform_principal, make_tenant
+from daimon.testing.factories import (
+    make_account,
+    make_platform_principal,
+    make_routine,
+    make_tenant,
+)
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding
@@ -505,7 +510,11 @@ async def _with_an_openai_generation(world: World) -> None:
             "generation": 2,
             "provider": "openai",
             "profile": "openai.agents_sdk",
-            "native_refs": {"session": "session-openai-a", "account_scope": "scope-1"},
+            "native_refs": {
+                "session": "session-openai-a",
+                "account_scope": "scope-1",
+                "env_file": "file:keys",
+            },
         }
     )
     await world.store.put_binding(openai, expected_generation=1)
@@ -529,6 +538,7 @@ async def test_the_erased_accounts_private_provider_sessions_go_to_the_provider_
     }, "only A's private sessions, never B's or the shared one"
     openai = next(i for i in sent if i.provider == "openai")
     assert (openai.account_scope_id, openai.profile) == ("scope-1", "openai.agents_sdk")
+    assert openai.native_refs["env_file"] == "file:keys", "purge can delete its keys file"
 
 
 async def test_a_provider_outage_never_fails_the_erasure(world: World) -> None:
@@ -1077,3 +1087,80 @@ async def test_the_fence_ignores_ids_that_are_not_accounts(sm: Factory) -> None:
     async with sm() as session, session.begin():
         await mux_erasure.fence_writers(session, None, "operator", "selfhosted-billing:b")
         await mux_erasure.fence_writers(session, str(uuid.uuid4()))
+
+
+async def _age(sm: Factory, label: str) -> None:
+    """Make `label`'s conversation idle for 200 days."""
+    old = NOW - timedelta(days=200)
+    async with sm() as session, session.begin():
+        await session.execute(
+            text("UPDATE provider_binding SET created_at = :t WHERE binding_id = :b"),
+            {"t": old, "b": f"binding-{label}"},
+        )
+        await session.execute(
+            text("UPDATE journal_session SET last_appended_at = :t WHERE binding_id = :b"),
+            {"t": old, "b": f"binding-{label}"},
+        )
+
+
+async def test_idle_slots_go_whole_and_active_or_held_ones_stay(sm: Factory) -> None:
+    """A writer holding a journal session is skipped, not waited on, so no lock cycle forms."""
+    tenant_id = uuid.uuid4()
+    person = await make_person(sm, tenant_id, "idle-sweep")
+    store = PostgresStateStore(sm)
+    for label in ("idle", "active", "held"):
+        await converse(store, person, label, thread(tenant_id, label), release_lease=True)
+    await _age(sm, "idle")
+    await _age(sm, "held")
+    cutoff = NOW - timedelta(days=90)
+
+    async with sm() as writer, writer.begin():
+        await writer.execute(
+            text("SELECT 1 FROM journal_session WHERE binding_id = 'binding-held' FOR UPDATE")
+        )
+        async with sm() as session, session.begin():
+            erased = await asyncio.wait_for(
+                mux_erasure.delete_idle_slots(
+                    session, tenant_id=tenant_id, idle_before=cutoff, limit=10
+                ),
+                10,
+            )
+
+    assert erased.slots == 1, "only the idle slot went; the held one was skipped, not waited on"
+    assert erased.journal_events == 1, "the idle slot's journal went with it"
+    slots = set(await rows(sm, "provider_binding_slot", "true"))
+    assert len(slots) == 2, "the active and held slots stay"
+    assert await count(sm, "journal", "session_id = 'session-idle'") == 0, "no events left behind"
+    assert await count(sm, "journal", "session_id = 'session-active'") == 1, "active journal kept"
+
+    async with sm() as session, session.begin():
+        later = await mux_erasure.delete_idle_slots(
+            session, tenant_id=tenant_id, idle_before=cutoff, limit=10
+        )
+    assert later.slots == 1, "the held slot goes on the next sweep, once the writer is done"
+    assert await count(sm, "journal", "session_id = 'session-held'") == 0, "its journal went too"
+    assert await count(sm, "journal", "session_id = 'session-active'") == 1, "active still kept"
+
+
+async def test_an_idle_slot_a_routine_still_posts_into_stays(sm: Factory) -> None:
+    tenant_id = uuid.uuid4()
+    person = await make_person(sm, tenant_id, "routine-sweep")
+    store = PostgresStateStore(sm)
+    for label in ("idle", "routed"):
+        await converse(store, person, label, thread(tenant_id, label), release_lease=True)
+        await _age(sm, label)
+    async with sm() as session, session.begin():
+        tenant = await get_tenant(session, tenant_id)
+        routine = await make_routine(session, tenant=tenant)
+        await session.execute(
+            text(
+                "UPDATE routines SET destination_kind = 'thread', destination_id = 'routed' "
+                "WHERE id = :id"
+            ),
+            {"id": routine.id},
+        )
+        erased = await mux_erasure.delete_idle_slots(
+            session, tenant_id=tenant_id, idle_before=NOW - timedelta(days=90), limit=10
+        )
+    assert erased.slots == 1, "only the slot no routine posts into goes"
+    assert await count(sm, "journal", "session_id = 'session-routed'") == 1, "its context stays"

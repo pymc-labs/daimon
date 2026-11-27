@@ -110,6 +110,8 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
         assert "--ci-shard-suite=${{ matrix.suite }}" in shard_options[0]
     assert set(deploy["needs"]) == {
         "lint",
+        "conventions",
+        "staging-quiet",
         "shard-check",
         "pytest-db",
         "pytest-discord",
@@ -298,19 +300,21 @@ def test_defaults_verify_qa_exception_is_staging_only() -> None:
     assert "defaults verify $verify_tenant_arg" in script
 
 
-def test_prebuilt_staging_is_pinned_and_production_rebuilds() -> None:
+def test_prebuilt_staging_is_pinned_and_production_promotes_the_soaked_digests() -> None:
     steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
     select = next(step for step in steps if step.get("id") == "images")
     assert "Prebuilt digests are restricted to staging" in select["run"]
+    assert "Soaked digests are promoted only to production" in select["run"]
     assert "^sha256:[0-9a-f]{64}$" in select["run"]
     assert "gcloud artifacts docker images describe" in select["run"]
     assert "Prebuilt digests need the selective main CI path" in select["run"]
+    assert select["env"]["SOURCE_REGISTRY"] == "${{ inputs.source_registry }}"
     builds = {
         step["name"]: without_freshness(step["if"])
         for step in steps
         if step.get("name", "").startswith("Build + push")
     }
-    # A build lands on the tag the images step chose, never straight on the short SHA.
+    # A build lands on the tag the images step chose, never straight on the SHA tag.
     assert {
         step["with"]["tags"] for step in steps if step.get("name", "").startswith("Build + push")
     } == {f"${{{{ steps.images.outputs.{name} }}}}" for name in ("daimon", "notebook", "report")}
@@ -322,10 +326,50 @@ def test_prebuilt_staging_is_pinned_and_production_rebuilds() -> None:
             ("report-host", "report"),
         )
     }
-    promote = _workflow("promote.yml")["jobs"]
-    assert promote["deploy"]["needs"] == "validate"
-    assert promote["deploy"]["with"]["environment"] == "production"
-    assert "daimon_digest" not in promote["deploy"]["with"]
+    crane = next(step for step in steps if step.get("uses", "").startswith("imjasonh/setup-crane@"))
+    assert steps.index(crane) < steps.index(select), "crane must be on the path before the copy"
+    assert without_freshness(crane["if"]) == (
+        "inputs.environment == 'production' && inputs.source_registry != ''"
+    )
+    smoke = next(step for step in steps if step.get("name") == "Post-deploy smoke turn")
+    assert "inputs.environment" not in smoke["if"], "production promotes run the smoke turn too"
+
+    promote = _workflow("promote.yml")
+    assert promote["run-name"] == "Promote ${{ inputs.sha }}", "the release proposal reads the SHA"
+    validate, deploy = promote["jobs"]["validate"], promote["jobs"]["deploy"]
+    assert deploy["needs"] == "validate"
+    assert deploy["with"]["environment"] == "production"
+    digests = ("daimon_digest", "notebook_digest", "report_digest")
+    for name in digests:
+        assert deploy["with"][name] == f"${{{{ needs.validate.outputs.{name} }}}}"
+    assert deploy["with"]["source_registry"] == "${{ needs.validate.outputs.registry }}"
+    assert set(validate["outputs"]) == {*digests, "registry"}
+
+
+def test_every_promote_ends_with_a_production_canary_judged_by_the_reply() -> None:
+    """The canary's production identity has no VM access, so it must skip the outcome read."""
+    verify = _workflow("promote.yml")["jobs"]["verify"]
+    assert verify["needs"] == "deploy"
+    assert verify["uses"] == "./.github/workflows/canary.yml"
+    assert verify["with"]["environments"] == '["production-canary"]'
+    # GitHub would create a missing environment with no branch policy.
+    assert verify["if"] == "vars.PRODUCTION_CANARY == 'true'"
+    job = _workflow("canary.yml")["jobs"]["canary"]
+    assert job["environment"] == "${{ matrix.environment }}", "auth comes from the environment"
+    assert "vars.PRODUCTION_CANARY != 'true'" in job["strategy"]["matrix"]["environment"]
+    for step in job["steps"][1:]:
+        assert "steps.ready.outputs.ready == 'true'" in step["if"], (
+            f"{step.get('name') or step['uses']}: a leg without its variables must skip, not page"
+        )
+    ready = job["steps"][0]
+    assert ready["env"]["CALLED"] == "${{ inputs.environments && 'true' || '' }}"
+    assert 'if [ -n "$CALLED" ]' in ready["run"], "a promote's canary must fail, not skip"
+    assert ready["run"].index('if [ -n "$CALLED" ]') < ready["run"].index("::warning::")
+    run = next(step for step in job["steps"] if step.get("name") == "One turn per backend")
+    assert run["env"]["NO_OUTCOMES"] == (
+        "${{ matrix.environment != 'staging' && '--no-outcomes' || '' }}"
+    )
+    assert "$NO_OUTCOMES" in run["run"]
 
 
 _DIGEST = {
@@ -339,14 +383,19 @@ _RECORDED = {
 }
 _TAGS = {name: f"example/{name}:abc1234" for name in ("daimon", "notebook", "report")}
 _RUN_TAG = "deploy-7-1"
+_BUILT = {
+    name: f"example.test/test-project/images/{pkg}:{_RUN_TAG}"
+    for name, pkg in (("daimon", "daimon"), ("notebook", "notebook-host"), ("report", "report-host"))
+}  # fmt: skip
 
 
 @pytest.mark.parametrize(
     ("environment", "selective", "digests", "changed", "expected"),
     [
-        # Manual and production deploys build every image from source.
-        ("staging", False, {}, (), {"prebuilt": "false", **_TAGS}),
-        ("production", False, {}, (), {"prebuilt": "false", **_TAGS}),
+        # Manual and rebuild deploys build every image from source, under a run tag:
+        # only the post-gate step may write the SHA tag promote.yml trusts.
+        ("staging", False, {}, (), {"prebuilt": "false", **_BUILT}),
+        ("production", False, {}, (), {"prebuilt": "false", **_BUILT}),
         ("staging", False, _DIGEST, (), None),
         ("production", True, _DIGEST, (), None),
         # Main CI: this run's candidates, else the deployed image, else a build.
@@ -472,6 +521,116 @@ def test_unusable_deployed_image_is_rebuilt(tmp_path: Path, recorded: str, serve
     outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert outputs["build_daimon"] == "true"
     assert outputs["daimon"] == f"example.test/test-project/images/daimon:{_RUN_TAG}"
+
+
+_SOURCE = "example.test/staging-project/images"
+
+
+_SHA = "abc1234" + "0" * 33
+_MAIN = "1" * 40
+
+
+@pytest.mark.parametrize(
+    ("tagged", "release", "expected"),
+    [
+        (("daimon", "notebook-host", "report-host"), _MAIN, {
+            **{f"{name}_digest": _DIGEST[name] for name in _TAGS}, "registry": _SOURCE,
+        }),
+        (("daimon", "notebook-host"), _MAIN, None),
+        # A tag pushed by hand onto a build from a branch, or with no release at all.
+        (("daimon", "notebook-host", "report-host"), "2" * 40, None),
+        (("daimon", "notebook-host", "report-host"), "", None),
+    ],
+)  # fmt: skip
+def test_promote_resolves_the_soaked_digests_of_main_builds(
+    tmp_path: Path, tagged: tuple[str, ...], release: str, expected: dict[str, str] | None
+) -> None:
+    """A SHA without all three full-SHA tags, or a daimon image main did not build, fails
+    before reviewers are paged."""
+    steps = _workflow("promote.yml")["jobs"]["validate"]["steps"]
+    step = next(step for step in steps if step.get("id") == "soaked")
+    assert step["if"] == "inputs.rebuild != true", "rebuild needs no staging image"
+    digests = {"daimon": _DIGEST["daimon"], "notebook-host": _DIGEST["notebook"],
+               "report-host": _DIGEST["report"]}  # fmt: skip
+    cases = "".join(
+        f'    *"{_SOURCE}/{package}:{_SHA} "*) echo "{digests[package]}" ;;\n' for package in tagged
+    )
+    fake = (
+        f'gcloud() {{\n  case "$* " in\n    *configure-docker*) ;;\n{cases}    *) return 1 ;;\n  esac\n}}\n'
+        f'crane() {{ echo \'{{"config": {{"Env": ["DAIMON_RELEASE={release}"]}}}}\'; }}\n'
+        f'git() {{ [ "$*" = "merge-base --is-ancestor {_MAIN} {_SHA}" ]; }}\n'
+    )
+    output = tmp_path / "outputs"
+    env = {**os.environ, "GITHUB_OUTPUT": str(output), "SHA": _SHA, "REGISTRY": _SOURCE}
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", fake + step["run"]],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if expected is None:
+        assert result.returncode != 0, "a SHA main CI never tagged after its gates must not promote"
+        assert "registry=" not in (output.read_text() if output.exists() else "")
+        return
+    assert result.returncode == 0, result.stderr
+    assert dict(line.split("=", 1) for line in output.read_text().splitlines()) == expected
+
+
+@pytest.mark.parametrize(
+    ("environment", "served", "ok"),
+    [("production", True, True), ("production", False, False), ("staging", True, False)],
+)
+def test_production_copies_the_soaked_digests_instead_of_building(
+    tmp_path: Path, environment: str, served: bool, ok: bool
+) -> None:
+    """Each soaked image is copied under the SHA tag and used by the digest it soaked as."""
+    steps = _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
+    script = next(step["run"] for step in steps if step.get("id") == "images")
+    script = script.replace("${{ inputs.environment }}", environment)
+    script = script.replace("${{ vars.GCP_PROJECT_ID }}", "test-project")
+    for name, tag in _TAGS.items():
+        script = script.replace(f"${{{{ steps.tags.outputs.{name} }}}}", tag)
+    log = tmp_path / "calls"
+    fake = (
+        f'crane() {{ echo "crane $*" >> "{log}"; }}\n'
+        f'gcloud() {{ echo "gcloud $*" >> "{log}"; case "$*" in *images\\ describe*) '
+        f"{'echo ${5#*@}' if served else 'return 1'} ;; esac; }}\n"
+    )
+    output = tmp_path / "outputs"
+    env = {
+        **os.environ,
+        "GITHUB_OUTPUT": str(output),
+        "AR_HOST": "example.test",
+        "REPO": "images",
+        "SELECTIVE": "false",
+        "SOURCE_REGISTRY": _SOURCE,
+        **{f"{name.upper()}_DIGEST": digest for name, digest in _DIGEST.items()},
+    }
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", fake + script],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    outputs = output.read_text() if output.exists() else ""
+    if not ok:
+        assert result.returncode != 0, "only production takes soaked digests, and only served ones"
+        assert "prebuilt=" not in outputs
+        return
+    assert result.returncode == 0, result.stderr
+    assert dict(line.split("=", 1) for line in outputs.splitlines()) == {
+        "prebuilt": "false",
+        **{f"build_{name}": "false" for name in _TAGS},
+        **{name: f"example.test/test-project/images/{pkg}@{_DIGEST[name]}"
+           for name, pkg in (("daimon", "daimon"), ("notebook", "notebook-host"), ("report", "report-host"))},
+    }  # fmt: skip
+    copies = [line for line in log.read_text().splitlines() if line.startswith("crane")]
+    assert copies == [
+        f"crane copy {_SOURCE}/{pkg}@{_DIGEST[name]} {_TAGS[name]}"
+        for name, pkg in (("daimon", "daimon"), ("notebook", "notebook-host"), ("report", "report-host"))
+    ]  # fmt: skip
 
 
 _RECORD_STEP = "Record deployed image digests for VM boot"
@@ -869,3 +1028,66 @@ def test_the_tls_check_retries_a_blip_and_fails_a_stale_store(
     with pytest.raises(SystemExit) as stale:
         runpy.run_path(script, run_name="__main__")
     assert stale.value.code == 1, "a store that never handshakes still fails"
+
+
+def test_deploy_refuses_a_migration_main_never_added(tmp_path: Path) -> None:
+    """A branch commit main reached through a merge can hold a pre-rechain migration id."""
+    step = next(
+        s
+        for s in _workflow("deploy.yml")["jobs"]["deploy"]["steps"]
+        if s.get("name") == "Refuse migrations that are not on main"
+    )
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
+            cwd=tmp_path, check=True, capture_output=True, text=True,
+        ).stdout.strip()  # fmt: skip
+
+    def commit(*names: str, rename: tuple[str, str] | None = None) -> str:
+        versions = tmp_path / "packages/core/alembic/versions"
+        versions.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (versions / name).write_text(name)
+        if rename:
+            git("mv", *(f"packages/core/alembic/versions/{n}" for n in rename))
+        git("add", "-A")
+        git("commit", "-qm", "c")
+        return git("rev-parse", "HEAD")
+
+    git("init", "-qb", "main")
+    commit("0221_a.py")
+    git("checkout", "-qb", "feature")
+    stale = commit("0222_mine.py")
+    commit(rename=("0222_mine.py", "0223_mine.py"))
+    git("checkout", "-q", "main")
+    commit("0222_other.py")
+    git("merge", "-q", "--no-ff", "feature", "-m", "Merge pull request #1")
+    git("update-ref", "refs/remotes/origin/main", "main")
+
+    def guard(sha: str) -> int:
+        env = {**os.environ, "SHA": sha}
+        run = ["bash", "-e", "-c", step["run"]]
+        return subprocess.run(run, cwd=tmp_path, env=env, capture_output=True).returncode
+
+    assert guard(git("rev-parse", "main")) == 0, "main's own SHA deploys"
+    assert guard(stale) != 0, "0222_mine was rechained before the merge; main never added it"
+
+
+def test_staging_deploys_wait_out_a_quiet_window() -> None:
+    """A burst of merges deploys once: deploy-gcp waits for a job that sleeps from push time."""
+    jobs = _workflow("ci.yml")["jobs"]
+    quiet, deploy = jobs["staging-quiet"], jobs["deploy-gcp"]
+    assert quiet["if"] == deploy["if"], "the window runs exactly when the deploy does"
+    assert "needs" not in quiet, "it must start with the push, in parallel with the tests"
+    assert "staging-quiet" in deploy["needs"], "the deploy must wait for the window"
+    assert quiet["timeout-minutes"] <= 35, "the wait is bounded"
+    assert "cancel-in-progress" not in quiet.get("concurrency", {}), (
+        "cancelling turns older runs cancelled"
+    )
+    script = quiet["steps"][0]["run"]
+    assert "vars.STAGING_QUIET_MINUTES" in quiet["steps"][0]["env"]["QUIET"]
+    assert "${QUIET:-5}" in script, "the default window is 5 minutes"
+    assert jobs["docker-publish-candidate"].get("needs") is None, (
+        "the candidate image is not delayed"
+    )

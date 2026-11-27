@@ -180,6 +180,11 @@ class PurgeReport(BaseModel):
     dm_rules: int = 0
     dm_grant_users: int = 0
     credential_requests: int = 0
+    task_continuations: int = 0
+    turn_outcomes: int = 0
+    thread_sessions: int = 0
+    switch_cards: int = 0
+    long_job_cancel_audit: int = 0
     secret_shares: int = 0
     wizard_sessions: int = 0
     message_feedback: int = 0
@@ -191,6 +196,7 @@ class PurgeReport(BaseModel):
     support_settlers_cleared: int = 0
     daimon_admins: int = 0
     agent_post_requesters: int = 0
+    agent_chat_session_links: int = 0
     platform_user_names: int = 0
     teams_messages: int = 0
     microsoft_user_tokens: int = 0

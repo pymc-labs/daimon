@@ -24,6 +24,9 @@ class ComputeSession(BaseModel):
     agent_name: str
     source_metadata: dict[str, str] = Field(default_factory=dict)
     extension_keys: list[str] = Field(default_factory=list)
+    # The wake turns (origin ids, hex) that acted since the owner last ran a command or
+    # wrote a file here. Changed only under the session lock (`turn_may_act`).
+    wake_turns: list[str] = Field(default_factory=list)
     request_key: str
     app_name: str
     profile: str
@@ -104,3 +107,5 @@ class ComputeTask(BaseModel):
     created_at: datetime
     finished_at: datetime | None = None
     version: int = 0
+    # While the caller of an inline command still waits for it, the scheduler leaves it.
+    wait_until: datetime | None = None
