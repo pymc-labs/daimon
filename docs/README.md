@@ -16,9 +16,12 @@ server](https://daimon.decision.ai/) instead.
   install, then [Model providers](providers.md),
   [Operations](operations.md) and [Compute sessions](compute.md).
 - **Add a platform or tool:** [Slack](slack.md),
-  [Microsoft Teams](teams.md), the [web app](web.md), [GitHub](github.md),
+  [Microsoft Teams](teams.md), [GitHub](github.md),
   [MCP servers](mcp-servers.md) and the
   [Claude Code plugin](plugin.md).
+<!-- knowledge: web -->
+- **Use it in a browser:** the [web app](web.md).
+<!-- /knowledge -->
 - **Shape what it does:** [Defaults](defaults.md) for agents and skills,
   [Routines](routines.md) and [Watches](watches.md) for scheduled work,
   [Direct messages](direct-messages.md),
@@ -29,10 +32,14 @@ server](https://daimon.decision.ai/) instead.
 
 ## Understand it
 
+- [How Daimon works](how-daimon-works.md): the concepts, and where each is
+  covered.
 - [Architecture](architecture.md): the packages and how a message becomes a
   turn.
 - [Isolation](isolation.md), [Permissions](permissions.md) and
   [Admins](admins.md): who can see and do what.
+- [Approvals](approvals.md): when an agent asks before it writes.
+- [Helpers and handoffs](helpers.md): agents working together.
 - [Rooms with outside people](outside-people.md): which Discord rooms are
   contained or narrow, and what your own DM can read.
 - [Unattended turns](unattended.md): what runs with nobody watching.

@@ -299,6 +299,7 @@ async def test_list_my_sessions_rejects_a_daimon_id_outside_the_callers_tenants(
     ("tool", "arguments"),
     [
         ("get_session", {"handle": _THEIR_HANDLE}),
+        ("await_turn", {"handle": _THEIR_HANDLE}),
         ("list_events", {"handle": _THEIR_HANDLE}),
         ("continue_turn", {"handle": _THEIR_HANDLE, "message": "hi"}),
         ("ask", {"handle": _THEIR_HANDLE, "message": "hi"}),

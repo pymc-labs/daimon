@@ -1,0 +1,14 @@
+{
+  "description": [
+    "List the support limits for Ask a person, with credits used. Admin-only.",
+    "",
+    "``limits`` are places, workspace first, then agents, then channels; ``people``",
+    "are each person's own limits. Read ``summary`` back. With no limit, requests",
+    "use the default credits per person."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

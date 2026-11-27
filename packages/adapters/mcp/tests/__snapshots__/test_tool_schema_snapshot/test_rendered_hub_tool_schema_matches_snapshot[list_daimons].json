@@ -1,0 +1,15 @@
+{
+  "description": [
+    "List every Daimon you can reach on this platform, across all your workspaces.",
+    "",
+    "Call this first. ``id`` is what every other tool takes as ``daimon_id``;",
+    "``workspace`` tells you which workspace the Daimon lives in. Two Daimons may",
+    "share a ``name`` in different workspaces. ``monitoring``, when set, is a notice",
+    "to show the person before they ask that Daimon anything."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

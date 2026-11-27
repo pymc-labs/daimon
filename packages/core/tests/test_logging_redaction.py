@@ -76,7 +76,7 @@ def test_access_records_keep_positional_args_with_a_redacted_target() -> None:
         __file__,
         1,
         '%s - "%s %s HTTP/%s" %d',
-        ("127.0.0.1:1", "GET", f"/slack/file/{token}?code=abc&next=/x#frag", "1.1", 200),
+        ("203.0.113.7:4242", "GET", f"/slack/file/{token}?code=abc&next=/x#frag", "1.1", 200),
         None,
     )
 
@@ -87,6 +87,8 @@ def test_access_records_keep_positional_args_with_a_redacted_target() -> None:
     assert "abc" not in message and "frag" not in message
     assert "/slack/file/[redacted]?code=" in message
     assert message.endswith("200")
+    assert "203.0.113.7" not in message, "an access line must not name the client"
+    assert message.startswith("- - "), "the client slot stays, so uvicorn's formatter still fits"
 
 
 def test_install_log_redaction_quiets_httpx_and_is_idempotent() -> None:

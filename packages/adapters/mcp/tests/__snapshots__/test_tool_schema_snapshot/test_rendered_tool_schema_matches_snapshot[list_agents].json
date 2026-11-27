@@ -1,0 +1,50 @@
+{
+  "description": [
+    "List agents visible here, including their attached ``mcp_servers`` and ``skills``.",
+    "",
+    "Each agent says ``owned_by_you``: the caller owns it and may change it without",
+    "an admin, and ``owner``: who to ask about changing it (absent: admins only).",
+    "``mine=true`` lists only the caller's own agents (\"which agents do I",
+    "own?\"), wherever they answer, including ones that answer nowhere yet.",
+    "``mcp_servers`` and ``created_at`` are null for a caller who is neither an",
+    "admin nor its owner: setup details are for them, capabilities (name,",
+    "description, model, skills) are not. Members see the channel/thread",
+    "responders, agents explicitly allowed to run here, and their own agents;",
+    "other unrouted agents and other channels' agents are hidden.",
+    "Always pass this turn's ``origin_context_id`` to verify its location: without",
+    "it a member sees only their own agents. Admins retain their existing",
+    "visibility. ``page`` is reserved for pagination."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "mine": {
+        "default": false,
+        "type": "boolean"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "page": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

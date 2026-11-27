@@ -54,16 +54,20 @@ from daimon.adapters.mcp.tools._session_access import (
     sessions_outside_seals,
 )
 from daimon.adapters.mcp.tools.agent_chat import (
+    AWAIT_TURN_MAX_S,
     AgentDescription,
     _ask_impl,  # pyright: ignore[reportPrivateUsage]
     _ask_tool_result,  # pyright: ignore[reportPrivateUsage]
+    _await_turn_impl,  # pyright: ignore[reportPrivateUsage]
     _continue_turn_impl,  # pyright: ignore[reportPrivateUsage]
     _describe_agent_impl,  # pyright: ignore[reportPrivateUsage]
     _get_session_impl,  # pyright: ignore[reportPrivateUsage]
     _list_events_impl,  # pyright: ignore[reportPrivateUsage]
     _start_turn_impl,  # pyright: ignore[reportPrivateUsage]
+    _turn_news_result,  # pyright: ignore[reportPrivateUsage]
     _verify_agent_owns_session,  # pyright: ignore[reportPrivateUsage]
     agent_pin_names,
+    still_waiting,
 )
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core.access_policy import TenantAccessPolicy
@@ -394,8 +398,10 @@ def register_hub_tools(
         Runs as you, in that Daimon's workspace: it reads only what you can see
         and spends that workspace's credit. Pass ``handle`` from a previous
         result to continue the same conversation. Replies require current membership
-        and invoker-policy access at delivery. On timeout the error carries
-        the handle; resume with it rather than asking again.
+        and invoker-policy access at delivery. A reply that takes longer ends
+        this call with an error that carries the handle, and the Daimon keeps
+        working: wait for it with ``await_turn`` rather than asking again. For a
+        long job (a code review, a test run), use ``start_turn`` and ``await_turn``.
         Only handles opened through agent chat can be continued here; platform
         conversations and legacy sessions without this provenance are refused.
         """
@@ -421,8 +427,9 @@ def register_hub_tools(
     ) -> dict[str, str]:
         """Start a turn without waiting.
 
-        Returns ``{"handle": ...}`` for polling with ``get_session``; show the person
-        ``monitoring`` when it is set.
+        Returns ``{"handle": ...}``. Wait for the reply with ``await_turn``: it
+        returns when the Daimon says something or the turn ends, so there is
+        nothing to poll. Show the person ``monitoring`` when it is set.
         """
         auth, _, recheck = await _admitted(ctx, daimon_id, "start_turn")
         # A hub caller is a person, verified by their platform login.
@@ -434,6 +441,7 @@ def register_hub_tools(
     ) -> dict[str, str]:
         """Send a follow-up on an existing session without waiting.
 
+        Wait for the reply with ``await_turn``.
         On a session ``get_session`` reports ``paused`` with the hint to call
         ``continue_turn`` (a turn started here, waiting on tool confirmations
         after a restart), this resumes it first: the waiting calls are decided
@@ -450,10 +458,67 @@ def register_hub_tools(
             return await _continue_turn_impl(runtime, auth, handle, message, recheck=recheck)
 
     @mcp.tool
+    async def await_turn(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context,
+        daimon_id: str,
+        handle: str,
+        after: str | None = None,
+        wait_seconds: float = AWAIT_TURN_MAX_S,
+    ) -> ToolResult:
+        """Wait for news from the turn running on ``handle``, without polling.
+
+        Call this after ``start_turn`` or ``continue_turn``, and again each time
+        it returns ``running``. It returns as soon as one of these happens:
+
+        - the Daimon said something: ``status`` ``running``, the new text in
+          ``messages``. Pass ``cursor`` back as ``after`` on the next call;
+        - the turn ended: ``status`` ``idle``. The last of ``messages`` is the
+          final answer, with any chart images and links;
+        - the turn stopped and cannot go on: ``status`` ``paused``, and ``hint``
+          says why and what to do;
+        - the conversation is over: ``status`` ``terminated``;
+        - ``wait_seconds`` passed (at most about four minutes): ``status``
+          ``running`` with no new messages. Call it again.
+
+        A turn paused on tool confirmations nobody is answering is resumed by
+        this call, as ``continue_turn`` does. So a long job runs to its end
+        while you wait, with no ``get_session`` loop and no ``continue_turn``.
+        ``activity``, when set, names the tool call running now and for how
+        long. ``wait_seconds=0`` only reads where the turn stands: it waits
+        for nothing and resumes nothing.
+        Only your own conversations opened through agent chat can be waited on.
+        """
+        _, _, auth = await _identity(runtime, ctx, daimon_id)
+
+        async def resume() -> None:
+            admitted, subject, recheck = await _admitted(ctx, daimon_id, "continue_turn")
+            with hub_session_access(subject, "continue"):
+                await _verify_account_owns_session(runtime, admitted, handle)
+                await _continue_turn_impl(runtime, admitted, handle, None, recheck=recheck)
+
+        # The driver's tool, so the driver's access: an admin's read of someone
+        # else's conversation goes through `get_session` and `list_events`.
+        with hub_session_access(await load_hub_subject(runtime, auth), "continue"):
+            await _verify_account_owns_session(runtime, auth, handle)
+            return _turn_news_result(
+                await _await_turn_impl(
+                    runtime,
+                    auth,
+                    handle,
+                    after=after,
+                    wait_seconds=wait_seconds,
+                    resume=resume,
+                    on_tick=still_waiting(ctx),
+                )
+            )
+
+    @mcp.tool
     async def get_session(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, daimon_id: str, handle: str
     ) -> SessionInfo:
-        """Status of one session. Poll until ``idle`` before reading ``list_events``.
+        """Status of one session, read once. To wait for a turn, use ``await_turn``.
+
+        ``idle`` means the turn ended and ``list_events`` has its transcript.
 
         ``paused`` means the turn waits on tool confirmations; ``hint`` says
         whether its owner resumes it with ``continue_turn`` or it waits for an

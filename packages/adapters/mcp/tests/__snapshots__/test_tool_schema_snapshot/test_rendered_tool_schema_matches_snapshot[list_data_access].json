@@ -1,0 +1,11 @@
+{
+  "description": [
+    "List who may read what in the data sources: each scope with its holders, and the",
+    "workspace's people (names and account ids). Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

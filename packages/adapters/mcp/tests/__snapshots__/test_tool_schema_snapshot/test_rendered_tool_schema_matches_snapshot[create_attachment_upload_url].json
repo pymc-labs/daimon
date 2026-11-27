@@ -1,0 +1,42 @@
+{
+  "description": [
+    "Mint a one-time upload URL for a raw data file in a notebook/blog workspace.",
+    "",
+    "Produce the bytes in your sandbox (e.g. idata.to_netcdf(\"posterior.nc\")) then",
+    "PUT the file to upload_url with curl -sS -X PUT --data-binary @posterior.nc",
+    "\"<upload_url>\". This is the ONLY way to attach large data — base64 through a",
+    "tool argument cannot carry ~1 MB.",
+    "",
+    "name is the agent-visible filename (charset [A-Za-z0-9_][A-Za-z0-9_.-]{0,63},",
+    "no slash); it becomes data/<name> inside the notebook. slug must match the slug",
+    "you publish the notebook/blog under. Returns {upload_url, slug, upload_expires_at}.",
+    "Pass this turn's origin_context_id, as for create_notebook_upload_url."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "name": {
+        "type": "string"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "slug": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "slug",
+      "name"
+    ],
+    "type": "object"
+  }
+}

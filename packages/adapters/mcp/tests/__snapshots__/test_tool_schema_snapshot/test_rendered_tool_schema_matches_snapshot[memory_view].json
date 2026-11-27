@@ -1,0 +1,28 @@
+{
+  "description": [
+    "Read a memory file, or list the memory paths under a directory.",
+    "",
+    "Memory persists across conversations. `personal` selects the caller's own",
+    "memory instead of the agent's shared memory."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "type": "string"
+      },
+      "path": {
+        "default": "/",
+        "type": "string"
+      },
+      "personal": {
+        "default": false,
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

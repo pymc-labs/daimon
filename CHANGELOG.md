@@ -7,58 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **Coding keys, the hub and outside clients can read the skill library.** The workspace
-  feature `library_skills` (on by default, and idle until the library holds skills) adds
-  `list_library_skills` and `read_library_skill`; a scoped skill shows only to callers whose
-  data reads include its scope, and in chat only when everyone who can read the room holds
-  it. An agent or channel carrying a scoped skill loads it only in DMs, the web chat and
-  Discord rooms where everyone present holds its scope. Admins add a repository's skills and set a skill's scope on the web or in chat
-  (`add_library_repository`, `get_skill_scope`, `set_skill_scope`); declared `skill_repos`
-  add skills too ([Data sources](docs/data-sources.md)).
+- **A long job asked through agent chat runs to its end with one tool: `await_turn`.**
+  Call it after `start_turn`. It returns when the agent says something, when the turn
+  ends, or after about four minutes, and reports the tool call running now. Nothing is
+  polled: `ask`, `await_turn` and Daimon's own handling of tool confirmations wait on the
+  session's event stream. A turn that paused because the service restarted, or because it
+  reached the unattended run time limit, is resumed by the call that waits for it, so the
+  caller no longer needs `get_session` and `continue_turn`
+  ([Agent chat sessions](docs/unattended.md#agent-chat-sessions)).
 
-- **Data sources are on by default and inert until used.** `DAIMON_FEATURES__DATA_SOURCES=off`
-  turns them off, and no data tool is offered until a workspace has a source. A data-reading
-  agent no longer starts a fresh session each turn, except when held, or loses long-term
-  memory: it and other agents ask each other only when both read data, writes out still ask
-  first, and a memory saved after a data read shows only to people who could read that data.
-  Workspace admins manage data access, and may grant themselves a scope or link an account
-  to themselves (audited). Chat adds a source or refreshes its credential through a private
-  form only the asker opens, and in a room sends emails, sign-ins and rules by direct message. Redaction sets take `at: storage` or `at: answer`, reach SQL and
-  file text best effort, and apply to their own sources. Teams rooms with a guest, another
-  organisation's member or a shared channel get no data; others get public data until the
-  app (0.6.3) may read their members, per team or for the whole tenant
-  ([Data sources](docs/data-sources.md#who-sees-an-answer)).
+- **A turn asked through agent chat no longer stops when Discord is slow to answer.**
+  Daimon checks membership again before each tool call it lets through. A check Discord
+  did not answer used to count as a refusal and left the turn paused. It is now tried
+  again, and a call refused for that reason says "Discord didn't answer" instead of "You
+  aren't on this server's list of people".
 
-- **The web app gets pages for data sources, with the feature on.** A Data section searches
-  and browses what the person may read and opens items with their files. Integrations lists
-  sources with their runs, parity result and publish control. Admin gains Data access for
-  scopes, grants, identity links and redaction sets, and Profile lists a
-  person's linked and connected accounts ([Data sources](docs/data-sources.md)).
+- **A signed-identity MCP server can learn which routine is calling, and for which room.**
+  With `"routine_claims": true` on the server, a routine run that posts to a Discord room
+  signs its routine, that room and the room's kind. It is off by default
+  ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).
 
-- **Data sources can go stale, be read live, be declared in a file and be checked before
-  they publish.** A source past its freshness ceiling is hidden until it syncs; a new source
-  publishes only after a clean comparison with its own permissions. `DAIMON_DATA__DECLARED`
-  names a file of sources, scopes and grants that Daimon applies every 10 minutes without
-  deleting, and `daimon data access-check` explains who can read a record
-  ([Data sources](docs/data-sources.md)).
+- **A signed-identity MCP server learns what kind of Discord place the answer goes to.**
+  The token's new `room` claim says `dm`, `team`, `narrow` or `contained`, so the server can
+  limit what it returns to what that place may read
+  ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).
 
-- **The groundwork for a data store ships, switched off.** A release migration creates the
-  `data` and `data_views` Postgres schemas, the store's tables and four `daimon_data_*` roles; the
-  `data_sources` feature (`DAIMON_FEATURES__DATA_SOURCES`) stays off and nothing reads them
-  yet. A database user that cannot create them logs `data_store_skipped` and Daimon starts
-  anyway; `daimon data init` sets the store up later, and `--repair` puts back its grants
-  after a restore. The default Postgres image is unchanged; `docker-compose.data.yml` swaps
-  in one with pgvector ([Data sources](docs/data-sources.md)).
-
-- **Agents can be set to read data sources.** The `data_reads` feature (off by default) turns
-  it on; other sessions' transcripts hide its data results
-  ([Features](docs/features.md#data-source-reads)).
-
-- **Agents that read data sources get tools to search and read them.** `data_sources`,
-  `data_search`, `data_get`, `data_file` and `data_sql` answer only with what everyone who
-  will see the answer may read, and bill the person who asked. After such a read,
-  a write that would not ask first shows a card in chat and is refused in a routine
-  ([Permissions](docs/permissions.md#data-reads)).
+- **Each request to a signed-identity MCP server carries a new token with its own `jti`.**
+  A server can accept each token once, so a copied token cannot be replayed
+  ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).
 
 - **The agent no longer tells a person to expect an approval card for a cloud computer.**
   Daimon shows the card itself when one is needed. The agent also sizes parallel work from
@@ -395,6 +371,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failure notice are unchanged. Set one routine's value with
   `daimon features set routine_result_header off --routine <id>`; its value
   beats its agent's.
+
+- **GitHub repo connect runs in the web app when it is on.** Every Connect
+  GitHub link, from chat, the web panel, the CLI and pending requests, opens
+  the web app's pages, and the MCP host sends old links on to them. A link
+  started in the web app returns to the agent's GitHub tab. Every service, the
+  MCP server included, needs `DAIMON_WEB__PUBLIC_URL`, and the web app needs the
+  GitHub App settings and crypto keys; a service without the web URL builds links
+  on the MCP host, which splits flows across hosts. Before upgrading, add
+  `<web>/oauth/github/callback` to the GitHub App's callback URLs and keep the MCP
+  one for personal account links. Once that holds, move the setup URL to
+  `<web>/oauth/github/setup`.
 
 - **Discord answers read the same in DMs and threads, and agents can have a
   display name.** DM turns now get the working, done and model reactions, 👍/👎

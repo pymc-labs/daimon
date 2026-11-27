@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -31,6 +32,7 @@ from daimon.core.errors import UserFacingError
 from daimon.core.github_app_auth import BotIdentity
 from daimon.core.github_app_session import AppSessionAccess, AppToken
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.mcp_identity import DmRoutineRelay, RelayBinding
 from daimon.core.memory_resource import (
     CHANNEL_MEMORY_INSTRUCTIONS,
     MEMORY_INSTRUCTIONS,
@@ -3387,18 +3389,21 @@ def _make_env(
     return ma_environment(id=anthropic_id, name=name)
 
 
-async def test_identity_relay_gets_a_vault_of_the_sessions_own_mounted_first(
+async def _relay_session(
     monkeypatch: pytest.MonkeyPatch,
-    db_session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    """The relay credential never shares the caller's vault, so it can name the session."""
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    daimon_mcp: bool = False,
+    **kwargs: Any,
+) -> tuple[RelayBinding, list[dict[str, Any]]]:
+    """Create a session of an agent with the `tools` identity relay attached (and, with
+    `daimon_mcp`, Daimon's own server, so the session has an execution grant). Returns
+    the relay credential's binding and the provider request bodies."""
     relay = "https://mcp.example.com/mcp-identity/tools"
-    agent = ma_agent(
-        id="ag_relay",
-        name="Helper",
-        model="claude-opus-4-7",
-        mcp_servers=[{"name": "tools", "type": "url", "url": relay}],
-    )
+    servers: list[dict[str, str]] = [{"name": "tools", "type": "url", "url": relay}]
+    if daimon_mcp:
+        servers.append({"name": "daimon-mcp", "type": "url", "url": "https://mcp.example.com/mcp"})
+    agent = ma_agent(id="ag_relay", name="Helper", model="claude-opus-4-7", mcp_servers=servers)
     created_relay = AsyncMock(return_value="vlt_relay")
     monkeypatch.setattr(
         "daimon.core.sessions.ensure_agent_mcp_vault", AsyncMock(return_value="vlt_caller")
@@ -3409,16 +3414,16 @@ async def test_identity_relay_gets_a_vault_of_the_sessions_own_mounted_first(
     def _handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         bodies.append(body)
+        agent_id = body["agent"]  # with Daimon's server, an agent with overrides
         return httpx.Response(
             200,
             json=_session_body(
                 session_id="sess_relay",
-                agent_id=body["agent"],
+                agent_id=agent_id if isinstance(agent_id, str) else agent_id["id"],
                 environment_id=body["environment_id"],
             ),
         )
 
-    key = uuid.uuid4()
     await create_session(
         build_fake_anthropic_http(_handler),
         agent=agent,
@@ -3428,15 +3433,72 @@ async def test_identity_relay_gets_a_vault_of_the_sessions_own_mounted_first(
         mcp_settings=McpSettings(
             jwt_secret=SecretStr("x" * 32), public_url=HttpUrl("https://mcp.example.com/mcp")
         ),
-        session_factory=db_session_factory,
-        relay_session_key=key,
+        session_factory=factory,
         tool_safety=OPEN_TOOL_SAFETY,
-    )
-
-    assert bodies[0]["vault_ids"] == ["vlt_relay", "vlt_caller"], (
-        "the relay vault goes first; the snapshot records the last, the caller's"
+        **kwargs,
     )
     call = created_relay.await_args
     assert call is not None and call.kwargs["relay_urls"] == (relay,), "the attached relay URL"
-    assert call.kwargs["relay"].session_key == key, "the credential names the mapping row"
-    assert call.kwargs["relay"].agent_name == "Helper", "and the agent"
+    return call.kwargs["relay"], bodies
+
+
+async def test_identity_relay_gets_a_vault_of_the_sessions_own_mounted_first(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The relay credential never shares the caller's vault, so it can name the session."""
+    key = uuid.uuid4()
+    binding, bodies = await _relay_session(monkeypatch, db_session_factory, relay_session_key=key)
+    assert bodies[0]["vault_ids"] == ["vlt_relay", "vlt_caller"], (
+        "the relay vault goes first; the snapshot records the last, the caller's"
+    )
+    assert binding.session_key == key, "the credential names the mapping row"
+    assert binding.agent_name == "Helper", "and the agent"
+
+
+_DM_FIRE = DmRoutineRelay(
+    routine_id=uuid.uuid4(),
+    owner="42",
+    execution=uuid.uuid4(),
+    revision="2026-10-01T12:00:00+00:00",
+    channel="77",
+)
+
+
+async def test_a_dm_routines_turn_binds_its_routine_beside_its_session_and_exact_grant(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    key = uuid.uuid4()
+    binding, _ = await _relay_session(
+        monkeypatch, db_session_factory, daimon_mcp=True, relay_session_key=key,
+        relay_dm_routine=_DM_FIRE,
+    )  # fmt: skip
+    assert binding.grant is not None, "the session's own execution grant"
+    assert binding == RelayBinding(
+        "Helper", key, grant=binding.grant, routine_id=_DM_FIRE.routine_id, owner="42",
+        destination="dm::", execution=_DM_FIRE.execution, revision=_DM_FIRE.revision,
+        dm_channel="77",
+    ), "the combined binding"  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("fire", "daimon_mcp"),
+    [(_DM_FIRE, False), (replace(_DM_FIRE, channel=None), True)],
+    ids=["no-grant", "no-dm-opened"],
+)
+async def test_a_dm_routines_turn_without_a_grant_or_an_opened_dm_binds_as_today(
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fire: DmRoutineRelay,
+    daimon_mcp: bool,
+) -> None:
+    key = uuid.uuid4()
+    binding, _ = await _relay_session(
+        monkeypatch, db_session_factory, daimon_mcp=daimon_mcp, relay_session_key=key,
+        relay_dm_routine=fire,
+    )  # fmt: skip
+    assert binding == RelayBinding("Helper", key, grant=binding.grant), (
+        "the session alone, as without the setting"
+    )
+    assert (binding.grant is not None) == daimon_mcp, "a grant only with Daimon's own server"

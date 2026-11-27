@@ -90,7 +90,7 @@ from daimon.core.github_app_session import (
 )
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_hold import hold_key
-from daimon.core.mcp_identity import RelayBinding, identity_relay_urls
+from daimon.core.mcp_identity import DmRoutineRelay, RelayBinding, identity_relay_urls
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
 from daimon.core.mcp_server_url import github_router_url, same_mcp_url, session_mcp_url
 from daimon.core.mcp_vault import (
@@ -742,6 +742,8 @@ async def create_session(
     relay_session_key: uuid.UUID | None = None,
     relay_routine_id: uuid.UUID | None = None,
     relay_owner: str | None = None,
+    relay_destination: str | None = None,
+    relay_dm_routine: DmRoutineRelay | None = None,
     github_mcp_router: bool = False,
     identity: SessionIdentity = DEFAULT_IDENTITY,
     withheld_skills: frozenset[str] = frozenset(),
@@ -816,6 +818,8 @@ async def create_session(
     be recorded under, which the relay reads to find the turn the session runs;
     without it the relay names no person. ``relay_routine_id`` marks a routine's run and
     ``relay_owner`` the owner it started for; the relay names that owner, not a live turn.
+    ``relay_destination`` is where the routine posted when the run started
+    (`daimon.core.mcp_identity.routine_destination_key`).
 
     ``budget_channel_id`` is the channel whose budget the session's spend counts
     toward (for a DM, the channel it was moved from). It is stamped apart from
@@ -1091,11 +1095,22 @@ async def create_session(
                 agent_id=agent_uuid,
                 jwt_secret=mcp_settings.jwt_secret.get_secret_value().encode(),
                 relay_urls=relay_urls,
-                relay=RelayBinding(
+                # A DM routine's turn binds its routine beside its session, only with
+                # the exact grant the relay finds the turn by; otherwise today's binding.
+                relay=relay_dm_routine.binding(
+                    agent.name, session_key=relay_session_key, grant=chat_session_id
+                )
+                if relay_dm_routine is not None
+                and relay_dm_routine.channel is not None
+                and relay_session_key is not None
+                and chat_session_id is not None
+                and relay_routine_id is None
+                else RelayBinding(
                     agent_name=agent.name,
                     session_key=relay_session_key,
                     routine_id=relay_routine_id,
                     owner=relay_owner,
+                    destination=relay_destination,
                     grant=chat_session_id if relay_session_key is not None else None,
                 ),
                 now=dt.datetime.now(dt.UTC),

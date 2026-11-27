@@ -1,0 +1,31 @@
+{
+  "description": [
+    "Set the agents an agent may ask for help to exactly these names or ids, for any agent",
+    "you can see; helpers kept to channels you can't see stay. A normal agent gets a new",
+    "version, so an open draft goes out of date; the default agent and self-hosted agents",
+    "change in place. The person approves first."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_id": {
+        "type": "string"
+      },
+      "helpers": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "origin_context_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "agent_id",
+      "helpers",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

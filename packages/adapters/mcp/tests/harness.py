@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import uuid
+from collections.abc import Awaitable, Callable, Collection
 from contextlib import AbstractAsyncContextManager
 from typing import Any
 
@@ -33,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = [
     "stop_confirmation_workers",
+    "QuietFeed",
     "auth_identity",
     "discord_turn_origin",
     "make_identity",
@@ -210,3 +212,28 @@ async def stop_confirmation_workers() -> None:
         if not worker.cancelling():
             worker.cancel()
     await asyncio.gather(*workers, return_exceptions=True)
+
+
+class QuietFeed:
+    """A turn feed for tests of a waiting loop: its stream never has news.
+
+    `next` returns at once, as a stream that went quiet does, after `on_wait` (a
+    test's clock advance). `waits` counts them. Pass it as ``feed=``.
+    """
+
+    def __init__(self, on_wait: Callable[[], Awaitable[None]] | None = None) -> None:
+        self._on_wait = on_wait
+        self.waits = 0
+
+    async def open(self) -> None:
+        return None
+
+    async def next(self, kinds: Collection[str], **_wait: object) -> None:
+        del kinds
+        self.waits += 1
+        if self._on_wait is not None:
+            await self._on_wait()
+        return None
+
+    async def close(self) -> None:
+        return None

@@ -38,7 +38,12 @@ from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.monitoring import monitors_any
 from daimon.core.observability import capture_exception_with_scope
-from daimon.core.privacy import DELETE_PAUSED, account_other_providers, collect_purge_preview
+from daimon.core.privacy import (
+    DELETE_PAUSED,
+    account_other_providers,
+    collect_purge_preview,
+    legal_links,
+)
 from daimon.core.purge import purge_account
 from daimon.core.stores import microsoft_user_tokens as microsoft_tokens
 from daimon.core.stores.identity import find_platform_principal
@@ -83,10 +88,11 @@ class PrivacyPanel:
         account_id = await self._account(tenant_id, user_id)
         if account_id is None:
             return no_data_card(bot)
-        policy_url = str(self._runtime.settings.privacy_policy_url)
+        legal = legal_links(self._runtime.settings)
         return panel_card(
             bot=bot,
-            policy_url=policy_url,
+            policy_url=legal.privacy,
+            terms_url=legal.terms,
             delete_enabled=self._runtime.settings.privacy.delete_enabled,
             microsoft_connected=await self._microsoft_connected(tenant_id, user_id),
             monitored=await self._monitored(tenant_id),

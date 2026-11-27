@@ -22,6 +22,7 @@ from daimon.adapters.web.chat import chat_router
 from daimon.adapters.web.credits import credits_router
 from daimon.adapters.web.data_pages import data_pages_router
 from daimon.adapters.web.features import features_router
+from daimon.adapters.web.github_connect import github_connect_router
 from daimon.adapters.web.integrations import integrations_router
 from daimon.adapters.web.integrations_data import integrations_data_router
 from daimon.adapters.web.invites import invites_router
@@ -113,6 +114,7 @@ def create_app(runtime: WebRuntime) -> FastAPI:
     app.include_router(profile_router(runtime))
     app.include_router(nodes_router(runtime))
     app.include_router(agent_github_router(runtime))
+    app.include_router(github_connect_router(runtime))
     app.include_router(agent_google_router(runtime))
     app.include_router(agent_keys_router(runtime))
     app.include_router(agent_knowledge_router(runtime))

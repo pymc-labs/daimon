@@ -99,6 +99,7 @@ def privacy_panel_v2() -> Any:
 
     runtime = MagicMock()
     runtime.settings.privacy_policy_url = "https://example.com/privacy"
+    runtime.settings.terms_url = None
     runtime.settings.privacy.delete_enabled = True
     runtime.settings.discord.bot_display_name = "research-bot"
 

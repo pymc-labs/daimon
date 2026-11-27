@@ -1,0 +1,92 @@
+{
+  "description": [
+    "Set or replace a channel's spending budget. Admin-only.",
+    "",
+    "With ``on_limit`` ``stop``, once the channel's spend in the window",
+    "reaches ``limit_usd`` (a decimal string such as ``\"25.00\"``; ``\"0\"``",
+    "stops the channel), new turns there are refused, including routines",
+    "that post there. With ``alert``, turns continue and Daimon posts an",
+    "alert at the limit and each further multiple, to ``alert_channel_id``",
+    "or the support channel. Omitted, ``on_limit`` keeps the budget's mode;",
+    "a new budget stops. Spend is the channel's debits, markup included.",
+    "",
+    "``window``: ``monthly`` resets each UTC calendar month and takes no",
+    "dates; ``total`` counts everything since ``starts_at`` (or ever);",
+    "``fixed`` counts only between ``starts_at`` and ``ends_at`` and gates",
+    "nothing outside them. Dates are ISO 8601, read as UTC without an",
+    "offset. A thread id resolves to its parent channel."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "alert_channel_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "channel_id": {
+        "type": "string"
+      },
+      "ends_at": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "limit_usd": {
+        "type": "string"
+      },
+      "on_limit": {
+        "anyOf": [
+          {
+            "enum": [
+              "stop",
+              "alert"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "starts_at": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "window": {
+        "enum": [
+          "monthly",
+          "total",
+          "fixed"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "channel_id",
+      "limit_usd",
+      "window"
+    ],
+    "type": "object"
+  }
+}

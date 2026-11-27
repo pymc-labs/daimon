@@ -125,6 +125,43 @@ async def test_shutdown_settle_uses_owned_scope_and_cannot_interrupt_a_released_
     assert (stored.status == "dead") is (owns_claim and not interrupt_ack)
 
 
+async def test_a_private_conversation_is_dated_by_its_last_activity(
+    db_session: AsyncSession,
+) -> None:
+    """The retention clock moves on a claimed message and a finished reply."""
+    from datetime import UTC, datetime
+
+    from daimon.core._models import DirectMessageConversation
+    from daimon.core.stores.direct_messages import claim_message, finish_message
+    from sqlalchemy import select, update
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    dm = await make_dm_conversation(db_session, tenant=tenant, account_id=account.id)
+    long_ago = datetime(2020, 1, 1, tzinfo=UTC)
+
+    async def stamp() -> datetime:
+        db_session.expire_all()
+        found = await db_session.scalar(select(DirectMessageConversation.updated_at))
+        assert found is not None, "the conversation row exists"
+        return found
+
+    assert await stamp() > long_ago, "starting a conversation dates it"
+    await db_session.execute(update(DirectMessageConversation).values(updated_at=long_ago))
+    claimed = await claim_message(
+        db_session,
+        fence=OwnerDmFence(dm.platform, dm.external_user_id),
+        route_key=dm.route_key,
+        message_ids=("m1",),
+        expected_scope_id=dm.scope_id,
+        claimed_at=datetime.now(UTC),
+    )
+    assert claimed is not None and await stamp() > long_ago, "a claimed message moves the clock"
+    await db_session.execute(update(DirectMessageConversation).values(updated_at=long_ago))
+    await finish_message(db_session, conversation=claimed, history=[])
+    assert await stamp() > long_ago, "a finished reply moves the clock"
+
+
 def _turns(count: int, size: int = 10) -> list[TranscriptTurn]:
     return [TranscriptTurn(role="user", text=f"{i:03d}".ljust(size, "x")) for i in range(count)]
 

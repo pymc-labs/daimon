@@ -1,0 +1,25 @@
+{
+  "description": [
+    "Republish an older library skill version as the next one."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "type": "string"
+      },
+      "skill_id": {
+        "type": "string"
+      },
+      "version": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "skill_id",
+      "version",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

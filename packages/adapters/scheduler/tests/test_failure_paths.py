@@ -1,5 +1,6 @@
 """Scheduler failure boundaries preserve completed replies and record failures."""
 
+import json
 import unittest.mock
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -268,3 +269,137 @@ async def test_a_dm_routine_fire_passes_the_owners_current_standing(
                 wait_for_completion=True,
             )
     assert seen == [standing]
+
+
+@pytest.mark.parametrize("case", ["live", "off", "no_execution", "other_routine"])
+async def test_a_dm_routine_fire_binds_its_live_execution_and_opens_the_owners_dm(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    """With dm_routine_claims on, inside this routine's own execution, the fire passes the
+    relay (routine, owner, execution, revision) and an opener that only opens the DM."""
+    import uuid
+
+    from daimon.core.config import (
+        DirectMessagePolicy,
+        DiscordSettings,
+        McpIdentitySettings,
+        SignedIdentityServer,
+    )
+    from daimon.core.discord_membership import open_discord_dm
+    from daimon.core.lead_intake_execution import current_intake_execution
+    from daimon.core.membership import CachedMembershipResolver, Membership
+    from daimon.core.stores.direct_messages import set_dm_enabled
+    from daimon.core.stores.lead_intake import routine_execution
+    from pydantic import SecretStr
+
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="424244")
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    row = await create_routine(
+        db_session,
+        tenant_id=tenant.id,
+        created_by_user_id="123",
+        agent_id="old_agent",
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="summary",
+        next_fire_at=datetime.now(UTC),
+        destination_kind="dm",
+        destination_id="123",
+        source_provenance_known=True,
+    )
+    await set_dm_enabled(db_session, tenant_id=tenant.id, enabled=True)
+    await db_session.commit()
+    server = SignedIdentityServer(
+        name="grove",
+        url="https://grove.example/mcp",
+        issuer="daimon",
+        audience="https://grove.example",
+        routine_claims=True,
+        dm_routine_claims=case != "off",
+    )
+    settings = _make_test_settings(monkeypatch).model_copy(
+        update={
+            "direct_message_policies": {tenant.id: DirectMessagePolicy(mode="members")},
+            "discord": DiscordSettings(bot_token=SecretStr("bot-token")),
+            "mcp_identity": McpIdentitySettings(servers=[server]),
+        }
+    )
+    requests: list[httpx.Request] = []
+
+    def discord(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"id": "777"})
+
+    async def offline_open(token: str, user_id: str) -> str:
+        return await open_discord_dm(token, user_id, transport=httpx.MockTransport(discord))
+
+    monkeypatch.setattr("daimon.adapters.scheduler.main.open_discord_dm", offline_open)
+
+    async def member(*args: Any, **kwargs: Any) -> Membership:
+        return Membership(is_member=True)
+
+    seen: list[dict[str, Any]] = []
+
+    async def dm_turn(*args: Any, **kwargs: Any) -> SimpleNamespace:
+        live = current_intake_execution.get()
+        opened = await kwargs["open_dm"]() if kwargs["open_dm"] is not None else None
+        seen.append({**kwargs, "live": live, "opened": opened})
+        return SimpleNamespace(
+            text="ok", session_id="ses", producing_agent_id="old_agent", on_managed_agents=True
+        )
+
+    async with AsyncAnthropic(api_key="offline") as client:
+        fire = await _build_fire(
+            client=client,
+            sm=db_session_factory,
+            settings=settings,
+            deployment_default=DeploymentDefault(),
+            resolver_cache=new_resolver_cache(),
+            membership_resolver=CachedMembershipResolver(member),
+        )
+        with (
+            unittest.mock.patch(
+                "daimon.adapters.scheduler.main.resolve_agent", return_value="old_agent"
+            ),
+            unittest.mock.patch(
+                "daimon.adapters.scheduler.main.resolve_environment", return_value="env"
+            ),
+            unittest.mock.patch(
+                "daimon.adapters.scheduler.main.run_dm_routine", side_effect=dm_turn
+            ),
+            unittest.mock.patch("daimon.core.routine_files.poll_output_files", return_value={}),
+        ):
+            if case == "no_execution":
+                await fire(row)
+            elif case == "other_routine":
+                token = current_intake_execution.set((uuid.uuid4(), uuid.uuid4()))
+                try:
+                    await fire(row)
+                finally:
+                    current_intake_execution.reset(token)
+            else:
+                async with routine_execution(db_session_factory, tenant.id, row.id, lifetime_s=60):
+                    await fire(row)
+    (call,) = seen
+    if case != "live":
+        assert call["relay"] is None and call["open_dm"] is None
+        assert requests == [], "no DM is opened"
+        return
+    assert call["live"] is not None and call["live"][0] == row.id
+    relay = call["relay"]
+    assert (relay.routine_id, relay.owner, relay.execution, relay.revision, relay.channel) == (
+        row.id,
+        "123",
+        call["live"][1],
+        row.updated_at.isoformat(),
+        None,
+    ), "this routine, its owner, the live execution, the revision now; the DM not yet opened"
+    assert call["opened"] == "777"
+    (opened,) = requests
+    assert (opened.method, opened.url.path) == ("POST", "/api/v10/users/@me/channels")
+    assert json.loads(opened.content) == {"recipient_id": "123"}
+    assert opened.headers["Authorization"] == "Bot bot-token", "the bot opens; nothing is sent"

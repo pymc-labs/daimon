@@ -6,19 +6,33 @@ bounded worker for that one turn boundary, right after an authorized
 that agent chat started that turn and under which channel's tool rules. Each
 pause is decided at call time by `unattended_posture` from the current
 policy. A read (`turn_status`) only reports. After a restart the session
-stays paused and gated until its owner calls `continue_turn`, which re-gates
-it and starts a worker on the paused turn (`resume_paused`), only if agent
-chat started that turn: a chat card is left to the person it asks.
+stays paused and gated until its owner calls `continue_turn` or waits with
+`await_turn`, which re-gates it and starts a worker on the paused turn
+(`resume_paused`), only if agent chat started that turn: a chat card is left
+to the person it asks.
+
+Nothing here polls every second. The worker and every waiting call sleep on the
+session's event stream (`TurnFeed`) and read the session when it brings news, and
+otherwise once every `RECHECK_S` so that no missed event can leave a turn waiting.
+After an event the turn's standing is read from the event list, once the list
+shows that event (`caught_up`), never from the session's `status`: a status read
+right after an idle event can still say running.
+A worker is a background task, and a host that gives the process no CPU
+between requests (Cloud Run's default) freezes it there, so a call that waits
+for a turn keeps a worker running in its own process (`local_worker`).
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextvars
+from collections import OrderedDict
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
+import anthropic
 import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
@@ -30,7 +44,10 @@ from daimon.adapters.mcp.resource_ports import (
     retrieve_session,
 )
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._ctx import _policy_gate  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools._ctx import (
+    MembershipUnknown,
+    _policy_gate,  # pyright: ignore[reportPrivateUsage]
+)
 from daimon.adapters.mcp.tools._session_access import hub_access_mode
 from daimon.core.agent_chat_requester import UNREAD, EarlierTurn
 from daimon.core.compute_sessions import agent_chat_owner
@@ -54,7 +71,7 @@ from daimon.core.turn.approvals import (
 )
 from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.core.turn.io import turn_io
+from daimon.core.turn.io import TurnEvent, TurnStream, turn_io
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.unattended import (
@@ -79,7 +96,197 @@ NOT_RESUMABLE_MSG = (
 
 # Newest-first pages read back to a turn's boundary before giving up.
 _MAX_TURN_PAGES = 20
-_POLL_S = 1.0
+# How long a silent stream is trusted before the session is read again.
+_QUIET_S = 120.0
+# The pause before a stream that closed, or never opened, is opened again.
+_REOPEN_S = 1.0
+# How long a subscription may take to open before the caller goes on without it.
+_OPEN_S = 10.0
+#: The longest a wait sleeps on the stream before it reads the session's state again,
+#: news or none. The stream saves reads; this bounds what a missed event can cost.
+RECHECK_S = 20.0
+# How long, and how often, a wake waits for the event list to show the event that
+# caused it. Past that the state is read as it is, and again on the next recheck.
+_CATCH_UP_TRIES = 20
+_CATCH_UP_GAP_S = 0.25
+
+_STATUS_EVENTS = (
+    "session.status_idle",
+    "session.status_running",
+    "session.status_rescheduled",
+    "session.status_terminated",
+)
+# The waits before each new try of a membership check Discord did not answer.
+_UNANSWERED_WAITS_S: tuple[float, ...] = (2.0, 5.0, 15.0, 30.0, 60.0)
+
+#: The events that end a wait on a turn: it paused or ended, or its session is gone.
+TURN_STOPPED: frozenset[str] = frozenset(
+    {"session.status_idle", "session.status_terminated", "session.deleted"}
+)
+
+
+@dataclass(frozen=True)
+class Woke:
+    """The stream event that ended a wait. `stop` is an idle event's stop reason."""
+
+    type: str
+    id: str
+    stop: str | None = None
+
+
+class TurnFeed:
+    """A session's live events, for code that waits for a turn instead of polling it.
+
+    Open it BEFORE reading the session's state: an event that lands between that
+    read and the wait is then still delivered. The stream has no cursor and replays
+    nothing, so what happened before `open` is read from the event list, never here.
+
+    The stream only saves reads. Whatever goes wrong with it (it will not open, it
+    drops, an event will not parse) ends the wait a moment later, and the state
+    read that follows says what the stream could not. So no fault here fails a turn.
+    """
+
+    def __init__(self, runtime: McpRuntime, auth: AuthIdentity, handle: str) -> None:
+        self._runtime = runtime
+        self._auth = auth
+        self._handle = handle
+        self._stream: TurnStream | None = None
+        # The read in flight. It outlives a `next` that timed out, so a recheck
+        # neither cancels a read mid-event nor reopens the stream.
+        self._reading: asyncio.Future[TurnEvent] | None = None
+
+    async def open(self) -> None:
+        """Subscribe, unless already subscribed. A failure leaves it closed: `next`
+        then waits a moment and returns, and the caller reads the state again."""
+        if self._stream is not None:
+            return
+        try:
+            async with asyncio.timeout(_OPEN_S):
+                self._stream = await turn_io(
+                    self._runtime.client,
+                    self._handle,
+                    scope=mcp_scope(self._auth),
+                    read_timeout_s=_QUIET_S,
+                ).open_stream(read_timeout_s=_QUIET_S)
+        except Exception as err:
+            # Named boundary: without a stream the caller reads the state after a moment.
+            log.info(
+                "mcp.agent_chat.stream_unavailable",
+                session_id=self._handle,
+                error_class=type(err).__name__,
+            )
+
+    async def next(
+        self,
+        kinds: Collection[str],
+        *,
+        within: float | None = None,
+        or_done: asyncio.Future[Any] | None = None,
+    ) -> Woke | None:
+        """The next event in `kinds`, or None.
+
+        None when `within` seconds passed, `or_done` finished, or the stream went
+        quiet, closed or was never open. On None the caller reads the session's
+        state, which says what the stream could not.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = None if within is None else loop.time() + within
+        first = True
+        while True:
+            left = None if deadline is None else max(0.0, deadline - loop.time())
+            # Checked before each read, so events that keep arriving outside `kinds`
+            # cannot carry the wait past its time or past a finished `or_done`.
+            if not first and (left == 0.0 or (or_done is not None and or_done.done())):
+                return None
+            first = False
+            stream = self._stream
+            if stream is None:
+                await asyncio.sleep(_REOPEN_S if left is None else min(_REOPEN_S, left))
+                return None
+            if self._reading is None:
+                self._reading = asyncio.ensure_future(stream.__anext__())
+            reading = self._reading
+            waiting: set[asyncio.Future[Any]] = {reading} if or_done is None else {reading, or_done}
+            done, _ = await asyncio.wait(waiting, timeout=left, return_when=asyncio.FIRST_COMPLETED)
+            if reading not in done:
+                return None
+            self._reading = None
+            try:
+                native = reading.result().native
+            except StopAsyncIteration:
+                await self.close()
+                continue
+            except Exception as err:
+                # Named boundary: a quiet or dropped stream, read again after a moment.
+                log.info(
+                    "mcp.agent_chat.stream_dropped",
+                    session_id=self._handle,
+                    error_class=type(err).__name__,
+                )
+                await self.close()
+                continue
+            if native is not None and native.type in kinds:
+                event_id: object = getattr(native, "id", None)
+                stop: object = getattr(getattr(native, "stop_reason", None), "type", None)
+                if isinstance(event_id, str):
+                    return Woke(native.type, event_id, stop if isinstance(stop, str) else None)
+                # An event with no id cannot be looked up in the list: read the state.
+                return None
+
+    async def close(self) -> None:
+        reading, self._reading = self._reading, None
+        if reading is not None and not reading.done():
+            reading.cancel()
+            # The read is dropped with its stream; its own end is not an error here.
+            await asyncio.gather(reading, return_exceptions=True)
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            try:
+                await stream.close()
+            except Exception:
+                # Named boundary: the stream is being dropped either way.
+                log.info("mcp.agent_chat.stream_close_failed", session_id=self._handle)
+
+
+async def caught_up(
+    runtime: McpRuntime, auth: AuthIdentity, handle: str, woke: Woke | None
+) -> None:
+    """Wait until the event list shows the event a stream wake brought.
+
+    The list can trail the stream by a moment, and a state read taken in that
+    moment misses the very event that caused it. Bounded: past the tries the caller
+    reads what there is, and reads again at its next recheck.
+    """
+    if woke is None:
+        return
+    for _ in range(_CATCH_UP_TRIES):
+        listed = await list_session_events(
+            runtime.client,
+            handle,
+            scope=mcp_scope(auth),
+            query={"order": "desc", "limit": 10, "types": [woke.type]},
+        )
+        if any(event.id == woke.id for event in listed.data):
+            return
+        await asyncio.sleep(_CATCH_UP_GAP_S)
+    log.info("mcp.agent_chat.list_behind_stream", session_id=handle, event_type=woke.type)
+
+
+async def _newest_status(
+    runtime: McpRuntime, auth: AuthIdentity, handle: str
+) -> BetaManagedAgentsSessionEvent | None:
+    """The session's newest status event: where its turn stands, as the events say.
+
+    The session's own `status` can say running for a moment after the idle event,
+    so code that waits on events reads the standing here.
+    """
+    result = await list_session_events(
+        runtime.client,
+        handle,
+        scope=mcp_scope(auth),
+        query={"order": "desc", "limit": 1, "types": list(_STATUS_EVENTS)},
+    )
+    return result.data[0] if result.data else None
 
 
 @dataclass(frozen=True)
@@ -94,6 +301,41 @@ class _Worker:
 
 
 _workers: dict[tuple[int, str], _Worker] = {}
+
+
+# Why this process's last worker for a handle left its turn paused, in words the
+# caller can be given. Newest last; the oldest are dropped.
+_stopped: OrderedDict[tuple[int, str], str] = OrderedDict()
+_STOPPED_KEPT = 256
+
+RUN_LIMIT_MSG = "it reached the time limit for a run nobody is watching"
+_FAILED_MSG = "Daimon could not decide a tool call"
+
+
+def local_worker(runtime: McpRuntime, handle: str) -> asyncio.Task[bool] | None:
+    """This process's live confirmation worker for `handle`, if it has one."""
+    worker = _workers.get((id(runtime), handle))
+    return worker.task if worker is not None and not worker.task.done() else None
+
+
+def why_stopped(runtime: McpRuntime, handle: str) -> str | None:
+    """Why this process's last worker for `handle` left its turn paused; None if it
+    did not, or another process ran it."""
+    return _stopped.get((id(runtime), handle))
+
+
+def _note_stopped(runtime: McpRuntime, handle: str, why: str) -> None:
+    key = (id(runtime), handle)
+    _stopped[key] = why
+    _stopped.move_to_end(key)
+    while len(_stopped) > _STOPPED_KEPT:
+        _stopped.popitem(last=False)
+
+
+async def recorded_turn_id(runtime: McpRuntime, handle: str) -> str | None:
+    """The boundary of the latest turn agent chat sent on `handle`, if it was recorded."""
+    recorded = await _recorded_turn(runtime, handle)
+    return recorded.turn_event_id if recorded is not None else None
 
 
 def single_attempt(runtime: McpRuntime) -> AsyncAnthropic:
@@ -365,6 +607,7 @@ def watch_turn(
     key = (id(runtime), handle)
     if (previous := _workers.get(key)) is not None:
         previous.task.cancel()
+    _stopped.pop(key, None)
     task = asyncio.create_task(
         _watch(
             runtime, auth, handle, turn_event_id=turn_event_id, rules_channel_id=rules_channel_id
@@ -393,10 +636,16 @@ async def _watch(
     answered: set[str] = set()
     annotations_for: AnnotationLookup | None = None
     annotations_bound = False
+    unanswered = 0
     started = asyncio.get_running_loop().time()
+    feed = TurnFeed(runtime, auth, handle)
+    limit = asyncio.timeout(LONGEST_TURN_CEILING_S)
+    woke: Woke | None = None
     try:
-        async with asyncio.timeout(LONGEST_TURN_CEILING_S) as limit:
+        async with limit:
             while True:
+                # Subscribed before the state is read, so no pause falls between them.
+                await feed.open()
                 session = await retrieve_session(runtime.client, handle, scope=mcp_scope(auth))
                 if not annotations_bound:
                     annotations_for = _annotations_for(runtime, auth, session)
@@ -414,34 +663,90 @@ async def _watch(
                     limit.reschedule(started + ceiling_s)
                 if session.status == "terminated" or session.archived_at is not None:
                     return True
-                if session.status == "idle":
+                await caught_up(runtime, auth, handle, woke)
+                # The events, not `session.status`, which can still say running here.
+                standing = await _newest_status(runtime, auth, handle)
+                if standing is not None and standing.type == "session.status_idle":
                     turn = await _read_turn(runtime, auth, handle)
-                    if turn.boundary_id != turn_event_id:
-                        # Not listed yet, or a newer turn whose sender answers it.
-                        await asyncio.sleep(_POLL_S)
-                        continue
-                    stop = turn.state.stop_reason
-                    ids = pending_confirmation_ids(stop, confirmed=turn.confirmed | answered)
-                    if ids:
-                        # The confirmation resumes the turn: gate it as a message
-                        # would be, and decide on the snapshot that gate left.
-                        await gate(runtime, auth, session)
-                        session = await retrieve_session(
-                            runtime.client, handle, scope=mcp_scope(auth)
-                        )
-                        await _answer(
-                            runtime, auth, session, turn, ids, rules_channel_id, annotations_for
-                        )
-                        answered.update(ids)
-                    elif stop is not None and stop.type != "requires_action":
-                        if answered:
-                            await _keep_settle_request(runtime, handle, turn_event_id)
-                        return True
-                await asyncio.sleep(_POLL_S)
-    except Exception:
+                    # Any other boundary: not listed yet, or a newer turn whose sender
+                    # answers it. Either way the next idle is read again.
+                    if turn.boundary_id == turn_event_id:
+                        stop = turn.state.stop_reason
+                        ids = pending_confirmation_ids(stop, confirmed=turn.confirmed | answered)
+                        if ids:
+                            try:
+                                await _answer_pause(
+                                    runtime,
+                                    auth,
+                                    session,
+                                    turn,
+                                    ids,
+                                    rules_channel_id,
+                                    annotations_for,
+                                )
+                            except MembershipUnknown:
+                                # Discord did not answer: nothing was decided, so the
+                                # same pause is tried again instead of being left.
+                                if unanswered == len(_UNANSWERED_WAITS_S):
+                                    raise
+                                log.info(
+                                    "mcp.agent_chat.membership_unanswered",
+                                    session_id=handle,
+                                    attempt=unanswered + 1,
+                                )
+                                await asyncio.sleep(_UNANSWERED_WAITS_S[unanswered])
+                                unanswered += 1
+                                continue
+                            unanswered = 0
+                            answered.update(ids)
+                        elif stop is not None and stop.type != "requires_action":
+                            if answered:
+                                await _keep_settle_request(runtime, handle, turn_event_id)
+                            return True
+                woke = await feed.next(TURN_STOPPED, within=RECHECK_S)
+    except Exception as err:
+        if isinstance(err, TimeoutError) and limit.expired():
+            # The run limit: later pauses wait for the owner's `continue_turn` or `await_turn`.
+            log.info("mcp.agent_chat.run_limit_reached", session_id=handle)
+            _note_stopped(runtime, handle, RUN_LIMIT_MSG)
+            return False
         # The session stays gated on any failure; no failure path allows a call.
         log.exception("mcp.agent_chat.confirmation_worker_failed", session_id=handle)
+        _note_stopped(
+            runtime,
+            handle,
+            str(err).removeprefix("TERMINAL ERROR: ")
+            if isinstance(err, ToolError)
+            else _FAILED_MSG,
+        )
         return False
+    finally:
+        await feed.close()
+
+
+async def _answer_pause(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    session: BetaManagedAgentsSession,
+    turn: _Turn,
+    ids: list[str],
+    rules_channel_id: str | None,
+    annotations_for: AnnotationLookup | None,
+) -> None:
+    """Gate `session`, then decide `ids` on the snapshot that gate left.
+
+    A confirmation resumes the turn, so it is gated as a message would be. A second
+    worker for this turn (another instance, after a resume) may answer the same
+    pause first; a refused send whose calls all read as confirmed is that, not a
+    failure.
+    """
+    await gate(runtime, auth, session)
+    session = await retrieve_session(runtime.client, session.id, scope=mcp_scope(auth))
+    try:
+        await _answer(runtime, auth, session, turn, ids, rules_channel_id, annotations_for)
+    except anthropic.BadRequestError:
+        if set(ids) - (await _read_turn(runtime, auth, session.id)).confirmed:
+            raise
 
 
 async def owner_tools(
@@ -543,23 +848,39 @@ async def _keep_settle_request(runtime: McpRuntime, handle: str, turn_event_id: 
         log.exception("billing.settle_request_failed", managed_session_id=handle)
 
 
-async def _paused(
+@dataclass(frozen=True)
+class _Pause:
+    """A turn whose newest status event is a pause on tool confirmations.
+
+    `waiting` is False once every call of that pause is confirmed: nothing waits for
+    anybody then, and the turn is about to run on, whatever the session's status
+    still says.
+    """
+
+    turn: _Turn
+    waiting: bool
+
+
+async def _pause(
     runtime: McpRuntime, auth: AuthIdentity, session: BetaManagedAgentsSession
-) -> bool:
-    if session.status != "idle":
-        return False
-    result = await list_session_events(
-        runtime.client,
-        session.id,
-        scope=mcp_scope(auth),
-        query={"order": "desc", "limit": 1, "types": ["session.status_idle"]},
-    )
-    event = result.data[0] if result.data else None
-    return (
-        event is not None
-        and event.type == "session.status_idle"
-        and event.stop_reason.type == "requires_action"
-    )
+) -> _Pause | None:
+    """The pause the session's turn stands at, read from its events; None at no pause.
+
+    A status of idle says so, and so may running: it can trail the idle event by a
+    moment. Any other status is taken as the provider reports it.
+    """
+    if session.status not in ("idle", "running") or session.archived_at is not None:
+        return None
+    event = await _newest_status(runtime, auth, session.id)
+    if (
+        event is None
+        or event.type != "session.status_idle"
+        or event.stop_reason.type != "requires_action"
+    ):
+        return None
+    turn = await _read_turn(runtime, auth, session.id)
+    pending = pending_confirmation_ids(turn.state.stop_reason, confirmed=turn.confirmed)
+    return _Pause(turn, waiting=bool(pending))
 
 
 async def turn_status(
@@ -567,14 +888,18 @@ async def turn_status(
 ) -> tuple[Literal["running", "paused"], str | None] | None:
     """What a read reports for a turn paused on confirmations; never answers one.
 
-    `running` while this process's worker is answering it; otherwise `paused`
+    `running` while this process's worker is answering it, or once every call of
+    the pause is confirmed and the turn is about to run on; otherwise `paused`
     with a hint: resume with `continue_turn` when agent chat started that
     turn, approve where it was asked when it did not. None for any session
     not paused, which reads as MA reports it.
     """
-    if not await _paused(runtime, auth, session):
+    pause = await _pause(runtime, auth, session)
+    if pause is None:
         return None
-    turn = await _read_turn(runtime, auth, session.id)
+    if not pause.waiting:
+        return ("running", None)
+    turn = pause.turn
     worker = _workers.get((id(runtime), session.id))
     if worker is not None and worker.owns(turn.boundary_id):
         return ("running", None)
@@ -599,9 +924,10 @@ async def resume_paused(
     that send's channel's. A pause on any other turn is refused.
     """
     require_session_driver(session, auth)
-    if not await _paused(runtime, auth, session):
+    pause = await _pause(runtime, auth, session)
+    if pause is None or not pause.waiting:
         return None
-    turn = await _read_turn(runtime, auth, session.id)
+    turn = pause.turn
     recorded = await _recorded_turn(runtime, session.id)
     if turn.boundary_id is None or recorded is None or recorded.turn_event_id != turn.boundary_id:
         raise ToolError(NOT_RESUMABLE_MSG)

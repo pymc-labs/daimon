@@ -1,0 +1,94 @@
+{
+  "description": [
+    "List a session's events — the transcript.",
+    "",
+    "Callers must still pass current membership and invoker-policy checks where required.",
+    "",
+    "The agent's reply is in the ``agent.message`` events. Call this once",
+    "``get_session`` reports the session is idle to read what the agent said.",
+    "",
+    "A poller reading one turn should pass",
+    "``types=[\"agent.message\", \"session.status_idle\"]``,",
+    "``created_at_gte=<the turn_started_at from start_turn/continue_turn>``,",
+    "and ``order=\"asc\"``, then discard events up to and including the",
+    "``turn_event_id`` it was given, locally. A turn is finished only when",
+    "a ``session.status_idle`` event appears AFTER the boundary, or",
+    "``get_my_session`` reports the session ``terminated`` — a bare",
+    "``idle`` status read right after a send may be the PREVIOUS turn's",
+    "state and must not be trusted. ``rescheduling`` counts as running."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "created_at_gte": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "handle": {
+        "type": "string"
+      },
+      "limit": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "order": {
+        "anyOf": [
+          {
+            "enum": [
+              "asc",
+              "desc"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "page": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "types": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "handle"
+    ],
+    "type": "object"
+  }
+}

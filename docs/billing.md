@@ -98,7 +98,11 @@ left`. The money left is the channel budget's remainder, else the prepaid
 balance.
 
 An admin can hide that line under Cost footer in `/settings` (`settings` on
-Teams), the web app's Settings section, or by asking Daimon. Failure notices still show, and billing is unchanged.
+Teams), or by asking Daimon. Failure notices still show, and billing is unchanged.
+
+<!-- knowledge: web -->
+The web app also hides it.
+<!-- /knowledge -->
 
 ### Overdraft bound
 

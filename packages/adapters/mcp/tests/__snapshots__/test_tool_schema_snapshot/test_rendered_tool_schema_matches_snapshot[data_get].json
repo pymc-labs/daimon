@@ -1,0 +1,22 @@
+{
+  "description": [
+    "Open one record by its `record_id`: its text (12,000 characters from `start`; a",
+    "`next_start` says where the rest continues) and its attached files for `data_file`."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "record_id": {
+        "type": "string"
+      },
+      "start": {
+        "default": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "record_id"
+    ],
+    "type": "object"
+  }
+}

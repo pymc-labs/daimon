@@ -31,8 +31,13 @@ daimon dm --guild GUILD_ID default                # show it; --clear unsets it
 An admin can do the same in Discord with `/dm-me action:enable`, then
 `/dm-me action:agent agent_name:AGENT_NAME` (`clear-agent` unsets it). The
 default agent is one value for cold DMs, `/dm-me`, the picker and agent-sent
-notices. The CLI, Discord, the web app and MCP all set it through one writer
-that checks the name and audits the change. Once the server has rules or
+notices. The CLI, Discord and MCP all set it through one writer that checks the
+name and audits the change.
+
+<!-- knowledge: web -->
+The web app sets it through the same writer.
+<!-- /knowledge -->
+ Once the server has rules or
 narrower grants, clearing it does not stop cold DMs: turn DMs off for that.
 
 A Slack or Teams DM belongs to one workspace, so a cold DM there starts at
@@ -84,9 +89,9 @@ daimon dm import-policies --dry-run      # DAIMON_DIRECT_MESSAGE_POLICIES as sto
 ```
 
 `--guild GUILD_ID` (or `--tenant TENANT_UUID`) picks the server and goes after
-`dm` or `features`, before the command; without it the CLI's own tenant is used. As
-in the web app, an unknown agent name is refused and each change is in the
-audit log, under the CLI's local user. Erasing a person removes their pick,
+`dm` or `features`, before the command; without it the CLI's own tenant is used. An
+unknown agent name is refused, and each change is in the audit log, under the CLI's
+local user. Erasing a person removes their pick,
 their unlocked personal rules and their entry in any listed grant. Locked rules
 and exclusions stay, so erasing someone never lifts a restriction.
 
@@ -118,7 +123,7 @@ The opening message names the server and agent, and offers **Switch server**
 and **New conversation**. `/dm-settings` shows those buttons again, and `/new`
 starts an empty conversation with the same server and the agent routing picks.
 Buttons expire after fifteen minutes, and only the latest set works. When
-workspace admins [monitor](features.md#monitor-direct-messages) the agent, a
+workspace admins [monitor](admins.md#read-monitored-conversations) the agent, a
 card tells the person once per agent, at their first message after it starts,
 in whichever conversation that is.
 
@@ -127,6 +132,19 @@ server or starting a new one never carries the old history across. An active
 conversation always wins over discovery, so a message never moves to another
 server, even after access is revoked.
 
+## Settings for direct messages
+
+Each setting is a [feature](features.md), set with `daimon features set` or in
+
+| Feature | Default | Effect |
+| --- | --- | --- |
+| `dm_approvals` | Off | A DM follows its agent's [Approvals](approvals.md#approvals-in-direct-messages) value. |
+| `dm_completion_pings` | Off | A DM follows Completion pings, so the person is pinged when a long answer ends. |
+| `dm_debounce_seconds` | 0 | Holds a DM for up to five seconds, so a burst of messages gets one reply. |
+| `dm_memory_read_only` | Writable | A DM reply reads the agent's memory but cannot change it. |
+| `dm_history_depth` | 12 | How many earlier DMs each reply carries, up to 100. |
+| `thread_new` | Off | `/new` works in threads Daimon started, as it does in a DM (Discord). |
+
 ## Inside a Discord DM
 
 - **Progress card.** A DM turn shows the same card as a thread, with Stop,
@@ -134,7 +152,7 @@ server, even after access is revoked.
   update.
 - **Approvals.** A write that needs approval posts its card in the DM, and
   only the sender can answer. Slack and Teams DMs have no card, so such a write
-  is refused there.
+  is refused there. See [Approvals](approvals.md#approvals-in-direct-messages).
 - **Files.** Files the agent saves are attached to the answer, under Discord's
   10 MB DM limit. A larger file stays in the session with a notice.
 - **Cost line.** The answer ends with the usual summary line unless an admin

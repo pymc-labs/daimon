@@ -1,0 +1,85 @@
+{
+  "description": [
+    "Make a copy of Daimon or another agent that you can edit under a new name.",
+    "Anyone may copy you (the agent answering them), and owns that copy; copying",
+    "any other agent is admin-only. Only for a saved, named copy someone asked",
+    "to keep. The copy keeps its source's tool rules (copied once, at the fork:",
+    "later changes to the source's rules don't follow).",
+    "Copies its prompt, model, skills and the MCP servers that need",
+    "no stored token. The copy starts with no credentials: no repo binding or",
+    "GitHub access, no API/service keys and no connector tokens; attach its own",
+    "with ``request_agent_key`` and the repo tools. An agent an operator pinned",
+    "to channels can't be copied.",
+    "",
+    "Use ``update_agent`` to edit the copy. Daimon cannot be edited directly.",
+    "",
+    "Continue configuring it through Daimon with the copy named as the setup",
+    "target. A returned ``answering`` field says the copy is routed nowhere yet:",
+    "post it verbatim.",
+    "",
+    "``new_copy_if_taken``: when ``new_name`` is taken, copy under the first free",
+    "``new_name-2``, ``new_name-3``... instead of refusing; the result's ``name``",
+    "is the copy's: name the copy by it, not ``new_name``. Pass true for \"make a",
+    "copy of yourself\" asks, where the person named no copy; when the person",
+    "names the copy, leave this false.",
+    "",
+    "If the person names a model for the copy (\"fork yourself onto",
+    "gpt-3.5-turbo\"), pass it as ``model``. A saved copy keeps its source's",
+    "model: an unavailable model is refused as unavailable, and a different",
+    "available one is refused; make the copy and then request a backend switch",
+    "for it. Pass this active turn's ``origin_context_id``."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "expected_ma_agent_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "model": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "new_copy_if_taken": {
+        "default": false,
+        "type": "boolean"
+      },
+      "new_name": {
+        "type": "string"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "source_name": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "source_name",
+      "new_name"
+    ],
+    "type": "object"
+  }
+}

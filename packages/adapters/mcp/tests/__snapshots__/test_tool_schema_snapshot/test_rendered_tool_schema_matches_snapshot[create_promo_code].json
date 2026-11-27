@@ -1,0 +1,99 @@
+{
+  "description": [
+    "Unavailable over MCP: issue deployment-wide promos with the human operator CLI.",
+    "",
+    "``amount_usd`` is the credit per redemption as a decimal string.",
+    "``credit`` codes stay until spent; ``timed`` codes need",
+    "``credit_starts_at`` and ``credit_ends_at`` and expire unspent credit",
+    "at the end. Redemption is open between ``redeem_starts_at`` and",
+    "``redeem_ends_at`` when given (a timed code's defaults to its credit",
+    "end). Dates are ISO 8601, UTC without an offset. ``code`` is shown",
+    "only in this result."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "amount_usd": {
+        "type": "string"
+      },
+      "credit_ends_at": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "credit_starts_at": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "kind": {
+        "enum": [
+          "credit",
+          "timed"
+        ],
+        "type": "string"
+      },
+      "max_redemptions": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "note": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "redeem_ends_at": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "redeem_starts_at": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "amount_usd",
+      "kind"
+    ],
+    "type": "object"
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "description": [
+    "Add a data source (create: kind, name, settings by the kind's non-secret fields),",
+    "post the asker's private form for a source's credential (set_credential: source_id),",
+    "or pause, resume, retire, publish, unpublish or sync one (source_id). Runs on the",
+    "asker's Approve card. Never ask for a credential in chat or pass one in settings: a",
+    "source that needs one waits, paused, for the private form this posts, and only the",
+    "asker can fill it in. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "action": {
+        "enum": [
+          "create",
+          "set_credential",
+          "pause",
+          "resume",
+          "retire",
+          "publish",
+          "unpublish",
+          "sync"
+        ],
+        "type": "string"
+      },
+      "kind": {
+        "default": "",
+        "type": "string"
+      },
+      "name": {
+        "default": "",
+        "type": "string"
+      },
+      "origin_context_id": {
+        "type": "string"
+      },
+      "settings": {
+        "anyOf": [
+          {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              ]
+            },
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "source_id": {
+        "default": "",
+        "type": "string"
+      }
+    },
+    "required": [
+      "action",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}
