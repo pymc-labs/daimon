@@ -30,6 +30,90 @@ Check a case before you save it:
 daimon evals cases validate case.json
 ```
 
+## Cases from threads
+
+Make cases from a conversation you can read. Each turn the agent answered becomes
+one case: the messages before it are history, and the world holds only what that
+turn used. Send a Discord, Slack or Teams link to the `eval_case_from_thread` tool,
+or a chat link or a saved thread file to the command line:
+
+```bash
+daimon evals cases from-thread support-basics https://example.com/chat/<id>
+daimon evals cases from-thread support-basics --record thread.json
+```
+
+<!-- knowledge: web -->
+The web app sends a chat link to `POST /api/evals/suites/{id}/cases/from-thread`.
+<!-- /knowledge -->
+
+Chat platforms keep messages, not tool calls, so these cases have `text` fidelity
+and the simulator fills the gaps. A case starts with the recorded answer as its
+reference and an `expectations_unreviewed` flag.
+
+Draft the pass criteria with a model, then review them. The command shows a cost
+estimate first and drafts only with `--yes`:
+
+```bash
+daimon evals cases draft support-basics <case-id> --yes
+```
+
+Repeated requests are marked as near-duplicates with `daimon evals cases dedupe`.
+Add `--keep 2` to keep the two oldest of each group.
+
+## Scrubbing
+
+Every case made from a thread is scrubbed before it is saved. Known names and those the
+name model finds get the same fake everywhere: in messages, tool data, file names and
+file contents. Known names are the workspace's people, channels and repos, plus the thread.
+Common secret and token formats are removed. Word, Excel, PowerPoint, PDF and text files
+are rebuilt with fakes and images are blanked where text is found. Other files are left out.
+
+Set [`DAIMON_EVALS__SCRUB_KEY`](configuration.md#daimon_evals__scrub_key) first.
+Install the scrub tools with `pip install "daimon-core[evals]"`, add the spaCy model
+named in [`DAIMON_EVALS__SCRUB_NER_MODEL`](configuration.md#daimon_evals__scrub_ner_model)
+and the `tesseract` program for images. Without the model only known names and patterns
+are found, and cases stay `partial`. Only a `scrubbed` case can be shared; a person
+should still read a case before it leaves the workspace.
+
+Scrub a bundle folder, zip or encrypted file offline, with a dictionary of the names
+your data holds (people, emails, companies, projects, hostnames, repos, channels, phrases):
+
+```bash
+export DAIMON_EVALS__SCRUB_KEY=<at least 16 characters>
+daimon evals bundle scrub bundle/ --entities names.yaml --salt my-workspace --map fakes.json --out clean/
+daimon evals bundle leftovers clean/ --entities names.yaml --salt my-workspace --map fakes.json
+```
+
+Both print counts and places, never the text they found, and exit 1 unless the bundle
+is fully scrubbed. Reuse the same key, `--salt` and `--map` for every bundle of a suite
+so fakes stay the same. Scrub each raw bundle once: a second scrub fakes its names again.
+Add `--jobs 2` or more to run the names model in that many processes; each loads it.
+The map holds only hashes and fakes, but keep it private.
+
+To scrub many bundles one after another, pass the same `--learned names-found.json` to each
+`scrub` (and to `leftovers`). It is read first, as extra dictionary entries, and the names the
+model finds in a run are added to it at the end, so a name found in one bundle is replaced in
+every later one. It holds real names in plain text (created mode 600): keep it private and
+delete it with the raw bundles. The map and that file are saved before the bundle is
+written, under a lock; run batches one at a time, not side by side.
+
+Only what looks like a name is learned: no code or JSON fragments, and at most 5 words. One
+word must not be an everyday word (the spaCy model's dictionary, when installed), an acronym of
+up to 4 letters, a number or a kept name. Values under identity keys (`company`,
+`owner`, `user`...) are learned unless they are code, kept or one lowercase everyday word. Put
+acronym-only clients in the dictionary. The model reads one line at a time, so a name split
+across lines is missed.
+
+A `keep` list in the dictionary holds public names (the platforms and products you use, your
+suites' own ids). They are never faked, learned or reported as leftovers, in any field, ids,
+tool names and effect verbs included; a private name next to one is still faked
+(`acme` in `notion_acme_sync`). Daimon's own name, its effect verbs and the services they
+name are always kept.
+
+A one-word name that is also an everyday word ("Will", "Hope", "Young") is replaced only when
+it is written as in the dictionary, capitalized; the sweep cannot see the lowercase form. Add
+such handles to the dictionary as they appear.
+
 ## Who can do what
 
 | Person | Can |

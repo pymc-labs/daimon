@@ -34,6 +34,18 @@ dependencies = [
     "python-ulid>=3.1,<4",
 ]
 
+[project.optional-dependencies]
+# Scrubbing real conversations into shareable eval cases. The eval worker image and
+# operators who build suites install this extra; other images stay lean. Image OCR
+# uses the `tesseract` binary when it is on PATH, and name detection needs a spaCy model
+# (see docs/evals.md).
+evals = [
+    "faker>=30",
+    "phonenumbers>=8.13",
+    "presidio-analyzer>=2.2,<3",
+    "pdfplumber>=0.11,<1",
+]
+
 [project.urls]
 Repository = "https://github.com/pymc-labs/daimon"
 

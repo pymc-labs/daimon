@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from daimon.core.config import EvalsSettings
 from daimon.core.evals.access import Share, Subject, WorkspaceRole
 from daimon.core.evals.bundle import DirSource, ZipSource, sign, to_zip
+from daimon.core.evals.draft import Completion
 from daimon.core.evals.format import JsonObject, sha256_hex
 from daimon.core.evals.service import (
     EvalForbidden,
@@ -142,6 +143,29 @@ async def test_share_when_unscrubbed_case_is_added_then_viewers_lose_it(
     with pytest.raises(EvalNotFound):
         await service.cases(sam, SUITE)
     assert [c.revision for c in await service.cases(alex, SUITE)] == [2], "the owner still does"
+
+
+async def test_draft_when_viewer_or_unscrubbed_case_then_refused_before_any_model_call(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    service, alex, _ = await _setup(db_session, db_session_factory, "member")
+    sam = Subject(tenant_id=alex.tenant_id, platform="web", key="sam", role="member")
+    await service.import_bundle(alex, _chunks(to_zip(_files())))
+    await service.share(alex, SUITE, [Share(kind="person", id="sam", role="viewer")])
+    case = json.loads(EXAMPLE.read(CASES))
+
+    async def paid(*_: object) -> Completion:
+        raise AssertionError("no model call")
+
+    with pytest.raises((EvalForbidden, EvalNotFound)):
+        await service.draft_expectations(sam, SUITE, [case["id"]], complete=paid, confirm=True)
+    del case["provenance"]["scrub"]
+    ref = await service.put_case(alex, SUITE, case)
+    await service.save_suite(
+        alex, SuiteDraft(id=SUITE, name="Support", cases=[SuiteCasePick(id=ref.id)])
+    )
+    with pytest.raises(EvalRefused, match="only scrubbed"):
+        await service.draft_expectations(alex, SUITE, [case["id"]], complete=paid, confirm=True)
 
 
 async def test_imported_run_when_unfinished_then_stored_as_cancelled_record(

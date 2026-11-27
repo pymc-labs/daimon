@@ -187,6 +187,8 @@ _MAY_NAME: dict[str, frozenset[str]] = {
     "packages/adapters/mcp/daimon/adapters/mcp/tools/_channel_target.py": frozenset({"slack"}),
     # Reached only on a Teams origin, like the other Teams-not-configured refusals.
     "packages/adapters/mcp/daimon/adapters/mcp/tools/_own_card.py": frozenset({"teams"}),
+    # Reads threads of whichever chat app the caller is on, one reader each.
+    "packages/adapters/mcp/daimon/adapters/mcp/tools/_eval_threads.py": frozenset(_APPS),
     "packages/adapters/mcp/daimon/adapters/mcp/tools/credential_requests.py": frozenset({"teams"}),
     "packages/adapters/mcp/daimon/adapters/mcp/tools/direct_messages.py": frozenset(
         {"discord", "slack"}

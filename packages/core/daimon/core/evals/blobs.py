@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Iterator
 from typing import Final, Protocol
 
 from pydantic import JsonValue
@@ -39,16 +40,19 @@ def _is_ref(node: dict[str, JsonValue]) -> bool:
     )
 
 
-def blob_refs(document: JsonValue) -> set[str]:
-    """The sha256 of every `BlobRef` anywhere in `document`."""
-    found: set[str] = set()
+def ref_nodes(document: JsonValue) -> Iterator[dict[str, JsonValue]]:
+    """Every `BlobRef` object anywhere in `document`, as the dict it is (edits show in place)."""
     stack: list[JsonValue] = [document]
     while stack:
         node = stack.pop()
         if isinstance(node, dict):
             if _is_ref(node):
-                found.add(str(node["sha256"]))
+                yield node
             stack.extend(node.values())
         elif isinstance(node, list):
             stack.extend(node)
-    return found
+
+
+def blob_refs(document: JsonValue) -> set[str]:
+    """The sha256 of every `BlobRef` anywhere in `document`."""
+    return {str(ref["sha256"]) for ref in ref_nodes(document)}

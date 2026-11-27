@@ -3119,6 +3119,28 @@ class EvalsSettings(BaseModel):
     max_bundle_mb: int = Field(
         default=128, gt=0, description="Largest eval bundle import or export handles, in MiB."
     )
+    scrub_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Secret that keys the scrub map (at least 16 characters). Required to scrub real "
+            "conversations into eval cases; changing it changes every fake made afterwards."
+        ),
+    )
+    scrub_ner_model: str = Field(
+        default="en_core_web_sm",
+        description=(
+            "spaCy model that finds names, places and organizations while scrubbing. Not "
+            "installed or empty: only known names and patterns are found and cases stay partial."
+        ),
+    )
+    scrub_entities_file: str | None = Field(
+        default=None,
+        description="JSON or YAML file of known private names added to every scrub.",
+    )
+    draft_model: str | None = Field(
+        default=None,
+        description="Model that drafts case expectations. Unset: the side-call model.",
+    )
 
 
 class LongJobsSettings(BaseModel):
