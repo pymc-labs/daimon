@@ -35,13 +35,16 @@ daimon evals cases validate case.json
 Make cases from a conversation you can read. Each turn the agent answered becomes
 one case: the messages before it are history, and the world holds only what that
 turn used. Send a Discord, Slack or Teams link to the `eval_case_from_thread` tool,
-a web chat link to `POST /api/evals/suites/{id}/cases/from-thread`, or a web chat
-link or a saved thread file to the command line:
+or a chat link or a saved thread file to the command line:
 
 ```bash
 daimon evals cases from-thread support-basics https://example.com/chat/<id>
 daimon evals cases from-thread support-basics --record thread.json
 ```
+
+<!-- knowledge: web -->
+The web app sends a chat link to `POST /api/evals/suites/{id}/cases/from-thread`.
+<!-- /knowledge -->
 
 Chat platforms keep messages, not tool calls, so these cases have `text` fidelity
 and the simulator fills the gaps. A case starts with the recorded answer as its

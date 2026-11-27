@@ -4,6 +4,7 @@ One new tenant-scoped table. It holds no real value: only an HMAC of it under th
 scrub key and the fake that replaced it. Additive only.
 
 downgrade: destructive
+schema: expand
 """
 
 from collections.abc import Sequence
@@ -11,8 +12,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0235_eval_scrub_entities"
-down_revision: str | None = "0234_evals_foundation"
+revision: str = "0240_eval_scrub_entities"
+down_revision: str | None = "0239_evals_foundation"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
