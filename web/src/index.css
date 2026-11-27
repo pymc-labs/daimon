@@ -44,6 +44,9 @@
   --color-chart-3: var(--chart-3);
   --color-chart-4: var(--chart-4);
   --color-chart-5: var(--chart-5);
+  --color-discord: var(--discord);
+  --color-slack: var(--slack);
+  --color-teams: var(--teams);
   --color-sidebar: var(--muted);
   --color-sidebar-foreground: var(--foreground);
   --color-sidebar-border: var(--border);
@@ -89,6 +92,9 @@
   --chart-3: #d0731d;
   --chart-4: #c2456b;
   --chart-5: #7a8a1e;
+  --discord: #5865f2;
+  --slack: #611f69;
+  --teams: #5b5fc7;
 }
 
 .dark {
@@ -118,6 +124,9 @@
   --chart-3: #c9772c;
   --chart-4: #d24f95;
   --chart-5: #869a2a;
+  --discord: #7c87f5;
+  --slack: #b068b8;
+  --teams: #8c90e6;
 }
 
 @layer base {

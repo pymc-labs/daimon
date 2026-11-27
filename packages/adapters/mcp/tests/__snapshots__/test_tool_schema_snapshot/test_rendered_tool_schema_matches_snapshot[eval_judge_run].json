@@ -1,0 +1,130 @@
+{
+  "description": [
+    "Estimate what judging an eval run with models would cost. Never runs the judges:",
+    "a person approves the estimate and a spending ceiling on the evals page or in the CLI."
+  ],
+  "parameters": {
+    "$defs": {
+      "JudgeRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "aggregate": {
+            "default": "majority",
+            "enum": [
+              "majority",
+              "mean",
+              "all"
+            ],
+            "type": "string"
+          },
+          "approve_cap_usd": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "batch": {
+            "default": false,
+            "type": "boolean"
+          },
+          "id": {
+            "default": "judge",
+            "type": "string"
+          },
+          "kind": {
+            "default": "rubric",
+            "enum": [
+              "rubric",
+              "pairwise",
+              "reference"
+            ],
+            "type": "string"
+          },
+          "models": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/$defs/ModelChoice"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      },
+      "ModelChoice": {
+        "additionalProperties": false,
+        "properties": {
+          "backend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "effort": {
+            "anyOf": [
+              {
+                "enum": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "request": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/JudgeRequest"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "run_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "run_id"
+    ],
+    "type": "object"
+  }
+}

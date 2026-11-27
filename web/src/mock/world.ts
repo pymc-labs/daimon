@@ -61,19 +61,19 @@ export const SESSIONS: Record<string, ChatSession[]> = {
 
 const ALL: Capability[] = [
   "chat.use", "files.attach", "agents.view", "agents.edit", "agents.create", "channels.view", "channels.manage", "routines.view", "routines.manage",
-  "credits.view_own", "credits.manage", "integrations.view", "integrations.manage", "people.manage", "audit.view", "workspace.manage",
+  "credits.view_own", "credits.manage", "integrations.view", "integrations.manage", "people.manage", "audit.view", "workspace.manage", "evals.use",
 ]
 const CAPS: Record<Role, Capability[]> = {
   owner: ALL, admin: ALL,
-  member: ["chat.use", "files.attach", "agents.view", "agents.edit", "agents.create", "channels.view", "routines.view", "routines.manage", "credits.view_own"],
+  member: ["chat.use", "files.attach", "agents.view", "agents.edit", "agents.create", "channels.view", "routines.view", "routines.manage", "credits.view_own", "evals.use"],
   visitor: ["chat.use", "credits.view_own"],
 }
 /** Visitors the demo lets attach files, by person; the default visitor has them off. */
 export const visitorFiles: Record<string, boolean> = { p_jordan: false }
 const MODULES: Record<Role, ModuleKey[]> = {
-  owner: ["chat", "agents", "channels", "routines", "credits", "integrations", "admin"],
-  admin: ["chat", "agents", "channels", "routines", "credits", "integrations", "admin"],
-  member: ["chat", "agents", "channels", "routines", "credits"], visitor: ["chat"],
+  owner: ["chat", "agents", "channels", "routines", "evals", "credits", "integrations", "admin"],
+  admin: ["chat", "agents", "channels", "routines", "evals", "credits", "integrations", "admin"],
+  member: ["chat", "agents", "channels", "routines", "evals", "credits"], visitor: ["chat"],
 }
 const CREDIT: Record<Role, Me["credit"]> = {
   owner: { left_usd: 63.2, total_usd: 100, window: "month", resets_at: "2026-11-01T00:00:00Z" },

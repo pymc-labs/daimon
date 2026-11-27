@@ -1,0 +1,21 @@
+/* Diff and JSON viewers drawn with the app tokens, so light and dark both hold. */
+.diff-view {
+  --diff-background-color: transparent; --diff-text-color: var(--foreground); --diff-font-family: var(--font-mono);
+  --diff-gutter-insert-background-color: color-mix(in oklab, var(--success) 18%, transparent); --diff-gutter-insert-text-color: var(--foreground);
+  --diff-gutter-delete-background-color: color-mix(in oklab, var(--destructive) 18%, transparent); --diff-gutter-delete-text-color: var(--foreground);
+  --diff-code-insert-background-color: color-mix(in oklab, var(--success) 12%, transparent); --diff-code-insert-text-color: var(--foreground);
+  --diff-code-delete-background-color: color-mix(in oklab, var(--destructive) 12%, transparent); --diff-code-delete-text-color: var(--foreground);
+  --diff-code-insert-edit-background-color: color-mix(in oklab, var(--success) 32%, transparent); --diff-code-insert-edit-text-color: var(--foreground);
+  --diff-code-delete-edit-background-color: color-mix(in oklab, var(--destructive) 32%, transparent); --diff-code-delete-edit-text-color: var(--foreground);
+  --diff-omit-gutter-line-color: var(--border-strong);
+  font-size: 12px;
+}
+.jsondiffpatch-delta { font-family: var(--font-mono); font-size: 12px; color: var(--foreground); }
+.jsondiffpatch-delta pre { background: transparent; }
+.jsondiffpatch-added .jsondiffpatch-property-name, .jsondiffpatch-added .jsondiffpatch-value pre, .jsondiffpatch-modified .jsondiffpatch-right-value pre, .jsondiffpatch-textdiff-added {
+  background: color-mix(in oklab, var(--success) 22%, transparent);
+}
+.jsondiffpatch-deleted .jsondiffpatch-property-name, .jsondiffpatch-deleted pre, .jsondiffpatch-modified .jsondiffpatch-left-value pre, .jsondiffpatch-textdiff-deleted {
+  background: color-mix(in oklab, var(--destructive) 22%, transparent);
+}
+.jsondiffpatch-unchanged, .jsondiffpatch-movedestination { color: var(--muted-foreground); }
