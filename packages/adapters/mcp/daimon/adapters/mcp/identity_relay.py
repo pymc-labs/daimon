@@ -29,6 +29,7 @@ from daimon.core.config import SignedIdentityServer, load_watches_settings
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.defaults.builtin_agent import find_agent_or_builtin
 from daimon.core.defaults.metadata import BUILTIN_AGENT_NAMES, MA_METADATA_KEY_MANAGED
+from daimon.core.errors import WatchFeatureUnreadable
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
 from daimon.core.mcp_identity import (
@@ -66,6 +67,7 @@ from daimon.core.stores.domain import (
     ChatPlatform,
     ContinuationReason,
     RoutineRow,
+    TaskContinuationRow,
     TurnOriginRow,
     WatchRow,
 )
@@ -74,6 +76,7 @@ from daimon.core.stores.routines import get_routine
 from daimon.core.stores.task_continuations import get_running_wake_row
 from daimon.core.stores.thread_sessions import get_thread_session_by_id
 from daimon.core.stores.turn_origins import get_session_origin, list_active_origins
+from daimon.core.stores.watches import get_firing, watch_seed
 from daimon.core.turn_origin import origin_place
 from fastmcp.server.auth.auth import TokenVerifier
 from pydantic import SecretStr
@@ -265,10 +268,10 @@ async def _thread_wake(
     A wake's turn takes its claim's owner as its origin id (`turn_origin.wake_turn`), so
     the row is found from the turn alone: claimed by that owner, started and inside its
     lease, for this workspace, platform, requester and agent. Its origin and signed channel
-    must be the row's own thread under the same parent, so a watch report into a new
-    thread, a turn in the channel itself, a DM or channel scope and a helper find none.
-    The room is judged as a routine posting there judges it (`routine_room`), never as the
-    turn's own. Reads only.
+    must be one thread under the row's parent: the row's own thread, or for a watch report
+    the new thread its firing made (`stores.watches.watch_seed` rechecks the watch). A turn
+    in the channel itself, a DM or channel scope and a helper find none. The room is judged
+    as a routine posting there judges it (`routine_room`), never as the turn's own. Reads only.
     """
     thread = origin.thread_id
     if (
@@ -280,22 +283,19 @@ async def _thread_wake(
     ):
         return None
     async with sessionmaker() as session:
-        row = await get_running_wake_row(
-            session,
-            tenant_id=tenant_id,
-            platform=platform,
-            thread_id=thread,
-            owner=origin.id.hex,
-            now=now,
-        )
-    if (
-        row is None
-        or row.parent_channel_id != origin.parent_channel_id
-        or not row.requester_account_id == origin.account_id == account_id
-        or row.requester_external_user_id != person
-        or row.target_ma_agent_id != origin.responder_ma_agent_id
-    ):
-        return None
+        row = await _running_wake(
+            session, origin, tenant_id=tenant_id, account_id=account_id, person=person,
+            platform=platform, now=now,
+        )  # fmt: skip
+        if row is None or row.parent_channel_id != origin.parent_channel_id:
+            return None
+        if row.thread_id != thread and not (
+            row.reason == "watch_report"
+            and (firing := await get_firing(session, row.idempotency_key)) is not None
+            and firing.delivery_thread_id == thread
+            and await _watch_runs(session, row.model_copy(update={"thread_id": thread}), now)
+        ):
+            return None
     destination = {
         "place_type": "thread",
         "channel_id": thread,
@@ -305,6 +305,94 @@ async def _thread_wake(
         sessionmaker, tenant_id=tenant_id, platform=platform, destination=destination, now=now
     )
     return None if found is None else (row.reason, found[0], found[1])
+
+
+async def _running_wake(
+    session: AsyncSession,
+    origin: TurnOriginRow,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    person: str,
+    platform: str,
+    now: datetime,
+) -> TaskContinuationRow | None:
+    """The wake row `origin`'s turn runs, in any thread, for this requester and agent."""
+    row = await get_running_wake_row(
+        session, tenant_id=tenant_id, platform=platform, thread_id=None,
+        owner=origin.id.hex, now=now,
+    )  # fmt: skip
+    if (
+        row is None
+        or not row.requester_account_id == origin.account_id == account_id
+        or row.requester_external_user_id != person
+        or row.target_ma_agent_id != origin.responder_ma_agent_id
+    ):
+        return None
+    return row
+
+
+async def _watch_runs(session: AsyncSession, row: TaskContinuationRow, now: datetime) -> bool:
+    """Whether the watch behind a report still runs it in the place `row` names."""
+    try:
+        return await watch_seed(session, row, now=now) is not None
+    except WatchFeatureUnreadable:
+        return False
+
+
+async def _dm_wake(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    binding: RelayBinding,
+    origin: TurnOriginRow,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    person: str,
+    platform: str,
+    now: datetime,
+) -> bool:
+    """Whether `origin` is a watch report's live turn in its owner's fresh DM scope.
+
+    The credential binds only its session, grant and the owner's DM, opened by the report
+    before its turn. The turn holds that grant, is no person's and no helper's, and took
+    its claim's owner as its id; that claim is a `watch_report` still running under its
+    lease for this owner and agent, its watch still reports to the owner's DM
+    (`watch_seed`), and the firing recorded this session as the one it runs on.
+    """
+    if (
+        binding.dm_channel is None
+        or binding.routine_id is not None
+        or binding.session_key is None
+        or origin.helper_of is not None
+        or origin.human_invocation is not False
+        or origin.attended
+        or origin.platform != "discord"
+        or not origin.thread_id.startswith(DM_SCOPE_PREFIX)
+        or origin.parent_channel_id != origin.thread_id
+        or origin.platform_channel_id is not None
+        or origin.platform_message_id is not None
+        or origin.expires_at <= now
+    ):
+        return False
+    async with sessionmaker() as session:
+        row = await _running_wake(
+            session, origin, tenant_id=tenant_id, account_id=account_id, person=person,
+            platform=platform, now=now,
+        )  # fmt: skip
+        if row is None or row.reason != "watch_report":
+            return False
+        firing = await get_firing(session, row.idempotency_key)
+        watch = None if firing is None else await watches.get_watch(session, firing.watch_id)
+        mapping = await get_thread_session_by_id(session, id=binding.session_key)
+        return (
+            firing is not None
+            and watch is not None
+            and watch.delivery == "dm"
+            and watch.owner_external_id == person
+            and mapping is not None
+            and firing.delivery_session_id == mapping.ma_session_id
+            and await _watch_runs(session, row, now)
+        )
 
 
 async def _routine_run(
@@ -819,9 +907,20 @@ def build_identity_relay_route(
             ):
                 # Only the turn holding this credential's own grant. A person's live turn
                 # keeps everything it signs; a continuation signs its thread as a routine
-                # posting there would. Anything else signs what it signs without the setting.
+                # posting there would; a watch report to its owner's DM signs that DM as a
+                # DM routine does. Anything else signs what it signs without the setting.
                 if _live_person_turn(origin, now=now):
                     wake = "turn"
+                elif (
+                    server.dm_routine_claims
+                    and binding.dm_channel is not None
+                    and await _dm_wake(
+                        sessionmaker, binding, origin, tenant_id=tenant_id,
+                        account_id=account_id, person=person, platform=platform, now=now,
+                    )
+                ):  # fmt: skip
+                    wake, room = "watch_report", "dm"
+                    place = TurnPlace(channel_id=binding.dm_channel, message_id=None)
                 elif (
                     running := await _thread_wake(
                         sessionmaker,

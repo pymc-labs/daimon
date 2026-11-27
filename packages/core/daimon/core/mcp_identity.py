@@ -223,16 +223,27 @@ class RelayBinding:
 class DmRoutineRelay:
     """What a fire of a routine posting to its owner's DM binds into its turn's relay
     credential (`RelayBinding`): the routine, its owner, the fire's execution, the
-    routine's `updated_at` when the fire began (ISO 8601) and, once opened, the DM."""
+    routine's `updated_at` when the fire began (ISO 8601) and, once opened, the DM. A
+    watch report to its owner's DM binds only the DM (`watch_report`)."""
 
-    routine_id: uuid.UUID
+    routine_id: uuid.UUID | None
     owner: str
-    execution: uuid.UUID
-    revision: str
+    execution: uuid.UUID | None
+    revision: str | None
     channel: str | None = None
+
+    @classmethod
+    def watch_report(cls, owner: str) -> DmRoutineRelay:
+        """A watch report to its owner's DM: no routine, only the DM once opened. The
+        relay finds the report's live wake from the turn itself (`wake_turn`)."""
+        return cls(routine_id=None, owner=owner, execution=None, revision=None)
 
     def binding(self, agent_name: str, *, session_key: uuid.UUID, grant: str) -> RelayBinding:
         assert self.channel is not None
+        if self.routine_id is None:
+            return RelayBinding(
+                agent_name=agent_name, session_key=session_key, grant=grant, dm_channel=self.channel
+            )
         return RelayBinding(
             agent_name=agent_name,
             session_key=session_key,
@@ -262,7 +273,19 @@ def parse_relay_claim(raw: object) -> RelayBinding:
     unattended = routine is not None or watch is not None
     # A routine in its owner's DM turn: the session, its grant and the routine together,
     # with every field the relay checks it by; any of them alone is a wrong shape.
-    dm = (
+    # A watch report in its owner's DM turn: the session, its grant and the DM alone.
+    report = (
+        dm_channel is not None
+        and routine is None
+        and set(claim)
+        <= {
+            "agent_name",
+            "session",
+            "grant",
+            "dm_channel",
+        }
+    )
+    dm = not report and (
         revision is not None
         or dm_channel is not None
         or (execution is not None and key is not None)
@@ -285,6 +308,7 @@ def parse_relay_claim(raw: object) -> RelayBinding:
             "dm_channel",
         }
         or (dm and not _dm_routine_shape(claim))
+        or (report and not _dm_report_shape(claim))
         or (fire and not _routine_fire_shape(claim))
         or not (destination is None or (isinstance(destination, str) and routine is not None))
         or not (owner is None or (isinstance(owner, str) and owner and unattended))
@@ -337,6 +361,14 @@ def _dm_routine_shape(claim: Mapping[str, object]) -> bool:
     except (TypeError, ValueError):
         return False
     return at.tzinfo is not None
+
+
+def _dm_report_shape(claim: Mapping[str, object]) -> bool:
+    """Whether a relay claim is whole as a DM watch report's: session, grant, a channel id."""
+    channel = claim.get("dm_channel")
+    if not all(isinstance(claim.get(k), str) and claim.get(k) for k in ("session", "grant")):
+        return False
+    return isinstance(channel, str) and channel.isascii() and channel.isdecimal()
 
 
 def _routine_fire_shape(claim: Mapping[str, object]) -> bool:
@@ -452,14 +484,16 @@ def caller_claims(
 
     `wake` says why a call with no fresh message runs: `turn` is the person's live turn
     and keeps its `sub` and `msg`; any other reason is a continuation posting to `place`,
-    signed like a routine with that room's kind and no person or message.
+    signed like a routine with that room's kind and no person or message. A watch report
+    posting to its owner's DM (room `dm`) names the owner, as a DM routine does.
 
     `rev` and `routine_name` come only with `routine` (`routine_revision`).
     `routine_owner`, a channel or thread routine's owner, is signed as `owner`: who
     receives a file the run makes for its owner. It never makes the owner the person
     asking; a DM routine's owner is already `sub`.
     """
-    owned = routine is not None and room == "dm"
+    # A routine or a watch report posting to its owner's DM: the owner is the person.
+    owned = (routine is not None or wake not in (None, "turn")) and room == "dm"
     if routine is None and (rev is not None or routine_name is not None):
         raise ValueError("a routine's revision and name come only with its routine")
     if routine_owner is not None and (routine is None or owned or not routine_owner):
@@ -484,7 +518,7 @@ def caller_claims(
             and place.channel_id
             and not place.message_id
             and room is not None
-            and room != "dm"
+            and (room != "dm" or (wake == "watch_report" and bool(platform_user_id)))
         ):
             raise ValueError("a continuation wake needs its room and its kind, and no message")
     person = owned or (

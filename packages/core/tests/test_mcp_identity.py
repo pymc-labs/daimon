@@ -911,3 +911,39 @@ def test_a_channel_routines_run_carries_its_fire_through_the_relay_claim() -> No
     ):
         with pytest.raises(ValueError):
             parse_relay_claim({**whole, **wrong})
+
+
+def test_a_dm_watch_reports_relay_claim_binds_its_session_and_the_dm_alone() -> None:
+    report = RelayBinding("Helper", uuid.uuid4(), grant="g-1", dm_channel="77")
+    assert parse_relay_claim(report.claim()) == report, "the report's binding reads back"
+    whole = report.claim()
+    for key in ("session", "grant"):
+        with pytest.raises(ValueError):
+            parse_relay_claim({k: v for k, v in whole.items() if k != key})
+    for wrong in ({"dm_channel": "abc"}, {"watch": str(uuid.uuid4())}, {"owner": "42"}):
+        with pytest.raises(ValueError):
+            parse_relay_claim({**whole, **wrong})
+
+
+def test_a_dm_watch_report_signs_its_owner_and_dm_with_its_wake() -> None:
+    now = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
+    base: dict[str, Any] = {
+        "issuer": "i", "audience": "a", "agent_id": "ag", "platform": "discord",
+        "workspace_id": "1", "agent_name": "Agent",
+    }  # fmt: skip
+    payload = caller_claims(
+        **base, platform_user_id="42", place=TurnPlace("77", None), room="dm",
+        wake="watch_report",
+    ).payload(now=now)  # fmt: skip
+    assert (payload["sub"], payload["channel"], payload["room"], payload["wake"]) == (
+        "discord:42",
+        "77",
+        "dm",
+        "watch_report",
+    )
+    assert "msg" not in payload
+    with pytest.raises(ValueError, match="continuation wake"):
+        caller_claims(  # a DM wake names its owner
+            **base, platform_user_id=None, place=TurnPlace("77", None), room="dm",
+            wake="watch_report",
+        )  # fmt: skip

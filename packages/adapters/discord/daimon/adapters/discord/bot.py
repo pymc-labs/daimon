@@ -4511,6 +4511,18 @@ class DaimonBot(commands.Bot):
             )
         )
 
+    def _watch_report_dm_opener(self, owner: str) -> Callable[[], Awaitable[str]] | None:
+        """How a DM watch report opens its owner's DM before its turn, sending nothing, when
+        a signed server reads for such reports (`names_dm_watch_report`); None otherwise."""
+        settings = self.runtime.settings
+        if settings.discord is None or not settings.mcp_identity.names_dm_watch_report:
+            return None
+        from daimon.core.discord_membership import open_discord_dm
+
+        return functools.partial(
+            open_discord_dm, settings.discord.bot_token.get_secret_value(), owner
+        )
+
     async def _run_watch_report(self, row: TaskContinuationRow, seed: str) -> None:
         """Run one started watch report into the owner's DM or a new thread."""
         from daimon.adapters.discord.watch_delivery import (
@@ -4563,6 +4575,7 @@ class DaimonBot(commands.Bot):
                         prompt=seed,
                         source=source,
                         budget_channel_id=budget,
+                        open_dm=self._watch_report_dm_opener(current.owner_external_id),
                     )
                 except DirectMessageAccessRevoked as error:
                     log.info("watch_report.dm_refused", reason=error.reason)

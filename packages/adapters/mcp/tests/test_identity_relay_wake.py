@@ -8,7 +8,8 @@ from __future__ import annotations
 import datetime as dt
 import json
 import uuid
-from typing import cast, get_args
+from types import SimpleNamespace
+from typing import Any, cast, get_args
 
 import pytest
 from daimon.core.config import SignedIdentityServer
@@ -281,8 +282,8 @@ async def test_a_row_that_no_longer_names_this_turn_signs_no_wake(
 @pytest.mark.parametrize(
     ("case", "thread", "moved"),
     [
-        # The turn and its session run in the new thread; the row names the watch's thread.
-        ("new-thread-report", "thr-1", "thr-new"),
+        # The turn and its session run in a new thread its firing never recorded.
+        ("unrecorded-new-thread", "thr-1", "thr-new"),
         ("dm-scope", "dm:user-1", None),
         ("channel-scope", "ch:chan-1:1", None),
     ],
@@ -361,3 +362,161 @@ async def test_the_two_settings_are_independent_and_never_combine(
         assert ("routine" in routine_claims) is routines
         assert "wake" not in routine_claims, "a routine run never signs a wake"
         assert "routine" not in turn_claims and "routine" not in wake_claims
+
+
+# A watch report, where it is posted
+
+
+def _report_world(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    delivery: str,
+    thread: str | None = None,
+    session: str | None = None,
+    runs: bool = True,
+    owner: str = "user-1",
+) -> None:
+    """The watch behind a report row: its firing's recorded new thread or DM session, its
+    delivery and owner, and whether it still runs the report (`watch_seed`)."""
+    from daimon.adapters.mcp import identity_relay
+
+    firing = SimpleNamespace(watch_id=uuid.uuid4(), delivery_thread_id=thread,
+                             delivery_session_id=session)  # fmt: skip
+    watch = SimpleNamespace(delivery=delivery, owner_external_id=owner)
+
+    async def get_firing(_session: object, _key: object) -> object:
+        return firing
+
+    async def get_watch(_session: object, _id: object) -> object:
+        return watch
+
+    async def watch_seed(_session: object, row: object, *, now: object) -> str | None:
+        return "seed" if runs else None
+
+    monkeypatch.setattr(identity_relay, "get_firing", get_firing)
+    monkeypatch.setattr("daimon.core.stores.watches.get_watch", get_watch)
+    monkeypatch.setattr(identity_relay, "watch_seed", watch_seed)
+
+
+async def _new_thread_report(factory: async_sessionmaker[AsyncSession], person: _Person) -> str:
+    """A watch report's turn in thr-new, the thread its firing made under chan-1; its row
+    names the watch's own thread, thr-1."""
+    token = await _continuation(factory, person, reason="watch_report", thread="thr-1")
+    await _sql(
+        factory, "UPDATE turn_origins SET thread_id = 'thr-new', platform_channel_id = 'thr-new'"
+    )
+    await _sql(factory, "UPDATE thread_sessions SET thread_id = 'thr-new'")
+    return token
+
+
+async def test_a_watch_report_in_the_new_thread_its_firing_made_signs_wake_there(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding: the lookup used the new thread while the row holds the watch's own, so a
+    report in a new thread signed nothing and read nothing. Its room is the new thread."""
+    person = await _person(db_session_factory)
+    await _facts(db_session_factory, person, {"chan-1": TEAM, "thr-new": NARROW})
+    token = await _new_thread_report(db_session_factory, person)
+    _report_world(monkeypatch, delivery="new_thread", thread="thr-new")
+    on, off = await _today(db_session_factory, token, WAKE_SERVER)
+    assert (on["wake"], on["channel"], on["room"]) == ("watch_report", "thr-new", "narrow")
+    assert not {"sub", "msg", "routine"} & set(on), "no person, message or routine"
+    assert off["sub"] == "discord:user-1", "today it names the requester and reads nothing"
+
+
+@pytest.mark.parametrize(
+    ("case", "world"),
+    [
+        ("another-thread-recorded", {"delivery": "new_thread", "thread": "thr-other"}),
+        ("watch-stopped", {"delivery": "new_thread", "thread": "thr-new", "runs": False}),
+    ],
+)
+async def test_a_new_thread_report_its_firing_does_not_vouch_for_signs_no_wake(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    world: dict[str, Any],
+) -> None:
+    person = await _person(db_session_factory)
+    await _facts(db_session_factory, person, {"chan-1": TEAM, "thr-new": TEAM})
+    token = await _new_thread_report(db_session_factory, person)
+    _report_world(monkeypatch, **world)
+    on, off = await _today(db_session_factory, token, WAKE_SERVER)
+    assert "wake" not in on and on == off, f"{case}: what it signs today"
+
+
+DM_WAKE_SERVER = SERVER.model_copy(
+    update={"wake_claims": True, "routine_claims": True, "dm_routine_claims": True}
+)
+
+
+async def _dm_report(factory: async_sessionmaker[AsyncSession], person: _Person) -> str:
+    """A watch report's turn in a fresh `dm:` scope of its owner, holding its session's
+    grant; the credential binds that session and the DM opened before the turn."""
+    scope = f"dm:{uuid.uuid4()}"
+    await _continuation(factory, person, reason="watch_report", thread="thr-1", grant="g-dm")
+    await _sql(
+        factory,
+        "UPDATE turn_origins SET thread_id = :s, parent_channel_id = :s,"
+        " platform_channel_id = NULL",
+        s=scope,
+    )
+    await _sql(factory, "UPDATE thread_sessions SET thread_id = :s", s=scope)
+    async with factory() as db:
+        mapping = (await db.execute(text("SELECT id FROM thread_sessions"))).scalar_one()
+    return await _token(
+        factory, person, RelayBinding("Agent A", mapping, grant="g-dm", dm_channel="555")
+    )
+
+
+async def test_a_watch_report_in_its_owners_dm_signs_wake_the_owner_and_the_dm(
+    db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finding: a report to a DM signed nothing. Now it signs as a DM routine does: the
+    owner as `sub`, the DM opened for it, room `dm`, with `wake` and no message."""
+    person = await _person(db_session_factory)
+    token = await _dm_report(db_session_factory, person)
+    _report_world(monkeypatch, delivery="dm", session="sess_g-dm")
+    on, off = await _today(db_session_factory, token, DM_WAKE_SERVER)
+    assert (on["wake"], on["sub"], on["channel"], on["room"]) == (
+        "watch_report",
+        "discord:user-1",
+        "555",
+        "dm",
+    )
+    assert not {"msg", "routine", "owner"} & set(on), "no message, no routine"
+    assert "wake" not in off and "room" not in off, "without wake claims: today's claims"
+
+
+@pytest.mark.parametrize(
+    ("case", "world", "server"),
+    [
+        ("dm-claims-off", {}, WAKE_SERVER),
+        ("another-session", {"session": "sess_other"}, DM_WAKE_SERVER),
+        ("not-a-dm-watch", {"delivery": "new_thread"}, DM_WAKE_SERVER),
+        ("another-owner", {"owner": "user-9"}, DM_WAKE_SERVER),
+        ("watch-stopped", {"runs": False}, DM_WAKE_SERVER),
+        ("lease-lost", {"lease": True}, DM_WAKE_SERVER),
+    ],
+)
+async def test_a_dm_report_any_check_fails_signs_what_it_signs_today(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    world: dict[str, Any],
+    server: SignedIdentityServer,
+) -> None:
+    person = await _person(db_session_factory)
+    token = await _dm_report(db_session_factory, person)
+    if world.pop("lease", False):
+        await _sql(db_session_factory, "UPDATE task_continuations SET lease_owner = 'other'")
+    _report_world(
+        monkeypatch,
+        delivery=world.get("delivery", "dm"),
+        session=world.get("session", "sess_g-dm"),
+        runs=world.get("runs", True),
+        owner=world.get("owner", "user-1"),
+    )
+    on = await _claims(db_session_factory, token, server)
+    off = await _claims(db_session_factory, token, SERVER)
+    assert "wake" not in on and on == off, f"{case}: what it signs today"

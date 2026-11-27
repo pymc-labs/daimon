@@ -231,3 +231,44 @@ async def test_only_the_owner_dm_routine_fire_is_given_own_dm_reach(
 
     assert unattended.await_args.kwargs["own_dm_reach"] is reach
     assert unattended.await_args.kwargs["may_end_empty"] is reach
+
+
+@pytest.mark.parametrize("signs", [True, False])
+async def test_a_dm_watch_report_opens_its_owners_dm_before_its_turn_only_when_a_server_signs(
+    db_session_factory: async_sessionmaker, monkeypatch, signs: bool
+):
+    """With an opener (a server signs DM watch reports), the owner's DM is opened after
+    admission and bound into the turn, with no routine; without one, nothing is opened."""
+    tenant, account, row = await seed(db_session_factory, reason="watch_report")
+    admission = admission_for(tenant, account.id, "ag_target")
+    patch_world(monkeypatch, admission)
+
+    async def reauthorize(_deps: object, admitted: Admission) -> Admission:
+        return admitted
+
+    monkeypatch.setattr(direct_messages, "reauthorize", reauthorize)
+    bind = AsyncMock(
+        return_value=SimpleNamespace(admission=admission, backend=None, ma_session_id="sesn")
+    )
+    monkeypatch.setattr(direct_messages, "bind_session", bind)
+    monkeypatch.setattr(
+        direct_messages, "_run_unattended_turn", AsyncMock(return_value=SimpleNamespace(text="x"))
+    )
+    monkeypatch.setattr(
+        "daimon.core.stores.watches.record_delivery_session", AsyncMock(return_value=True)
+    )
+    opener = AsyncMock(return_value="555")
+    await run_dm_watch(
+        deps_for(None, db_session_factory), row, owner_user_id=OWNER, prompt="p", source=None,
+        budget_channel_id=None, open_dm=opener if signs else None,
+    )  # fmt: skip
+    assert bind.await_args is not None
+    bound: Admission = bind.await_args.args[1]
+    relay = bound.dm_routine_relay
+    if signs:
+        opener.assert_awaited_once()
+        assert relay is not None and (relay.channel, relay.routine_id) == ("555", None)
+        binding = relay.binding("Agent", session_key=uuid.uuid4(), grant="g")
+        assert (binding.dm_channel, binding.routine_id, binding.execution) == ("555", None, None)
+    else:
+        assert relay is None

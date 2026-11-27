@@ -1375,6 +1375,7 @@ async def run_dm_watch(
     source: DmSource | None,
     budget_channel_id: str | None,
     requester_org: RequesterOrg = RequesterOrg.HOST,
+    open_dm: Callable[[], Awaitable[str]] | None = None,
 ) -> DmRoutineReply:
     """Run a DM watch's fire as a fresh private DM turn of its owner, under watch posture.
 
@@ -1386,6 +1387,10 @@ async def run_dm_watch(
     DM; nothing is posted there. While the
     owner has a DM turn running, which may be waiting on an approval card, it
     raises `SessionBusyError` so the report is offered again later.
+
+    With `open_dm` (a server signs DM watch reports), the owner's DM is opened after
+    admission, sending nothing, and bound into the turn's relay credential, so the relay
+    can sign the report's `wake` with that DM (`DmRoutineRelay.watch_report`).
     """
     if row.reason != "watch_report" or row.requester_external_user_id != owner_user_id:
         raise DirectMessageAccessRevoked("invoker_not_allowed", message="Watch owner changed.")
@@ -1400,6 +1405,8 @@ async def run_dm_watch(
             source=source,
             budget_channel_id=budget_channel_id,
             watch_row=row,
+            relay=None if open_dm is None else DmRoutineRelay.watch_report(owner_user_id),
+            open_dm=open_dm,
         )
     except DirectMessageAccessRevoked as error:
         if error.reason != "owner_busy":
@@ -1727,7 +1734,7 @@ async def _with_owner_dm(
         )
         _log.warning(
             "routine.dm_open_failed",
-            routine_id=str(relay.routine_id),
+            routine_id=str(relay.routine_id) if relay.routine_id else None,
             tenant_id=str(tenant_id),
             reason=reason,
         )
