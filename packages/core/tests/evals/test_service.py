@@ -13,8 +13,9 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from daimon.core.config import EvalsSettings
 from daimon.core.evals.access import Share, Subject, WorkspaceRole
 from daimon.core.evals.bundle import DirSource, ZipSource, sign, to_zip
-from daimon.core.evals.format import JsonObject, sha256_hex
+from daimon.core.evals.format import JsonObject, Run, sha256_hex
 from daimon.core.evals.service import (
+    BlindRun,
     EvalForbidden,
     EvalNotFound,
     EvalRefused,
@@ -222,12 +223,12 @@ async def test_run_when_a_reviewer_reads_it_then_arms_and_item_ids_are_neutral(
     await service.import_bundle(alex, _chunks(to_zip(_files())))
     await service.share(alex, SUITE, [Share(kind="person", id="sam", role="reviewer")])
     run = await service.run(sam, RUN)
-    assert [(a.id, a.label) for a in run.arms] == [("Arm 1", "Arm 1")], "arms are labelled"
-    assert run.blind_labels is None and run.name is None, "nothing maps a label back"
+    assert isinstance(run, BlindRun) and run.arms == ["Arm 1"], "arms are labelled"
+    assert "kind" not in run.model_dump_json(), "no arm kind tells the arm"
     [summary] = await service.items(sam, RUN, Page())
     assert summary.arm_id == "Arm 1" and summary.key == summary.id, "no arm in the item key"
     item = await service.item(sam, summary.id)
     assert (item.id, item.arm_id) == (summary.id, "Arm 1"), "nor in the item id"
     owner = await service.run(alex, RUN)
-    assert [a.id for a in owner.arms] == ["baseline-a"], "the owner sees the real run"
-    assert [a.id for a in (await service.run(alex, RUN, blind=True)).arms] == ["Arm 1"]
+    assert isinstance(owner, Run) and [a.id for a in owner.arms] == ["baseline-a"], "owner: real"
+    assert (await service.run(alex, RUN, blind=True)).model_dump()["arms"] == ["Arm 1"]

@@ -1,0 +1,36 @@
+{
+  "description": [
+    "Compare the arms of an eval run side by side, case by case, with each item's replies",
+    "and scores. `blind` hides arm and model names behind letters and shuffles the columns."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "arms": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "blind": {
+        "default": false,
+        "type": "boolean"
+      },
+      "run_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "run_id"
+    ],
+    "type": "object"
+  }
+}
