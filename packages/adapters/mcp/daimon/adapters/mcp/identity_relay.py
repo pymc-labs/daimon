@@ -56,6 +56,7 @@ from daimon.core.mcp_identity import (
     requester_conversation,
     routine_conversation,
     routine_destination_key,
+    routine_revision,
     stamp_parsed,
     watch_conversation,
 )
@@ -346,8 +347,8 @@ async def _dm_routine_run(
     agent_id: uuid.UUID,
     person: str,
     now: datetime,
-) -> bool:
-    """Whether a call comes from a live fire of a routine posting to its owner's DM.
+) -> RoutineRow | None:
+    """The routine whose live fire posting to its owner's DM a call comes from, or None.
 
     `origin` is the turn holding the credential's own grant. It must be that routine's
     unattended turn in a fresh `dm:` scope: no person's message, not a helper's, not a
@@ -374,7 +375,7 @@ async def _dm_routine_run(
         or origin.platform_message_id is not None
         or origin.expires_at <= now
     ):
-        return False
+        return None
     async with sessionmaker() as session:
         row = await get_routine(session, binding.routine_id, tenant_id=tenant_id)
         if (
@@ -385,9 +386,12 @@ async def _dm_routine_run(
             or routine_destination_key(row) != DM_ROUTINE_DESTINATION
             or derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=row.agent_id) != agent_id
             or row.updated_at != datetime.fromisoformat(binding.revision)
+            or not await execution_is_active(
+                session, tenant_id, binding.routine_id, binding.execution
+            )
         ):
-            return False
-        return await execution_is_active(session, tenant_id, binding.routine_id, binding.execution)
+            return None
+        return row
 
 
 async def _watch_poll(
@@ -748,6 +752,7 @@ def build_identity_relay_route(
                 else None
             )
             routine_id: str | None = None
+            signed_routine: RoutineRow | None = None
             if (
                 server.routine_claims
                 and origin is None
@@ -776,7 +781,7 @@ def build_identity_relay_route(
                     else None
                 )
                 if destination is not None:
-                    routine_id = str(binding.routine_id)
+                    routine_id, signed_routine = str(binding.routine_id), routine
                     place, room = (
                         TurnPlace(channel_id=destination[0], message_id=None),
                         destination[1],
@@ -790,20 +795,23 @@ def build_identity_relay_route(
                 and binding.dm_channel is not None
                 and isinstance(person, str)
                 and person
-                and await _dm_routine_run(
-                    sessionmaker,
-                    binding,
-                    origin,
-                    tenant_id=tenant_id,
-                    agent_id=agent_id,
-                    person=person,
-                    now=now,
+                and (
+                    dm_routine := await _dm_routine_run(
+                        sessionmaker,
+                        binding,
+                        origin,
+                        tenant_id=tenant_id,
+                        agent_id=agent_id,
+                        person=person,
+                        now=now,
+                    )
                 )
+                is not None
             ):
                 # A routine posting to its owner's DM, in a live fire: the owner, their DM
                 # (opened by the fire, never the origin's) and room `dm`. Any check failing
                 # leaves the call as it is without the setting.
-                routine_id = str(binding.routine_id)
+                routine_id, signed_routine = str(binding.routine_id), dm_routine
                 place, room = TurnPlace(channel_id=binding.dm_channel, message_id=None), "dm"
             wake: WakeReason | None = None
             if (
@@ -844,6 +852,16 @@ def build_identity_relay_route(
                 room=room,
                 routine=routine_id,
                 wake=wake,
+                # What a server's approval of this routine is bound to, from the row just
+                # checked; none for a routine that is paused, so no approval counts there.
+                rev=(
+                    routine_revision(
+                        signed_routine, workspace=f"{platform}:{workspace}" if workspace else None
+                    )
+                    if signed_routine is not None and signed_routine.enabled
+                    else None
+                ),
+                routine_name=signed_routine.name if signed_routine is not None else None,
             )
             headers["authorization"] = f"Bearer {tokens.token(identity, now=now)}"
         if request.method in ("GET", "DELETE"):
