@@ -77,7 +77,10 @@ class LiveAppSession(BaseModel):
     model_config = ConfigDict(frozen=True)
     mapping: ThreadSessionRow
     agent_id: uuid.UUID
+    #: The earliest expiry among the session's current tokens: when it next needs renewing.
     expires_at: datetime | None
+    #: The latest expiry: until then the session holds a usable token.
+    last_expires_at: datetime | None
     has_linked_requester: bool
     permissions_by_repo: dict[int, dict[str, str]]
 
@@ -864,6 +867,7 @@ async def list_live_app_sessions(
                 mapping=mapped,
                 agent_id=agent_id,
                 expires_at=token.expires_at if token is not None else None,
+                last_expires_at=token.expires_at if token is not None else None,
                 has_linked_requester=token is not None and token.link_generation is not None,
                 permissions_by_repo=(
                     {repo_id: token.permissions for repo_id in token.repo_ids}
@@ -877,6 +881,11 @@ async def list_live_app_sessions(
                     "expires_at": (
                         min(current.expires_at, token.expires_at)
                         if current.expires_at is not None
+                        else token.expires_at
+                    ),
+                    "last_expires_at": (
+                        max(current.last_expires_at, token.expires_at)
+                        if current.last_expires_at is not None
                         else token.expires_at
                     ),
                     "has_linked_requester": current.has_linked_requester

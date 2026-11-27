@@ -265,8 +265,10 @@ async def test_a_stop_ends_a_github_session_pass_between_two_sessions(
             SimpleNamespace(
                 session_id=f"{name}-{n}",
                 token_id=f"{name}-{n}",
-                mapping=SimpleNamespace(ma_session_id=f"{name}-{n}"),
+                # A running turn, so the mapped pass enters each session.
+                mapping=SimpleNamespace(ma_session_id=f"{name}-{n}", active_turn_message_id="turn"),
                 expires_at=None,
+                last_expires_at=None,
             )
             for n in (1, 2)
         ]
