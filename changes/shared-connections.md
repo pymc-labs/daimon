@@ -10,4 +10,4 @@
   (`shared_write_approval` can skip it per workspace or agent); an outside
   client may call it and is told to ask its user first. Admins turn tools off
   for the workspace, or for one agent with its tool rules, and every call is
-  audited ([MCP servers](docs/mcp-servers.md#share-a-server-with-the-workspace)).
+  audited ([Shared connections](docs/shared-connections.md#share-a-server-with-the-workspace)).

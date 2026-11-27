@@ -17,7 +17,7 @@ server](https://daimon.decision.ai/) instead.
   [Operations](operations.md) and [Compute sessions](compute.md).
 - **Add a platform or tool:** [Slack](slack.md),
   [Microsoft Teams](teams.md), [GitHub](github.md),
-  [MCP servers](mcp-servers.md) and the
+  [MCP servers](mcp-servers.md), [shared connections](shared-connections.md) and the
   [Claude Code plugin](plugin.md).
 <!-- knowledge: web -->
 - **Use it in a browser:** the [web app](web.md).

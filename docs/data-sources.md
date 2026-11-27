@@ -171,9 +171,6 @@ read-only in the app. Daimon never deletes one: a removed entry stays, and
 with `publish: true` and a clean run. `replaces` retires the sources it names, by declared id or name. A `revision`
 below the last applied one is ignored. Credentials are `env:NAME` or `file:/path`, never values.
 
-A `connections` entry (`id`, `url`, `token: "env:NAME"`) declares a
-[shared MCP connection](mcp-servers.md#share-a-server-with-the-workspace); admins approve its tools.
-
 ## Who can read a record
 
 `daimon data access-check --tenant <id> --source <id>` shows a source's state and freshness.

@@ -771,7 +771,7 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         doc="Tool servers an admin shares, each tool approved first.",
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,
-        page="mcp-servers.md#share-a-server-with-the-workspace",
+        page="shared-connections.md#share-a-server-with-the-workspace",
     ),
     FeatureSpec(
         key="direct_messages",
@@ -1033,7 +1033,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         authority=_ADMIN_NOT_OWNER,
         # Ask is the default and the strict value: the nearer tier decides, as for watches.
         combine_override="most_specific",
-        page="mcp-servers.md#share-a-server-with-the-workspace",
+        page="shared-connections.md#share-a-server-with-the-workspace",
     ),
     FeatureSpec(
         key="watch_approval",
