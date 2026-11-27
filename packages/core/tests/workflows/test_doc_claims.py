@@ -119,8 +119,8 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
     "step asks people": (
         _ASKS.format("slack") + "test_ask_derick_by_dm_resolves_in_the_thread_under_it",
         *_STRANGERS,
-        _INBOX,
     ),
+    "The web app's inbox shows the same asks.": _INBOX,
     "On Discord, the person answers by reply": (
         _ASKS.format("discord") + "test_ask_derick_by_dm_resolves_by_reply_and_closes_the_ask",
         _ASKS.format("slack") + "test_ask_derick_by_dm_resolves_in_the_thread_under_it",
@@ -204,10 +204,9 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
     + "test_runs.py::test_deadline_and_budget_end_the_run",
     "Each step's spend counts": _LANES
     + "test_step_spend_counts_against_the_run_as_persons_allowance_and_gates_them",
-    "move a routine to a workflow and back": (
-        _WEB + "test_an_admin_moves_a_routine_to_a_workflow_and_back",
-        _CLI + "test_from_routine_previews_without_moving_then_moves_and_moves_back",
-    ),
+    "move a routine to a workflow and back": _CLI
+    + "test_from_routine_previews_without_moving_then_moves_and_moves_back",
+    "The web app can move one too.": _WEB + "test_an_admin_moves_a_routine_to_a_workflow_and_back",
     "takes over the routine's schedule": (
         _W + "test_convert.py::test_a_routine_moves_to_a_workflow_and_back_with_each_slot_once",
         _W + "test_convert.py::test_a_paused_routine_moves_to_a_paused_workflow",
@@ -235,7 +234,7 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
     "only on the Anthropic backend": _W
     + "test_runs.py::test_a_home_channel_on_another_backend_refuses_the_run",
     "A run form in chat holds": _GAPS,
-    "Longer forms open in the web app.": _GAPS,
+    "A longer form opens in the web app.": _GAPS,
     "A draft card does not refresh": _GAPS,
     "Publishing from chat records no note.": _GAPS,
     "a run confirmation card cannot start a run": _GAPS,
