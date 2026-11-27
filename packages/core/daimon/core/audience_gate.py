@@ -81,7 +81,6 @@ def _place(
     channel_id: str,
     parent_id: str | None,
     routine_id: uuid.UUID | None,
-    workflow_id: uuid.UUID | None = None,
 ) -> FeaturePlace:
     return FeaturePlace.of(
         tenant_id,
@@ -89,7 +88,6 @@ def _place(
         parent_id or channel_id,
         channel_id if parent_id else None,
         routine_id=routine_id,
-        workflow_id=workflow_id,
     )
 
 
@@ -102,7 +100,6 @@ async def read_audience_mode(
     parent_id: str | None = None,
     routine_id: uuid.UUID | None = None,
     session: AsyncSession | None = None,
-    workflow_id: uuid.UUID | None = None,
 ) -> AudienceMode:
     """The mode for a destination: `off` for a platform that cannot set it, else read (raises).
 
@@ -110,7 +107,7 @@ async def read_audience_mode(
     """
     if platform not in GATED_PLATFORMS:
         return "off"
-    place = _place(tenant_id, platform, channel_id, parent_id, routine_id, workflow_id)
+    place = _place(tenant_id, platform, channel_id, parent_id, routine_id)
     if session is not None:
         return await audience_mode(session, place)
     async with sessionmaker() as own:
@@ -169,7 +166,6 @@ async def audience_fact(
     mode: AudienceMode | None = None,
     held_if_contained: bool = False,
     session: AsyncSession | None = None,
-    workflow_id: uuid.UUID | None = None,
 ) -> ChannelAudience | None:
     """The fact `authorize(POST, audience=...)` must enforce, or None when nothing is.
 
@@ -186,7 +182,6 @@ async def audience_fact(
         parent_id=parent_id,
         routine_id=routine_id,
         session=session,
-        workflow_id=workflow_id,
     )
     if mode == "off":
         return None

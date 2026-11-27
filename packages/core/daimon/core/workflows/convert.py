@@ -1,8 +1,8 @@
-"""Routines to one-step workflows and back, one routine at a time, by an admin with workflows on.
+"""Routines to agent-step workflows and back, one at a time, by an admin with workflows on.
 
 `from_routine` locks the routine and, in one transaction, writes the move `routine_translation`
 makes of it: the workflow with v1 published as the routine's owner, its schedule cursor, posts,
-features and intake binding; the routine row goes. `to_routine` undoes one the same way, from
+sandbox grant and intake binding; the routine row goes. `to_routine` undoes one the same way, from
 the workflow as it is now. Both stay in the caller's workspace.
 """
 
@@ -15,6 +15,7 @@ from typing import Any, Final
 
 from daimon.core.cron import InvalidScheduleError, validated_next_slot
 from daimon.core.dispatch_timeout import DispatchTimeoutSettings
+from daimon.core.routine_sandbox import pinned_opt_in
 from daimon.core.stores import feature_values, lead_intake, tenants
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores import workflow_deliveries as deliveries_store
@@ -47,8 +48,11 @@ REFUSALS: Final[dict[Reason, str]] = {
     "invalid_schedule": "This routine's schedule isn't valid. Fix it first.",
     "owner_unlinked": "This routine's owner has no account. Create it again first.",
     "busy": "This routine is running or posting. Try again once it finishes.",
-    "not_a_routine": "This workflow does more than a routine can: one schedule, one step.",
-    "changed": "Put its agent, where it posts and its owner back as the routine had them first.",
+    "not_a_routine": "This workflow does more than a routine can: one schedule, one agent step.",
+    "changed": (
+        "Put its steps, agent, where it posts and its owner back as the routine had them,"
+        " with built-ins off, first."
+    ),
 }
 BUSY_WORKFLOW: Final = "This workflow has a run or a post in progress. Try again once it finishes."
 
@@ -73,22 +77,24 @@ async def routine_snapshot(
     platform: str,
     now: datetime,
 ) -> RoutineSnapshot:
-    """What `translate` reads of a locked routine: its owner's account, routine-tier features,
-    intake binding and next slot."""
+    """What `translate` reads of a locked routine: its owner's account, its own result header,
+    the sandbox On it runs under, its intake binding and next slot."""
     owner = None
     if row.created_by_user_id is not None:
         principal = await get_or_create_platform_principal(
             session, tenant_id=row.tenant_id, platform=platform, external_id=row.created_by_user_id
         )
         owner = principal.account_id
-    values = await feature_values.place_values(
+    header = await feature_values.place_values(
         session,
         tenant_id=row.tenant_id,
         agent_id=None,
         channel_id=None,
         thread_key=None,
         routine_id=row.id,
+        keys=("routine_result_header",),
     )
+    sandbox = await pinned_opt_in(session, row, platform)
     try:
         slot = validated_next_slot(row.cron_expr, row.timezone, now)
     except InvalidScheduleError:
@@ -96,7 +102,9 @@ async def routine_snapshot(
     extra = {
         "owner_account_id": owner,
         "owner_notice": notice,
-        "features": tuple(sorted(v.key for v in values if v.tier == "routine")),
+        "header": any(v.tier == "routine" for v in header),
+        "sandbox": sandbox is not None,
+        "sandbox_set_by": None if sandbox is None else sandbox.set_by,
         "intake": await lead_intake.bound_config(
             session, row.tenant_id, key="routine_id", holder=row.id
         ),
@@ -131,11 +139,9 @@ async def _plan(
     return Plan(row, move.spec, move.outcome == "paused", validation, move)
 
 
-async def apply(session: AsyncSession, tenant_id: uuid.UUID, move: Move) -> None:
-    """Write a move in the session's transaction; a moved feature makes snapshots stale."""
+async def apply(session: AsyncSession, move: Move) -> None:
+    """Write a move in the session's transaction."""
     await session.run_sync(lambda s: apply_move(s.connection(), move))
-    if any(w.table == "feature_values" for w in move.writes):
-        await feature_values.bump_revision(session, tenant_id)
 
 
 async def move_routine(
@@ -146,7 +152,7 @@ async def move_routine(
     plan = await _plan(session, tenant_id, routine_id, now)
     if plan.validation.errors:
         raise Invalid(plan.validation.errors[0].message)
-    await apply(session, tenant_id, plan.move)
+    await apply(session, plan.move)
     return plan
 
 
@@ -167,7 +173,7 @@ async def preview(env: Env, routine_id: uuid.UUID) -> Plan:
 
 
 async def from_routine(env: Env, routine_id: uuid.UUID) -> uuid.UUID:
-    """Move one routine onto a one-step workflow; returns the workflow's id."""
+    """Move one routine onto an agent-step workflow; returns the workflow's id."""
     _admin(env)
     await ensure_on(env)
     async with env.sm.begin() as session:
@@ -177,8 +183,8 @@ async def from_routine(env: Env, routine_id: uuid.UUID) -> uuid.UUID:
 
 async def to_routine(env: Env, workflow_id: uuid.UUID) -> uuid.UUID:
     """Make a converted workflow its routine again, as the workflow is now, and delete the
-    workflow; returns the routine's id. Its agent, destination and owner must be the routine's,
-    with no run or post in progress."""
+    workflow; returns the routine's id. Its shape, agent, destination and owner must be the
+    routine's, with no run or post in progress."""
     _admin(env)
     await ensure_on(env)
     tenant_id = env.who.tenant_id
@@ -198,14 +204,6 @@ async def to_routine(env: Env, workflow_id: uuid.UUID) -> uuid.UUID:
         )
         if live is None or trigger is None:
             raise Refused(REFUSALS["not_a_routine"])
-        values = await feature_values.place_values(
-            session,
-            tenant_id=tenant_id,
-            agent_id=None,
-            channel_id=None,
-            thread_key=None,
-            workflow_id=workflow.id,
-        )
         posts = await deliveries_store.unsent_routine_posts(session, workflow.id)
         last = await runs_store.last_ended(session, workflow_id=workflow.id)
         snap = WorkflowSnapshot(
@@ -223,7 +221,6 @@ async def to_routine(env: Env, workflow_id: uuid.UUID) -> uuid.UUID:
             last_fired_slot=trigger.last_fired_slot,
             seeded_after=trigger.seeded_after,
             deliveries=tuple(Delivery(p.id, p.kind, p.status, p.payload, p.note) for p in posts),
-            features=tuple(sorted(v.key for v in values if v.tier == "workflow")),
             intake=await lead_intake.bound_config(
                 session, tenant_id, key="workflow_id", holder=workflow.id
             ),
@@ -234,5 +231,5 @@ async def to_routine(env: Env, workflow_id: uuid.UUID) -> uuid.UUID:
         move = untranslate(snap, now=env.now)
         if isinstance(move, Refusal):
             raise Refused(BUSY_WORKFLOW if move.reason == "busy" else REFUSALS[move.reason])
-        await apply(session, tenant_id, move)
+        await apply(session, move)
         return move.id

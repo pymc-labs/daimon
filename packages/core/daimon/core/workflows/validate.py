@@ -17,7 +17,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from daimon.core.constants import AGENT_SKILL_CAP
 from daimon.core.continuity.watch_projection import projection_path
-from daimon.core.routines import private_routine_steps
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.workflows.expressions import (
     ExpressionError,
@@ -55,7 +54,6 @@ from daimon.core.workflows.spec import (
     MentionTrigger,
     PollTrigger,
     PostNode,
-    RoutineNode,
     ScheduleTrigger,
     SchemaField,
     Spec,
@@ -66,6 +64,8 @@ from daimon.core.workflows.spec import (
     business_days,
     parse_duration,
     parse_spec,
+    private_steps,
+    reads_private,
 )
 from daimon.core.workflows.taint import (
     Catalog,
@@ -91,10 +91,16 @@ _BAD_WAIT_SOURCE: Final = (
     "A wait's event is another workflow's run (`workflow:<id>`), a delivery to one of this "
     "workflow's webhook triggers (`trigger:<id>`) or `callback`"
 )
-_STEP_PARTS: Final = frozenset({"output", "summary", "route", "status", "files", "visits"})
-#: What a private routine step still shows expressions (`engine.expression_context`).
-_OPEN_PARTS: Final = frozenset({"route", "status", "visits"})
-_PRIVATE_OUTPUT: Final = "Step {step} is private to its owner, so its result cannot be used"
+_STEP_PARTS: Final = frozenset(
+    {"output", "summary", "route", "status", "files", "visits", "posted"}
+)
+#: What a private step still shows every expression (`engine.expression_context`).
+_OPEN_PARTS: Final = frozenset({"route", "status", "visits", "posted"})
+_PRIVATE_OUTPUT: Final = (
+    "Step {step} uses personal memory, so only a post to the person it runs as can use its result"
+)
+#: Where an agent works: home, origin, or a channel or thread id; never a person or a template.
+_NOT_A_PLACE: Final = re.compile(r"\s*|owner|run_as|person:.*|.*\$\{\{.*")
 _ROOTS: Final[dict[str, frozenset[str]]] = {
     "node": frozenset({"inputs", "trigger", "steps", "run", "workflow"}),
     "item": frozenset({"inputs", "trigger", "steps", "run", "workflow", "item", "index"}),
@@ -211,7 +217,6 @@ def validate_spec(
         _check_template(spec, template, None, None, report)
     _check_loops(spec, report)
     _check_spec(spec, report)
-    _check_routines(spec, report)
     _check_durations(spec, report)
     _check_triggers(spec, catalog, now, report)
     tainted = tainted_steps(spec, catalog)
@@ -252,7 +257,9 @@ def _check_template(
         return
     guards = {r.path[1] for r in refs if r.guarded and len(r.path) > 1 and r.path[0] == "steps"}
     up = ancestors(spec, node_id) if node_id else set[str]()
-    private = private_routine_steps(spec, spec.home.channel if spec.home else None)
+    private = private_steps(spec) - {node_id or ""}
+    if node_id is not None and reads_private(spec.nodes[node_id]):
+        private = frozenset[str]()
     for ref in refs:
         root, rest = ref.path[0], ref.path[1:]
         if root == "steps" and rest and rest[0] in private and not _open_part(rest):
@@ -317,8 +324,10 @@ def _check_refs(
     if isinstance(node, AgentNode | ForEachNode):
         agent = node.do if isinstance(node, ForEachNode) else node
         if isinstance(agent, AgentNode) and expressions_in(agent.instructions):
-            report.error(
-                "instructions_expression", "Instructions take no expressions; use inputs", node_id
+            report.warn(
+                "instructions_expression",
+                "Instructions are sent as written, so ${{ }} stays as text; use inputs",
+                node_id,
             )
 
 
@@ -350,7 +359,7 @@ def _check_node(
             if isinstance(inner, ActionNode):
                 _check_action(node_id, inner, catalog, report)
             if isinstance(inner, PostNode):
-                _check_deliver(spec, node_id, inner, report)
+                _check_post(spec, node_id, inner, catalog, report)
             if (node.concurrency or 1) > _COSTLY_CONCURRENCY and isinstance(inner, AgentNode):
                 report.warn("cost", "Agent per item, high concurrency", node_id)
         case WaitNode():
@@ -362,7 +371,7 @@ def _check_node(
         case FinishNode() if node.deliver:
             _check_deliver(spec, node_id, node.deliver, report)
         case PostNode():
-            _check_deliver(spec, node_id, node, report)
+            _check_post(spec, node_id, node, catalog, report)
         case _:
             pass
 
@@ -451,6 +460,30 @@ def _check_deliver(spec: Spec, node_id: str, deliver: Deliver, report: _Report) 
             report.error("bad_target", f"Not a person or a role: {target}", node_id)
 
 
+def _check_post(
+    spec: Spec, node_id: str, node: PostNode, catalog: Catalog | None, report: _Report
+) -> None:
+    _check_deliver(spec, node_id, node, report)
+    if catalog is not None and node.as_agent is not None and node.as_agent not in catalog.agents:
+        report.error("unknown_agent", f"Unknown agent: {node.as_agent}", node_id)
+
+
+def _check_place(spec: Spec, node_id: str, node: AgentNode, report: _Report) -> None:
+    """`at` names a channel or thread; personal memory keeps a step private, so off one."""
+    if node.at is None:
+        return
+    if _NOT_A_PLACE.fullmatch(node.at):
+        report.error("bad_place", "Works in home, origin, or a channel or thread id", node_id)
+    if node.at == "home" and spec.home is None:
+        report.error("no_home", "Working in home needs a home channel", node_id)
+    if node.at == "origin" and spec.home is None:
+        report.warn("no_home", "A run that no chat message started works in home", node_id)
+    if node.memory == "personal":
+        report.error(
+            "private_place", "A step with personal memory is private, so it works nowhere", node_id
+        )
+
+
 def _check_poll(
     where: str | None, agent: str, tool: str, every: str, catalog: Catalog | None, report: _Report
 ) -> None:
@@ -474,6 +507,7 @@ def _check_agent(
     if agent is None:
         report.error("no_agent", "Choose an agent", node_id)
     _check_scopes(node_id, node, catalog, report)
+    _check_place(spec, node_id, node, report)
     if catalog is not None and catalog.skills is not None:
         for skill in node.skills or []:
             if skill not in catalog.skills:
@@ -692,24 +726,6 @@ def _check_spec(spec: Spec, report: _Report) -> None:
     ):
         report.error(
             "respond_result", "Answering with the result needs a workflow without agent steps"
-        )
-
-
-def _check_routines(spec: Spec, report: _Report) -> None:
-    """One routine step at most (its sandbox pin is the workflow's), run once a run, never two
-    runs at a time: as a routine fires."""
-    found = [k for k, n in spec.nodes.items() if isinstance(n, RoutineNode)]
-    if len(found) > 1:
-        report.error("routine_count", "A workflow has at most one routine step", found[1])
-    for node_id in found:
-        if node_id in ancestors(spec, node_id):
-            report.error("routine_loop", "A routine step runs once a run, never in a loop", node_id)
-    c = spec.concurrency
-    if found and (c is None or c.limit != 1 or c.on_conflict != "skip" or c.key is not None):
-        report.error(
-            "routine_concurrency",
-            "A routine step needs concurrency limit 1, on conflict skip, and no key",
-            found[0],
         )
 
 

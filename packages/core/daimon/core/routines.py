@@ -9,7 +9,6 @@ from typing import Any, Final, Literal
 from daimon.core.fire.subject import RoutineFacts
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.workflows import WorkflowRow
-from daimon.core.workflows.spec import RoutineNode, Spec
 
 PANEL_CAP = 25
 #: A moved routine's line on every panel; the panel links the workflow and offers no changes.
@@ -91,25 +90,6 @@ def private_destination(
 def has_private_output(row: RoutineFacts) -> bool:
     """DM results and destination-free runs, which mount personal memory."""
     return private_destination(row.destination_kind, row.destination_id, row.channel_id)
-
-
-def private_routine_steps(spec: Spec, home_channel_id: str | None) -> frozenset[str]:
-    """The routine step whose output is private, as `has_private_output` has it for a workflow's
-    step: a DM, or no destination and no home channel. Expressions read none of it."""
-    found: set[str] = set()
-    for node_id, node in spec.nodes.items():
-        if isinstance(node, RoutineNode):
-            kind, target = (node.to.kind, node.to.id) if node.to else (None, None)
-            if private_destination(kind, target, home_channel_id):
-                found.add(node_id)
-    return frozenset(found)
-
-
-def hides_workflow_output(workflow: WorkflowRow, spec: Spec, *, reader: uuid.UUID | None) -> bool:
-    """A routine step's private output is its owner's, not an admin's."""
-    if reader is not None and reader == workflow.owner_account_id:
-        return False
-    return bool(private_routine_steps(spec, workflow.home_channel_id))
 
 
 def hides_moved_output(

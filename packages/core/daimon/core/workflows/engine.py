@@ -32,6 +32,7 @@ from daimon.core.workflows.spec import (
     Spec,
     TransformNode,
     WaitNode,
+    reads_private,
 )
 from pydantic import JsonValue
 
@@ -55,7 +56,7 @@ DEFAULT_MAX_VISITS: Final = 3
 DEFAULT_MAX_STEPS: Final = 100
 INLINE: Final = (BranchNode, TransformNode, FinishNode)
 _FLOW_KINDS: Final = frozenset({"next", "route", "case", "else", "otherwise"})
-_DEFAULT_ATTEMPTS: Final = {"agent": 2, "code": 2, "routine": 3}
+_DEFAULT_ATTEMPTS: Final = {"agent": 2, "code": 2}
 _BACKOFF_S: Final = 20
 
 
@@ -88,6 +89,8 @@ class StepView:
     error_message: str | None = None
     reused: Literal["fork", "pinned"] | None = None
     files: tuple[dict[str, JsonValue], ...] = ()
+    #: Where the agent posted by itself during the step, as `Deliver.to` names places.
+    posted: tuple[str, ...] = ()
 
     @property
     def key(self) -> str:
@@ -128,6 +131,8 @@ class Succeeded:
     summary: str | None = None
     #: Files API refs of the files the step made.
     files: tuple[dict[str, JsonValue], ...] = ()
+    #: Where the agent posted by itself (`StepView.posted`).
+    posted: tuple[str, ...] = ()
     #: `finish_early`: the run ends here as succeeded with outcome `nothing_to_do`.
     early: bool = False
     #: A Finish's rendered `state`.
@@ -164,7 +169,8 @@ class RunFacts:
     max_steps: int = DEFAULT_MAX_STEPS
     #: Test runs: outputs reused for these nodes instead of running them.
     pinned: Mapping[str, StepView] = field(default_factory=dict[str, StepView])
-    #: Private routine steps (`routines.private_routine_steps`): expressions read none of them.
+    #: Steps with personal memory (`spec.private_steps`): only a post to the run-as person
+    #: reads their output, summary and files.
     private_steps: frozenset[str] = frozenset()
 
 
@@ -188,7 +194,7 @@ def retry_delay_s(node: AnyNode, attempt: int, outcome: Outcome) -> int | None:
     """Seconds until the next attempt, or None when this outcome is final.
 
     Only `retryable` errors retry, up to `retry.attempts` (agent and code steps default to
-    2, routine steps 3, others 1); the wait doubles from 20 seconds.
+    2, others 1); the wait doubles from 20 seconds.
     """
     if not isinstance(outcome, Failed) or outcome.error_class != "retryable":
         return None
@@ -238,8 +244,10 @@ def expression_context(
     hide the output of the one before it, which the `on_max_visits` target reads. A step that
     has not run is absent, so `has()` guards hold, except a loop-carried one (upstream and
     downstream of `node_id` at once), which reads as null on the first pass. A private step's
-    output, summary and files read empty.
+    output, summary and files read empty but to a post to the run-as person alone.
     """
+    reader = spec.nodes.get(node_id)
+    hidden = frozenset[str]() if reader and reads_private(reader) else facts.private_steps
     latest: dict[str, StepView] = {}
     counts: dict[str, int] = {}
 
@@ -255,7 +263,7 @@ def expression_context(
             latest[s.node_id] = s
     view: dict[str, JsonValue] = {}
     for nid, s in latest.items():
-        shown = nid not in facts.private_steps
+        shown = nid not in hidden
         view[nid] = {
             "output": s.output if shown else None,
             "summary": s.summary if shown else None,
@@ -263,6 +271,7 @@ def expression_context(
             "status": s.status,
             "files": list(s.files) if shown else [],
             "visits": counts.get(nid, 0),
+            "posted": list(s.posted),
         }
     up = ancestors(spec, node_id)
     for nid in up - set(view):
@@ -274,6 +283,7 @@ def expression_context(
                 "status": None,
                 "files": [],
                 "visits": 0,
+                "posted": [],
             }
     return {
         "inputs": dict(facts.inputs),
@@ -458,6 +468,7 @@ class _Walk:
                 route=outcome.route,
                 summary=outcome.summary,
                 files=outcome.files,
+                posted=outcome.posted,
                 reused=reused,
                 error_class=None,
                 error_message=None,

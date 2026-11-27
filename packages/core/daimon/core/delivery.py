@@ -128,17 +128,12 @@ class Claim:
 
     @property
     def routine_result(self) -> bool:
-        """A routine's result or a workflow routine step's: its failures page as a routine's."""
-        return self.routine is not None or (
-            self.workflow is not None and self.workflow.kind == "result"
-        )
+        """A routine's result: its failures page as a routine's."""
+        return self.routine is not None
 
 
 def job_payload(row: DeliveryRow) -> RoutinePayload:
-    """A workflow post's text and file refs. Refs that do not parse are dropped; a routine
-    step's result carries them in its text, as a routine's does."""
-    if row.kind == "result":
-        return decode_payload(str(row.payload.get("text") or ""))
+    """A workflow post's text and file refs. Refs that do not parse are dropped."""
     files: list[RoutineFile] = []
     raw_files: list[object] = row.payload.get("files") or []
     for raw in raw_files:
@@ -321,29 +316,16 @@ def _log_routine_skip(
 def _report_routine_failed(
     sm: async_sessionmaker[AsyncSession], job: Claim, platform: str, reason: str
 ) -> None:
-    """Tagged with the routine, or with the workflow and run of a routine step's result."""
-    routine, row = job.routine, job.workflow
-    if routine is not None:
-        event = OpsEvent(
-            "routine.delivery_failed",
-            routine.tenant_id,
-            reason=reason,
-            routine_id=routine.id,
-            agent_id=routine.agent_id,
-            platform=platform,
-        )
-    else:
-        assert row is not None
-        agent = row.payload.get("agent_id")
-        event = OpsEvent(
-            "routine.delivery_failed",
-            row.tenant_id,
-            reason=reason,
-            agent_id=str(agent) if agent else None,
-            platform=platform,
-            workflow_id=row.workflow_id,
-            workflow_run_id=row.run_id,
-        )
+    routine = job.routine
+    assert routine is not None
+    event = OpsEvent(
+        "routine.delivery_failed",
+        routine.tenant_id,
+        reason=reason,
+        routine_id=routine.id,
+        agent_id=routine.agent_id,
+        platform=platform,
+    )
     report_ops_event(sm, event, logged=False)
 
 

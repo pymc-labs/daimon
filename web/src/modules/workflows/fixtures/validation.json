@@ -1819,10 +1819,10 @@
     }
    },
    "server_only": true,
-   "errors": [
+   "errors": [],
+   "warnings": [
     "instructions_expression:draft"
-   ],
-   "warnings": []
+   ]
   },
   {
    "name": "a branch condition without markers",

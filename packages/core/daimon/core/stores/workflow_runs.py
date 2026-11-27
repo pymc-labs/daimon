@@ -94,6 +94,7 @@ class StepRow(_Row):
     waiting_reason: str | None
     output: Any
     files: list[Any] = []
+    posted: list[str] = []
     summary: str | None
     route: str | None
     error_class: ErrorClass | None
@@ -143,6 +144,7 @@ class StepWrite(TypedDict, total=False):
     waiting_reason: str | None
     output: Any
     files: list[Any]
+    posted: list[str]
     summary: str | None
     route: str | None
     error_class: str | None

@@ -29,7 +29,6 @@ from daimon.core.config import SignedIdentityServer, load_watches_settings
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.defaults.builtin_agent import find_agent_or_builtin
 from daimon.core.defaults.metadata import BUILTIN_AGENT_NAMES, MA_METADATA_KEY_MANAGED
-from daimon.core.fire.subject import Subject
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
 from daimon.core.mcp_identity import (
@@ -70,13 +69,12 @@ from daimon.core.stores.domain import (
     TurnOriginRow,
     WatchRow,
 )
-from daimon.core.stores.lead_intake import execution_is_active, workflow_execution_is_active
+from daimon.core.stores.lead_intake import execution_is_active
 from daimon.core.stores.routines import get_routine
 from daimon.core.stores.task_continuations import get_running_wake_row
 from daimon.core.stores.thread_sessions import get_thread_session_by_id
 from daimon.core.stores.turn_origins import get_session_origin, list_active_origins
 from daimon.core.turn_origin import origin_place
-from daimon.core.workflows.fire_store import bound_step
 from fastmcp.server.auth.auth import TokenVerifier
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -336,28 +334,6 @@ async def _routine_run(
     return row
 
 
-async def _workflow_step_run(
-    sessionmaker: async_sessionmaker[AsyncSession], binding: RelayBinding, *, tenant_id: uuid.UUID
-) -> Subject | None:
-    """The routine step a workflow run's credential names, or None, by `_routine_run`'s rule:
-    a run of this tenant whose workflow still runs the same version, owned by the user the
-    run started for, with the agent the credential was minted for (by name; the version
-    pins it)."""
-    if binding.workflow_run_id is None:
-        return None
-    async with sessionmaker() as session:
-        step = await bound_step(session, tenant_id=tenant_id, run_id=binding.workflow_run_id)
-    subject = step.subject if step else None
-    if (
-        subject is None
-        or not subject.created_by_user_id
-        or subject.created_by_user_id != binding.owner
-        or subject.agent_name != binding.agent_name
-    ):
-        return None
-    return subject
-
-
 async def _dm_routine_run(
     sessionmaker: async_sessionmaker[AsyncSession],
     binding: RelayBinding,
@@ -367,9 +343,8 @@ async def _dm_routine_run(
     agent_id: uuid.UUID,
     person: str,
     now: datetime,
-) -> RoutineRow | Subject | None:
-    """The routine (or workflow step) whose live fire posting to its owner's DM a call
-    comes from, or None.
+) -> RoutineRow | None:
+    """The routine whose live fire posting to its owner's DM a call comes from, or None.
 
     `origin` is the turn holding the credential's own grant. It must be that routine's
     unattended turn in a fresh `dm:` scope: no person's message, not a helper's, not a
@@ -377,14 +352,12 @@ async def _dm_routine_run(
     the credential's and the routine's, which still posts to that person's DM, runs this
     agent, is enabled and unedited since the fire began; and the fire is still running
     (`routine_execution`). Checked on every call, so a pause or an edit stops the next.
-    A workflow's routine step is checked by the same rule on its run (`bound_step`): the
-    workflow active, its live version the run's, and the run's step grant live.
     """
     if (
         binding.execution is None
         or binding.revision is None
         or binding.dm_channel is None
-        or (binding.routine_id is None) == (binding.workflow_run_id is None)
+        or binding.routine_id is None
         or binding.destination != DM_ROUTINE_DESTINATION
         or binding.owner != person
         or origin.helper_of is not None
@@ -400,38 +373,21 @@ async def _dm_routine_run(
     ):
         return None
     async with sessionmaker() as session:
-        facts: RoutineRow | Subject | None
-        if binding.workflow_run_id is not None:
-            run = binding.workflow_run_id
-            step = await bound_step(session, tenant_id=tenant_id, run_id=run)
-            facts = step.subject if step is not None and step.workflow.status == "active" else None
-            live = (
-                facts is not None
-                and facts.agent_name == binding.agent_name
-                and facts.revision == binding.revision
-                and await workflow_execution_is_active(session, tenant_id, run, binding.execution)
+        row = await get_routine(session, binding.routine_id, tenant_id=tenant_id)
+        if (
+            row is None
+            or not row.enabled
+            or row.destination_kind != "dm"
+            or not row.created_by_user_id == row.destination_id == person
+            or routine_destination_key(row) != DM_ROUTINE_DESTINATION
+            or derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=row.agent_id) != agent_id
+            or row.updated_at != datetime.fromisoformat(binding.revision)
+            or not await execution_is_active(
+                session, tenant_id, binding.routine_id, binding.execution
             )
-        else:
-            assert binding.routine_id is not None
-            row = await get_routine(session, binding.routine_id, tenant_id=tenant_id)
-            facts = row if row is not None and row.enabled else None
-            live = (
-                row is not None
-                and derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=row.agent_id) == agent_id
-                and row.updated_at == datetime.fromisoformat(binding.revision)
-                and await execution_is_active(
-                    session, tenant_id, binding.routine_id, binding.execution
-                )
-            )
-    if (
-        facts is None
-        or not live
-        or facts.destination_kind != "dm"
-        or not facts.created_by_user_id == facts.destination_id == person
-        or routine_destination_key(facts) != DM_ROUTINE_DESTINATION
-    ):
-        return None
-    return facts
+        ):
+            return None
+        return row
 
 
 async def _watch_poll(
@@ -781,25 +737,20 @@ def build_identity_relay_route(
                 else None
             )
             routine_id: str | None = None
-            signed_routine: RoutineRow | Subject | None = None
+            signed_routine: RoutineRow | None = None
             if (
                 server.routine_claims
                 and origin is None
-                and (binding.routine_id is not None or binding.workflow_run_id is not None)
+                and binding.routine_id is not None
                 and binding.session_key is None
                 and FOREIGN_HOME_CLAIM not in claims
             ):
                 # Only a run the routine check passes, still posting where it did when the
                 # run started, and only for that room: the channel comes from the routine's
                 # own row, never from the request. A credential minted before runs kept
-                # their destination names none, so it signs no routine claim. A workflow's
-                # routine step is the same run, read from its workflow run (`bound_step`).
-                routine: RoutineRow | Subject | None = (
-                    await _routine_run(
-                        sessionmaker, binding, tenant_id=tenant_id, agent_id=agent_id
-                    )
-                    if binding.routine_id is not None
-                    else await _workflow_step_run(sessionmaker, binding, tenant_id=tenant_id)
+                # their destination names none, so it signs no routine claim.
+                routine = await _routine_run(
+                    sessionmaker, binding, tenant_id=tenant_id, agent_id=agent_id
                 )
                 if routine is not None and routine_destination_key(routine) != binding.destination:
                     routine = None
@@ -814,8 +765,8 @@ def build_identity_relay_route(
                     if routine is not None
                     else None
                 )
-                if routine is not None and destination is not None:
-                    routine_id, signed_routine = str(routine.id), routine
+                if destination is not None:
+                    routine_id, signed_routine = str(binding.routine_id), routine
                     place, room = (
                         TurnPlace(channel_id=destination[0], message_id=None),
                         destination[1],
@@ -845,7 +796,7 @@ def build_identity_relay_route(
                 # A routine posting to its owner's DM, in a live fire: the owner, their DM
                 # (opened by the fire, never the origin's) and room `dm`. Any check failing
                 # leaves the call as it is without the setting.
-                routine_id, signed_routine = str(dm_routine.id), dm_routine
+                routine_id, signed_routine = str(binding.routine_id), dm_routine
                 place, room = TurnPlace(channel_id=binding.dm_channel, message_id=None), "dm"
             wake: WakeReason | None = None
             if (
@@ -934,19 +885,6 @@ def build_identity_relay_route(
                     named, conversation, kind = (
                         routine.created_by_user_id,
                         routine_conversation(routine),
-                        "routine",
-                    )
-            elif (
-                binding.workflow_run_id is not None
-                and binding.session_key is None
-                and platform in REQUESTER_PLATFORMS
-                and FOREIGN_HOME_CLAIM not in claims
-            ):
-                step = await _workflow_step_run(sessionmaker, binding, tenant_id=tenant_id)
-                if step is not None:
-                    named, conversation, kind = (
-                        step.created_by_user_id,
-                        routine_conversation(step),
                         "routine",
                     )
             elif (

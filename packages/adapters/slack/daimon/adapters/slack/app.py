@@ -364,7 +364,6 @@ from daimon.core.turn_origin import (
 )
 from daimon.core.turn_queue import TurnQueue
 from daimon.core.workflows import answers, chat_cards
-from daimon.core.workflows.delivery import result_poster
 from mux.errors import ScopeViolation
 from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode.async_client import AsyncBaseSocketModeClient
@@ -992,7 +991,6 @@ class SlackApp:
                 should_stop=lambda: self.draining,
             )
         )
-        # A workflow's routine step posts through the routine poster.
         results = make_slack_poster(self.runtime)
         sm, settings = self.runtime.sessionmaker, self.runtime.settings
         return self._spawn(
@@ -1000,13 +998,7 @@ class SlackApp:
                 sm,
                 platform="slack",
                 post=routine_poster(sm, results, platform="slack", settings=settings),
-                workflow=result_poster(
-                    sm,
-                    results,
-                    make_slack_workflow_poster(self.runtime),
-                    platform="slack",
-                    settings=settings,
-                ),
+                workflow=make_slack_workflow_poster(self.runtime),
                 run_cards=chat_cards.follower(
                     self.runtime.sessionmaker,
                     platform="slack",

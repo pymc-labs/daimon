@@ -39,10 +39,10 @@ from daimon.core.features.model_input import is_isolated
 from daimon.core.features.snapshot import FeaturePlace, place_feature_or_none
 from daimon.core.fire.failure import record_fire_error
 from daimon.core.fire.store import FireGuardStore, FireResult, FireStatus, FireStore
-from daimon.core.fire.subject import Subject, tier_ids
+from daimon.core.fire.subject import Subject
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.headless_runner import run_turn
-from daimon.core.lead_intake_execution import WorkflowExecution, current_intake_execution
+from daimon.core.lead_intake_execution import current_intake_execution
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import (
     ResolverCache,
@@ -104,8 +104,6 @@ from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.turn_hold import TurnHold
 from daimon.core.usage_recording import record_turn_usage
 from mux.contracts.config import DEFAULT_BACKEND
-from mux.contracts.ids import Provider
-from mux.profiles import PROVIDER_LABELS
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
@@ -127,14 +125,13 @@ async def fire(
     turn: Callable[[], Awaitable[None]],
     dispatch: Dispatch,
     *,
-    routines_gate: bool,
     intake_bound: bool,
     settle: Callable[[FireStatus], Awaitable[None]] | None = None,
 ) -> FireStatus:
     """Run `turn` under the feature gates, the execution grant and the dispatch bound.
 
-    `routines_gate` reads the `routines` feature first; `intake_bound` (bound as lead
-    intake) reads `lead_intake` too. A failure is recorded through `store`; `settle` runs
+    It reads the `routines` feature first; `intake_bound` (bound as lead intake) reads
+    `lead_intake` too. A failure is recorded through `store`; `settle` runs
     last, with the status, even when the fire is cancelled.
     """
     sm = dispatch.sm
@@ -155,19 +152,17 @@ async def fire(
                     "",
                     subject.channel_id,
                     agent_id=subject.agent_id,
-                    workflow_id=tier_ids(subject)[1],
                 )
-                if routines_gate:
-                    routines = await place_feature_or_none(sm, None, place, "routines")
-                    if routines is None or not routines.on:
-                        # Off here, or unreadable: the schedule does not run this tick.
-                        # Unreadable is not Off: the owner sees why, and the slot is given
-                        # back so the next tick tries again, as a watch's poll does.
-                        unreadable = routines is None
-                        reason = "feature_read_failed" if unreadable else "routines_turned_off"
-                        outcome, skip_reason = "skipped", reason
-                        await record_fire_error(sm, subject, store, reason, None)
-                        return "unreadable" if unreadable else outcome
+                routines = await place_feature_or_none(sm, None, place, "routines")
+                if routines is None or not routines.on:
+                    # Off here, or unreadable: the schedule does not run this tick.
+                    # Unreadable is not Off: the owner sees why, and the slot is given
+                    # back so the next tick tries again, as a watch's poll does.
+                    unreadable = routines is None
+                    reason = "feature_read_failed" if unreadable else "routines_turned_off"
+                    outcome, skip_reason = "skipped", reason
+                    await record_fire_error(sm, subject, store, reason, None)
+                    return "unreadable" if unreadable else outcome
                 if intake_bound:
                     intake = await place_feature_or_none(sm, None, place, "lead_intake")
                     if intake is None or not intake.on:
@@ -305,17 +300,6 @@ RESTRICTED_SOURCE_ERROR = "restricted source cannot deliver by DM"
 SELFHOSTED_ROUTINES_UNSUPPORTED = "selfhosted_routines_unsupported"
 
 
-def routines_unsupported_error(provider: Provider) -> str:
-    """The error a fire records on a place it cannot run on: the self-hosted harness, or
-    another provider for a workflow's routine step (routines run there as chat turns)."""
-    if provider == "selfhosted":
-        return SELFHOSTED_ROUTINES_UNSUPPORTED
-    return (
-        f"Workflows run only on Anthropic, and this one is set to {PROVIDER_LABELS[provider]}. "
-        "Switch its agent or channel back to Anthropic."
-    )
-
-
 async def _has_daimon_tools(deps: FireDeps, subject: Subject, agent_id: str | None) -> bool:
     """Whether the agent that runs this fire has Daimon's tools; an isolated one has none.
     Unreadable: the fire's controls carry no hint about them."""
@@ -335,15 +319,11 @@ def _dm_routine_relay(
     deps: FireDeps, subject: Subject, owner: str
 ) -> tuple[DmRoutineRelay | None, Callable[[], Awaitable[str]] | None]:
     """What this fire binds into its turn's relay credential, and how to open the owner's
-    DM, when a server signs DM routines: the routine (or a workflow step's run), its owner,
-    this fire's execution and its revision now. (None, None) otherwise: today's turn."""
+    DM, when a server signs DM routines: the routine, its owner, this fire's execution and
+    its revision now. (None, None) otherwise: today's turn."""
     execution = current_intake_execution.get()
-    discord, run = deps.settings.discord, subject.workflow_run_id
-    held = execution is not None and (
-        execution.run_id == run
-        if isinstance(execution, WorkflowExecution)
-        else run is None and execution[0] == subject.id
-    )
+    discord = deps.settings.discord
+    held = execution is not None and execution[0] == subject.id
     if (
         not deps.settings.mcp_identity.names_dm_routine
         or discord is None
@@ -353,11 +333,10 @@ def _dm_routine_relay(
     ):
         return None, None
     relay = DmRoutineRelay(
-        routine_id=subject.id if run is None else None,
+        routine_id=subject.id,
         owner=owner,
         execution=execution[1],
         revision=subject.revision,
-        workflow_run_id=run,
     )
     token = discord.bot_token.get_secret_value()
     return relay, functools.partial(deps.open_discord_dm, token, owner)
@@ -599,14 +578,14 @@ async def fire_turn(subject: Subject, store: FireStore, deps: FireDeps) -> None:
             return
         # A thread, channel or agent on another provider is decided before anything is
         # resolved at Anthropic: a routine on OpenAI or Gemini runs through the chat path
-        # (`provider_routine`), never quietly on Claude; a workflow step runs on Anthropic only.
+        # (`provider_routine`), never quietly on Claude.
         if is_routine_parent_unknown(subject):
             await store.refuse(s, "routine_destination_parent_unknown", fault=True)
             return
         provider = await routine_provider(s, subject, platform=platform)
         native = provider if provider != DEFAULT_BACKEND else None
-        if native is not None and (native == "selfhosted" or subject.workflow_run_id is not None):
-            await store.refuse(s, "routines_unsupported", error=routines_unsupported_error(native))
+        if native == "selfhosted":
+            await store.refuse(s, "routines_unsupported", error=SELFHOSTED_ROUTINES_UNSUPPORTED)
             return
         principal = await deps.get_or_create_platform_principal(
             s,
@@ -805,10 +784,7 @@ async def fire_turn(subject: Subject, store: FireStore, deps: FireDeps) -> None:
             channel_id=subject.channel_id,
             agent_id=resolved_agent_id,
         )
-        # A routine's binding stays exactly as before (the scheduler goldens).
-        if subject.workflow_run_id is None:
-            return record
-        return functools.partial(record, workflow_run_id=subject.workflow_run_id)
+        return record
 
     # Resolve agent + environment by daimon-tag at fire time,
     # self-healing across MA archive/recreate. The environment follows the
@@ -914,10 +890,8 @@ async def fire_turn(subject: Subject, store: FireStore, deps: FireDeps) -> None:
         )
     final_state: list[TurnState] = []
     output_sessions: list[str] = []
-    # Passed only when held (or a workflow run), so an ordinary fire's call stays what it was.
+    # Passed only when held, so an ordinary fire's call stays what it was.
     held_fire: dict[str, Any] = {} if fire_hold is None else {"hold": fire_hold}
-    if subject.workflow_run_id is not None:
-        held_fire["routine_step_run_id"] = subject.workflow_run_id
 
     result = await deps.run_turn(
         anthropic=client,
@@ -958,8 +932,7 @@ async def fire_turn(subject: Subject, store: FireStore, deps: FireDeps) -> None:
         platform=platform,
         runs_as_user=subject.created_by_user_id,
         membership_resolver=membership_resolver,
-        # A workflow's routine step binds its run instead (`routine_step_run_id`).
-        routine_id=tier_ids(subject)[0],
+        routine_id=subject.id,
         # Where this run posts, fixed now: a later edit moves no claim its relay calls
         # sign (`daimon.core.mcp_identity.routine_destination_key`).
         routine_destination=routine_destination_key(subject),

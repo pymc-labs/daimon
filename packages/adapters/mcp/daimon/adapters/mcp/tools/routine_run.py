@@ -8,7 +8,6 @@ from datetime import datetime
 from typing import Literal
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
-from daimon.adapters.mcp.middleware.capability_gate import chat_agent_id
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.routines import (
@@ -19,9 +18,8 @@ from daimon.adapters.mcp.tools.routines import (
 from daimon.core import routine_service
 from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.routines import has_private_output
-from daimon.core.stores.lead_intake import execution_is_active, workflow_execution_is_active
+from daimon.core.stores.lead_intake import execution_is_active
 from daimon.core.stores.routines import get_routine
-from daimon.core.workflows.fire_store import bound_step
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -48,9 +46,7 @@ async def _run_routine_impl(
 
 @dataclass(frozen=True)
 class RoutineProblemReported:
-    routine_id: str | None
-    workflow_id: str | None = None
-    """Set instead of `routine_id` when a workflow's routine step reported."""
+    routine_id: str
 
 
 async def _report_routine_problem_impl(
@@ -58,10 +54,6 @@ async def _report_routine_problem_impl(
 ) -> RoutineProblemReported:
     # The routine comes only from the signed credential of a live fire, never an argument.
     routine_id, execution_id = auth.routine_id, auth.execution_id
-    if auth.workflow_run_id is not None and execution_id is not None:
-        return await _report_step_problem(
-            runtime, auth, auth.workflow_run_id, execution_id, category, note
-        )
     if routine_id is None or execution_id is None:
         raise ToolError(_NOT_A_RUN)
     async with runtime.session_factory() as session:
@@ -82,40 +74,6 @@ async def _report_routine_problem_impl(
         ),
     )
     return RoutineProblemReported(routine_id=str(row.id))
-
-
-async def _report_step_problem(
-    runtime: McpRuntime,
-    auth: AuthIdentity,
-    run_id: uuid.UUID,
-    grant: uuid.UUID,
-    category: RoutineProblem,
-    note: str,
-) -> RoutineProblemReported:
-    """`report_routine_problem` from a workflow's routine step: its run's live grant only."""
-    agent = await chat_agent_id(runtime, auth)
-    async with runtime.session_factory() as session:
-        live = await workflow_execution_is_active(session, auth.tenant_id, run_id, grant)
-        step = (
-            await bound_step(session, tenant_id=auth.tenant_id, run_id=run_id, agent_id=agent or "")
-            if live
-            else None
-        )
-    if step is None:
-        raise ToolError(_NOT_A_RUN)
-    report_ops_event(
-        runtime.session_factory,
-        OpsEvent(
-            "routine.goal_unmet",
-            auth.tenant_id,
-            reason=category,
-            agent_id=agent,
-            note=None if has_private_output(step.subject) else note,
-            workflow_id=step.workflow.id,
-            workflow_run_id=run_id,
-        ),
-    )
-    return RoutineProblemReported(routine_id=None, workflow_id=str(step.workflow.id))
 
 
 def register_routine_run_tool(mcp: FastMCP, runtime: McpRuntime) -> None:

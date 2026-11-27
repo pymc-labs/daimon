@@ -7,9 +7,6 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from daimon.core.stores.domain import RoutineDestinationKind, RoutineRow
-from daimon.core.stores.workflows import WorkflowRow
-from daimon.core.workflows.routine_translation import routine_name
-from daimon.core.workflows.spec import RoutineNode, ScheduleTrigger, Spec
 
 
 class RoutineFacts(Protocol):
@@ -49,8 +46,7 @@ class RoutineFacts(Protocol):
 
 @dataclass(frozen=True)
 class Subject:
-    """One fire's input, built from a routine row (`routine_subject`) or a workflow run's routine
-    step (`workflow_subject`, whose `id` is the workflow's and `workflow_run_id` the run's).
+    """One fire's input, built from a routine row (`routine_subject`).
 
     `id` tags usage, ops events and the controls; `created_by_user_id` is the owner;
     `channel_id` the channel the fire is billed to; `cron_expr` and `timezone` the schedule
@@ -72,60 +68,10 @@ class Subject:
     source_provenance_known: bool = False
     source_channel_id: str | None = None
     source_thread_id: str | None = None
-    workflow_run_id: uuid.UUID | None = None
-    #: What a DM fire's relay checks is unedited (ISO 8601): a routine's `updated_at`, a
-    #: workflow's live version's `published_at`.
+    #: What a DM fire's relay checks is unedited (ISO 8601): the routine's `updated_at`.
     revision: str | None = None
-    #: Whether it runs now: a routine enabled, a workflow active. A paused one signs no `rev`.
+    #: Whether the routine is enabled. A paused one signs no `rev`.
     enabled: bool = True
-    #: A workflow's routine step: `id` is the workflow's (a result carried by a move has no run).
-    workflow: bool = False
-
-
-def tier_ids(facts: RoutineFacts) -> tuple[uuid.UUID | None, uuid.UUID | None]:
-    """The fire's own feature tier and tag, as `(routine_id, workflow_id)`."""
-    if isinstance(facts, Subject) and facts.workflow:
-        return None, facts.id
-    return facts.id, None
-
-
-def workflow_subject(
-    workflow: WorkflowRow,
-    spec: Spec,
-    node: RoutineNode,
-    *,
-    run_id: uuid.UUID | None,
-    owner: str | None,
-    agent_id: str,
-    revision: str | None = None,
-) -> Subject:
-    """The fire input for a run's routine step: `owner` is the owner's platform id, the budget
-    channel the workflow's home and the schedule its first schedule trigger's."""
-    schedule = next((t for t in spec.triggers or [] if isinstance(t, ScheduleTrigger)), None)
-    made_in = workflow.made_in
-    to = node.to
-    return Subject(
-        id=workflow.id,
-        tenant_id=workflow.tenant_id,
-        created_by_user_id=owner,
-        agent_id=agent_id,
-        agent_name=node.agent,
-        cron_expr=(schedule.cron if schedule else None) or "",
-        timezone=(schedule.timezone if schedule else None) or spec.timezone or "UTC",
-        trigger_message=node.prompt,
-        # A moved unnamed routine posts as one, not under the label its workflow is named.
-        name=routine_name(workflow.name, workflow.converted_from, node.prompt),
-        destination_kind=to.kind if to else None,
-        destination_id=(owner if to.kind == "dm" else to.id) if to else None,
-        channel_id=workflow.home_channel_id,
-        source_provenance_known=bool(made_in and made_in["known"]),
-        source_channel_id=made_in["channel_id"] if made_in else None,
-        source_thread_id=made_in["thread_id"] if made_in else None,
-        workflow_run_id=run_id,
-        revision=revision,
-        enabled=workflow.status == "active",
-        workflow=True,
-    )
 
 
 def routine_subject(row: RoutineRow) -> Subject:

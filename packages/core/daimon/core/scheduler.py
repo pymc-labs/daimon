@@ -430,7 +430,6 @@ async def run_one_tick(
                 RoutineFireStore(sm, row, notify_owner),
                 lambda: fire(row),
                 Dispatch(sm, sem, dispatch_timeout_s, capture=capture_exception_with_scope),
-                routines_gate=True,
                 intake_bound=(row.tenant_id, row.id) in intake_bindings,
                 settle=settle,
             )

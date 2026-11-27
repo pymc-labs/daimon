@@ -61,7 +61,7 @@ from daimon.core.workflows.action_step import (
 )
 from daimon.core.workflows.brief import NUDGE, render_brief, step_inputs
 from daimon.core.workflows.expressions import ExpressionError
-from daimon.core.workflows.lanes import FRESH, OWNER_DM, agent_of, lane_key, lane_skills
+from daimon.core.workflows.lanes import FRESH, agent_of, lane_key, lane_skills
 from daimon.core.workflows.preflight import Refusal, check
 from daimon.core.workflows.runs import ENGINE, Park, Sessions, StepWork, key_of
 from daimon.core.workflows.spec import AgentNode, WriteScope
@@ -75,7 +75,7 @@ from daimon.core.workflows.unattended import (
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
 
-Writes = Literal["refuse", "propose", "allow", "routine"]
+Writes = Literal["refuse", "propose", "allow", "policy"]
 READ_BUILTINS: Final = frozenset({"read", "glob", "grep", "web_fetch", "web_search"})
 #: Daimon tools a step never calls: no step builds more automation.
 AUTHORING_TOOLS: Final = WORKFLOW_AUTHORING_TOOLS | {
@@ -144,9 +144,6 @@ class LaneTurn(Protocol):
     ) -> None: ...
 
 
-#: An `owner_dm` step: a fresh private DM turn of the workflow's owner, as a DM routine's fire.
-OwnerDm = Callable[[StepWork], Awaitable[engine.Outcome]]
-
 #: The M8 seam: buffer a third-party write as a proposal and answer the paused call.
 #: Records a write as a proposal; gets the call and why it needs review.
 Propose = Callable[[ToolCall, str | None], Awaitable[ToolConfirmationResult]]
@@ -156,9 +153,9 @@ def step_policy(
     policy: ToolSafetyPolicy, writes: Writes, scopes: Sequence[WriteScope] = ()
 ) -> ToolSafetyPolicy:
     """The tool policy a step runs under: `allow` lets third-party writes through (rules still
-    deny); `routine` keeps the operator's; `refuse` and `propose` let none through unattended
+    deny); `policy` keeps the operator's; `refuse` and `propose` let none through unattended
     but its scoped tools, whose arguments `decide_unattended_call` checks first."""
-    if writes == "routine":
+    if writes == "policy":
         return policy
     allowed = ("*",) if writes == "allow" else tuple(dict.fromkeys(s.tool for s in scopes))
     return policy.model_copy(update={"unattended_writes": allowed})
@@ -375,17 +372,12 @@ class AgentStepExecutor:
     turn: LaneTurn
     #: Records proposed writes and sends them once approved; without it proposals are refused.
     tools: ToolClient | None = None
-    owner_dm: OwnerDm | None = None
     collect_files: CollectFiles | None = None
     clock: Callable[[], datetime] = lambda: datetime.now(UTC)
 
     async def __call__(self, work: StepWork) -> engine.Outcome | Park:
         node = work.node
         assert isinstance(node, AgentNode), "the agent executor runs agent nodes"
-        if node.session == OWNER_DM:
-            if self.owner_dm is None:
-                return engine.Failed("fatal", "Owner DM steps are not available here.")
-            return await self.owner_dm(work)
         if (held := await reviewed(self.sm, work)) is not None:
             return await send_proposals(
                 self.sm, self.settings, self.tools, work, held, self.clock()

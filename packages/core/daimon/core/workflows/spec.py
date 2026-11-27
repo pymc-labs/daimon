@@ -36,7 +36,6 @@ MAX_ATTACHMENTS: Final = 10
 MAX_ALSO: Final = 5
 MAX_MENTIONS: Final = 10
 MAX_TITLE: Final = 100
-MAX_ROUTINE_TITLE: Final = 120
 
 Id = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9_]{0,63}$")]
 #: `1h30m`, or business days alone (`2bd`: Mon-Fri in the spec's timezone, no holidays).
@@ -157,8 +156,8 @@ class AgentNode(_Flow):
     output: dict[str, SchemaField] | None = None
     routes: dict[str, str | Route] | None = None
     tools: Literal["inherit"] | list[str] | None = None
-    #: `routine`: as the routine it was converted from, under the operator's policy unchanged.
-    writes: Literal["refuse", "propose", "allow", "routine"] | None = None
+    #: `policy`: the server's unattended rules (`tool_safety.unattended_writes`) unchanged.
+    writes: Literal["refuse", "propose", "allow", "policy"] | None = None
     review: Literal["auto"] | list[str] | None = None
     builtins: Literal["none", "read", "all"] | None = None
     session: str | None = None
@@ -169,6 +168,10 @@ class AgentNode(_Flow):
     writes_to: list[WriteScope] | None = None
     #: Library skills the step's agent gets, pinned by content at publish.
     skills: list[str] | None = None
+    #: Where the agent works: home, origin, or a channel or thread id (`Deliver.to` without DMs).
+    at: str | None = None
+    #: `personal`: the run-as person's personal memory, read-only; the step's output is theirs.
+    memory: Literal["personal"] | None = None
 
 
 class BranchCase(_Model):
@@ -293,6 +296,8 @@ class PostNode(_Flow, Deliver):
     """Post now and carry on; the step's output is where the post went."""
 
     kind: Literal["post"]
+    #: Post under this agent's name and picture where agent identity is on, else as Daimon.
+    as_agent: str | None = None
 
 
 class FinishNode(_Base):
@@ -302,37 +307,6 @@ class FinishNode(_Base):
     deliver: Deliver | None = None
     #: Merged into `workflow.state` by a live run; a null value deletes the key.
     state: dict[Annotated[str, StringConstraints(max_length=MAX_TITLE)], Template] | None = None
-
-
-class RoutineTarget(_Model):
-    """Where a routine step's result goes: a channel or thread id, or the owner's DM."""
-
-    kind: Literal["channel", "thread", "dm"]
-    id: str | None = Field(default=None, min_length=1)
-
-    @model_validator(mode="after")
-    def _id_fits(self) -> RoutineTarget:
-        if (self.kind == "dm") != (self.id is None):
-            raise ValueError(
-                "A channel or thread needs its id; a DM, which goes to the owner, none"
-            )
-        return self
-
-
-class RoutineNode(_Flow):
-    """One routine turn as the owner: `prompt` is literal, `to` where its result goes."""
-
-    kind: Literal["routine"]
-    title: str | None = Field(default=None, max_length=MAX_ROUTINE_TITLE)
-    agent: str
-    prompt: str  # any message a routine holds, even blank or long
-    to: RoutineTarget | None = None
-
-    @model_validator(mode="after")
-    def _no_retry_or_budget(self) -> RoutineNode:
-        if self.retry or self.budget_usd or self.max_visits or self.on_max_visits:
-            raise ValueError("A routine step has no retry, budget or visit limit")
-        return self
 
 
 ItemNode = Annotated[
@@ -360,7 +334,6 @@ Node = Annotated[
     | ForEachNode
     | WorkflowNode
     | PostNode
-    | RoutineNode
     | FinishNode,
     Field(discriminator="kind"),
 ]
@@ -375,7 +348,6 @@ Kind = Literal[
     "for_each",
     "workflow",
     "post",
-    "routine",
     "finish",
 ]
 
@@ -532,9 +504,24 @@ AnyNode = (
     | ForEachNode
     | WorkflowNode
     | PostNode
-    | RoutineNode
     | FinishNode
 )
+
+
+def private_steps(spec: Spec) -> frozenset[str]:
+    """Steps with personal memory (a For each's by its own id): their output, summary and
+    files are the run-as person's, so only a post to them alone reads them (`reads_private`)."""
+    return frozenset(
+        node_id
+        for node_id, node in spec.nodes.items()
+        if isinstance(inner := node.do if isinstance(node, ForEachNode) else node, AgentNode)
+        and inner.memory == "personal"
+    )
+
+
+def reads_private(node: AnyNode) -> bool:
+    """A post to the run-as person and nobody else."""
+    return isinstance(node, PostNode) and node.to == "run_as" and not node.also and not node.mention
 
 
 def parse_spec(document: JsonValue) -> Spec:

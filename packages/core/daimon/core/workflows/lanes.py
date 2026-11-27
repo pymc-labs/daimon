@@ -14,7 +14,6 @@ from daimon.core.workflows.spec import AgentNode, ForEachNode, Spec
 
 MAIN: Final = "main"
 FRESH: Final = "fresh"
-OWNER_DM: Final = "owner_dm"
 
 
 def agent_of(spec: Spec, node: AgentNode) -> str | None:

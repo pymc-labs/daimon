@@ -429,7 +429,7 @@ def from_routine_command(
         bool, typer.Option("--apply", help="Move them; default is a preview.")
     ] = False,
 ) -> None:
-    """Preview, then move, routines onto one-step workflows, keeping their schedule cursor."""
+    """Preview, then move, routines onto agent-step workflows, keeping their schedule cursor."""
     _run(lambda rt, c: from_routine(rt, c, tenant, list(routine or []), apply=apply))
 
 

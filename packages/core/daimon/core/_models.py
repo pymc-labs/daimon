@@ -2563,12 +2563,11 @@ class HubOAuthKv(Base):
 class FeatureValue(Base):
     """A feature set at one tier of one place; no row means the tier inherits.
 
-    Rows exist for the workspace, agent, channel, thread, routine and workflow tiers (the
-    deployment tier is the `features` setting). Unused place columns hold '' (`routine_id`
-    and `workflow_id` NULL). A thread row is keyed by its thread key alone; its `channel_id`
-    is the channel the thread sits in, '' when unknown. A routine or workflow row goes with
-    its routine or workflow and holds its id in `channel_id` too, so
-    `uq_feature_values_place` serves every tier but the thread. A
+    Rows exist for the workspace, agent, channel, thread and routine tiers (the deployment
+    tier is the `features` setting). Unused place columns hold '' (`routine_id` NULL). A
+    thread row is keyed by its thread key alone; its `channel_id` is the channel the thread
+    sits in, '' when unknown. A routine row goes with its routine and holds its id in
+    `channel_id` too, so `uq_feature_values_place` serves every tier but the thread. A
     pinned feature's On keeps in `pin` what it covers. `daimon.core.features.resolver`
     combines the rows; `locked` is final for every tier below.
     """
@@ -2576,7 +2575,7 @@ class FeatureValue(Base):
     __tablename__ = "feature_values"
     __table_args__ = (
         CheckConstraint(
-            "tier IN ('workspace', 'agent', 'channel', 'thread', 'routine', 'workflow')",
+            "tier IN ('workspace', 'agent', 'channel', 'thread', 'routine')",
             name="ck_feature_values_tier",
         ),
         CheckConstraint(
@@ -2584,18 +2583,12 @@ class FeatureValue(Base):
             name="ck_feature_values_surface",
         ),
         CheckConstraint(
-            "NOT (locked AND tier IN ('thread', 'routine', 'workflow'))",
-            name="ck_feature_values_lock",
+            "NOT (locked AND tier IN ('thread', 'routine'))", name="ck_feature_values_lock"
         ),
         CheckConstraint(
             "(tier = 'routine') = (routine_id IS NOT NULL)"
             " AND (routine_id IS NULL OR channel_id = routine_id::text)",
             name="ck_feature_values_routine",
-        ),
-        CheckConstraint(
-            "(tier = 'workflow') = (workflow_id IS NOT NULL)"
-            " AND (workflow_id IS NULL OR channel_id = workflow_id::text)",
-            name="ck_feature_values_workflow",
         ),
         CheckConstraint(
             "key <> 'routine_sandbox_tools' OR value <> 'on'"
@@ -2622,7 +2615,6 @@ class FeatureValue(Base):
             postgresql_where=text("tier = 'thread'"),
         ),
         Index("uq_feature_values_routine", "routine_id", "key", unique=True),
-        Index("uq_feature_values_workflow", "workflow_id", "key", unique=True),
         Index("ix_feature_values_channel", "tenant_id", "channel_id"),
     )
 
@@ -2643,9 +2635,6 @@ class FeatureValue(Base):
     surface: Mapped[str]
     set_at: Mapped[TsNow]
     revision: Mapped[int] = mapped_column(BigInteger, server_default=text("1"))
-    workflow_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("workflows.id", ondelete="CASCADE")
-    )
 
 
 class ThreadModelSetting(Base):
@@ -3677,7 +3666,7 @@ class AgentPostedMessage(Base):
     and by chat adapters for a turn's status cards, answers and notices
     (`source='turn'`), the thread it opens from a mention
     (`source='auto_thread'`) and a routine's result (`source='routine'`, or
-    `source='workflow'` from a workflow's routine step).
+    `source='workflow'` from a workflow step's agent).
     The channel tidy tools edit or delete only what
     this table says the calling agent posted. Holds ids and a keyed HMAC of
     the text, never the text itself.
@@ -6109,7 +6098,7 @@ class OpsEvent(Base):
     subject_key: Mapped[str | None]
     release: Mapped[str | None]
     note: Mapped[str | None]
-    # A workflow's routine step, as `routine_id` is a routine; no FK, like it.
+    # A workflow run's event, as `routine_id` is a routine's; no FK, like it.
     workflow_id: Mapped[uuid.UUID | None]
     workflow_run_id: Mapped[uuid.UUID | None]
 
@@ -6586,6 +6575,8 @@ class WorkflowStep(Base):
     output: Mapped[dict[str, Any] | None]
     #: Files API refs of the files the step made (`steps.<id>.files`).
     files: Mapped[JsonList]
+    #: Where the agent posted by itself (`steps.<id>.posted`), as `Deliver.to` names places.
+    posted: Mapped[JsonList]
     summary: Mapped[str | None]
     route: Mapped[str | None]
     route_reason: Mapped[str | None]
@@ -6822,8 +6813,7 @@ class WorkflowEventBuffer(Base):
 
 class WorkflowDelivery(Base):
     """A post the delivery loop sends: a Finish result, a post step's message, an ask, a
-    reminder, an ask's update, an owner notice or a routine step's `result`. Policy runs at
-    post time."""
+    reminder, an ask's update or an owner notice. Policy runs at post time."""
 
     __tablename__ = "workflow_deliveries"
     __table_args__ = (
@@ -6840,7 +6830,7 @@ class WorkflowDelivery(Base):
         ),
         _one_of(
             "kind",
-            ("finish", "ask", "reminder", "ask_update", "notice", "post", "result"),
+            ("finish", "ask", "reminder", "ask_update", "notice", "post"),
             "workflow_deliveries",
         ),
         _one_of(

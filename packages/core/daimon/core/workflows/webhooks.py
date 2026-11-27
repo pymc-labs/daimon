@@ -29,7 +29,6 @@ from daimon.core.workflows.service import (
     NotFound,
     Off,
     Refused,
-    check_routine_run,
 )
 from daimon.core.workflows.signatures import hint_of, new_secret
 from daimon.core.workflows.triggers import MappingError, map_inputs
@@ -318,7 +317,6 @@ async def replay(env: Env, workflow_id: uuid.UUID, key: str, ref: str) -> Delive
             )
             assert live is not None
             spec, run_as = live.spec, live.published_by_account_id or env.who.account_id
-            await check_routine_run(session, workflow, rights, live.number)
     if event.payload is None or event.status in ("rejected", "duplicate"):
         raise Refused("Only accepted deliveries can be replayed.")
     config = _named(spec, key) or {}

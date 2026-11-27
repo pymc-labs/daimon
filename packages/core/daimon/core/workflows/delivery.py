@@ -14,9 +14,6 @@ placed the channel): a live workspace, a readable access policy, a speaker still
 to invoke, no write protection, the audience gate, and reach. The adapter checks that
 the speaker may post in the channel themselves.
 
-A routine step's `result` (and its channel's failure notice) is no such post: it goes through
-its platform's routine poster as a `DeliveryJob` (`result_poster`), as its routine's would.
-
 A post to a person's DM (`owner`, `run_as`, an ask's addressee, and every test run, which
 delivers to the tester) goes on the workspace's platform when it has DMs on and the person
 is linked there; the channel rules then have no channel to check.
@@ -29,22 +26,18 @@ import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any, Final, Literal, cast
 
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
 from daimon.core.config import DirectMessagePolicy, Settings, env_admits
-from daimon.core.delivery import DeliveryOutcome, WorkflowPoster
-from daimon.core.fire.delivery import INTERRUPTED, DeliveryJob, Poster
-from daimon.core.fire.subject import workflow_subject
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.outbound.mentions import Platform, RenderedPost, attribution_line, render_post
 from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.outbound.reach import ReachPlan, ReachTally, check_reach
 from daimon.core.routine_delivery import creator_refusal_for
-from daimon.core.routine_header import routine_header_shown
 from daimon.core.routine_hold import DeliveryGate, workflow_delivery_gate
 from daimon.core.stores import (
     web_people,
@@ -52,7 +45,6 @@ from daimon.core.stores import (
     workflow_runs,
     workflow_threads,
     workflow_waits,
-    workflows,
 )
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
@@ -66,7 +58,7 @@ from daimon.core.stores.workflows import WorkflowRow
 from daimon.core.web_links import WebAt
 from daimon.core.workflows.engine import Event, RunEnd, RunFacts, StepView, expression_context
 from daimon.core.workflows.expressions import ExpressionError, expressions_in, render
-from daimon.core.workflows.spec import Deliver, FinishNode, RoutineNode, Spec, parse_spec
+from daimon.core.workflows.spec import Deliver, FinishNode, Spec
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -86,8 +78,6 @@ __all__ = [
     "queue_finish",
     "queue_post",
     "reach_limits",
-    "result_job",
-    "result_poster",
     "target_for",
     "titled_thread",
 ]
@@ -99,7 +89,7 @@ NOTICE_TITLE: Final[str] = "Workflow run failed"
 #: A templated address outside the spec's destinations, the run's origin and its own threads.
 NOT_A_DESTINATION: Final[str] = "not_a_destination"
 _KEYWORDS: Final = frozenset({"home", "owner", "run_as", "origin"})
-PostKind = Literal["finish", "post", "notice", "result"]
+PostKind = Literal["finish", "post", "notice"]
 _SLACK_THREAD: Final[re.Pattern[str]] = re.compile(r"([CG][A-Z0-9]{2,}):([0-9]+\.[0-9]+)")
 _TEAMS_THREAD: Final[str] = ";messageid="
 
@@ -244,7 +234,7 @@ async def queue_post(
     status: Literal["pending", "skipped"] = "pending",
     note: str | None = None,
 ) -> tuple[uuid.UUID, list[Event]]:
-    """The one writer of a run's own posts (Finish, post step, notice, a routine step's result):
+    """The one writer of a run's own posts (Finish, post step, notice):
     the first target is the post, any others its `also` DMs. `extra` adds payload fields.
     Returns the post's id and the ledger events."""
     payload: dict[str, Any] = {
@@ -618,10 +608,6 @@ def _uuid(raw: object) -> uuid.UUID | None:
         return None
 
 
-def _at(raw: object) -> datetime | None:
-    return datetime.fromisoformat(raw) if isinstance(raw, str) else None
-
-
 async def post_refusal(
     post: WorkflowPost,
     *,
@@ -757,91 +743,3 @@ async def titled_thread(
             title=post.title,
             thread_id=made,
         )
-
-
-async def result_job(
-    sessionmaker: async_sessionmaker[AsyncSession],
-    row: DeliveryRow,
-    *,
-    platform: str,
-    settings: Settings | None = None,
-) -> DeliveryJob | None:
-    """A routine step's claimed `result` as the job its platform's poster takes, from the run's
-    version (a result a routine's move carried names its own), fenced on that version staying
-    live under the owner it was queued for and on the claim. None when the workflow, run or
-    step is gone."""
-    payload = row.payload
-    async with sessionmaker() as session:
-        flow = await workflows.get_workflow(
-            session, tenant_id=row.tenant_id, workflow_id=row.workflow_id
-        )
-        run = None if row.run_id is None else await workflow_runs.get_run(session, row.run_id)
-        number = run.version if run is not None else payload.get("version")
-        version = (
-            None
-            if flow is None or not isinstance(number, int) or (row.run_id and run is None)
-            else await workflows.get_version(
-                session, tenant_id=row.tenant_id, workflow_id=flow.id, number=number
-            )
-        )
-    spec = None if version is None else parse_spec(version.spec)
-    node = next(
-        (n for n in (spec.nodes if spec else {}).values() if isinstance(n, RoutineNode)), None
-    )
-    if flow is None or version is None or spec is None or node is None:
-        return None
-    payload = row.payload
-    subject = workflow_subject(
-        flow,
-        spec,
-        node,
-        run_id=None if run is None else run.id,
-        owner=payload.get("owner"),
-        agent_id=str(payload.get("agent_id") or ""),
-        revision=version.published_at.isoformat(),
-    )
-    owner, lease = _uuid(payload.get("speaker")), row.lease_owner or ""
-
-    async def still_current() -> str | None:
-        async with sessionmaker() as session:
-            live = await workflows.is_live(
-                session, workflow_id=flow.id, version=version.number, owner_account_id=owner
-            )
-            held = await workflow_deliveries.still_claimed(
-                session, row.id, owner=lease, now=datetime.now(UTC)
-            )
-        return "destination_changed" if not live else None if held else INTERRUPTED
-
-    return DeliveryJob(
-        **vars(subject),
-        header=await routine_header_shown(sessionmaker, subject, platform, settings),
-        still_current=still_current,
-        delivery_payload=str(payload.get("text") or ""),
-        delivery_note=row.note,
-        delivery_hold=payload.get("hold"),
-        last_fired_at=run.started_at if run else _at(payload.get("fired_at")),
-        delivery_id=row.id,
-        source="workflow",
-    )
-
-
-def result_poster(
-    sessionmaker: async_sessionmaker[AsyncSession],
-    post: Poster,
-    workflow: WorkflowPoster,
-    *,
-    platform: str,
-    settings: Settings | None = None,
-) -> WorkflowPoster:
-    """`workflow` for a run's own posts; a routine step's `result` goes through `post`, the
-    platform's routine poster, as its routine's would."""
-
-    async def post_row(row: DeliveryRow) -> DeliveryOutcome:
-        if row.kind != "result":
-            return await workflow(row)
-        job = await result_job(sessionmaker, row, platform=platform, settings=settings)
-        if job is None:
-            return DeliveryOutcome(status="skipped", note="destination_changed")
-        return await post(job)
-
-    return post_row

@@ -738,7 +738,6 @@ async def create_session(
     system_override: str | None = None,
     relay_session_key: uuid.UUID | None = None,
     relay_routine_id: uuid.UUID | None = None,
-    relay_workflow_run_id: uuid.UUID | None = None,
     relay_owner: str | None = None,
     relay_destination: str | None = None,
     relay_dm_routine: DmRoutineRelay | None = None,
@@ -811,10 +810,9 @@ async def create_session(
     vault of this session's own for it (`create_relay_vault`), whatever caller.
     ``relay_session_key`` is the `thread_sessions` row a person's chat session will
     be recorded under, which the relay reads to find the turn the session runs;
-    without it the relay names no person. ``relay_routine_id`` marks a routine's run
-    (``relay_workflow_run_id`` a workflow's routine step) and ``relay_owner`` the owner it
-    started for; the relay names that owner, not a live turn. ``relay_destination`` is
-    where the routine posted when the run started
+    without it the relay names no person. ``relay_routine_id`` marks a routine's run and
+    ``relay_owner`` the owner it started for; the relay names that owner, not a live turn.
+    ``relay_destination`` is where the routine posted when the run started
     (`daimon.core.mcp_identity.routine_destination_key`).
 
     ``budget_channel_id`` is the channel whose budget the session's spend counts
@@ -1105,7 +1103,6 @@ async def create_session(
                     agent_name=agent.name,
                     session_key=relay_session_key,
                     routine_id=relay_routine_id,
-                    workflow_run_id=relay_workflow_run_id,
                     owner=relay_owner,
                     destination=relay_destination,
                     grant=chat_session_id if relay_session_key is not None else None,

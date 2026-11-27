@@ -27,6 +27,7 @@ import functools
 import signal
 import sys
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -50,6 +51,7 @@ from daimon.core.compute_provider import compute_provider_for
 from daimon.core.compute_sessions import ComputeSessions
 from daimon.core.config import (
     Settings,
+    env_admits,
     load_settings,
 )
 from daimon.core.constants import MA_MAX_RETRIES
@@ -62,7 +64,8 @@ from daimon.core.discord_membership import (
     open_discord_dm,
     send_discord_error_dm,
 )
-from daimon.core.fire.run import Dispatch, FireDeps, fire_turn
+from daimon.core.dm_access import roles_by_membership, sender_admits
+from daimon.core.fire.run import FireDeps, fire_turn
 from daimon.core.fire.subject import routine_subject
 from daimon.core.github_app_session import (
     GitHubTokenMintUnavailable,
@@ -116,7 +119,8 @@ from daimon.core.session_ports_compat import retrieve_session_record, session_sc
 from daimon.core.skill_sync.resync_queue import drain_github_push_resync_queue
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.slack_event_dedup_sweep import sweep_expired_slack_event_dedup
-from daimon.core.stores.domain import RoutineRow, ThreadSessionRow
+from daimon.core.stores.direct_messages import dm_enabled
+from daimon.core.stores.domain import RoutineRow, TenantRow, ThreadSessionRow
 from daimon.core.stores.file_uploads import ROUTINE_OUTPUT_TITLE, delete_uploads
 from daimon.core.stores.github_connect import delete_expired_flows
 from daimon.core.stores.github_issued_tokens import (
@@ -251,6 +255,35 @@ async def _acquire_advisory_lock(engine: AsyncEngine, key: int) -> AsyncConnecti
     return conn
 
 
+async def _dm_open(
+    session: AsyncSession, settings: Settings, *, tenant_id: uuid.UUID, platform: str, owner: str
+) -> bool:
+    """Whether a routine may DM its owner: Discord, routine DMs on, owner allowed."""
+    return (
+        platform == "discord"
+        and env_admits(settings.direct_message_policies, tenant_id, owner)
+        and await dm_enabled(session, tenant_id=tenant_id)
+    )
+
+
+async def _owner_granted(
+    sm: async_sessionmaker[AsyncSession],
+    resolver: MembershipResolver | None,
+    *,
+    tenant: TenantRow,
+    agent_name: str,
+    owner: str,
+) -> bool:
+    """The agent's DM grant admits the owner, by their current server roles."""
+    return await sender_admits(
+        sm,
+        tenant_id=tenant.id,
+        agent_name=agent_name,
+        user_id=owner,
+        groups=roles_by_membership(resolver, tenant_id=tenant.id, guild_id=tenant.external_id),
+    )
+
+
 def _fire_deps(
     *,
     client: AsyncAnthropic,
@@ -307,8 +340,8 @@ def _fire_deps(
             membership_resolver=membership_resolver,
             turn_deps=_turn_deps,
             send_dm=send_dm,
-            dm_open=workflows.dm_open,
-            owner_granted=workflows.owner_granted,
+            dm_open=_dm_open,
+            owner_granted=_owner_granted,
             run_turn=run_turn,
             run_dm_routine=run_dm_routine,
             resolve_agent=resolve_agent,
@@ -1523,16 +1556,6 @@ async def run(
         dm_turn_deps=dm_turn_deps,
         notify_owner=notify_owner,
     )
-    fire_deps = _fire_deps(
-        client=client,
-        sm=sm,
-        settings=settings,
-        deployment_default=deployment_default,
-        resolver_cache=resolver_cache,
-        billing_config=billing_config,
-        dm_turn_deps=dm_turn_deps,
-    )
-
     dispatcher = RoutineDispatcher(scheduler_settings.max_concurrent_fires)
     compute = ComputeSessions(sm, settings.compute, compute_provider_for(settings.compute))
     long_jobs = LongJobExecutor(
@@ -1554,7 +1577,6 @@ async def run(
                 settings,
                 lane_turn,
                 tool_client,
-                owner_dm=workflows.OwnerDmTurn(sm, settings, dm_turn_deps),
                 collect_files=functools.partial(session_files, client),
             ),
             "action": ActionStepExecutor(sm, settings, tool_client),
@@ -1562,12 +1584,6 @@ async def run(
             "post": PostStepExecutor(sm),
             "code": CodeStepExecutor(
                 sm, ManagedCodeWorker(client, sm, settings, lane_turn.targets)
-            ),
-            "routine": workflows.RoutineStep(
-                sm,
-                Dispatch(sm, dispatcher.semaphore, scheduler_settings.dispatch_timeout_s),
-                lane_turn.agent_id,
-                lambda subject, store: fire_turn(subject, store, fire_deps()),
             ),
             **workflow_waits.executors(sm),
         },

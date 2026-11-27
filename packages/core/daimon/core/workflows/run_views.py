@@ -14,7 +14,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Final, Literal, cast
 
-from daimon.core.routines import PRIVATE_FAILED, hides_workflow_output, private_routine_steps
+from daimon.core.routines import PRIVATE_FAILED
 from daimon.core.stores import workflow_reads as reads
 from daimon.core.stores import workflow_runs as runs_store
 from daimon.core.stores import workflow_waits as waits_store
@@ -22,7 +22,6 @@ from daimon.core.stores import workflows as workflows_store
 from daimon.core.stores.workflow_run_events import EventRow, list_events
 from daimon.core.stores.workflow_runs import RunRow, StepRow
 from daimon.core.stores.workflow_waits import Wait
-from daimon.core.stores.workflows import WorkflowRow
 from daimon.core.workflows import board, ledger
 from daimon.core.workflows.engine import (
     RunFacts,
@@ -32,7 +31,7 @@ from daimon.core.workflows.engine import (
     step_key,
 )
 from daimon.core.workflows.expressions import ExpressionError, Ref, render, template_refs
-from daimon.core.workflows.spec import Spec, parse_spec
+from daimon.core.workflows.spec import Spec, parse_spec, private_steps
 from daimon.core.workflows.views import Person, iso, obj, people_of, person, seq
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -360,7 +359,7 @@ async def event_views(
     session: AsyncSession, run: RunRow, *, after_seq: int = 0, private: bool = False
 ) -> list[RunEvent]:
     """Ledger rows for the page, with names, and answers read from their waits (the ledger
-    holds only the answer's hash); `private` hides a routine step's failures (`hides_output`)."""
+    holds only the answer's hash); `private` hides a private step's failures (`hides_output`)."""
     events = await list_events(session, run.id, after_seq=after_seq)
     names = await people_of(session, run.tenant_id, _wanted_accounts(events))
     answered = [
@@ -385,13 +384,14 @@ _FAILURES: Final = {
 
 
 async def hides_output(
-    session: AsyncSession, run: RunRow, workflow: WorkflowRow, reader: uuid.UUID | None
+    session: AsyncSession, run: RunRow, reader: uuid.UUID | None
 ) -> bool:
-    """Whether `reader` misses the run's private routine output: anyone but the owner."""
-    if run.mode != "live":  # a routine step runs only live
+    """Whether `reader` misses the run's private output (`memory: personal` steps): anyone but
+    the person it runs as."""
+    if reader is not None and reader == run.run_as_account_id:
         return False
     spec = await _spec_of(session, run, {})
-    return hides_workflow_output(workflow, parse_spec(spec), reader=reader)
+    return bool(private_steps(parse_spec(spec)))
 
 
 #: Rows that end an attempt carry its cost, as `runs.ts` `project` reads it.
@@ -892,7 +892,7 @@ class StepDetail(BaseModel):
 def _view(s: StepRow) -> StepView:
     return StepView(
         s.node_id, s.visit, s.status, route=s.route, output=s.output, summary=s.summary,
-        via=tuple(s.via), files=tuple(s.files),
+        via=tuple(s.via), files=tuple(s.files), posted=tuple(s.posted),
     )  # fmt: skip
 
 
@@ -932,9 +932,6 @@ async def step_detail(
     attempts = await runs_store.list_attempts(session, step.id)
     chosen = next((a for a in attempts if a.number == attempt), attempts[-1] if attempts else None)
     exprs = _inputs_of(node)
-    flow = await workflows_store.get_workflow(
-        session, tenant_id=run.tenant_id, workflow_id=run.workflow_id
-    )
     facts = RunFacts(
         inputs=run.inputs,
         run={"id": str(run.id), "number": run.number, "mode": run.mode, "label": run.label},
@@ -945,10 +942,7 @@ async def step_detail(
     context: Any = None
     try:
         parsed = parse_spec(spec)
-        facts = replace(
-            facts,
-            private_steps=private_routine_steps(parsed, flow.home_channel_id if flow else None),
-        )
+        facts = replace(facts, private_steps=private_steps(parsed))
         context = expression_context(parsed, [_view(s) for s in steps], node_id, facts)
         context |= own
     except ValueError:

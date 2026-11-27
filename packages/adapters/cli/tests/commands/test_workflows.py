@@ -151,6 +151,7 @@ async def test_from_routine_previews_without_moving_then_moves_and_moves_back(
 
     assert await cli.from_routine(rt, console, world.tenant_id, [], apply=False) == []
     assert f"Routine {routine.id} would move" in out.getvalue(), out.getvalue()
+    assert "kind: agent" in out.getvalue() and "at: home" in out.getvalue(), "its agent step"
     with pytest.raises(UserFacingError, match="--routine"):
         await cli.from_routine(rt, console, world.tenant_id, [], apply=True)
     [made] = await cli.from_routine(rt, console, world.tenant_id, [routine.id], apply=True)

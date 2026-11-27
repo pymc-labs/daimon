@@ -80,7 +80,6 @@ async def _fire(
         store,
         turn,
         Dispatch(sm, asyncio.Semaphore(1), 10, capture=lambda _: None),
-        routines_gate=True,
         intake_bound=intake_bound,
         settle=settle,
     )

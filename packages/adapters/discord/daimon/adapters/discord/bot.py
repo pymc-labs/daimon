@@ -273,7 +273,6 @@ from daimon.core.turn_keys import answering_env_sha256, list_mounted_key_names
 from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
 from daimon.core.turn_queue import TurnQueue
 from daimon.core.workflows import chat_cards
-from daimon.core.workflows.delivery import result_poster
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Scope
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
@@ -1324,7 +1323,6 @@ class DaimonBot(commands.Bot):
             )
             # Post routine results to their destinations. Same
             # switch as the wake poller: one process per platform posts.
-            # A workflow's routine step posts through the routine poster.
             results = make_discord_poster(
                 self.runtime.sessionmaker,
                 fetch_channel=self._channel_by_id,
@@ -1351,19 +1349,14 @@ class DaimonBot(commands.Bot):
                     self.runtime.sessionmaker,
                     platform="discord",
                     post=routine_poster(self.runtime.sessionmaker, results, platform="discord"),
-                    workflow=result_poster(
+                    workflow=make_discord_workflow_poster(
                         self.runtime.sessionmaker,
-                        results,
-                        make_discord_workflow_poster(
-                            self.runtime.sessionmaker,
-                            settings=self.runtime.settings,
-                            links=web_at(self.runtime, self._channel_by_id),
-                            fetch_channel=self._channel_by_id,
-                            open_dm=self.open_member_dm,
-                            membership_resolver=self.membership_resolver,
-                            output_client=self.runtime.anthropic,
-                        ),
-                        platform="discord",
+                        settings=self.runtime.settings,
+                        links=web_at(self.runtime, self._channel_by_id),
+                        fetch_channel=self._channel_by_id,
+                        open_dm=self.open_member_dm,
+                        membership_resolver=self.membership_resolver,
+                        output_client=self.runtime.anthropic,
                     ),
                     run_cards=chat_cards.follower(
                         self.runtime.sessionmaker,

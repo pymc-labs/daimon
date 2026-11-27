@@ -28,7 +28,7 @@ from daimon.core.workflows.spec import (
 from daimon.core.workflows.taint import Catalog, node_scopes, tainted_steps
 from pydantic import JsonValue
 
-Writes = Literal["refuse", "propose", "allow", "routine"]
+Writes = Literal["refuse", "propose", "allow", "policy"]
 Verdict = Literal["allow", "propose", "refuse"]
 #: Ledger event: ids an allowed call returned that a `created_by` rule may name later.
 CREATED: Final = "write.created"
@@ -84,7 +84,7 @@ def decide_unattended_call(policy: ToolSafetyPolicy, call: Call) -> Decision:
         return Decision("refuse", "test_run", "A test run never writes.")
     if call.approved or scope_allows(call.scopes, key, call.args, call.created):
         return Decision("allow")
-    granted = call.writes in ("allow", "routine")
+    granted = call.writes in ("allow", "policy")
     if call.writes == "propose" or (granted and call.exposed):
         reason = "untrusted" if call.exposed else None
         return Decision("propose", reason, "A person reviews this write before it is sent.")

@@ -99,10 +99,7 @@ _STAMPED = {
     "source_metadata": {"MA_METADATA_KEY_WORKFLOW_RUN", "MA_METADATA_KEY_WORKFLOW_STEP"},
 }
 #: Deliberate gaps, each with its reason.
-_UNSTAMPED = {
-    "owner_dm.py:run_dm_routine": "an owner DM step continues the owner's DM session, which "
-    "bills through the DM's own usage path and is not a workflow session",
-}
+_UNSTAMPED: dict[str, str] = {}
 
 
 def test_every_workflow_session_is_stamped_and_settles_through_usage_recording() -> None:
@@ -121,7 +118,7 @@ def test_every_workflow_session_is_stamped_and_settles_through_usage_recording()
                 if kw.arg == "source_metadata" and isinstance(kw.value, ast.Dict):
                     name = "source_metadata"
                     passed = {k.id for k in kw.value.keys if isinstance(k, ast.Name)}
-            if name in _STAMPED or name == "run_dm_routine":
+            if name in _STAMPED:
                 found[f"{path.name}:{name}"] = passed
     assert set(found) == {
         "lane_turn.py:run_turn",

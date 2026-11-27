@@ -280,3 +280,54 @@ def test_an_approval_that_times_out_back_into_the_loop_is_no_person_gate(
     }
     codes = [p.code for p in validate_document(spec, None).errors]
     assert ("loop_limit" in codes) is limited, f"{timeout}: {codes}"
+
+
+def _codes(run: dict[str, Any], after: dict[str, Any], home: bool = True) -> list[str]:
+    raw: dict[str, Any] = {
+        "schema": "daimon.workflow/v1",
+        "name": "T",
+        "start": "run",
+        "nodes": {"run": {"kind": "agent", "agent": "a", "instructions": "x", **run}, **after},
+    }
+    if home:
+        raw["home"] = {"channel": "C0HOME"}
+    result = validate_document(raw)
+    return sorted(f"{p.code}:{p.severity}" for p in result.errors + result.warnings)
+
+
+_DONE = {"done": {"kind": "finish"}}
+
+
+@pytest.mark.parametrize(
+    ("run", "home", "codes"),
+    [
+        ({"at": "home"}, True, []),
+        ({"at": "C0OTHER/1700000000.000100"}, True, []),
+        ({"at": "home"}, False, ["no_home:error"]),
+        ({"at": "origin"}, False, ["no_home:warning"]),
+        ({"at": "run_as"}, True, ["bad_place:error"]),
+        ({"at": "${{ inputs.c }}"}, True, ["bad_place:error"]),
+        ({"memory": "personal"}, True, []),
+        ({"memory": "personal", "at": "home"}, True, ["private_place:error"]),
+    ],
+)
+def test_an_agent_works_in_a_channel_or_thread_and_a_personal_one_nowhere(
+    run: dict[str, Any], home: bool, codes: list[str]
+) -> None:
+    assert _codes({**run, "next": "done"}, _DONE, home) == codes
+
+
+@pytest.mark.parametrize(
+    ("post", "codes"),
+    [
+        ({"to": "run_as", "message": "${{ steps.run.summary }}"}, []),
+        ({"to": "home", "message": "${{ steps.run.summary }}"}, ["private_output:error"]),
+        ({"to": "owner", "message": "${{ steps.run.files }}"}, ["private_output:error"]),
+        ({"to": "home", "message": "${{ 'home' in steps.run.posted }}"}, []),
+    ],
+)
+def test_only_a_post_to_the_person_reads_a_personal_steps_result(
+    post: dict[str, Any], codes: list[str]
+) -> None:
+    after = {"post": {"kind": "post", "next": "done", **post}, **_DONE}
+    assert _codes({"memory": "personal", "next": "post"}, after) == codes

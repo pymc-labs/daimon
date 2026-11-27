@@ -91,7 +91,6 @@ from daimon.core.teams_bot_framework import SERVICE_URL, retry_throttled
 from daimon.core.teams_graph import GRAPH_SCOPE, GraphClient, GraphMessage, TeamGroups
 from daimon.core.teams_sharepoint import SharePoint
 from daimon.core.workflows import chat_cards
-from daimon.core.workflows.delivery import result_poster
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from microsoft_teams.api import UninstalledActivity
@@ -445,17 +444,12 @@ def create_teams_http_service(
         feed=feed,
         team_channels=billing_panel.sdk_team_channels(teams_app),
         routine_poster=routine_poster(runtime.sessionmaker, results, platform="teams"),
-        workflow_poster=result_poster(
+        workflow_poster=make_teams_workflow_poster(
             runtime.sessionmaker,
-            results,
-            make_teams_workflow_poster(
-                runtime.sessionmaker,
-                direct,
-                tenant_id=installs.tenant_id,
-                settings=runtime.settings,
-                links=workflow_cards.web_at(runtime),
-            ),
-            platform="teams",
+            direct,
+            tenant_id=installs.tenant_id,
+            settings=runtime.settings,
+            links=workflow_cards.web_at(runtime),
         ),
         run_cards=chat_cards.follower(
             runtime.sessionmaker,

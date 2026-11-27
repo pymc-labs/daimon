@@ -28,7 +28,6 @@ from daimon.core.workflows.spec import (
     ApprovalNode,
     CodeNode,
     ForEachNode,
-    RoutineNode,
     Spec,
     WaitNode,
     WriteScope,
@@ -121,13 +120,14 @@ def tool_writes(tool: str, catalog: Catalog | None) -> bool:
 def node_writes(node: AnyNode, catalog: Catalog | None) -> bool:
     """An outside effect at run time beyond its `writes_to` scopes: a write Action whose
     tool no scope names, or an agent allowed to write. A post is not one: its targets are
-    the spec's own, as a Finish's are."""
+    the spec's own, as a Finish's are. Nor is `writes: policy`: it writes only what the
+    operator lets every unattended run write, and proposes when untrusted data steers it."""
     match node:
         case ActionNode():
             scoped = any(s.tool == node.tool for s in node.writes_to or [])
             return tool_writes(node.tool, catalog) and not scoped
         case AgentNode():
-            return node.writes in ("allow", "routine") or node.review == "auto"
+            return node.writes == "allow" or node.review == "auto"
         case CodeNode():
             return node.network == "on"
         case ForEachNode():
@@ -152,7 +152,7 @@ def untrusted_output(node: AnyNode) -> bool:
     """Steps whose output is outside data whatever they read."""
     if isinstance(node, ApprovalNode):
         return human_answer(node)
-    return isinstance(node, ActionNode | WaitNode | RoutineNode)
+    return isinstance(node, ActionNode | WaitNode)
 
 
 def _agent_tools(node: AgentNode, spec: Spec, catalog: Catalog) -> frozenset[str]:

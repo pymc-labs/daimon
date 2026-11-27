@@ -33,14 +33,11 @@ from daimon.core.workflows.expressions import expressions_in
 from daimon.core.workflows.features import KEYS, workflow_features
 from daimon.core.workflows.spec import (
     AgentNode,
-    BranchNode,
     CodeNode,
     Deliver,
     FinishNode,
     ForEachNode,
-    RoutineNode,
     Spec,
-    TransformNode,
     WaitNode,
     node_hash,
     slug,
@@ -107,15 +104,6 @@ def uses_polls(spec: Spec) -> bool:
     )
 
 
-def routine_only(spec: Spec) -> bool:
-    """A routine step is the only work: the fire's own gates and budgets apply, not a run's."""
-    kinds = RoutineNode | BranchNode | TransformNode | FinishNode
-    nodes = spec.nodes.values()
-    return any(isinstance(n, RoutineNode) for n in nodes) and all(
-        isinstance(n, kinds) for n in nodes
-    )
-
-
 def uses_mentions(spec: Spec) -> bool:
     return any(t.kind == "mention" for t in spec.triggers or [])
 
@@ -149,8 +137,6 @@ async def check(
         )
         if not features.enabled:
             return Refusal("workflows_off", "Workflows are off here. Ask an admin to turn them on.")
-        if routine_only(place.spec):
-            return Cleared(settings.workflows.max_run_budget_usd)
         if not features.code and has_code(place.spec):
             return Refusal("code_off", "Code steps are off here. Ask an admin to turn them on.")
         if not features.polls and uses_polls(place.spec):
@@ -211,8 +197,8 @@ async def check(
 
 
 def _reached(spec: Spec, home_channel_id: str | None) -> tuple[list[str], set[str]]:
-    """The channels a workflow posts to (home, literal delivery targets and destinations) and
-    its step agents."""
+    """The channels a workflow posts to or works in (home, literal delivery targets and `at`
+    places, destinations) and its step agents."""
     home = spec.home.channel if spec.home is not None else home_channel_id
     channels = [home] if home else []
     agents = {spec.defaults.agent} if spec.defaults and spec.defaults.agent else set[str]()
@@ -221,9 +207,12 @@ def _reached(spec: Spec, home_channel_id: str | None) -> tuple[list[str], set[st
         if isinstance(inner, AgentNode) and inner.agent:
             agents.add(inner.agent)
         deliver = node.deliver if isinstance(node, FinishNode) else inner
-        if isinstance(deliver, Deliver) and deliver.to not in DM_TARGETS:
-            target = target_for(deliver.to, home=home, mode="live", run_as=None, owner=None)
-            if isinstance(target.get("channel_id"), str) and not expressions_in(deliver.to):
+        place = deliver.to if isinstance(deliver, Deliver) else None
+        if isinstance(inner, AgentNode):
+            place = inner.at
+        if place is not None and place not in DM_TARGETS and not expressions_in(place):
+            target = target_for(place, home=home, mode="live", run_as=None, owner=None)
+            if isinstance(target.get("channel_id"), str):
                 channels.append(target["channel_id"])
     channels += [d for d in spec.destinations or [] if not d.startswith("person:")]
     return channels, agents

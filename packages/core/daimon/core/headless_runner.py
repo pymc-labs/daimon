@@ -279,7 +279,6 @@ async def run_turn(
     routine_id: uuid.UUID | None = None,
     session_id: str | None = None,
     step: StepTurn | None = None,
-    routine_step_run_id: uuid.UUID | None = None,
     routine_destination: str | None = None,
 ) -> str:
     observation = current_outcome.get()
@@ -323,7 +322,6 @@ async def run_turn(
             routine_id=routine_id,
             session_id=session_id,
             step=step,
-            routine_step_run_id=routine_step_run_id,
             routine_destination=routine_destination,
         )
     observation.agent_id = agent_id
@@ -367,7 +365,6 @@ async def run_turn(
                 routine_id=routine_id,
                 session_id=session_id,
                 step=step,
-                routine_step_run_id=routine_step_run_id,
                 routine_destination=routine_destination,
             )
     except BaseException as exc:
@@ -439,7 +436,6 @@ async def run_turn_impl(
     routine_id: uuid.UUID | None = None,
     session_id: str | None = None,
     step: StepTurn | None = None,
-    routine_step_run_id: uuid.UUID | None = None,
     routine_destination: str | None = None,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its complete final reply.
@@ -532,8 +528,7 @@ async def run_turn_impl(
     assembled, and the gate and decider read it as it is now. ``step`` runs the
     turn as a workflow step (`StepTurn`): the `workflow_step` entry point with the
     step's tools, its decider, its stamps on a new session, and its brief sent as
-    is, without the routine framing. ``routine_step_run_id`` is the workflow run of a
-    routine step's turn, bound to the identity relay as ``routine_id`` binds a routine's.
+    is, without the routine framing.
 
     ``hold`` runs the turn held to a shared channel (`routine_hold.routine_hold`):
     the channel's own store replaces the agent-wide and personal ones, and the
@@ -610,7 +605,7 @@ async def run_turn_impl(
     relay_destination = (
         routine_destination
         if relay_routine
-        and (routine_id is not None or routine_step_run_id is not None)
+        and routine_id is not None
         and feature_settings is not None
         and feature_settings.mcp_identity.names_routine
         else None
@@ -731,10 +726,7 @@ async def run_turn_impl(
             model_override=model_override,
             system_override=identity.system(agent.system, platform),
             relay_routine_id=routine_id if relay_routine else None,
-            relay_workflow_run_id=routine_step_run_id if relay_routine else None,
-            relay_owner=(
-                runs_as_user if relay_routine and (routine_id or routine_step_run_id) else None
-            ),
+            relay_owner=runs_as_user if relay_routine and routine_id else None,
             relay_destination=relay_destination,
             identity=identity,
             workflow_run_id=step.workflow_run_id if step is not None else None,

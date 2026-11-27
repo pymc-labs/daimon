@@ -4030,7 +4030,7 @@ async def test_dm_fire_holds_the_owner_to_the_agents_grant_by_their_server_roles
         seen.append((agent_name, user_id, await groups(user_id, frozenset({"R1", "R2"}))))
         return False
 
-    monkeypatch.setattr("daimon.adapters.scheduler.workflows.owner_dm.sender_admits", admits)
+    monkeypatch.setattr("daimon.adapters.scheduler.main.sender_admits", admits)
     client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
     fire = await _build_fire(
         client=client,

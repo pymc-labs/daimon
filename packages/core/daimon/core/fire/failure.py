@@ -6,7 +6,7 @@ import asyncio
 
 import structlog
 from daimon.core.fire.store import FireGuardStore
-from daimon.core.fire.subject import Subject, tier_ids
+from daimon.core.fire.subject import Subject
 from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.turn.termination import TerminationReason
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -47,17 +47,14 @@ async def record_fire_error(
         error_class=error_class,
     )
     if event == "routine.fire_failed":
-        routine_id, workflow_id = tier_ids(subject)
         report_ops_event(
             sm,
             OpsEvent(
                 event,
                 subject.tenant_id,
                 reason=error_class or fixed,
-                routine_id=routine_id,
+                routine_id=subject.id,
                 agent_id=subject.agent_id,
-                workflow_id=workflow_id,
-                workflow_run_id=subject.workflow_run_id,
             ),
             logged=False,
         )

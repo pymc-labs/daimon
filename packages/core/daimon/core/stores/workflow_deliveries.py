@@ -16,8 +16,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-#: `result` is a routine step's output (text, files, header, hold, identity, DM fallback).
-DeliveryKind = Literal["finish", "post", "ask", "reminder", "ask_update", "notice", "result"]
+DeliveryKind = Literal["finish", "post", "ask", "reminder", "ask_update", "notice"]
 SettledStatus = Literal["sent", "skipped", "refused", "failed"]
 
 
@@ -181,12 +180,13 @@ async def deliveries_of_wait(session: AsyncSession, wait_id: uuid.UUID) -> list[
 
 
 async def unsent_routine_posts(session: AsyncSession, workflow_id: uuid.UUID) -> list[DeliveryRow]:
-    """A workflow's `result` and `notice` posts not yet sent (pending or claimed), oldest first."""
+    """A workflow's `post` and `notice` deliveries not yet sent (pending or claimed), oldest
+    first."""
     found = await session.scalars(
         select(WorkflowDelivery)
         .where(
             WorkflowDelivery.workflow_id == workflow_id,
-            WorkflowDelivery.kind.in_(("result", "notice")),
+            WorkflowDelivery.kind.in_(("post", "notice")),
             WorkflowDelivery.status.in_(("pending", "claimed")),
         )
         .order_by(WorkflowDelivery.created_at, WorkflowDelivery.id)

@@ -17,7 +17,6 @@ from decimal import Decimal
 from typing import Any, Final, Literal, Protocol
 
 from daimon.core.config import Settings
-from daimon.core.routines import private_routine_steps
 from daimon.core.stores import (
     security_audit,
     workflow_deliveries,
@@ -35,7 +34,7 @@ from daimon.core.workflows.engine import Event, Outcome, RunEnd, RunFacts, StepV
 from daimon.core.workflows.expressions import ExpressionError, evaluate, render
 from daimon.core.workflows.graph import ancestors
 from daimon.core.workflows.items import ItemState, item_label, items_next, items_problem
-from daimon.core.workflows.lanes import OWNER_DM, agent_of, lane_key
+from daimon.core.workflows.lanes import agent_of, lane_key
 from daimon.core.workflows.preflight import Cleared, Place, Refusal, check
 from daimon.core.workflows.spec import (
     ActionNode,
@@ -44,9 +43,9 @@ from daimon.core.workflows.spec import (
     CodeNode,
     FinishNode,
     ForEachNode,
-    RoutineNode,
     Spec,
     parse_spec,
+    private_steps,
 )
 from daimon.core.workflows.state import STATE_LIMIT, reads_of
 from daimon.core.workflows.taint import Catalog, SkillPin, catalog_of
@@ -64,7 +63,6 @@ EVENT_BUFFER: Final = timedelta(hours=1)
 DEFAULT_DEADLINE: Final = timedelta(days=7)
 BLOCKED_RECHECK: Final = timedelta(minutes=15)
 BLOCKED_FOR: Final = timedelta(days=1)
-ROUTINE_LIVE_ONLY: Final = "Routine steps run only live; use Run now."
 _TERMINAL: Final = frozenset({"succeeded", "failed", "skipped", "cancelled"})
 _MESSAGE_LIMIT: Final = 500
 #: What an ask still open when its run ends says, by how the run ended.
@@ -237,6 +235,7 @@ def _view(s: StepRow) -> StepView:
         summary=s.summary,
         via=tuple(s.via),
         files=tuple(s.files),
+        posted=tuple(s.posted),
         error_class=s.error_class,
         error_message=s.error_message,
         reused=s.reused,
@@ -292,7 +291,7 @@ async def _load(session: AsyncSession, settings: Settings, run: RunRow, now: dat
         trigger={"kind": run.trigger_kind, "key": run.trigger_key},
         now=now,
         max_steps=_max_steps(spec, settings),
-        private_steps=private_routine_steps(spec, workflow.home_channel_id),
+        private_steps=private_steps(spec),
         pinned={
             n: StepView(n, 1, "succeeded", route=p.get("route"), output=p.get("output"))
             for n, p in pinned.items()
@@ -344,6 +343,7 @@ def _write(view: StepView, now: datetime) -> StepWrite:
         "status": view.status,
         "output": view.output,
         "files": list(view.files),
+        "posted": list(view.posted),
         "summary": view.summary,
         "route": view.route,
         "via": list(view.via),
@@ -647,6 +647,7 @@ async def _settle_item(
             "output": outcome.output,
             "summary": outcome.summary,
             "files": list(outcome.files),
+            "posted": list(outcome.posted),
         }
         event = Event("step.succeeded", key, {})
     else:
@@ -725,9 +726,6 @@ async def _queue_posts(
             facts=loaded.facts,
             node_id=node_id,
         )
-    failed = next((v.node_id for v in views if v.key == end.step), None)
-    if failed is not None and isinstance(spec.nodes[failed], RoutineNode):
-        return []  # the fire already told the owner and the channel, once a streak
     queued = await delivery.queue_failure_notice(session, run=run, workflow=wf, spec=spec, end=end)
     return [] if queued is None else [queued]
 
@@ -1049,6 +1047,7 @@ def _fork_copies(
             "status": "succeeded",
             "output": s.output,
             "files": s.files,
+            "posted": s.posted,
             "summary": s.summary,
             "route": s.route,
             "via": s.via,
@@ -1142,7 +1141,6 @@ async def _take_lane(session: AsyncSession, run: RunRow, step: StepRow, lane: st
     """A step whose lane is busy gets one of its own: a session runs one turn at a time."""
     if (
         "@" in lane
-        or lane.startswith(f"{OWNER_DM}:")
         or not await workflow_runs.lane_busy(session, run_id=run.id, lane=lane, step_id=step.id)
     ):
         return lane
@@ -1163,23 +1161,16 @@ async def execute(
     async with sm() as session:
         loaded = await _load(session, settings, claimed.run, clock())
     node = node_of(loaded.spec, claimed.step)
-    # A routine step has no step preflight: the fire checks its own gates and budgets.
-    refusal = (
-        None
-        if isinstance(node, RoutineNode)
-        else await check(
-            sm,
-            settings,
-            loaded.place(),
-            now=clock(),
-            budget_usd=loaded.run.budget_usd,
-            cost_usd=loaded.run.cost_usd,
-        )
+    refusal = await check(
+        sm,
+        settings,
+        loaded.place(),
+        now=clock(),
+        budget_usd=loaded.run.budget_usd,
+        cost_usd=loaded.run.cost_usd,
     )
     outcome: Outcome | Park | Parked | Posted
-    if isinstance(node, RoutineNode) and loaded.run.mode != "live":
-        outcome = engine.Failed("fatal", ROUTINE_LIVE_ONLY)
-    elif isinstance(refusal, Refusal):
+    if isinstance(refusal, Refusal):
         if refusal.gate:
             await _block(sm, settings, claimed, refusal, now=clock())
             return
@@ -1516,7 +1507,7 @@ async def reclaim(sm: Sessions, settings: Settings, *, step_id: uuid.UUID, now: 
     attempt and is reattached to that session; a code step always does, as its worker is found
     by attempt and runs nothing before the session is saved. Nothing sent yet, or an
     idempotent node: run it again. Otherwise a write may have happened, and the step is
-    `unknown` for its owner. A routine step, which never reruns, fails `Interrupted`."""
+    `unknown` for its owner."""
     async with sm.begin() as session:
         held = await _locked_step(session, step_id, None, "running")
         if held is None or (held[1].lease_expires_at and held[1].lease_expires_at > now):
@@ -1534,9 +1525,6 @@ async def reclaim(sm: Sessions, settings: Settings, *, step_id: uuid.UUID, now: 
         await workflow_runs.finish_attempt(
             session, step_id=step_id, status="abandoned", now=now, error_class="unknown"
         )
-        if isinstance(node, RoutineNode):  # never `unknown`, which holds later slots on `skip`
-            await _resolve(session, loaded, step, engine.Failed("fatal", "Interrupted"), now=now)
-            return
         sent = bool(attempts) and attempts[-1].send_intent_at is not None
         if not sent or (isinstance(node, ActionNode) and node.idempotent):
             await _retry_later(

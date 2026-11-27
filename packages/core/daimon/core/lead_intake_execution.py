@@ -7,7 +7,7 @@ from uuid import UUID
 
 
 class WorkflowExecution(NamedTuple):
-    """A workflow run's routine step's grant. A routine fire's is a plain
+    """A workflow run's step grant. A routine fire's is a plain
     `(routine_id, execution_id)`; this names the run instead of a routine."""
 
     run_id: UUID

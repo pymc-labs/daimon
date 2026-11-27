@@ -12,6 +12,7 @@ from daimon.core._models import (
     Routine,
     Tenant,
     Workflow,
+    WorkflowRun,
     WorkflowTrigger,
     WorkflowTriggerEvent,
     WorkflowVersion,
@@ -32,7 +33,7 @@ from daimon.core.workflows.access import Who
 from daimon.core.workflows.catalog import AgentLister
 from daimon.core.workflows.routine_translation import STEP
 from daimon.core.workflows.service import Env, Forbidden, Refused
-from daimon.core.workflows.spec import RoutineNode, parse_spec
+from daimon.core.workflows.spec import AgentNode, parse_spec
 from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.workflows import NOW, agents_with, make_settings
@@ -140,7 +141,7 @@ async def test_routines_that_cannot_move_are_refused(db_session: AsyncSession) -
         await convert.from_routine(member, plain)
 
 
-async def test_a_dm_routine_becomes_an_owner_dm_step_that_posts_to_the_owner(
+async def test_a_dm_routine_becomes_a_private_step_that_posts_to_the_person_it_runs_as(
     db_session: AsyncSession,
 ) -> None:
     env = await _env(db_session)
@@ -148,7 +149,8 @@ async def test_a_dm_routine_becomes_an_owner_dm_step_that_posts_to_the_owner(
         db_session, env, created_by_user_id="1001", destination_kind="dm", destination_id="1001"
     )
     plan = await convert.preview(env, dm)
-    assert plan.spec["nodes"][STEP]["to"] == {"kind": "dm"}, "the owner's DM"
+    nodes = plan.spec["nodes"]
+    assert nodes[STEP]["memory"] == "personal" and nodes["post"]["to"] == "run_as", "their DM"
     assert not plan.validation.errors
 
 
@@ -277,16 +279,21 @@ async def test_seed_refuses_a_routine_that_runs_as_a_workflow(db_session: AsyncS
             await seed_routines(s, [entry], tenant_id=env.who.tenant_id, now=NOW, apply=True)
 
 
-async def test_converted_step_decides_like_its_routine(db_session: AsyncSession) -> None:
-    """The step is a routine step: it runs the routine's own fire, under its tool policy, so
-    the preview has nothing for the admin to approve."""
+async def test_converted_step_writes_as_the_server_allows(db_session: AsyncSession) -> None:
+    """The step runs the routine's prompt as written under the server's unattended rules, as
+    the routine did, so the preview has nothing for the admin to approve."""
     env = await _env(db_session, agents=agents_with({"daimon": ["crm/search"]}))
-    routine_id = await _routine(db_session, env, trigger_message="Sum up the deals")
+    routine_id = await _routine(db_session, env, trigger_message="Sum up ${{ the deals }}")
     plan = await convert.preview(env, routine_id)
     node = parse_spec(plan.spec).nodes[STEP]
-    assert isinstance(node, RoutineNode)
-    assert (node.agent, node.prompt) == ("daimon", "Sum up the deals")
+    assert isinstance(node, AgentNode)
+    assert (node.agent, node.instructions, node.writes) == (
+        "daimon",
+        "Sum up ${{ the deals }}",
+        "policy",
+    )
     assert not plan.validation.errors and not plan.validation.grants
+    assert [w.code for w in plan.validation.warnings] == ["instructions_expression"]
 
 
 @pytest.mark.parametrize(
@@ -324,43 +331,35 @@ async def test_a_workflow_on_a_multi_week_or_one_time_schedule_does_not_move_bac
         await convert.to_routine(env, flow)
 
 
-async def test_only_the_owner_or_an_admin_runs_a_moved_routine_by_hand(
-    db_session: AsyncSession,
-) -> None:
-    """Its step runs as the owner, so an editor or a runner cannot start, rerun or retry it."""
+async def test_manual_run_runs_as_presser(db_session: AsyncSession) -> None:
+    """A moved routine run by hand runs as whoever pressed it, as any workflow's does; where
+    it works then checks that person (place admission)."""
     env = await _env(db_session)
     tid = env.who.tenant_id
     flow = await convert.from_routine(env, await _routine(db_session, env))
     owner = await db_session.scalar(select(Workflow.owner_account_id).where(Workflow.id == flow))
-    editor, runner = Account(tenant_id=tid), Account(tenant_id=tid)
-    db_session.add_all([editor, runner])
+    runner = Account(tenant_id=tid)
+    db_session.add(runner)
     await db_session.commit()
+    assert owner is not None
     async with env.sm.begin() as s:
         await workflows.update_settings(s, tenant_id=tid, workflow_id=flow, visibility="shared")
-        for role, person in (("editor", editor), ("runner", runner)):
-            await workflows.set_access(
-                s,
-                tenant_id=tid,
-                workflow_id=flow,
-                role=role,
-                granted_by=owner,
-                account_id=person.id,
-            )
-    assert owner is not None
+        await workflows.set_access(
+            s, tenant_id=tid, workflow_id=flow, role="runner", granted_by=owner,
+            account_id=runner.id,
+        )  # fmt: skip
 
     def as_(account: uuid.UUID) -> Env:
         return Env(env.sm, env.settings, Who(tid, account), NOW, env.agents)
 
-    run = uuid.UUID((await service.start(as_(owner), flow, {})).id)  # the owner may
-    refused = [
-        service.start(as_(runner.id), flow, {}),
-        service.start(as_(editor.id), flow, {}),
-        service.rerun(as_(editor.id), run),
-        service.redrive(as_(editor.id), run),
-    ]
-    for call in refused:
-        with pytest.raises(Forbidden, match="Ask the owner or an admin to run it"):
-            await call
+    for person in (owner, runner.id):
+        run = uuid.UUID((await service.start(as_(person), flow, {})).id)
+        ran_as = await db_session.scalar(
+            select(WorkflowRun.run_as_account_id).where(WorkflowRun.id == run)
+        )
+        assert ran_as == person, "the presser, not the routine's owner"
+        await db_session.execute(delete(WorkflowRun).where(WorkflowRun.id == run))
+        await db_session.commit()
 
 
 @pytest.mark.parametrize(

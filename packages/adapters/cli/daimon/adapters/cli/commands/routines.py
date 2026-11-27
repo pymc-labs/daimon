@@ -846,7 +846,7 @@ def translate_command(
         bool, typer.Option("--dry-run", help="Print each outcome; write nothing.")
     ] = False,
 ) -> None:
-    """Operator only: move every routine onto a one-step workflow, as an admin.
+    """Operator only: move every routine onto an agent-step workflow, as an admin.
 
     Prints each routine's outcome; exits 1 when any routine stays.
     """

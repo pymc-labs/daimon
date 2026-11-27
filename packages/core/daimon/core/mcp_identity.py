@@ -175,8 +175,6 @@ class RelayBinding:
     #: turn holding it (`bind_origin_session`) is the one making the call, so the relay
     #: names that turn even beside a queued one or after the session row was replaced.
     grant: str | None = None
-    #: The workflow run a routine step belongs to, bound as `routine_id` is; never beside it.
-    workflow_run_id: uuid.UUID | None = None
     #: The agent-chat session (its Managed Agents id) this credential is mounted in; set
     #: alone. The relay names a person only while that session's driver is one signed in
     #: to the hub (`daimon.core.agent_chat_requester`).
@@ -204,8 +202,6 @@ class RelayBinding:
             value["routine"] = str(self.routine_id)
         if self.watch_id is not None:
             value["watch"] = str(self.watch_id)
-        if self.workflow_run_id is not None:
-            value["workflow_run"] = str(self.workflow_run_id)
         if self.owner is not None:
             value["owner"] = self.owner
         if self.agent_chat is not None:
@@ -225,15 +221,13 @@ class RelayBinding:
 class DmRoutineRelay:
     """What a fire of a routine posting to its owner's DM binds into its turn's relay
     credential (`RelayBinding`): the routine, its owner, the fire's execution, the
-    routine's `updated_at` when the fire began (ISO 8601) and, once opened, the DM. A
-    workflow's routine step names its run instead of a routine, and its workflow's revision."""
+    routine's `updated_at` when the fire began (ISO 8601) and, once opened, the DM."""
 
-    routine_id: uuid.UUID | None
+    routine_id: uuid.UUID
     owner: str
     execution: uuid.UUID
     revision: str
     channel: str | None = None
-    workflow_run_id: uuid.UUID | None = None
 
     def binding(self, agent_name: str, *, session_key: uuid.UUID, grant: str) -> RelayBinding:
         assert self.channel is not None
@@ -242,7 +236,6 @@ class DmRoutineRelay:
             session_key=session_key,
             grant=grant,
             routine_id=self.routine_id,
-            workflow_run_id=self.workflow_run_id,
             owner=self.owner,
             destination=DM_ROUTINE_DESTINATION,
             execution=self.execution,
@@ -264,8 +257,7 @@ def parse_relay_claim(raw: object) -> RelayBinding:
         claim.get("revision"),
         claim.get("dm_channel"),
     )
-    run = claim.get("workflow_run")
-    unattended = routine is not None or watch is not None or run is not None
+    unattended = routine is not None or watch is not None
     # A routine in its owner's DM turn: the session, its grant and the routine together,
     # with every field the relay checks it by; any of them alone is a wrong shape.
     dm = execution is not None or revision is not None or dm_channel is not None
@@ -283,13 +275,9 @@ def parse_relay_claim(raw: object) -> RelayBinding:
             "execution",
             "revision",
             "dm_channel",
-            "workflow_run",
         }
         or (dm and not _dm_routine_shape(claim))
-        or not (
-            destination is None
-            or (isinstance(destination, str) and (routine is not None or run is not None))
-        )
+        or not (destination is None or (isinstance(destination, str) and routine is not None))
         or not (owner is None or (isinstance(owner, str) and owner and unattended))
         or not (grant is None or (isinstance(grant, str) and grant and key is not None))
         or not isinstance(name, str)
@@ -297,8 +285,7 @@ def parse_relay_claim(raw: object) -> RelayBinding:
         or not (key is None or isinstance(key, str))
         or not (routine is None or isinstance(routine, str))
         or not (watch is None or isinstance(watch, str))
-        or not (run is None or isinstance(run, str))
-        or (sum(value is not None for value in (key, routine, watch, run)) > 1 and not dm)
+        or (sum(value is not None for value in (key, routine, watch)) > 1 and not dm)
         or not (
             agent_chat is None
             or (
@@ -321,20 +308,15 @@ def parse_relay_claim(raw: object) -> RelayBinding:
         execution=None if execution is None else uuid.UUID(cast("str", execution)),
         revision=cast("str | None", revision),
         dm_channel=cast("str | None", dm_channel),
-        workflow_run_id=None if run is None else uuid.UUID(run),
     )
 
 
 def _dm_routine_shape(claim: Mapping[str, object]) -> bool:
-    """Whether a relay claim is whole as a DM routine's: session, grant, routine (or a
-    workflow run, never both), owner, the unopened-DM destination, execution, a
-    timezone-aware revision and a channel id."""
-    values = [claim.get(k) for k in ("session", "grant", "owner", "execution")]
+    """Whether a relay claim is whole as a DM routine's: session, grant, routine, owner,
+    the unopened-DM destination, execution, a timezone-aware revision and a channel id."""
+    values = [claim.get(k) for k in ("session", "grant", "routine", "owner", "execution")]
     revision, channel = claim.get("revision"), claim.get("dm_channel")
     if not all(isinstance(v, str) and v for v in values) or "watch" in claim:
-        return False
-    holders = [claim[k] for k in ("routine", "workflow_run") if k in claim]
-    if len(holders) != 1 or not (isinstance(holders[0], str) and holders[0]):
         return False
     if claim.get("destination") != DM_ROUTINE_DESTINATION or "agent_chat" in claim:
         return False

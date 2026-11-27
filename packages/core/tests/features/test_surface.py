@@ -34,10 +34,10 @@ def test_every_registered_key_is_in_the_schema() -> None:
 
 
 def test_choices_round_trip_for_every_key_tier_and_value() -> None:
-    """Every chat tier's choice parses back; a chat card is never at a routine or workflow."""
+    """Every chat tier's choice parses back; a chat card is never at a routine."""
     for spec in FEATURES.values():
         for tier in spec.tiers:
-            if tier in ("routine", "workflow"):
+            if tier == "routine":
                 raw = choice(spec.key, tier, spec.default)
                 assert parse_choice(raw) is None, f"{raw} is not a chat choice"
                 continue

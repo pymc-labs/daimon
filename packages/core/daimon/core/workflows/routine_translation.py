@@ -1,14 +1,24 @@
-"""A routine as a one-step workflow and back, as plain row writes.
+"""A routine as an agent-step workflow and back, as plain row writes.
 
 `translate` and `untranslate` are pure and stdlib only: the phase 4 migration vendors this
 module. Ids are `uuid5` of the routine id and `now` is an argument, so a move is deterministic.
 `apply_move` writes one with SQLAlchemy Core, online and in that migration alike.
+
+Every routine becomes one of four shapes. Its `run` agent step works where it posts (`at`),
+else at home, else privately on its owner's personal memory; a Post then posts the result
+where the routine did, unless the agent already posted there itself:
+
+- A. a channel or thread: `run` at it, `seen` branch, `post` there, `done`;
+- B. a DM: `run` private, `seen`, `post` to the person it runs as, `done`;
+- C. no destination, a channel: `run` at home, `done`;
+- D. neither: `run` private, `done`.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
@@ -20,11 +30,20 @@ import sqlalchemy as sa
 NAMESPACE: Final = uuid.UUID("5d2f7c1e-6a0b-4f3e-9c8d-7b1a2e4f6c90")
 SCHEMA: Final = "daimon.workflow/v1"
 STEP: Final = "run"
+SEEN: Final = "seen"
+POST: Final = "post"
 DONE: Final = "done"
 TRIGGER: Final = "schedule"
 NOTE: Final = "Moved from a routine"
 MAX_TITLE: Final = 120
-_FEATURE_NOTES: Final = {"routine_sandbox_tools": "sandbox pin", "routine_result_header": "header"}
+#: `routine_files.PREFIX` and `OUTBOX_FILES`: a routine's pending result with file refs.
+FILES_PREFIX: Final = "\x1eroutine-files-v1\n"
+OUTBOX_FILES: Final = "generated_files"
+#: `delivery._SLACK_THREAD` and `_TEAMS_THREAD`, as `delivery.target_for` splits a thread id.
+_SLACK_THREAD: Final = re.compile(r"([CG][A-Z0-9]{2,}):([0-9]+\.[0-9]+)")
+_TEAMS_THREAD: Final = ";messageid="
+#: A schedule trigger's keys a routine holds.
+_SCHEDULE_KEYS: Final = frozenset({"id", "kind", "cron", "timezone", "catch_up"})
 
 Reason = Literal[
     "handback_paused",
@@ -67,8 +86,9 @@ class Refusal:
 @dataclass(frozen=True)
 class RoutineSnapshot:
     """A routine row's columns, plus what the caller reads beside it: the owner's account,
-    its routine-tier feature keys, the intake config bound to it and its schedule's next slot
-    (None when the schedule is invalid)."""
+    whether it sets its own result header (dropped), whether a pinned sandbox On decides it
+    and who set that, the intake config bound to it and its schedule's next slot (None when
+    the schedule is invalid)."""
 
     id: uuid.UUID
     tenant_id: uuid.UUID
@@ -104,7 +124,9 @@ class RoutineSnapshot:
     created_at: datetime
     owner_account_id: uuid.UUID | None = None
     owner_notice: dict[str, Any] | None = None
-    features: tuple[str, ...] = ()
+    header: bool = False
+    sandbox: bool = False
+    sandbox_set_by: uuid.UUID | None = None
     intake: dict[str, Any] | None = None
     next_slot: datetime | None = None
 
@@ -126,9 +148,8 @@ class Delivery:
 
 @dataclass(frozen=True)
 class WorkflowSnapshot:
-    """A converted workflow: its row, live spec and publisher, schedule cursor, pending result
-    and notice posts (oldest first), workflow-tier feature keys, intake config, runs and how
-    the last ended."""
+    """A converted workflow: its row, live spec and publisher, schedule cursor, unsent posts
+    and notices (oldest first), intake config, runs and how the last ended."""
 
     id: uuid.UUID
     tenant_id: uuid.UUID
@@ -144,7 +165,6 @@ class WorkflowSnapshot:
     last_fired_slot: datetime | None
     seeded_after: datetime | None
     deliveries: tuple[Delivery, ...] = ()
-    features: tuple[str, ...] = ()
     intake: dict[str, Any] | None = None
     active_runs: bool = False
     #: How its last ended live run ended and why it failed; None before its first.
@@ -154,14 +174,19 @@ class WorkflowSnapshot:
 
 def ids(routine_id: uuid.UUID) -> dict[str, uuid.UUID]:
     """The rows a routine's move makes, by name."""
-    names = ("workflow", "trigger", "result", "notice")
+    names = ("workflow", "trigger", "post", "notice", "grant")
     return {k: uuid.uuid5(NAMESPACE, f"{routine_id}:{k}") for k in names}
 
 
 def spec_hash(spec: Mapping[str, Any]) -> str:
-    """The canonical spec's sha256, as `workflows.spec.spec_hash`."""
+    """The canonical spec's sha256, as `workflows.spec.spec_hash` (and `node_hash` of a node)."""
     text = json.dumps(spec, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+def slug(name: str) -> str:
+    """`workflows.spec.slug`: the key a spec names an agent by."""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
 
 
 def label(prompt: str, routine_id: uuid.UUID) -> str:
@@ -187,24 +212,78 @@ def _to(kind: str | None, target: str | None) -> dict[str, Any] | None:
     return {"kind": "dm"} if kind == "dm" else {"kind": kind, "id": target}
 
 
-def _spec(snap: RoutineSnapshot) -> dict[str, Any]:
-    name = (snap.name or label(snap.trigger_message, snap.id))[:MAX_TITLE]
-    node: dict[str, Any] = {"title": name, "next": DONE, "kind": "routine"}
-    node |= {"agent": snap.agent_name, "prompt": snap.trigger_message}
-    if (to := _to(snap.destination_kind, snap.destination_id)) is not None:
-        node["to"] = to
+def _spec(
+    name: str,
+    *,
+    agent: str,
+    prompt: str,
+    trigger: dict[str, Any],
+    home: str | None,
+    to: Mapping[str, Any] | None,
+    sandbox: bool,
+) -> dict[str, Any]:
+    """The workflow of a routine posting `to` (`_to`), in canonical key order."""
+    key = slug(agent)
+    place = None if to is None or to["kind"] == "dm" else "home" if to["id"] == home else to["id"]
+    post = None if to is None else "run_as" if to["kind"] == "dm" else place
+    run: dict[str, Any] = {"title": name, "next": DONE if post is None else SEEN, "kind": "agent"}
+    run |= {"agent": key, "instructions": prompt, "writes": "policy"}
+    if sandbox:
+        run["builtins"] = "all"
+    run["can_finish_early"] = True
+    if place is not None or (to is None and home is not None):
+        run["at"] = place or "home"
+    else:
+        run["memory"] = "personal"
+    nodes: dict[str, Any] = {STEP: run}
+    if post is not None:
+        seen = {"when": f"${{{{ '{post}' in steps.{STEP}.posted }}}}", "to": DONE}
+        nodes[SEEN] = {"title": "Posted already?", "kind": "branch", "cases": [seen], "else": POST}
+        nodes[POST] = {
+            "to": post,
+            "message": f"${{{{ steps.{STEP}.summary }}}}",
+            "files": f"${{{{ steps.{STEP}.files }}}}",
+            "title": "Post the result",
+            "next": DONE,
+            "kind": "post",
+            "as_agent": key,
+        }
+    nodes[DONE] = {"title": "Done", "kind": "finish"}
     spec: dict[str, Any] = {"schema": SCHEMA, "name": name}
-    if snap.channel_id is not None:
-        spec["home"] = {"channel": snap.channel_id}
-    trigger = {"id": TRIGGER, "kind": "schedule", "cron": snap.cron_expr}
-    trigger |= {"timezone": snap.timezone, "catch_up": snap.catch_up_policy}
+    if home is not None:
+        spec["home"] = {"channel": home}
     return spec | {
         "visibility": "private",
         "triggers": [trigger],
         "concurrency": {"limit": 1, "on_conflict": "skip"},
         "start": STEP,
-        "nodes": {STEP: node, DONE: {"title": "Done", "kind": "finish"}},
+        "nodes": nodes,
     }
+
+
+def _trigger(cron: str, timezone: str | None, catch_up: str | None) -> dict[str, Any]:
+    found = {"cron": cron, "timezone": timezone, "catch_up": catch_up}
+    return {"id": TRIGGER, "kind": "schedule"} | {k: v for k, v in found.items() if v is not None}
+
+
+def _place(to: str, home: str | None) -> dict[str, Any]:
+    """`delivery.target_for` of a channel or thread id."""
+    channel, thread = to, None
+    if _TEAMS_THREAD in to:
+        channel, _, thread = to.partition(_TEAMS_THREAD)
+    elif match := _SLACK_THREAD.fullmatch(to):
+        channel, thread = match.group(1), match.group(2)
+    kind = "channel" if thread is None else "thread"
+    return {"kind": kind, "channel_id": channel, "thread_id": thread, "home": channel == home}
+
+
+def _pending(snap: RoutineSnapshot) -> tuple[str, list[Any]]:
+    """The pending result's text and file refs, as `routine_files.payload_for` reads it."""
+    text = snap.delivery_payload or ""
+    if snap.delivery_note != OUTBOX_FILES or not text.startswith(FILES_PREFIX):
+        return text, []
+    body = json.loads(text[len(FILES_PREFIX) :])
+    return str(body.get("text") or ""), list(body.get("files") or [])
 
 
 def _last(snap: RoutineSnapshot) -> dict[str, Any] | None:
@@ -219,10 +298,10 @@ def _last(snap: RoutineSnapshot) -> dict[str, Any] | None:
 
 
 def translate(snap: RoutineSnapshot, *, now: datetime, stuck_after: timedelta) -> Move | Refusal:
-    """The workflow a routine becomes, with its cursor, posts, features and intake binding;
-    the routine row goes. Active when it was enabled with an owner, else paused. A fire claimed
-    `stuck_after` ago (the scheduler's dispatch timeout) is dead: it counts as finished, and the
-    fence drops a late result."""
+    """The workflow a routine becomes, with its cursor, posts, sandbox grant and intake
+    binding; the routine row goes. Active when it was enabled with an owner, else paused. A
+    fire claimed `stuck_after` ago (the scheduler's dispatch timeout) is dead: it counts as
+    finished, and the fence drops a late result."""
     if snap.handback_paused_at is not None:
         return Refusal("handback_paused")
     if snap.next_slot is None:
@@ -236,7 +315,16 @@ def translate(snap: RoutineSnapshot, *, now: datetime, stuck_after: timedelta) -
         return Refusal("busy")
     made = ids(snap.id)
     flow, owner = made["workflow"], snap.owner_account_id
-    spec = _spec(snap)
+    to = _to(snap.destination_kind, snap.destination_id)
+    spec = _spec(
+        (snap.name or label(snap.trigger_message, snap.id))[:MAX_TITLE],
+        agent=snap.agent_name,
+        prompt=snap.trigger_message,
+        trigger=_trigger(snap.cron_expr, snap.timezone, snap.catch_up_policy),
+        home=snap.channel_id,
+        to=to,
+        sandbox=snap.sandbox,
+    )
     active = snap.enabled and owner is not None
     notes: list[str] = [] if active else ["disabled" if owner else "no owner"]
     converted = {
@@ -251,7 +339,7 @@ def translate(snap: RoutineSnapshot, *, now: datetime, stuck_after: timedelta) -
         "name": snap.name,
         "owner": snap.created_by_user_id,
         "owner_account_id": None if owner is None else str(owner),
-        "to": _to(snap.destination_kind, snap.destination_id),
+        "to": to,
         "channel_id": snap.channel_id,
         "fired_at": _iso(snap.last_fired_at),
         "finished_at": _iso(snap.last_finished_at),
@@ -319,46 +407,42 @@ def translate(snap: RoutineSnapshot, *, now: datetime, stuck_after: timedelta) -
             },
         ),
     ]
+    if snap.sandbox:
+        notes.append("built-ins grant")
+        pins = {"published_by": None if owner is None else str(owner)}
+        grant = {"id": made["grant"], "tenant_id": snap.tenant_id, "workflow_id": flow}
+        grant |= {"version": 1, "kind": "builtins", "node_id": STEP, "tool": None, "params": {}}
+        grant |= {"pins": pins | {"node_hash": spec_hash(spec["nodes"][STEP])}}
+        grant |= {"approved_by_account_id": snap.sandbox_set_by, "approved_at": now}
+        writes.append(Write("workflow_grants", "insert", grant))
+    if snap.header:
+        notes.append("header dropped")
     if snap.delivery_status == "pending":
         notes.append("1 pending post")
+        text, files = _pending(snap)
         payload: dict[str, Any] = {
-            "agent_id": snap.agent_id,
-            "owner": snap.created_by_user_id,
-            "hold": snap.delivery_hold,
-            "text": snap.delivery_payload or "",
-            "files": [],
+            "text": text,
+            "files": files,
             "workflow": spec["name"],
             "run_number": None,
             "speaker": None if owner is None else str(owner),
             "mention": [],
-            "version": 1,
-            "fired_at": _iso(snap.last_fired_at),
+            # Only for moving back: a workflow post's hold comes from where it goes.
+            "hold": snap.delivery_hold,
+            "note": snap.delivery_note,
         }
-        target = {"kind": snap.destination_kind, "id": snap.destination_id}
-        writes.append(
-            _delivery(made["result"], snap, "result", target, payload, now, snap.delivery_note)
+        target = (
+            {"kind": "dm", "account_id": payload["speaker"], "via": snap.channel_id}
+            if to is None or to["kind"] == "dm"
+            else _place(to["id"], snap.channel_id)
         )
+        writes.append(_delivery(made["post"], snap, "post", target, payload, now))
     if snap.owner_notice is not None:
         notes.append("owner notice")
         notice = snap.owner_notice
         text = notice.get("text") or f"{notice.get('title', '')}: {notice.get('body', '')}"
         payload = {"topic": "routine_failed", "text": text, "routine_notice": dict(notice)}
         writes.append(_delivery(made["notice"], snap, "notice", {"to": "owner"}, payload, now))
-    if snap.features:
-        notes += sorted(_FEATURE_NOTES.get(k, k) for k in snap.features)
-        writes.append(
-            Write(
-                "feature_values",
-                "update",
-                {
-                    "tier": "workflow",
-                    "routine_id": None,
-                    "workflow_id": flow,
-                    "channel_id": str(flow),
-                },
-                {"tier": "routine", "routine_id": snap.id},
-            )
-        )
     if snap.intake is not None:
         notes.insert(0, "intake binding")
         config = {**snap.intake, "routine_id": None, "workflow_id": str(flow)}
@@ -380,48 +464,58 @@ def _delivery(
     target: dict[str, Any],
     payload: dict[str, Any],
     now: datetime,
-    note: str | None = None,
 ) -> Write:
     values = {"id": id_, "tenant_id": snap.tenant_id, "workflow_id": ids(snap.id)["workflow"]}
-    values |= {"kind": kind, "target": target, "payload": payload, "note": note, "created_at": now}
+    values |= {"kind": kind, "target": target, "payload": payload, "note": None, "created_at": now}
     return Write("workflow_deliveries", "insert", values)
 
 
-def _routine_shape(spec: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]] | None:
-    """The schedule trigger and routine node of a translation-shaped spec, else None."""
-    keys = {"schema", "name", "visibility", "home", "triggers", "concurrency", "start", "nodes"}
+def _untitled(spec: Mapping[str, Any]) -> dict[str, Any]:
     nodes: dict[str, Any] = dict(spec.get("nodes") or {})
+    plain = {k: {f: v for f, v in n.items() if f != "title"} for k, n in nodes.items()}
+    return {**spec, "nodes": plain}
+
+
+def _schedules(spec: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Its schedule triggers when the rest are manual, else none."""
     triggers: list[dict[str, Any]] = list(spec.get("triggers") or [])
-    schedules = [t for t in triggers if t.get("kind") == "schedule"]
-    routines = [n for n in nodes.values() if n.get("kind") == "routine"]
-    finishes = [n for n in nodes.values() if set(n) <= {"kind", "title"} and n["kind"] == "finish"]
-    if (
-        not set(spec) <= keys
-        or len(schedules) != 1
-        or any(t.get("kind") not in ("schedule", "manual") for t in triggers)
-        or len(nodes) != 2
-        or len(routines) != 1
-        or len(finishes) != 1
-    ):
-        return None
-    trigger = schedules[0]
-    if not trigger.get("cron") or set(trigger) - {"id", "kind", "cron", "timezone", "catch_up"}:
-        return None
-    return trigger, routines[0]
+    if any(t.get("kind") not in ("schedule", "manual") for t in triggers):
+        return []
+    return [t for t in triggers if t.get("kind") == "schedule"]
+
+
+def _same_shape(snap: WorkflowSnapshot, cf: Mapping[str, Any], prompt: str) -> bool:
+    """Exactly its routine's shape (A-D) for the routine's agent and destination, titles
+    aside. Built-ins are not: a routine's sandbox opt-in cannot come back."""
+    spec, (trigger,) = snap.spec, _schedules(snap.spec)
+    expected = _spec(
+        str(spec.get("name")),
+        agent=str(cf.get("agent_name")),
+        prompt=prompt,
+        trigger=_trigger(trigger["cron"], trigger.get("timezone"), trigger.get("catch_up")),
+        home=snap.home_channel_id,
+        to=cf.get("to"),
+        sandbox=False,
+    )
+    return _untitled({**spec, "triggers": [trigger]}) == _untitled(expected)
 
 
 def untranslate(snap: WorkflowSnapshot, *, now: datetime) -> Move | Refusal:
     """The routine a converted workflow was, from the workflow as it is now; the workflow goes.
-    Only the translation's shape, its routine's agent and owner, and no run or post under way."""
+    Only one plain cron schedule (`not_a_routine` else), its routine's shape, agent,
+    destination and owner, and no run or post under way."""
     cf = snap.converted_from
-    shape = None if cf is None else _routine_shape(snap.spec)
-    if cf is None or shape is None:
+    schedules = _schedules(snap.spec)
+    trigger = schedules[0] if len(schedules) == 1 else {}
+    if cf is None or not trigger.get("cron") or set(trigger) - _SCHEDULE_KEYS:
         return Refusal("not_a_routine")
-    trigger, node = shape
+    nodes: dict[str, Any] = dict(snap.spec.get("nodes") or {})
+    run: dict[str, Any] = nodes.get(STEP) or {}
+    prompt = run.get("instructions")
     owner = cf.get("owner_account_id")
     if (
-        node["agent"] != cf.get("agent_name")
-        or node.get("to") != cf.get("to")
+        not isinstance(prompt, str)
+        or not _same_shape(snap, cf, prompt)
         or str(snap.owner_account_id) != str(owner)
         or str(snap.published_by) != str(owner)
     ):
@@ -430,7 +524,7 @@ def untranslate(snap: WorkflowSnapshot, *, now: datetime) -> Move | Refusal:
         return Refusal("busy")
     routine_id = uuid.UUID(cf["routine_id"])
     enabled = snap.status == "active"
-    to = node.get("to")
+    to = cf.get("to")
     made_in = snap.made_in or {}
     source = cf.get("source_routine_id")
     error = cf.get("error")  # the failure streak: its last run's since the move, if any
@@ -441,11 +535,11 @@ def untranslate(snap: WorkflowSnapshot, *, now: datetime) -> Move | Refusal:
         "tenant_id": snap.tenant_id,
         "created_by_user_id": cf.get("owner"),
         "agent_id": cf["agent_id"],
-        "agent_name": node["agent"],
-        "name": routine_name(snap.name, cf, node["prompt"]),
+        "agent_name": cf["agent_name"],
+        "name": routine_name(snap.name, cf, prompt),
         "cron_expr": trigger["cron"],
         "timezone": trigger.get("timezone") or "UTC",
-        "trigger_message": node["prompt"],
+        "trigger_message": prompt,
         "enabled": enabled,
         "catch_up_policy": trigger.get("catch_up") or "skip",
         "next_fire_at": snap.next_fire_at if enabled else None,
@@ -467,12 +561,19 @@ def untranslate(snap: WorkflowSnapshot, *, now: datetime) -> Move | Refusal:
         "updated_at": now,
     }
     notes: list[str] = [] if enabled else ["disabled"]
-    results = [d for d in snap.deliveries if d.kind == "result" and d.status == "pending"]
-    if results:
+    posts = [d for d in snap.deliveries if d.kind == "post" and d.status == "pending"]
+    if posts:
         notes.append("1 pending post")
-        payload = results[-1].payload
-        values |= {"delivery_status": "pending", "delivery_payload": payload.get("text") or ""}
-        values |= {"delivery_note": results[-1].note, "delivery_hold": payload.get("hold")}
+        payload = posts[-1].payload
+        text, files = str(payload.get("text") or ""), list(payload.get("files") or [])
+        note = payload.get("note", OUTBOX_FILES if files else None)
+        if note == OUTBOX_FILES:
+            body = json.dumps(
+                {"text": text, "files": files}, separators=(",", ":"), ensure_ascii=False
+            )
+            text = FILES_PREFIX + body
+        values |= {"delivery_status": "pending", "delivery_payload": text}
+        values |= {"delivery_note": note, "delivery_hold": payload.get("hold")}
     notices = [d for d in snap.deliveries if d.kind == "notice" and d.status == "pending"]
     if notices:
         notes.append("owner notice")
@@ -484,21 +585,6 @@ def untranslate(snap: WorkflowSnapshot, *, now: datetime) -> Move | Refusal:
             "text": text,
         }
     writes = [Write("routines", "insert", values)]
-    if snap.features:
-        notes += sorted(_FEATURE_NOTES.get(k, k) for k in snap.features)
-        writes.append(
-            Write(
-                "feature_values",
-                "update",
-                {
-                    "tier": "routine",
-                    "workflow_id": None,
-                    "routine_id": routine_id,
-                    "channel_id": str(routine_id),
-                },
-                {"tier": "workflow", "workflow_id": snap.id},
-            )
-        )
     if snap.intake is not None:
         notes.insert(0, "intake binding")
         config = {**snap.intake, "workflow_id": None, "routine_id": str(routine_id)}

@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any, Literal
 
 from daimon.core.config import Settings
-from daimon.core.features.service import clear_pinned_on
 from daimon.core.routine_files import RoutineFile
 from daimon.core.routines import PRIVATE_FAILED
 from daimon.core.stores import security_audit, workflow_waits
@@ -24,7 +23,6 @@ from daimon.core.stores import workflow_publish_requests as publish_requests
 from daimon.core.stores import workflow_reads as reads
 from daimon.core.stores import workflow_runs as runs_store
 from daimon.core.stores import workflows as store
-from daimon.core.stores.domain import SANDBOX_KEY, FeatureTarget
 from daimon.core.stores.workflow_run_events import list_events
 from daimon.core.stores.workflow_runs import GrantRow, RunRow
 from daimon.core.stores.workflows import WorkflowAccessRow, WorkflowRow
@@ -42,7 +40,6 @@ from daimon.core.workflows.preflight import (
 )
 from daimon.core.workflows.runs import Sessions
 from daimon.core.workflows.spec import (
-    RoutineNode,
     Spec,
     dump_spec,
     node_hash,
@@ -551,9 +548,6 @@ async def publish(
                 f"This version needs an admin's approval for {len(new)} thing(s). "
                 "Request approval instead."
             )
-        await _routine_publish(
-            session, workflow, parsed, publisher=env.who.account_id, admin=env.who.admin
-        )
         place = Place(workflow.tenant_id, workflow, parsed, 0, "live", env.who.account_id)
         reads = member_reads(env.sm, env.settings, workflow.tenant_id)
         if (private := await private_reach(session, place, env.who.account_id, reads)) is not None:
@@ -599,67 +593,6 @@ async def publish(
         fresh, access, _ = await _load(session, env, workflow_id)
         view = await _view(env, session, fresh, access=access, budget=budget)
         return view
-
-
-def _routine(spec: Spec) -> RoutineNode | None:
-    return next((n for n in spec.nodes.values() if isinstance(n, RoutineNode)), None)
-
-
-async def check_routine_run(
-    session: AsyncSession, workflow: WorkflowRow, rights: Rights, version: int | None
-) -> None:
-    """A routine step runs as the owner, so only they or an admin run `version` by hand."""
-    if rights.admin or rights.role == "owner" or version is None:
-        return
-    found = await store.get_version(
-        session, tenant_id=workflow.tenant_id, workflow_id=workflow.id, number=version
-    )
-    if found is not None and _routine(parse_spec(found.spec)) is not None:
-        raise Forbidden("A routine step runs as the owner. Ask the owner or an admin to run it.")
-
-
-async def _routine_publish(
-    session: AsyncSession,
-    workflow: WorkflowRow,
-    spec: Spec,
-    *,
-    publisher: uuid.UUID,
-    admin: bool,
-) -> None:
-    """A new or changed routine step runs as the owner, so only they or an admin publish it;
-    a change to its agent, prompt or destination clears the workflow's sandbox opt-in, as a
-    routine edit does."""
-    node = _routine(spec)
-    live = (
-        await store.get_version(
-            session,
-            tenant_id=workflow.tenant_id,
-            workflow_id=workflow.id,
-            number=workflow.live_version,
-        )
-        if workflow.live_version
-        else None
-    )
-    before = _routine(parse_spec(live.spec)) if live is not None else None
-    if node is None or (before is not None and node_hash(before) == node_hash(node)):
-        return
-    owner = publisher if workflow.status == "needs_owner" else workflow.owner_account_id
-    if not admin and publisher != owner:
-        raise Forbidden("A routine step runs as the owner. Ask the owner or an admin to publish.")
-    if node.to is not None and node.to.kind == "dm" and owner is None:
-        raise Invalid("A routine step that DMs its owner needs one. Ask an admin to assign one.")
-    if before is None or (before.agent, before.prompt, before.to) != (
-        node.agent,
-        node.prompt,
-        node.to,
-    ):
-        await clear_pinned_on(
-            session,
-            None,
-            tenant_id=workflow.tenant_id,
-            key=SANDBOX_KEY,
-            target=FeatureTarget("workflow", workflow_id=workflow.id),
-        )
 
 
 def grant_rows(
@@ -797,7 +730,6 @@ async def decide_publish_request(
             parsed = parse_spec(request.spec)
             spec = dump_spec(parsed)
             requester = request.requested_by_account_id or env.who.account_id
-            await _routine_publish(session, workflow, parsed, publisher=requester, admin=True)
             row = await store.publish_version(
                 session,
                 tenant_id=workflow.tenant_id,
@@ -997,7 +929,7 @@ async def runs_view(
 async def get_run(env: Env, run_id: uuid.UUID) -> run_views.RunDetail:
     async with env.sm() as session:
         run, workflow, _ = await _run(session, env, run_id)
-        private = await run_views.hides_output(session, run, workflow, env.who.account_id)
+        private = await run_views.hides_output(session, run, env.who.account_id)
         return await run_views.detail(session, run, workflow.name, private=private)
 
 
@@ -1017,8 +949,8 @@ async def run_events(
 ) -> tuple[list[run_views.RunEvent], bool]:
     """The ledger rows after `after_seq`, and whether the run has ended."""
     async with env.sm() as session:
-        run, workflow, _ = await _run(session, env, run_id)
-        private = await run_views.hides_output(session, run, workflow, env.who.account_id)
+        run, _, _ = await _run(session, env, run_id)
+        private = await run_views.hides_output(session, run, env.who.account_id)
         events = await run_views.event_views(session, run, after_seq=after_seq, private=private)
         return events, run.status not in _ACTIVE
 
@@ -1031,8 +963,8 @@ async def verify_run(env: Env, run_id: uuid.UUID) -> run_views.Verify:
 
 async def step(env: Env, run_id: uuid.UUID, key: str, attempt: int | None) -> run_views.StepDetail:
     async with env.sm() as session:
-        run, workflow, _ = await _run(session, env, run_id)
-        private = await run_views.hides_output(session, run, workflow, env.who.account_id)
+        run, _, _ = await _run(session, env, run_id)
+        private = await run_views.hides_output(session, run, env.who.account_id)
         found = await run_views.step_detail(
             session, run, key, attempt, now=env.now, private=private
         )
@@ -1101,8 +1033,6 @@ async def start(
     `origin` is the chat message it started from, which `deliver.to: origin` posts under."""
     async with env.sm() as session:
         workflow, _, rights = await _load(session, env, workflow_id)
-        if test is None and rights.run:
-            await check_routine_run(session, workflow, rights, workflow.live_version)
     if test is not None:
         if not rights.edit:
             raise Forbidden("Only the owner or an editor can test a workflow.")
@@ -1158,10 +1088,7 @@ async def cancel(env: Env, run_id: uuid.UUID) -> run_views.RunSummary:
 
 
 async def redrive(env: Env, run_id: uuid.UUID) -> run_views.RunSummary:
-    run, workflow, rights = await _control(env, run_id)
-    if run.mode == "live":
-        async with env.sm() as session:
-            await check_routine_run(session, workflow, rights, run.version)
+    run, _, _ = await _control(env, run_id)
     result = await runs.redrive(
         env.sm, env.settings, run_id=run.id, account_id=env.who.account_id, now=env.now
     )
@@ -1216,11 +1143,6 @@ async def rerun(
     )
     if (test or runs_version not in (None, workflow.live_version)) and not rights.edit:
         raise Forbidden("Only the owner or an editor can run the draft or an older version.")
-    if not test:
-        async with env.sm() as session:
-            await check_routine_run(
-                session, workflow, rights, runs_version or workflow.live_version
-            )
     result = await runs.start_run(
         env.sm,
         env.settings,
@@ -1299,9 +1221,7 @@ async def attention(env: Env) -> list[Attention]:
             if run.status in ("failed", "timed_out"):
                 workflow, _, rights = await _load(session, env, workflow_id)
                 if rights.controls_run(own=run_views.started_by_me(run, env.who.account_id)):
-                    hidden = await run_views.hides_output(
-                        session, run, workflow, env.who.account_id
-                    )
+                    hidden = await run_views.hides_output(session, run, env.who.account_id)
                     out.append(
                         Attention(
                             kind="failed",

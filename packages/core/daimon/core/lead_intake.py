@@ -351,7 +351,7 @@ class IntakeRecord(BaseModel):
     actor_id: str | None = None
     agent_id: UUID | None = None
     routine_id: UUID | None = None
-    #: The workflow and run that captured it, when a workflow's routine step did.
+    #: The workflow and run that captured it, when a workflow's step did.
     workflow_id: UUID | None = None
     workflow_run_id: UUID | None = None
     execution_id: UUID | None = None

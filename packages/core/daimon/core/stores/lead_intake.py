@@ -777,7 +777,7 @@ async def workflow_execution(
     *,
     lifetime_s: float,
 ) -> AsyncIterator[UUID]:
-    """`routine_execution` for a workflow run's routine step; yields the grant's id. Deleting
+    """`routine_execution` for a workflow run's step; yields the grant's id. Deleting
     the run (or its workflow) deletes the grant."""
     async with _grant(sessions, tenant_id, lifetime_s, workflow_run_id=run_id) as identity:
         token = current_intake_execution.set(WorkflowExecution(run_id, identity))

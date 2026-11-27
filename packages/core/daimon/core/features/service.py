@@ -188,7 +188,6 @@ def place_tiers(spec: FeatureSpec, place: FeaturePlace) -> tuple[Tier, ...]:
         "channel": place.channel_id is not None,
         "thread": place.thread_id is not None,
         "routine": place.routine_id is not None,
-        "workflow": place.workflow_id is not None,
     }
     return tuple(tier for tier in spec.tiers_on(place.backend) if present[tier])
 
@@ -252,7 +251,6 @@ async def read_features(
             channel_id=place.channel_id,
             thread_key=place.thread_key,
             routine_id=place.routine_id,
-            workflow_id=place.workflow_id,
         )
         policy = (
             await load_access_policy(session, tenant_id=place.tenant_id)
@@ -517,7 +515,6 @@ async def _values_at(
         channel_id=place.channel_id,
         thread_key=place.thread_key,
         routine_id=place.routine_id,
-        workflow_id=place.workflow_id,
         keys=(spec.key,),
     )
     return tier_values(spec, settings, place, rows)
@@ -531,7 +528,6 @@ def _target(tier: Tier, place: FeaturePlace) -> FeatureTarget:
         channel_id=place.channel_id if tier in ("channel", "thread") else None,
         thread_key=place.thread_key if tier == "thread" else None,
         routine_id=place.routine_id if tier == "routine" else None,
-        workflow_id=place.workflow_id if tier == "workflow" else None,
     )
 
 
@@ -547,8 +543,6 @@ def _history(setting: TierSetting, place: FeaturePlace, pin: JsonValue = None) -
         found: dict[str, JsonValue] = {"agent": place.agent_id, "value": value}
     elif setting.tier == "routine":
         found = {"routine": str(place.routine_id), "value": value}
-    elif setting.tier == "workflow":
-        found = {"workflow": str(place.workflow_id), "value": value}
     else:
         return value
     if pin is not None:
@@ -566,7 +560,7 @@ def _pin_refusal(
         return None
     if value != "on":
         return None
-    wants = {"agent": AgentSandboxPin, "routine": SandboxPin, "workflow": SandboxPin}.get(tier)
+    wants = {"agent": AgentSandboxPin, "routine": SandboxPin}.get(tier)
     if wants is None or not isinstance(pin, wants):
         return _refused(
             f"{spec.name} can't be turned on {_where_set(tier, place.platform)} from here, as "
@@ -1050,7 +1044,6 @@ async def clear_pinned_on(
         "" if tenant is None else tenant.platform,
         agent_id=target.agent_id,
         routine_id=target.routine_id,
-        workflow_id=target.workflow_id,
     )
 
     async def _nobody(_: DelegatedAction | None) -> bool:
@@ -1124,7 +1117,6 @@ async def _write_builtin(
             channel_id=place.channel_id,
             thread_key=place.thread_key,
             routine_id=place.routine_id,
-            workflow_id=place.workflow_id,
             keys=(spec.key,),
         )
     above = resolve_above(spec, tier_values(spec, settings, place, rows), "agent")

@@ -70,7 +70,7 @@ class OpsEvent:
     note: str | None = None
     """Only `routine.goal_unmet`, written by the routine's own agent."""
     workflow_id: uuid.UUID | None = None
-    """A workflow's routine step, with its run; `routine_id` is then None."""
+    """A workflow's, with its run; `routine_id` is then None."""
     workflow_run_id: uuid.UUID | None = None
 
 
