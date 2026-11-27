@@ -89,7 +89,16 @@ RUN_BINDING = frozenset(
 CARRIED = frozenset({"routine_notice", "version", "fired_at", "run_number"})
 #: A job's ids, times and recorded source, which name the routine or the run.
 JOB_REFS = frozenset(
-    {"id", "tenant_id", "workflow_run_id", "workflow", "source", "delivery_id", "last_fired_at"}
+    {
+        "id",
+        "tenant_id",
+        "workflow_run_id",
+        "workflow",
+        "source",
+        "delivery_id",
+        "last_fired_at",
+        "revision",
+    }
 )
 
 
@@ -495,8 +504,8 @@ async def test_on_another_provider_a_routine_runs_where_its_step_refuses(
     workflows run only on Anthropic, so its step refuses before admission."""
     admitted: list[str] = []
 
-    async def admit(_deps: object, subject: Subject, **_kw: object) -> NoReturn:
-        admitted.append(subject.agent_name)
+    async def admit(_deps: object, facts: Subject, **_kw: object) -> NoReturn:
+        admitted.append(facts.agent_name)
         raise AdmissionDenied(reason="backend_unsupported")
 
     shape = Shape(gemini=True)
@@ -509,7 +518,7 @@ async def test_on_another_provider_a_routine_runs_where_its_step_refuses(
     await _as_routine(routine, deps, now)
     ran = await _as_workflow(flow, _deps(flow, shape, client, settings, resolver), settings, now)
     await client.close()
-    assert admitted == [routine.row.agent_name], "the routine is admitted on its provider"
+    assert admitted == [routine.row.agent_name], f"admitted on its provider: {routine.seen.error}"
     assert ran and not flow.seen.turns and not admitted[1:], "the step runs no turn"
     assert "Workflows run only on Anthropic" in (flow.seen.error or ""), flow.seen.error
 
