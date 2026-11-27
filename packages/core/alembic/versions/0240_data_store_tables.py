@@ -18,8 +18,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision: str = "0234_data_store_tables"
-down_revision: str | None = "0233_data_store"
+revision: str = "0240_data_store_tables"
+down_revision: str | None = "0239_data_store"
 branch_labels: str | None = None
 depends_on: str | None = None
 

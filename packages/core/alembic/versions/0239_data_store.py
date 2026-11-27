@@ -20,8 +20,8 @@ from __future__ import annotations
 
 from alembic import op
 
-revision: str = "0233_data_store"
-down_revision: str | None = "0232_agent_chat_session_grant"
+revision: str = "0239_data_store"
+down_revision: str | None = "0238_dm_activity"
 branch_labels: str | None = None
 depends_on: str | None = None
 
