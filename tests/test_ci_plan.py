@@ -120,6 +120,7 @@ def test_test_helpers_run_every_pytest_job() -> None:
         "web",
         "docker-build",
         "harness-image",
+        "eval-sandbox-image",
         "migration-upgrade",
     }
 

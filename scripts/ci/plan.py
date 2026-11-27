@@ -81,6 +81,7 @@ RULES: tuple[tuple[str, str], ...] = (
     ("packages/testing/", "testing"),
     # Only a migration or a change to the table models needs the migrate job; any other
     # core change skips it.
+    ("packages/core/daimon/core/evals/sandbox/", "eval-sandbox-runtime"),
     ("packages/core/alembic/", "migrations"),
     ("packages/core/daimon/core/_models.py", "migrations"),
     # Core and the CLI, which migrations and the smoke turn run through.
@@ -91,6 +92,7 @@ RULES: tuple[tuple[str, str], ...] = (
     ("assets/", "core"),
     ("apps/harness/", "harness"),
     ("apps/compute-session/", "compute-session"),
+    ("apps/eval-sandbox/", "eval-sandbox"),
     ("apps/notebook-host/", "notebook-host"),
     ("apps/report-host/", "report-host"),
     ("scripts/check_report_host_lock.py", "report-host"),
@@ -154,6 +156,9 @@ SUITES: dict[str, tuple[str, ...]] = {
     "mux": (*_HOSTS, "mux", "harness", "harness-conformance", "image-harness"),
     # The mux tests drive the harness service.
     "harness": ("harness", "harness-conformance", "mux", "image-harness", "lint"),
+    "eval-sandbox": ("eval-sandbox", "image-eval-sandbox", "lint"),
+    # The pod runtimes, whose end-to-end test runs against the built image.
+    "eval-sandbox-runtime": (*_HOSTS, "mux", "image-eval-sandbox"),
     # Core's tests and daimon.testing import both hosts.
     "notebook-host": (*DAIMON, "notebook-host", "image-notebook-host"),
     "report-host": (*DAIMON, "report-host", "image-report-host"),
@@ -197,6 +202,7 @@ MATRICES: dict[str, list[Leg]] = {
         {"suite": "report-host", "paths": "apps/report-host"},
         {"suite": "harness", "paths": "apps/harness"},
         {"suite": "compute-session", "paths": "apps/compute-session"},
+        {"suite": "eval-sandbox", "paths": "apps/eval-sandbox"},
         {"suite": "mux", "paths": "packages/mux"},
         {"suite": "harness-conformance", "paths": "tests/harness_conformance"},
     ],
@@ -226,6 +232,7 @@ JOBS: dict[str, tuple[str, ...]] = {
     "image-smoke": ("image-daimon", "simulated"),
     "migration-upgrade": ("migration-upgrade",),
     "harness-image": ("image-harness",),
+    "eval-sandbox-image": ("image-eval-sandbox",),
 }
 ALL_SUITES = tuple(sorted({s for suites in (*SUITES.values(), *JOBS.values()) for s in suites}))
 

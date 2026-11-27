@@ -13,6 +13,7 @@ from mux.contracts.resources import (
     AgentSpec,
     MCPConnection,
     ToolSpec,
+    eval_tools,
 )
 from mux.drivers.openai import mcp_auth
 from mux.drivers.openai._common import (
@@ -29,6 +30,9 @@ from mux.drivers.openai.skill_bindings import decode, encode_metadata, reserved,
 from mux.drivers.openai.transport import Object, object_json, segment
 from mux.errors import ScopeViolation
 
+#: Native metadata marking an eval agent, the only kind a self-hosted session may run.
+PURPOSE_KEY = "mux_purpose"
+
 
 def agent_body(spec: AgentSpec, context: Context) -> Object:
     if spec.model.provider != "openai":
@@ -41,7 +45,7 @@ def agent_body(spec: AgentSpec, context: Context) -> Object:
     if spec.metadata is not None:
         body["metadata"] = dict(spec.metadata)
     if spec.metadata is not None and any(
-        reserved(key) or key == mcp_auth.KEY for key in spec.metadata
+        reserved(key) or key in (mcp_auth.KEY, PURPOSE_KEY) for key in spec.metadata
     ):
         raise context.unsupported("reserved_skill_metadata")
     if spec.skills is not None:
@@ -52,11 +56,13 @@ def agent_body(spec: AgentSpec, context: Context) -> Object:
     credential_intent = mcp_auth.encode(spec.mcp_servers or (), context)
     if credential_intent:
         body["metadata"] = {**object_json(body.get("metadata") or {}), **credential_intent}
+    if spec.purpose == "eval":
+        body["metadata"] = {**object_json(body.get("metadata") or {}), PURPOSE_KEY: "eval"}
     if len(object_json(body.get("metadata") or {})) > 15:
         # Leave one native metadata slot for the tenant ownership marker.
         raise context.unsupported("agent_metadata_size")
     tools: list[JsonValue] = []
-    for tool in spec.tools or ():
+    for tool in eval_tools(spec) or ():
         if tool.permission != "auto":
             raise context.unsupported("tool_confirmation")
         if tool.kind == "custom":
@@ -94,6 +100,10 @@ def agent_body(spec: AgentSpec, context: Context) -> Object:
     return body
 
 
+def is_eval_agent(raw: Object) -> bool:
+    return object_json(raw.get("metadata") or {}).get(PURPOSE_KEY) == "eval"
+
+
 def agent_spec(raw: Object, context: Context | None = None) -> AgentSpec:
     tools: list[ToolSpec] = []
     servers: list[MCPConnection] = []
@@ -127,6 +137,9 @@ def agent_spec(raw: Object, context: Context | None = None) -> AgentSpec:
             )
         else:
             tools.append(ToolSpec(name=kind, kind="builtin"))
+    metadata = raw.get("metadata")
+    if isinstance(metadata, dict) and PURPOSE_KEY in metadata:
+        metadata = {k: v for k, v in object_json(metadata).items() if k != PURPOSE_KEY}
     return AgentSpec.model_validate(
         {
             "name": raw.get("name") or "",
@@ -134,7 +147,8 @@ def agent_spec(raw: Object, context: Context | None = None) -> AgentSpec:
             "system": raw.get("instructions"),
             "tools": tuple(tools) if "tools" in raw else None,
             "mcp_servers": tuple(servers) if "tools" in raw else None,
-            "metadata": raw.get("metadata"),
+            "metadata": metadata,
+            "purpose": "eval" if is_eval_agent(raw) else "agent",
             "skills": decode(raw.get("metadata")),
         }
     )

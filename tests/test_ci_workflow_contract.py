@@ -127,6 +127,7 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
         "report-host",
         "mux",
         "harness",
+        "eval-sandbox",
         "harness-conformance",
         # Core's compute caller and task scripts against the session server. The image
         # build itself is a docker-build step, which a deploy does not wait for.
@@ -150,6 +151,7 @@ def test_pytest_jobs_use_four_workers_with_worksteal_except_discord() -> None:
         "pytest-light",
         "pytest-notebook-host",
         "journeys-offline",
+        "eval-sandbox-image",
     }
     for name, job in pytest_jobs.items():
         for command in _pytest_commands(job):

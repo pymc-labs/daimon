@@ -3158,6 +3158,67 @@ class EvalsSettings(BaseModel):
             "http://eval-worker:8090. Unset: no sandbox can be enclosed."
         ),
     )
+    sandbox_runtime: Literal["docker", "kubernetes"] | None = Field(
+        default=None,
+        description="Where eval sandbox pods run: a Docker host or a Kubernetes namespace.",
+    )
+    docker_host: str = Field(
+        default="unix:///var/run/docker.sock",
+        description=(
+            "Docker Engine for eval sandboxes: a unix socket, or tcp://host:2376 with the TLS "
+            "files."
+        ),
+    )
+    docker_network: str | None = Field(
+        default=None,
+        description=(
+            "Docker network for eval pods; it must reach the eval world URL. Unset: the default "
+            "bridge."
+        ),
+    )
+    docker_tls_ca: Path | None = Field(
+        default=None, description="CA file that signs the remote Docker host's certificate."
+    )
+    docker_tls_cert: Path | None = Field(
+        default=None, description="Client certificate file for the remote Docker host."
+    )
+    docker_tls_key: Path | None = Field(
+        default=None, description="Client key file for the remote Docker host."
+    )
+    kubernetes_namespace: str = Field(
+        default="daimon-evals",
+        description=(
+            "Namespace for eval sandbox pods, reached with the worker's in-cluster service account."
+        ),
+    )
+    sandbox_image: str | None = Field(
+        default=None,
+        description=(
+            "Eval sandbox image, pinned by digest (registry/daimon-eval-sandbox@sha256:...)."
+        ),
+    )
+    ca_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "PEM RSA private key of the eval CA. Sandbox tools trust it; the gateway mints a "
+            "certificate per host with it. Unset: no sandbox can be enclosed."
+        ),
+    )
+    passthrough_hosts: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Extra hosts the eval executor's own user may reach untouched, besides its "
+            "provider's control plane. Matched by TLS server name, not Host. Shells the executor "
+            "starts run as the agent and reach the fake world; commands it starts without a shell "
+            "run as the executor and reach these hosts."
+        ),
+    )
+    sandbox_rate_usd_per_hour: Decimal = Field(
+        default=Decimal("0"),
+        ge=0,
+        allow_inf_nan=False,
+        description="What an hour of one eval sandbox pod costs, for run cost reports.",
+    )
 
 
 class LongJobsSettings(BaseModel):

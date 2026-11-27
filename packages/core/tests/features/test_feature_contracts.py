@@ -105,6 +105,7 @@ _NARROWED: dict[str, str] = {
     "dm_debounce_seconds": "read before any agent is chosen, so only the workspace sets it",
     "tool_safety": "operator-only security switch",
     "host_call_gate": "operator-only rollback switch",
+    "eval_package_registries": "operator-only: eval sandboxes belong to the deployment",
     "mcp_connector_relay": "operator-only: sends connector data to another provider",
     "provider_keys_file": "operator-only: sends an agent's keys to another provider",
     "unattended_capabilities": "read for unattended runs, which have no channel or thread",

@@ -55,6 +55,8 @@ from mux.contracts.resources import (
     SessionSpec,
     SkillUpload,
     UpdatePlan,
+    eval_tools,
+    self_hosted_allowed,
 )
 from mux.drivers.gemini.bundles import (
     UPLOAD_ROOT,
@@ -100,6 +102,7 @@ from mux.drivers.gemini.transport import (
     EnvironmentTransport,
     Object,
     OwnedStream,
+    SelfHostedTransport,
     Transport,
     close_iterator,
     object_value,
@@ -262,13 +265,19 @@ class Base:
             env = records.environments.get(spec.environment.id)
             if env is None or env.ref != spec.environment:
                 raise ScopeViolation(spec.environment.id, "no owned inline environment")
-            environment = compile_environment(
-                env.spec, files=inline_files(records, scope, self._account, env.spec.sources)
+            environment = (
+                self_hosted_id(env)
+                if env.spec.execution == "self_hosted"
+                else compile_environment(
+                    env.spec, files=inline_files(records, scope, self._account, env.spec.sources)
+                )
             )
         # A session's own skills (a template's copies) mount beside the agent's.
         pins = tuple(p for p in (*(agent.spec.skills or ()), *spec.skills) if p.id not in omit)
         mounted = skill_sources(records, scope, self._account, pins)
         if mounted:
+            if isinstance(environment, str):
+                refuse("self_hosted_skills")  # the eval pod brings the agent's skills
             configuration = object_value(environment)
             sources = configuration.get("sources", [])
             if not isinstance(sources, list):
@@ -701,7 +710,7 @@ def compile_agent(
         result["system_instruction"] = spec.system
     if spec.tools is not None or spec.mcp_servers is not None:
         tools: list[JsonValue] = []
-        for tool in spec.tools or ():
+        for tool in eval_tools(spec) or ():
             if tool.permission != "auto":
                 refuse("tool_confirmation")
             if tool.kind == "builtin" and tool.name in BUILTIN_TOOLS:
@@ -750,6 +759,8 @@ class GeminiEnvironments(Base):
             ("artifact", s.artifact.id) for s in spec.sources or () if s.artifact
         )
         keys = Keys(lock=(ACCOUNT,), read=files, create=("environment",))
+        if spec.execution == "self_hosted":
+            return await self._self_hosted(scope, spec, key, digest, keys)
         async with self._storage.transaction(keys) as records:
             compile_environment(
                 spec, files=inline_files(records, scope, self._account, spec.sources)
@@ -768,6 +779,35 @@ class GeminiEnvironments(Base):
                 return result
         async with self._storage.read(Keys(read=(("environment", id_),))) as records:
             return records.environments[id_]
+
+    async def _self_hosted(
+        self, scope: Scope, spec: EnvironmentSpec, key: str, digest: str, keys: Keys
+    ) -> Environment:
+        """Made by the provider; its worker key is returned once and never stored."""
+        bare = EnvironmentSpec(name=spec.name, execution="self_hosted", purpose=spec.purpose)
+        if not self_hosted_allowed(spec) or spec != bare:
+            refuse("self_hosted_environment")
+        if not isinstance(self._transport, SelfHostedTransport):
+            refuse("self_hosted_environment")
+        # The provider call holds the account lock, so a retried key never makes a second one.
+        async with self._storage.transaction(keys) as records:
+            prior = self._creation(records, scope, key, digest)
+            if prior is None:
+                provider_id, worker_key = await self._transport.create_self_hosted_environment()
+                native = {"id": provider_id, "environment_key": worker_key}
+                id_ = str(uuid4())
+                result = Environment(
+                    ref=self._ref(scope, id_, "environment"),
+                    revision=Revision(local=1),
+                    spec=spec,
+                    created_at=now(),
+                    native={"id": provider_id},
+                )
+                records.environments[id_] = result
+                records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
+                return result.model_copy(update={"native": native})
+        async with self._storage.read(Keys(read=(("environment", prior),))) as records:
+            return records.environments[prior]
 
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Environment:
         self._check(scope, ref, "environment")
@@ -811,6 +851,11 @@ class GeminiEnvironments(Base):
     async def delete(self, scope: Scope, ref: ResourceRef, *, key: str) -> DeletionReceipt:
         self._check(scope, ref, "environment")
         refuse("environment_delete")
+
+
+def self_hosted_id(environment: Environment) -> str:
+    """The provider's id of a self-hosted environment, which interactions name it by."""
+    return string(object_value(environment.native)["id"])
 
 
 def compile_environment(
@@ -1213,6 +1258,8 @@ class GeminiSessions(Base):
         directory, name = posixpath.split(relative_path(path))
         async with self._storage.read(session_keys(ref.id)) as records:
             record = self._record(records, scope, ref)
+            if isinstance(record.request["environment"], str):
+                return False  # a self-hosted environment is the worker's, not a workspace
             environment_id, placed = record.environment_id, record.placed.get(path)
             config, fresh = self._environment_config(record), record.current is None
         if content is None and (placed is None or environment_id is None):

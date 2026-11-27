@@ -13,12 +13,12 @@ from pathlib import Path
 
 import pytest
 import uvicorn
-from daimon.core.evals.format import Case, WorldCall
+from daimon.core.evals.format import Case, ExchangeRequest, HttpRequest, WorldCall
 from daimon.core.evals.world.dispatch import FakeWorld, issue_world_token
 from daimon.core.evals.world.http_app import create_world_app
-from daimon.core.evals.world.model import HttpCall, ItemRef
+from daimon.core.evals.world.model import HttpCall, ItemRef, WorldRequest
 from daimon.core.evals.world.services.git import GitReply
-from daimon.core.evals.world.simulator import SimAnswer, SimContext, parse_answer
+from daimon.core.evals.world.simulator import SimAnswer, SimContext, build_prompt, parse_answer
 from daimon.core.stores import eval_world, evals
 from daimon.core.stores.evals import BlobRow
 from daimon.testing.eval_world import eval_case, make_running_item
@@ -179,7 +179,7 @@ async def test_git_when_calls_overlap_then_one_runs_at_a_time_per_item(
     assert peak == 1, "reading the bundle, serving and recording are one step per item"
 
 
-def _bundle(tmp_path: Path) -> bytes:
+def repo_bundle(tmp_path: Path) -> bytes:
     repo = tmp_path / "source"
     git = ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com"]
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
@@ -192,9 +192,9 @@ def _bundle(tmp_path: Path) -> bytes:
 
 
 @asynccontextmanager
-async def _serve(world: FakeWorld) -> AsyncIterator[str]:
+async def serve_world(world: FakeWorld, host: str = "127.0.0.1") -> AsyncIterator[str]:
     config = uvicorn.Config(
-        create_world_app(world), host="127.0.0.1", port=0, log_level="error", ws="none"
+        create_world_app(world), host=host, port=0, log_level="error", ws="none"
     )
     server = uvicorn.Server(config)
     task = asyncio.create_task(server.serve())
@@ -257,7 +257,7 @@ def test_a_repo_url_with_dot_segments_is_refused(url: str) -> None:
 async def test_push_when_made_by_one_item_then_lands_in_its_copy_only(
     db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
 ) -> None:
-    content = _bundle(tmp_path)
+    content = repo_bundle(tmp_path)
     world = FakeWorld(db_session_factory, None, tmp_path / "world")
     tenant = await make_tenant(db_session, platform="web")
     sha = hashlib.sha256(content).hexdigest()
@@ -269,7 +269,7 @@ async def test_push_when_made_by_one_item_then_lands_in_its_copy_only(
     case = eval_case({"repos": [repo]})
     ids = [await make_running_item(db_session, tenant.id, case) for _ in range(2)]
     tokens = [await issue_world_token(db_session, i) for i in ids]
-    async with _serve(world) as base:
+    async with serve_world(world) as base:
 
         def url(n: int) -> list[str]:
             header = f"http.extraHeader=Authorization: Bearer {tokens[n]}"
@@ -291,3 +291,14 @@ async def test_push_when_made_by_one_item_then_lands_in_its_copy_only(
     verbs = [e.verb for c in logged for e in WorldCall.model_validate(c).effects or ()]
     assert verbs == ["git.repo.clone", "git.repo.push"], f"clone and push are effects: {verbs}"
     assert all(c["surface"] == "git" for c in logged), "logged as git calls"
+
+
+def test_simulator_sees_recorded_commands_when_answering_a_binary() -> None:
+    cli = {"cli": {"argv": ["gh", "pr", "list"]}}
+    case = eval_case(
+        {"exchanges": [{"id": "c1", "surface": "cli", "service": "gh", "request": cli,
+                        "response": {"cli": {"exit_code": 0, "stdout": {"text": "#7 Fix"}}}}]}
+    )  # fmt: skip
+    request = ExchangeRequest(http=HttpRequest(method="GET", url="https://api.github.com/x"))
+    context = SimContext(uuid.uuid4(), WorldRequest("http", "github", request), case, "", {}, ())
+    assert "#7 Fix" in build_prompt(context), "the recorded output is what to reproduce"

@@ -718,6 +718,56 @@ jobs:
             daimon-harness:test bash -c \
             'mount -o remount,hidepid=2,gid=60002 /proc && chmod 755 /tmp /var/tmp /dev/shm /run/lock && exec python -' < apps/harness/tests/image_probe.py
 
+  # The enclosed eval pod on this runner's Docker host, against a served world.
+  eval-sandbox-image:
+    needs: changes
+    if: contains(fromJSON(needs.changes.outputs.jobs), 'eval-sandbox-image')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: mirror.gcr.io/library/postgres:18-alpine
+        env:
+          POSTGRES_USER: daimon
+          POSTGRES_PASSWORD: daimon
+          POSTGRES_DB: daimon
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U daimon"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+    env:
+      DAIMON_DATABASE__URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon
+      DAIMON_DATABASE__TEST_URL: postgresql+asyncpg://daimon:daimon@localhost:5432/daimon_test
+      EVAL_SANDBOX_IMAGE: daimon-eval-sandbox:test
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=docker.io/moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+      - name: eval sandbox
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: apps/eval-sandbox/Dockerfile
+          cache-from: type=gha,scope=eval-sandbox
+          cache-to: type=gha,mode=max,scope=eval-sandbox
+          load: true
+          tags: daimon-eval-sandbox:test
+      - name: tools and executors
+        run: |
+          docker run --rm daimon-eval-sandbox:test /opt/venv/bin/python -m daimon_eval_sandbox \
+            probe codex gemini-api anthropic harness | tee verdicts.json
+          python3 -c 'import json; v = json.load(open("verdicts.json")); assert set(v.values()) == {"pass"}, v'
+      - uses: ./.github/actions/setup-daimon
+        with:
+          database: "true"
+      - name: enclosed pod
+        run: >-
+          uv run pytest packages/core/tests/evals/test_sandbox_pod.py -n 4 --dist worksteal
+          --timeout=600 -rA --durations=20 --junitxml=eval-sandbox-image.xml
+
   # Unique candidate tags are deliberately not the full-SHA tags consumed
   # by promote.yml. Passing digests pins staging to these exact tested images;
   # deploy.yml assigns promotable SHA tags only after all staging gates pass.
