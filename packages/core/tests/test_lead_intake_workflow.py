@@ -14,6 +14,7 @@ from cryptography.fernet import Fernet
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.lead_intake import (
+    TEXT_LIMIT,
     IntakeConfig,
     IntakeResolution,
     LeadClassification,
@@ -37,6 +38,7 @@ from daimon.core.lead_intake_service import (
 from daimon.core.membership import Membership
 from daimon.core.stores.lead_intake import IntakeStore
 from daimon.testing.factories import make_tenant
+from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -178,6 +180,49 @@ async def test_fake_model_classification_replay(
             "association:contacts",
         ]
     assert (await store.get(result.id)).submission == result.submission
+
+
+_NEWSLETTER_HTML = "<p>newsletter</p>" * 15_000  # 255,000 characters, as a real one has
+
+
+async def test_a_long_source_that_is_not_a_lead_is_recorded_and_not_scanned_again(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """A source that cannot be recorded stays discovered and comes back on every scan."""
+    store, service, ports = await setup(lead_sessions, "active")
+    ports.source_text = FIXTURES[2]["text"] + "\n" + _NEWSLETTER_HTML
+    await service.scan()
+    fetched = await service.read_source("archived-a")
+    assert fetched.text == ports.source_text, "it is classified from its whole text"
+
+    result = await service.submit(draft("other", "archived-a"), "7")
+
+    assert result.status == "rejected" and ports.writes == []
+    kept = (await store.get(result.id)).submission
+    assert kept is not None
+    assert kept.evidence.original_text == ports.source_text[:TEXT_LIMIT]
+    config, _ = await store.configuration()
+    assert "archived-a" not in (await store.mailbox(config)).discovered
+
+
+async def test_a_long_lead_is_never_cut(
+    lead_sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    """A deliberate gap: its quotes and sender are checked on the whole text, or not at all.
+
+    A lead longer than a record field is refused and stays discovered, where the next
+    scan reports it again, until records can hold a longer source.
+    """
+    store, service, ports = await setup(lead_sessions, "active")
+    ports.source_text += "\n" + _NEWSLETTER_HTML
+    await service.scan()
+
+    with pytest.raises(ValidationError):
+        await service.submit(draft("project", "archived-a"), "7")
+
+    config, _ = await store.configuration()
+    assert "archived-a" in (await store.mailbox(config)).discovered
+    assert ports.writes == []
 
 
 async def test_capture_and_replay_preserve_original(
