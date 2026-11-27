@@ -47,6 +47,7 @@ __all__ = [
     "EventsResponse",
     "HealthResponse",
     "HistoryGapData",
+    "HostTool",
     "ImagePart",
     "InlineSkill",
     "InvocationEnvelope",
@@ -199,6 +200,14 @@ class Limits(WireModel):
     deadline_s: float = Field(gt=0, allow_inf_nan=False)
 
 
+class HostTool(WireModel):
+    """A function the host runs: the harness pauses on each call for the host's result."""
+
+    name: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    description: str = ""
+    input_schema: dict[str, JsonValue] = Field(default_factory=dict[str, JsonValue])
+
+
 class TurnRequest(WireModel):
     session_id: str
     turn_id: str
@@ -210,6 +219,8 @@ class TurnRequest(WireModel):
     skills: list[Skill]
     limits: Limits
     tool_policy: dict[str, Literal["auto", "ask", "deny"]] = Field(default_factory=dict)
+    # Left out while empty, so a harness predating host tools reads every other turn.
+    host_tools: list[HostTool] = Field(default_factory=list[HostTool], exclude_if=lambda v: not v)
 
     @field_validator("tool_policy")
     @classmethod
@@ -235,6 +246,13 @@ class TurnRequest(WireModel):
         )
         if size > TURN_SKILLS_MAX_BYTES:
             raise ValueError("turn skills exceed 24 MiB decoded bytes")
+        return self
+
+    @model_validator(mode="after")
+    def validate_host_tools(self) -> TurnRequest:
+        names = [tool.name for tool in self.host_tools]
+        if len(set(names)) != len(names) or {"bash", "read", "write", "edit"} & set(names):
+            raise ValueError("host tool names must be unique and not built-ins")
         return self
 
 
@@ -286,7 +304,7 @@ class ToolUseData(ResponseModel):
     call_id: str
     name: str
     input: JsonValue
-    executor: Literal["agent", "mcp"]
+    executor: Literal["agent", "mcp", "host"]
 
 
 class ToolResultData(ResponseModel):
@@ -297,7 +315,8 @@ class ToolResultData(ResponseModel):
 
 class RequiresActionData(ResponseModel):
     action_id: str
-    kind: Literal["tool_confirmation"] = "tool_confirmation"
+    #: `function_result`: a host tool's call, answered only by a `result` decision.
+    kind: Literal["tool_confirmation", "function_result"] = "tool_confirmation"
     call_id: str
     name: str
     input: JsonValue

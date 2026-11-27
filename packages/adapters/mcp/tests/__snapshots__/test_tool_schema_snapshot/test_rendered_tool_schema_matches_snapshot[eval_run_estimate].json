@@ -1,0 +1,95 @@
+{
+  "description": [
+    "Estimate what an eval run would cost: low, expected and high in USD, per category.",
+    "Runs nothing; start it with eval_run_start."
+  ],
+  "parameters": {
+    "$defs": {
+      "RunDraft": {
+        "additionalProperties": false,
+        "properties": {
+          "arm_ids": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "case_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "judge_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "repeats": {
+            "default": 1,
+            "maximum": 20,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "suite": {
+            "$ref": "#/$defs/SuitePin"
+          }
+        },
+        "required": [
+          "suite",
+          "arm_ids"
+        ],
+        "type": "object"
+      },
+      "SuitePin": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "version"
+        ],
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "draft": {
+        "$ref": "#/$defs/RunDraft"
+      }
+    },
+    "required": [
+      "draft"
+    ],
+    "type": "object"
+  }
+}

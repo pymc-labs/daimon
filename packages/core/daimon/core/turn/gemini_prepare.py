@@ -246,7 +246,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     # A model interaction (an output cap) has no sandbox to set up.
     compiled = (
         {}
-        if deployment.max_output_tokens is not None
+        if deployment.max_output_tokens is not None or deployment.self_hosted is not None
         else compile_environment(deployment.environment)
     )
     setup = "" if compiled in ({}, {"type": "remote", "sources": []}) else request_digest(compiled)
@@ -272,7 +272,8 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
                 spec = spec.model_copy(update={"system": variant})
             agent = await backend.agents.create(scope, spec, key=f"{binding_id}{era}:agent")
         environment = (
-            await backend.environments.create(
+            deployment.self_hosted
+            or await backend.environments.create(
                 scope, deployment.environment, key=f"{binding_id}{era}:environment"
             )
             if deployment.max_output_tokens is None

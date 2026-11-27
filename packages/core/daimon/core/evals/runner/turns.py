@@ -1,0 +1,726 @@
+"""The production turn port: each item runs as a real turn in the eval tenant.
+
+An item gets its own fork of the arm's agent, its own sandbox pod serving the worker's eval
+environment, a channel naming both, the case's people as principals, its recorded memory and
+context, and then turns through the same admit, bind and run path as a chat. The fork's MCP
+tools are custom tools the worker runs (`runner.tools`); tokens minted in its turns carry its
+id, so the world answers their calls.
+
+Anthropic environment keys come only from its console, so the worker has one Anthropic eval
+environment. Its executor takes whichever session the environment hands out, so items on it
+run one at a time, across workers: each holds a Postgres lock on it from its first turn to
+its close, and stops any pod left polling it before it starts. A pod that fails to stop keeps
+the lock until the worker restarts, so no other item meets it. A Gemini item
+makes an environment of its own (`runner.gemini`), a harness item's harness runs in its pod
+(`runner.harness`), and an OpenAI item's session gets an environment of its own that its pod
+serves (`runner.openai`), so those run side by side."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import hashlib
+import secrets
+import shlex
+import uuid
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
+from decimal import Decimal
+from functools import partial
+from typing import Any, Final, Literal
+
+import structlog
+from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.core.authz import Subject
+from daimon.core.channel_backend import channel_ref, set_channel_backend
+from daimon.core.context_provider import (
+    ContextProviders,
+    ContextRequest,
+    ContextResponse,
+    ProviderConfig,
+    estimate_tokens,
+)
+from daimon.core.defaults.ma_index import agent_id_in_tenant
+from daimon.core.defaults.metadata import build_metadata
+from daimon.core.defaults.provisioning import derive_guild_account_uuid
+from daimon.core.evals.chat.cards import EvalCardNotice, pending_cards, press_eval_card
+from daimon.core.evals.chat.surface import EvalSurfaceLifecycle
+from daimon.core.evals.eval_tenant import eval_tenant
+from daimon.core.evals.format import Case, Usage
+from daimon.core.evals.runner.gemini import GeminiArms
+from daimon.core.evals.runner.harness import HarnessArms
+from daimon.core.evals.runner.item import TurnRequest
+from daimon.core.evals.runner.openai import OpenAIArms
+from daimon.core.evals.runner.tools import (
+    Caller,
+    JsonObject,
+    McpService,
+    custom_tools,
+    daimon_catalogue,
+    item_tools,
+)
+from daimon.core.evals.sandbox.ca import EvalCA
+from daimon.core.evals.sandbox.runtime import (
+    PodFile,
+    PodHandle,
+    PodLimits,
+    PodSpec,
+    SandboxError,
+    SandboxRuntime,
+    read_files,
+    wait_ready,
+)
+from daimon.core.evals.world.dispatch import DAIMON_SERVER, FakeWorld
+from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_auth import current_eval_item
+from daimon.core.memory_resource import ensure_memory_store_and_mount
+from daimon.core.mux_backend import TurnRuntime, resource_scope
+from daimon.core.mux_compat import (
+    archive_agent,
+    create_agent,
+    create_memory,
+    create_owned_agent,
+    create_owned_environment,
+    retrieve_agent,
+    update_environment,
+)
+from daimon.core.output_delivery import DeliverableFile, sweep_outputs
+from daimon.core.output_runtime import SessionOutput
+from daimon.core.scope import ChannelScopeRef
+from daimon.core.stores import access_policy, context_providers, identity, scoped_config_write
+from daimon.core.stores.domain import Role
+from daimon.core.stores.tenants import set_funding_mode
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, session_tools_for_policy
+from daimon.core.turn.admission import admit, backend_facts
+from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn.gemini import PROFILE as GEMINI_PROFILE
+from daimon.core.turn.host_tools import host_tools
+from daimon.core.turn.hosted_codec import OPENAI, SELFHOSTED
+from daimon.core.turn.outcomes import observe_turn
+from daimon.core.turn.prepare import bind_session
+from daimon.core.turn.run import run_prepared_turn
+from daimon.core.turn.runtimes import RuntimeFactory
+from daimon.core.turn_hold import RequesterOrg
+from daimon.core.turn_origin import render_turn_origin, turn_origin
+from mux.contracts.config import BackendConfig
+from mux.contracts.ids import ModelRef, Provider
+from mux.contracts.resources import AgentSpec, EnvironmentSpec, ToolSpec
+from mux.drivers.gemini import self_hosted_id
+from mux.profiles import CONTROL_PLANE_HOSTS, get_profile
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+
+log = structlog.get_logger()
+
+OUTPUTS_DIR: Final = "/mnt/session/outputs"
+"""Where the agent saves files for its reply (the platform prompt names it)."""
+_FORK_FIELDS: Final = ("description", "system", "tools", "skills")
+_EVAL_CONTEXT: Final = "eval://case-context"
+_ENVIRONMENT: Final = "eval-environment"
+"""The Daimon name the worker gives its eval environment in the eval tenant."""
+_SHARED: Final = "anthropic"
+"""The backend whose items share the worker's console-made environment (`PodSettings`)."""
+_GEMINI: Final = get_profile(GEMINI_PROFILE).provider
+_HARNESS: Final = "harness"
+"""The arm backend of Daimon's own harness, whose provider is `selfhosted`."""
+_LOCK_POLL_S: Final = 5.0
+"""How often a running shared item checks that its environment lock is still held."""
+_BACKENDS: Final = frozenset({_SHARED, _GEMINI, _HARNESS, OPENAI.provider})
+"""Backends whose live arms run here: their executors serve self-hosted sessions."""
+
+
+@dataclass(frozen=True)
+class PodSettings:
+    """How an item's pod starts: D's runtime, image and CA, and where the world listens."""
+
+    runtime: SandboxRuntime
+    image: str
+    ca: EvalCA
+    world_url: str
+    #: The worker's self-hosted eval environment; its key is in `executor_config`.
+    environment_id: str
+    executor_config: Mapping[str, str] = field(default_factory=dict[str, str])
+    passthrough: frozenset[str] = frozenset()
+    #: The harness's own settings in a harness item's pod: its model endpoint and credentials.
+    harness_config: Mapping[str, str] = field(default_factory=dict[str, str])
+    #: `codex exec-server`'s settings in an OpenAI item's pod: its remote URL and key.
+    codex_config: Mapping[str, str] = field(default_factory=dict[str, str])
+    registries: Literal["passthrough", "deny"] = "deny"
+    limits: PodLimits = PodLimits()
+
+
+@dataclass
+class _Item:
+    tenant_id: uuid.UUID
+    #: The run's workspace, which keeps the item's delivered files.
+    run_tenant_id: uuid.UUID
+    case: Case
+    surface: EvalSurfaceLifecycle
+    name: str
+    agent_id: str
+    world_token: str
+    #: Whether it holds the worker's shared environment until it closes.
+    shared: bool
+    tools: list[JsonObject] = field(default_factory=list[JsonObject])
+    pod: PodHandle | None = None
+    #: Clean-up after the pod stops: the fork, a per-item environment.
+    cleanup: list[Callable[[], Awaitable[None]]] = field(
+        default_factory=list[Callable[[], Awaitable[None]]]
+    )
+    #: The item's own turn runtime, or its factory (`runtimes.RuntimeFactory`); None: the
+    #: deployment's.
+    runtime: RuntimeFactory | TurnRuntime | None = None
+    #: Held while its pod starts on its session's request (`_connect`).
+    connecting: asyncio.Lock = field(default_factory=asyncio.Lock)
+    #: Held while a card of the item is pressed; `raised` holds the cards handled so far.
+    pressing: asyncio.Lock = field(default_factory=asyncio.Lock)
+    raised: set[str] = field(default_factory=set[str])
+
+
+class PodOutputs:
+    """The pod's outputs folder as an `OutputRuntime`, for `sweep_outputs`."""
+
+    settles = False
+
+    def __init__(self, runtime: SandboxRuntime, pod: PodHandle) -> None:
+        self.session_id, self._runtime, self._pod = pod.id, runtime, pod
+        self._files: dict[str, DeliverableFile] = {}
+
+    async def list_outputs(self) -> tuple[SessionOutput, ...]:
+        files = await read_files(self._runtime, self._pod, OUTPUTS_DIR)
+        self._files = {f.file_id: f for f in files}
+        return tuple(SessionOutput(f.file_id, f.filename, f.mime_type, f.size_bytes) for f in files)
+
+    async def read_output(self, output_id: str) -> bytes:
+        return self._files[output_id].content
+
+    async def delete_output(self, output_id: str) -> None:
+        path = f"{OUTPUTS_DIR}/{output_id}"
+        await self._runtime.run(self._pod, f"rm -f -- {shlex.quote(path)}", timeout_s=60)
+
+
+class CaseContext:
+    """The context provider of eval channels: each answers with its case's recorded context."""
+
+    def __init__(self) -> None:
+        self.by_channel: dict[str, str] = {}
+
+    async def __call__(self, config: ProviderConfig, request: ContextRequest) -> ContextResponse:
+        text = self.by_channel.get(request.channel_id or "")
+        if not text:
+            return ContextResponse()
+        return ContextResponse(turn_fragment=text, estimated_tokens=estimate_tokens(text),
+                               status="ok")  # fmt: skip
+
+
+def principal_id(item_id: uuid.UUID, person: str) -> str:
+    """A case person's platform id in one item: no approval, role or state carries over."""
+    return f"{item_id.hex[:20]}:{person}"
+
+
+async def environment_lock(
+    engine: AsyncEngine, environment_id: str, cancel: asyncio.Event, poll_s: float = 5.0
+) -> AsyncConnection:
+    """A connection holding the Postgres lock on a shared environment, once no other worker
+    holds it; SandboxError when `cancel` is set first. `release_environment` frees it."""
+    key = f"eval-environment:{environment_id}"
+    while True:
+        conn = await engine.connect()
+        try:
+            held = await conn.scalar(text("select pg_try_advisory_lock(hashtextextended(:k, 0))"),
+                                     {"k": key})  # fmt: skip
+            await conn.commit()
+        except BaseException:
+            await conn.close()
+            raise
+        if held:
+            return conn
+        await conn.close()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(cancel.wait(), poll_s)
+        if cancel.is_set():
+            raise SandboxError("the shared eval environment stayed busy")
+
+
+async def release_environment(conn: AsyncConnection) -> None:
+    try:
+        await conn.execute(text("select pg_advisory_unlock_all()"))
+        await conn.commit()
+    except Exception:
+        # A dropped connection frees its locks.
+        await conn.invalidate()
+    finally:
+        await conn.close()
+
+
+def _engine(deps: TurnDeps) -> AsyncEngine:
+    bind = deps.sessionmaker.kw["bind"]
+    return bind.engine if isinstance(bind, AsyncConnection) else bind
+
+
+def _role(case: Case, person: str) -> Role:
+    people = {p.id: p for p in case.surface.participants}
+    found = people.get(person)
+    return Role.ADMIN if found and found.role in ("owner", "admin") else Role.USER
+
+
+class EvalTurns:
+    """`TurnPort` on the production turn path. `deps` is the worker's own."""
+
+    def __init__(self, deps: TurnDeps, world: FakeWorld, pods: PodSettings,
+                 mcp: McpService | None = None, gemini: GeminiArms | None = None,
+                 harness: HarnessArms | None = None,
+                 openai: OpenAIArms | None = None) -> None:  # fmt: skip
+        self.context = CaseContext()
+        self.deps = replace(deps, context_providers=ContextProviders(provider=self.context))
+        self.gemini = gemini or GeminiArms(deps.sessionmaker)
+        self.harness = harness or HarnessArms()
+        self.openai = openai or OpenAIArms()
+        self.world, self.pods = world, pods
+        url, secret = deps.mcp.public_url, deps.mcp.jwt_secret
+        self.mcp = mcp or (McpService(str(url), secret.get_secret_value().encode())
+                           if url is not None and secret is not None else None)  # fmt: skip
+        self._items: dict[uuid.UUID, _Item] = {}
+        self._environment = asyncio.Lock()
+        self._lock: AsyncConnection | None = None
+        #: A shared item's pod did not stop: the lock stays held until a later sweep stops it.
+        self._stuck = False
+        self._tagged = False
+
+    async def raise_card(self, notice: EvalCardNotice) -> None:
+        """A card a tool posted in an item's conversation: the script presses it."""
+        item = self._items.get(notice.item_id)
+        if item is None:
+            return
+        async with item.pressing:
+            if notice.card_id in item.raised:
+                return
+            item.raised.add(notice.card_id)
+            requester = item.surface.script.requester
+            admin = _role(item.case, requester) is Role.ADMIN
+            await press_eval_card(self.deps, item.tenant_id, item.surface, notice, is_admin=admin,
+                                  clicker=principal_id(notice.item_id, requester))  # fmt: skip
+
+    async def missed(self) -> list[EvalCardNotice]:
+        """Open cards of the running items, for after the card listener was away."""
+        threads = {item.name: item_id for item_id, item in self._items.items()}
+        tenant_id = await eval_tenant(self.deps.sessionmaker)
+        return await pending_cards(self.deps.sessionmaker, tenant_id, threads)
+
+    async def _cards(self, item_id: uuid.UUID, item: _Item) -> None:
+        """Press the item's cards posted this turn before it ends, so an approved call's wake
+        is queued when the item decides its next turn: one being pressed is waited for, one
+        whose notice has not come is found."""
+        async with item.pressing:
+            pass
+        for notice in await pending_cards(self.deps.sessionmaker, item.tenant_id,
+                                          {item.name: item_id}):  # fmt: skip
+            await self.raise_card(notice)
+
+    async def turn(self, request: TurnRequest) -> None:
+        item = self._items.get(request.item_id) or await self._open(request)
+        reset = current_eval_item.set(request.item_id)
+        if item.shared and not await self._alive():
+            raise SandboxError("the shared eval environment's lock was lost")
+        guard = asyncio.create_task(self._guard(request.cancel)) if item.shared else None
+        try:
+            await self._turn(item, request)
+            await self._cards(request.item_id, item)
+        finally:
+            current_eval_item.reset(reset)
+            if guard is not None:
+                guard.cancel()
+        if guard is not None and guard.done() and not guard.cancelled():
+            raise SandboxError("the shared eval environment's lock was lost")
+
+    async def close(self, item_id: uuid.UUID) -> None:
+        """Stop the item's pod and clean up; SandboxError when a shared item's pod did not
+        stop, which keeps the shared environment locked."""
+        item = self._items.pop(item_id, None)
+        if item is None:
+            return
+        self.context.by_channel.pop(item.name, None)
+        stopped = True
+        try:
+            if item.pod is not None:
+                try:
+                    await self.pods.runtime.stop(item.pod)
+                except Exception:
+                    stopped = False
+                    log.warning("eval_item.stop_failed", item_id=str(item_id), exc_info=True)
+            for step in item.cleanup:
+                try:
+                    await step()
+                # Archives can wait; `reap` removes other pods left behind.
+                except Exception:
+                    log.warning("eval_item.cleanup_failed", item_id=str(item_id), exc_info=True)
+        finally:
+            if item.shared:
+                await self._release(stuck=not stopped)
+        if item.shared and not stopped:
+            raise SandboxError(f"the eval pod of item {item_id} did not stop")
+
+    async def _alive(self) -> bool:
+        """Whether the connection holding the environment's lock still works: if it dropped,
+        so did the lock, and another worker may be stopping this worker's pod."""
+        lock = self._lock
+        if lock is None:
+            return False
+        try:
+            await lock.execute(text("select 1"))
+            await lock.commit()
+        except Exception:
+            log.warning("eval_environment.lock_lost", exc_info=True)
+            return False
+        return True
+
+    async def _guard(self, cancel: asyncio.Event) -> None:
+        """Stop the running turn when the environment's lock is lost."""
+        while await self._alive():
+            await asyncio.sleep(_LOCK_POLL_S)
+        cancel.set()
+
+    async def _acquire(self, cancel: asyncio.Event) -> None:
+        """Take this worker's turn at the shared environment; SandboxError when `cancel` is
+        set first (the item's run stopped, or its worker took it over)."""
+        acquiring = asyncio.ensure_future(self._environment.acquire())
+        stopped = asyncio.ensure_future(cancel.wait())
+        try:
+            await asyncio.wait({acquiring, stopped}, return_when=asyncio.FIRST_COMPLETED)
+            if not acquiring.done():
+                raise SandboxError("the shared eval environment stayed busy")
+        finally:
+            # No effect on an acquire that finished: the turn is this worker's.
+            stopped.cancel()
+            acquiring.cancel()
+
+    async def _hold(self, cancel: asyncio.Event) -> None:
+        """Take the shared environment, then stop any pod still polling it. A pod that did
+        not stop keeps the cross-worker lock with this worker (`_stuck`) until a later sweep
+        stops it."""
+        await self._acquire(cancel)
+        try:
+            if self._lock is not None and not await self._alive():
+                await release_environment(self._lock)
+                self._lock = None
+            if self._lock is None:
+                self._lock = await environment_lock(_engine(self.deps), self.pods.environment_id,
+                                                    cancel)  # fmt: skip
+            await self.pods.runtime.stop_environment(self.pods.environment_id)
+            self._stuck = False
+        except BaseException:
+            await self._release(stuck=False)
+            raise
+
+    async def _release(self, *, stuck: bool) -> None:
+        """Free the shared environment for this worker's next item. The cross-worker lock is
+        freed too, unless a pod did not stop (now or earlier)."""
+        self._stuck |= stuck
+        try:
+            if self._lock is not None and not self._stuck:
+                lock, self._lock = self._lock, None
+                await release_environment(lock)
+        finally:
+            self._environment.release()
+
+    async def _open(self, request: TurnRequest) -> _Item:
+        arm = request.arm
+        if arm.live is None or arm.live.backend not in _BACKENDS:
+            raise NotImplementedError(
+                f"the eval runner runs live arms on {', '.join(sorted(_BACKENDS))}"
+            )
+        shared = arm.live.backend == _SHARED
+        if shared:
+            # Waiting for the environment is not the item's time or sandbox cost.
+            request.meter.started_at = None
+            await self._hold(request.cancel)
+            request.meter.started_at = datetime.now(UTC)
+        try:
+            return await self._opened(request, shared)
+        except BaseException:
+            if request.item_id in self._items:
+                await self.close(request.item_id)
+            elif shared:
+                await self._release(stuck=False)
+            raise
+
+    async def _opened(self, request: TurnRequest, shared: bool) -> _Item:
+        deps, case, arm = self.deps, request.case, request.arm
+        assert arm.live is not None
+        tenant_id = await eval_tenant(deps.sessionmaker)
+        scope = resource_scope(tenant_id=str(tenant_id))
+        name = f"eval-{request.item_id.hex[:20]}"
+        account = derive_guild_account_uuid(tenant_id)
+        metadata = build_metadata(tenant_id=tenant_id, name=name, account_id=account)
+        async with deps.sessionmaker.begin() as session:
+            # The operator pays for eval turns; each run's cap bounds them.
+            await set_funding_mode(session, tenant_id=tenant_id, funding_mode="operator_funded")
+            accounts = {
+                person.id: (await identity.get_or_create_platform_principal(
+                    session, tenant_id=tenant_id, platform=case.surface.platform,
+                    external_id=principal_id(request.item_id, person.id),
+                )).account_id
+                for person in case.surface.participants
+            }  # fmt: skip
+        if shared and not self._tagged:
+            # Console-made, so untagged: the channel names it like any environment.
+            tag = build_metadata(tenant_id=tenant_id, name=_ENVIRONMENT, account_id=account)
+            await update_environment(deps.anthropic, self.pods.environment_id,
+                                     {"metadata": tag}, scope=scope,
+                                     records=deps.sessionmaker)  # fmt: skip
+            self._tagged = True
+        source = await self._source(request)
+        params: dict[str, Any] = source.model_dump(mode="json", include=set(_FORK_FIELDS))
+        source_tools: list[dict[str, Any]] = params.get("tools") or []
+        requester = accounts.get(request.surface.script.requester)
+        daimon: tuple[JsonObject, ...] = ()
+        if (
+            self.mcp is not None
+            and requester is not None
+            and any(t.get("mcp_server_name") == DAIMON_SERVER_NAME for t in source_tools)
+        ):
+            daimon = await daimon_catalogue(deps.sessionmaker, self.mcp,
+                                            Caller(tenant_id, requester, name))  # fmt: skip
+        trusted = frozenset({DAIMON_SERVER_NAME})
+        gated = session_tools_for_policy(deps.tool_safety, source_tools, trusted_servers=trusted)
+        tools = custom_tools(gated or source_tools, daimon, case)
+        servers = {str(t["name"]): str(t["_server"]) for t in tools}
+        request.surface.tool_servers.update(
+            {n: DAIMON_SERVER if s == DAIMON_SERVER_NAME else s for n, s in servers.items()}
+        )
+        if not shared:
+            assert requester is not None, "the case's requester is a participant"
+            item = await self._own(request, name, metadata, params.get("system"), tools,
+                                   requester)  # fmt: skip
+        else:
+            agent = await create_agent(deps.anthropic, {
+                **params, "name": name, "metadata": metadata, "purpose": "eval",
+                "model": arm.live.model, "mcp_servers": [],
+                # Provider-dialed MCP servers reach past the enclosure: the worker runs them.
+                "tools": [t for t in source_tools if t.get("type") != "mcp_toolset"] + [
+                    {k: v for k, v in t.items() if not k.startswith("_")} for t in tools],
+            }, scope=scope, records=deps.sessionmaker)  # fmt: skip
+            item = _Item(tenant_id, request.tenant_id, case, request.surface, name, agent.id,
+                         request.world_token, True, tools)  # fmt: skip
+            item.cleanup.append(partial(archive_agent, deps.anthropic, agent.id, scope=scope,
+                                        records=deps.sessionmaker))  # fmt: skip
+            self._items[request.item_id] = item
+            executor = {**self.pods.executor_config,
+                        "ANTHROPIC_ENVIRONMENT_ID": self.pods.environment_id}  # fmt: skip
+            item.pod = await self._pod(request, _SHARED, executor)
+        async with deps.sessionmaker.begin() as session:
+            await scoped_config_write.set_fields(
+                session, scope=ChannelScopeRef(tenant_id=tenant_id, channel_id=name),
+                tenant_id=tenant_id, agent_name=name,
+                environment_name=_ENVIRONMENT if shared else name,
+            )  # fmt: skip
+            context = "\n\n".join(c.text for c in (case.agent_context and
+                                                    case.agent_context.context) or [])  # fmt: skip
+            if context:
+                self.context.by_channel[name] = context
+                await context_providers.set_provider(
+                    session, tenant_id=tenant_id, channel_id=name, set_by="evals",
+                    config=ProviderConfig(endpoint=_EVAL_CONTEXT, enabled=True),
+                    actor=Subject(is_admin=True),
+                )  # fmt: skip
+        if shared:
+            await self._seed_memory(item)
+        return item
+
+    async def _own(self, request: TurnRequest, name: str, metadata: Mapping[str, str],
+                   system: str | None, tools: list[JsonObject],
+                   requester: uuid.UUID) -> _Item:  # fmt: skip
+        """A hosted or harness arm's item: Daimon-owned fork and environment records, the
+        channel on the arm's backend, and the item's pod: polling a self-hosted environment of
+        its own, running the harness the worker drives, or serving its OpenAI session."""
+        deps, live = self.deps, request.arm.live
+        assert live is not None
+        harness, openai = live.backend == _HARNESS, live.backend == OPENAI.provider
+        codec = SELFHOSTED if harness else OPENAI if openai else None
+        provider, profile = (codec.provider, codec.profile) if codec else (_GEMINI, GEMINI_PROFILE)
+        tenant_id = await eval_tenant(deps.sessionmaker)
+        # Owned records belong to an account: the requester's, whose turns run them.
+        scope = resource_scope(tenant_id=str(tenant_id), account_id=str(requester))
+        fork = await create_owned_agent(deps.anthropic, AgentSpec(
+            name=name, model=ModelRef(provider=provider, id=live.model), system=system,
+            metadata=metadata, purpose="eval",
+        ), scope=scope, records=deps.sessionmaker)  # fmt: skip
+        # The channel's name for the item's environment; the provider's is made below.
+        await create_owned_environment(deps.anthropic, EnvironmentSpec(
+            name=name, metadata=metadata), scope=scope, records=deps.sessionmaker)  # fmt: skip
+        item = _Item(tenant_id, request.tenant_id, request.case, request.surface, name, fork.id,
+                     request.world_token, False, tools)  # fmt: skip
+        item.cleanup.append(partial(archive_agent, deps.anthropic, fork.id, scope=scope,
+                                    records=deps.sessionmaker))  # fmt: skip
+        self._items[request.item_id] = item
+        channel = channel_ref(tenant_id, request.case.surface.platform, name)
+        async with deps.sessionmaker.begin() as session:
+            policy = await access_policy.load_access_policy(session, tenant_id=tenant_id)
+            if provider not in policy.enabled_backends:
+                # The eval workspace runs whichever backends its arms name.
+                await access_policy.set_access_policy(session, tenant_id=tenant_id,
+                    policy=policy.model_copy(update={"enabled_backends": (
+                        *policy.enabled_backends, provider)}))  # fmt: skip
+            revision = await set_channel_backend(session, channel, BackendConfig(
+                backend=provider, profile=profile, model=live.model,
+            ))  # fmt: skip
+        specs = [ToolSpec(kind="custom", name=t["name"], description=t["description"],
+                          input_schema=t["input_schema"]) for t in tools]  # fmt: skip
+        if harness:
+            token = secrets.token_urlsafe(32)
+            config = {**self.pods.harness_config, "HARNESS_TOKEN": token}
+            item.pod = await self._pod(request, provider, config)
+            if item.pod.address is None:
+                raise SandboxError(f"eval pod {item.pod.id} has no address for its harness")
+            item.runtime = self.harness.runtime(revision, name, system, specs,
+                                                address=item.pod.address, token=token)  # fmt: skip
+            return item
+        if openai:
+            agent = await self.openai.agent(scope, name, live.model, system, specs)
+            item.cleanup.append(partial(self.openai.delete, scope, agent))
+            item.runtime = self.openai.runtime(revision, agent, partial(self._connect, request,
+                                                                        item))  # fmt: skip
+            return item
+        environment, key = await self.gemini.environment(scope, name)
+        item.cleanup.append(partial(self.gemini.delete, environment))
+        item.runtime = self.gemini.runtime(revision, name, system, specs, environment)
+        item.pod = await self._pod(request, _GEMINI, {
+            "GEMINI_ENVIRONMENT_ID": self_hosted_id(environment), "GEMINI_ENVIRONMENT_KEY": key,
+        })  # fmt: skip
+        return item
+
+    async def _connect(self, request: TurnRequest, item: _Item, environment_id: str) -> None:
+        """An OpenAI item's pod, once its session asks for its environment: `codex
+        exec-server` serves it. Started once, however often the session asks."""
+        async with item.connecting:
+            if item.pod is None:
+                item.pod = await self._pod(request, OPENAI.provider, {
+                    **self.pods.codex_config, "CODEX_ENVIRONMENT_ID": environment_id})  # fmt: skip
+
+    async def _source(self, request: TurnRequest) -> BetaManagedAgentsAgent:
+        """The arm's agent in the run's workspace; an arm naming none runs the default one."""
+        ref = (request.arm.live and request.arm.live.agent) or "default"
+        found = await agent_id_in_tenant(self.deps.anthropic, tenant_id=request.tenant_id,
+                                         ref=ref, records=self.deps.sessionmaker)  # fmt: skip
+        if found is None:
+            raise LookupError(f"the arm's agent {ref!r} is not in the run's workspace")
+        scope = resource_scope(tenant_id=str(request.tenant_id))
+        return await retrieve_agent(self.deps.anthropic, found, scope=scope,
+                                    records=self.deps.sessionmaker)  # fmt: skip
+
+    async def _pod(self, request: TurnRequest, executor: Provider,
+                   config: Mapping[str, str]) -> PodHandle:  # fmt: skip
+        pods, case = self.pods, request.case
+        world_item = await self.world.item(request.item_id)
+        assert world_item is not None, "the item is running"
+        files = [
+            PodFile(f.path, await self.world.blob(world_item, f.blob.sha256),
+                    int(f.mode, 8) if f.mode else 0o644)
+            for f in case.world.files or [] if f.path.startswith("/workspace/")
+        ]  # fmt: skip
+        spec = PodSpec(
+            item=world_item, image=pods.image, executor=executor, world_url=pods.world_url,
+            world_token=request.world_token, ca=pods.ca, executor_config=config, files=files,
+            env=(case.world.env and case.world.env.vars) or {},
+            control_plane=CONTROL_PLANE_HOSTS[executor], passthrough=pods.passthrough,
+            registries=pods.registries,
+            clock=case.clock.now, limits=pods.limits,
+            shared_environment=pods.environment_id if executor == _SHARED else None,
+        )  # fmt: skip
+        pod = await pods.runtime.start(spec)
+        await wait_ready(pods.runtime, pod)
+        return pod
+
+    async def _seed_memory(self, item: _Item) -> None:
+        memory = (item.case.agent_context and item.case.agent_context.memory) or []
+        if not memory:
+            return
+        deps = self.deps
+        mount = await ensure_memory_store_and_mount(
+            deps.anthropic, deps.sessionmaker, tenant_id=item.tenant_id, agent_name=item.name,
+            agent_id=derive_agent_uuid(tenant_id=item.tenant_id, ma_agent_id=item.agent_id),
+        )  # fmt: skip
+        scope = resource_scope(tenant_id=str(item.tenant_id))
+        for entry in memory:
+            await create_memory(deps.anthropic, mount["memory_store_id"], entry.path,
+                                entry.content, scope=scope)  # fmt: skip
+
+    async def _turn(self, item: _Item, request: TurnRequest) -> None:
+        deps, case = self.deps, item.case
+        if isinstance(item.runtime, TurnRuntime):
+            # Given, not built, so no deployment setup runs for it (a tenant's environment).
+            deps = replace(deps, channel_backends=True, turn_runtime_factory=None,
+                           turn_runtimes={OPENAI.profile: item.runtime})  # fmt: skip
+        elif item.runtime is not None:
+            # The channel names the arm's backend; the item's runtime serves its fork.
+            deps = replace(deps, channel_backends=True, turn_runtime_factory=item.runtime)
+        platform = case.surface.platform
+        role = _role(case, request.surface.script.requester)
+        requester = principal_id(request.item_id, request.surface.script.requester)
+        with observe_turn(deps.sessionmaker, tenant_id=item.tenant_id, platform=platform,
+                          channel_id=item.name, thread_id=item.name) as observation:  # fmt: skip
+            request.meter.live = partial(_usage, request, observation.billed_cost)
+            admission = await admit(
+                deps, tenant_id=item.tenant_id, platform=platform, external_user_id=requester,
+                channel_id=item.name, thread_id=item.name, role=role, now=datetime.now(UTC),
+                origin="chat", requester_org=RequesterOrg.HOST,
+            )  # fmt: skip
+            prepared = await bind_session(
+                deps, admission, tenant_id=item.tenant_id, platform=platform,
+                external_user_id=requester, thread_id=item.name,
+                session_account_id=admission.account_id, reuse_existing=True,
+            )  # fmt: skip
+            async with turn_origin(
+                deps.sessionmaker, tenant_id=item.tenant_id, account_id=admission.account_id,
+                platform=platform, parent_channel_id=item.name, thread_id=item.name,
+                responder_ma_agent_id=str(admission.agent.id),
+                responder_name=admission.config.agent_name or admission.agent.name, role=role,
+                sender_foreign=False, shared_channel=admission.shared_channel,
+                message_text=request.text, platform_channel_id=item.name,
+            ) as origin:  # fmt: skip
+                controls = render_turn_origin(origin, **backend_facts(admission),
+                                              effective_is_admin=admission.is_admin)  # fmt: skip
+                message = f"{controls}\n\n{request.text}"
+
+                async def reseed() -> str:
+                    return message
+
+                caller = Caller(item.tenant_id, admission.account_id, str(admission.agent.id))
+                tools = item_tools(
+                    deps.sessionmaker, self.mcp, caller, item_id=request.item_id,
+                    world_token=item.world_token, tools=item.tools,
+                ) if self.mcp and item.tools else None  # fmt: skip
+                reset = host_tools.set(tools)
+                try:
+                    await run_prepared_turn(
+                        deps, prepared, tenant_id=item.tenant_id, platform=platform,
+                        thread_id=item.name, external_user_id=requester, user_message=message,
+                        request_text=request.text, lifecycle=request.surface, cancel=request.cancel,
+                        reseed_user_message=reseed, recovery_lifecycle=lambda _: request.surface,
+                        confirm_write=request.surface.confirm,
+                    )  # fmt: skip
+                finally:
+                    host_tools.reset(reset)
+                    request.meter.settle()
+        if item.pod is not None:
+            await sweep_outputs(PodOutputs(self.pods.runtime, item.pod),
+                                post=lambda f: self._keep(item, f))  # fmt: skip
+
+    async def _keep(self, item: _Item, file: DeliverableFile) -> None:
+        """A delivered file: kept as a blob of the run's workspace and shown in the chat."""
+        sha = hashlib.sha256(file.content).hexdigest()
+        await self.world.keep_blob(item.run_tenant_id, sha, file.mime_type, file.content)
+        item.surface.file(file.filename, file.mime_type, sha, len(file.content), OUTPUTS_DIR)
+
+
+def _usage(request: TurnRequest, billed: Callable[[Decimal], Decimal | None]) -> Usage:
+    """What the running turn has used so far: its tokens, and their cost while all are priced."""
+    totals, cost = request.surface.state.usage_totals, billed(Decimal(1))
+    return Usage(
+        input_tokens=totals.input_tokens or None,
+        output_tokens=totals.output_tokens or None,
+        cache_read_tokens=totals.cache_read_input_tokens or None,
+        cache_write_tokens=totals.cache_creation_input_tokens or None,
+        cost_usd=float(cost) if cost is not None else None,
+    )

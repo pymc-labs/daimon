@@ -14,8 +14,9 @@ from daimon.core.config import EvalsSettings
 from daimon.core.evals.access import Share, Subject, WorkspaceRole
 from daimon.core.evals.bundle import DirSource, ZipSource, sign, to_zip
 from daimon.core.evals.draft import Completion
-from daimon.core.evals.format import JsonObject, sha256_hex
+from daimon.core.evals.format import JsonObject, Run, sha256_hex
 from daimon.core.evals.service import (
+    BlindRun,
     EvalForbidden,
     EvalNotFound,
     EvalRefused,
@@ -26,7 +27,7 @@ from daimon.core.evals.service import (
     SuiteDraft,
     SuitePick,
 )
-from daimon.core.evals.validate import ValidationReport, validate_bundle
+from daimon.core.evals.validate import LoadedRun, ValidationReport, validate_bundle
 from daimon.core.stores import evals as store
 from daimon.testing.factories import make_tenant
 from daimon.testing.settings_mock import bare_settings
@@ -66,7 +67,13 @@ async def _chunks(data: bytes) -> AsyncIterator[bytes]:
 
 
 def _documents(report: ValidationReport) -> list[object]:
-    return [*((s.document, s.cases) for s in report.suites), *(vars(r) for r in report.runs)]
+    """Suites and runs as stored; each import gives a run a new id, so run ids are left out."""
+
+    def run(r: LoadedRun) -> object:
+        document = {k: v for k, v in r.document.items() if k not in ("id", "ext")}
+        return document, [{**i, "run_id": None} for i in r.items], r.scores, r.reviews
+
+    return [*((s.document, s.cases) for s in report.suites), *(run(r) for r in report.runs)]
 
 
 async def _setup(
@@ -92,9 +99,10 @@ async def test_bundle_when_exported_and_imported_elsewhere_then_documents_are_eq
     service, alex, sam = await _setup(db_session, db_session_factory, "member")
     first = await service.import_bundle(alex, _chunks(to_zip(_files())))
     assert [s.id for s in first.suites] == [SUITE], "the suite lands under its id"
-    request = ExportRequest(suites=[SuitePick(id=SUITE)], runs=[RUN])
+    request = ExportRequest(suites=[SuitePick(id=SUITE)], runs=first.runs)
     exported = await (await service.export_bundle(alex, request)).read()
-    await service.import_bundle(sam, _chunks(exported))
+    there_report = await service.import_bundle(sam, _chunks(exported))
+    request = ExportRequest(suites=[SuitePick(id=SUITE)], runs=there_report.runs)
     again = await (await service.export_bundle(sam, request)).read()
     original, there, back = (
         validate_bundle(s) for s in (EXAMPLE, ZipSource(exported), ZipSource(again))
@@ -115,12 +123,13 @@ async def test_unscrubbed_bundle_when_imported_then_only_an_accepting_admin_succ
     with pytest.raises(EvalForbidden, match="owner or an admin"):
         await service.import_bundle(member, _chunks(data), accept_unscrubbed=True)
     report = await service.import_bundle(admin, _chunks(data), accept_unscrubbed=True)
-    assert report.runs == [RUN], "an accepting admin imports it"
+    [run_id] = report.runs
+    assert run_id != RUN, "an accepting admin imports it, under a new id"
     sam = Subject(tenant_id=admin.tenant_id, platform="web", key="sam", role="member")
     with pytest.raises(EvalForbidden, match="not scrubbed"):
         await service.share(admin, SUITE, [Share(kind="person", id="sam", role="viewer")])
     with pytest.raises(EvalNotFound):
-        await service.run(sam, RUN)  # the run came unscrubbed: shares never reach it
+        await service.run(sam, run_id)  # the run came unscrubbed: shares never reach it
 
 
 async def test_share_when_unscrubbed_case_is_added_then_viewers_lose_it(
@@ -182,15 +191,21 @@ async def test_imported_run_when_unfinished_then_stored_as_cancelled_record(
             items_path: lambda i: i | {"status": "pending"},
         }
     )
-    await service.import_bundle(alex, _chunks(data))
-    run = await service.run(alex, RUN)
+    [run_id] = (await service.import_bundle(alex, _chunks(data))).runs
+    run = await service.run(alex, run_id)
+    assert isinstance(run, Run) and run.id.startswith("run-"), (
+        "a new id: the bundle's may name an arm"
+    )
+    assert run.ext is not None and run.ext["daimon.imported_id"] == RUN, (
+        "the bundle's id stays a note"
+    )
     assert (run.status, run.origin.kind, run.approval) == ("cancelled", "imported", None), run
     assert run.origin.deployment == "example", "the origin names the source deployment"
     async with db_session_factory() as session:
-        found = await store.run_by_key(session, tenant_id=alex.tenant_id, key=RUN)
+        found = await store.run_by_key(session, tenant_id=alex.tenant_id, key=run_id)
         assert found is not None and found.origin == "imported", "never queued as local work"
         items, _, _ = await store.run_parts(session, run_id=found.id)
-    assert [i["status"] for i in items] == ["cancelled"], "pending items are cancelled"
+    assert [(i["status"], i["run_id"]) for i in items] == [("cancelled", run_id)], "items follow"
 
 
 async def test_case_when_it_names_a_blob_from_another_suite_then_refused_like_a_missing_one(
@@ -243,15 +258,15 @@ async def test_run_when_a_reviewer_reads_it_then_arms_and_item_ids_are_neutral(
 ) -> None:
     service, alex, _ = await _setup(db_session, db_session_factory, "member")
     sam = Subject(tenant_id=alex.tenant_id, platform="web", key="sam", role="member")
-    await service.import_bundle(alex, _chunks(to_zip(_files())))
+    [run_id] = (await service.import_bundle(alex, _chunks(to_zip(_files())))).runs
     await service.share(alex, SUITE, [Share(kind="person", id="sam", role="reviewer")])
-    run = await service.run(sam, RUN)
-    assert [(a.id, a.label) for a in run.arms] == [("Arm 1", "Arm 1")], "arms are labelled"
-    assert run.blind_labels is None and run.name is None, "nothing maps a label back"
-    [summary] = await service.items(sam, RUN, Page())
+    run = await service.run(sam, run_id)
+    assert isinstance(run, BlindRun) and run.arms == ["Arm 1"], "arms are labelled"
+    assert "kind" not in run.model_dump_json(), "no arm kind tells the arm"
+    [summary] = await service.items(sam, run_id, Page())
     assert summary.arm_id == "Arm 1" and summary.key == summary.id, "no arm in the item key"
     item = await service.item(sam, summary.id)
     assert (item.id, item.arm_id) == (summary.id, "Arm 1"), "nor in the item id"
-    owner = await service.run(alex, RUN)
-    assert [a.id for a in owner.arms] == ["baseline-a"], "the owner sees the real run"
-    assert [a.id for a in (await service.run(alex, RUN, blind=True)).arms] == ["Arm 1"]
+    owner = await service.run(alex, run_id)
+    assert isinstance(owner, Run) and [a.id for a in owner.arms] == ["baseline-a"], "owner: real"
+    assert (await service.run(alex, run_id, blind=True)).model_dump()["arms"] == ["Arm 1"]

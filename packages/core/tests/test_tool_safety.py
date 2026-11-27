@@ -292,6 +292,7 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
                 "compute_launch_session",
                 "create_watch",
                 "delete_allowance",
+                "eval_run_start",
                 "remove_my_data",
                 "restore_library_skill_version",
                 "resume_watch",

@@ -28,7 +28,6 @@ import structlog
 from cryptography.fernet import InvalidToken
 from daimon.adapters.slack.errors import generate_request_id, surface_command_error
 from daimon.adapters.slack.interactions import resolve_web_client
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.privacy_panel.read import load_purge_preview, resolve_privacy_account
 from daimon.adapters.slack.privacy_panel.views import (
     build_delete_modal,
@@ -46,6 +45,7 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.monitoring import monitors_any
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.privacy import account_other_providers, legal_links, summary_line
+from daimon.core.slack_mrkdwn import escape_mrkdwn
 from daimon.core.slack_oauth import build_slack_connect_url
 from daimon.core.stores.slack_user_tokens import delete_slack_user_token, get_slack_user_token
 from slack_sdk.errors import SlackApiError

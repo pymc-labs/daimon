@@ -2,7 +2,7 @@
 
 All functions return plain ``dict[str, Any]`` objects — no ``slack_sdk.models``
 types (project convention per Pitfall 5 / S4). This module imports only stdlib
-and ``daimon.adapters.slack.mrkdwn`` (no slack_sdk, no daimon.core stores).
+and ``daimon.core.slack_mrkdwn`` (no slack_sdk, no daimon.core stores).
 
 Pitfall 5: all user/agent-derived text is run through ``escape_mrkdwn``.
 Pitfall 6: modal title ≤ 24 chars; overflow options ≤ 25.
@@ -14,10 +14,10 @@ import json
 from typing import Any
 
 from daimon.adapters.slack.agent_setup.state import encode_private_metadata
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.routines_panel.state import RoutineEntry, RoutinesPanelState
 from daimon.adapters.slack.web_button import open_in_web_button
 from daimon.core.cron_words import schedule_words
+from daimon.core.slack_mrkdwn import escape_mrkdwn
 
 __all__ = [
     "build_content_view",

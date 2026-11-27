@@ -30,6 +30,7 @@ from daimon.core.evals.format import (
     case_hash,
     sha256_hex,
 )
+from daimon.core.evals.scoring.checks import regex_problems
 from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import JsonValue
 
@@ -92,6 +93,7 @@ def case_problems(
     problems += _duplicates(where, "participant", [p.id for p in people])
     messages = [*case.history, *case.turn.messages]
     problems += _duplicates(where, "message", [m.id for m in messages])
+    problems += [f"{where}: {p}" for p in regex_problems(document.get("expect"))]
     authors = {p.id for p in people} | {case.surface.bot.id}
     problems += [
         f"{where}: message {m.id} is by {m.author}, who is not a participant"

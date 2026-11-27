@@ -207,6 +207,7 @@ _MAY_NAME: dict[str, frozenset[str]] = {
     "packages/core/daimon/core/platform_system.py": frozenset(_APPS),
     "packages/core/daimon/core/platform_sign_in.py": frozenset({"discord", "slack"}),
     "packages/core/daimon/core/platform_words.py": frozenset(_APPS),
+    "packages/core/daimon/core/chat_history.py": frozenset({"teams"}),
     "packages/core/daimon/core/microsoft_identity.py": frozenset({"teams"}),
     "packages/core/daimon/core/native_admins.py": frozenset({"discord"}),
     "packages/core/daimon/core/routine_delivery.py": frozenset(_APPS),

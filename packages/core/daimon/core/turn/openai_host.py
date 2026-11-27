@@ -129,6 +129,9 @@ class OpenAIHostRuntime(TurnRuntime):
     late_usage: LateUsage | None = field(default=None, kw_only=True)
     #: Bounds one late read, so a hung provider cannot hold the thread's lease.
     late_read_timeout_s: float = field(default=READ_TIMEOUT_S, kw_only=True)
+    #: An eval session's: starts the executor of the self-hosted environment a session
+    #: asks for (`OpenAITurnIO`). Its turns answer their own function calls.
+    connect_environment: Callable[[str], Awaitable[None]] | None = field(default=None, kw_only=True)
 
 
 def runtime_for(runtime: TurnRuntime | None, revision: ConfigRevision | None) -> OpenAIHostRuntime:
@@ -146,7 +149,9 @@ def runtime_for(runtime: TurnRuntime | None, revision: ConfigRevision | None) ->
         or runtime.controls.model != revision.model
         or runtime.controls.multi_agent_enabled is not False
         or runtime.controls.reasoning_effort != revision.effort
-        or runtime.controls.container_size != ("small" if revision.profile == PROFILE else None)
+        # A self-hosted session has no hosted container.
+        or runtime.controls.container_size
+        != ("small" if revision.profile == PROFILE and not runtime.connect_environment else None)
         or not isinstance(runtime.journal, OpenAIRecoveryJournal)
         or not isinstance(runtime.usage_store, OpenAIUsageRevisions)
     ):
@@ -227,6 +232,7 @@ def _codec(request: TurnCodecRequest) -> TurnIO:
         persistence=active,
         baseline_loader=invocation_baseline,
         spend_guard=runtime.spend_guard,
+        connect=runtime.connect_environment,
     )
 
 

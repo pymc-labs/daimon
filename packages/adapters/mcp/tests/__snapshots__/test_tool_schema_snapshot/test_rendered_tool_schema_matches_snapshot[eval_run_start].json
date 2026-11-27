@@ -1,0 +1,103 @@
+{
+  "description": [
+    "Start an eval run that stops once it has spent `cap_usd`. Runs only on the person's",
+    "card in chat. A cap above the admin limit waits for an admin to approve it."
+  ],
+  "parameters": {
+    "$defs": {
+      "RunDraft": {
+        "additionalProperties": false,
+        "properties": {
+          "arm_ids": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "case_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "judge_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "repeats": {
+            "default": 1,
+            "maximum": 20,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "suite": {
+            "$ref": "#/$defs/SuitePin"
+          }
+        },
+        "required": [
+          "suite",
+          "arm_ids"
+        ],
+        "type": "object"
+      },
+      "SuitePin": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "version"
+        ],
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "cap_usd": {
+        "type": "number"
+      },
+      "draft": {
+        "$ref": "#/$defs/RunDraft"
+      },
+      "origin_context_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "draft",
+      "cap_usd",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

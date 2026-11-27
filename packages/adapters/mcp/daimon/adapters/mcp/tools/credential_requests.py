@@ -75,6 +75,7 @@ from daimon.core.env_file import (
     env_name_problem,
     env_shadow_phrase,
 )
+from daimon.core.evals.eval_tenant import is_eval_tenant
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_attach import decide_mcp_connect
 from daimon.core.mcp_oauth.urls import McpUrlError, assert_public_host
@@ -446,6 +447,10 @@ async def _mint_and_post(
     branch: str | None = None,
     changes_agent: bool = True,
 ) -> RequestCredentialResult:
+    if is_eval_tenant(auth.tenant_id):
+        # An eval caller is answered by the fake world before it gets here; a real card or
+        # credential row must never come of one.
+        raise ToolError("This isn't available in an eval.")
     on_web = origin.platform == "web"
     if on_web and kind != "env":
         # The web chat's card holds one named key; files and connections need a chat app.

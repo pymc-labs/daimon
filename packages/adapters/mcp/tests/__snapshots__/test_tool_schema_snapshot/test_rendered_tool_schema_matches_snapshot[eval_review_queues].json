@@ -1,0 +1,10 @@
+{
+  "description": [
+    "List the open eval review queues you may work, across every run you review."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

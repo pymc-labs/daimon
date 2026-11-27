@@ -212,6 +212,21 @@ class FakeWorld:
             raise ItemNotRunningError(f"blob {sha256} of item {item.id} is missing")
         return content
 
+    blob = _load_blob
+
+    async def keep_blob(
+        self, tenant_id: uuid.UUID, sha256: str, media_type: str, content: bytes
+    ) -> None:
+        """Keep a file an item produced (its bytes in the artifact store when there is one)."""
+        if self.objects is not None:
+            await self.objects.put(key=object_key(tenant_id, sha256), content=content,
+                                   content_type=media_type)  # fmt: skip
+        row = BlobRow(sha256=sha256, size=len(content), media_type=media_type,
+                      scrub="generated", needs_human_check=False)  # fmt: skip
+        async with self.sessions.begin() as session:
+            await evals.put_blob(session, tenant_id=tenant_id, blob=row,
+                                 content=None if self.objects is not None else content)  # fmt: skip
+
     def _ref(self, row: eval_world.WorldItemRow) -> ItemRef:
         cached = self._items.get(row.id)
         if cached is None or cached.case_sha256 != row.case_sha256:

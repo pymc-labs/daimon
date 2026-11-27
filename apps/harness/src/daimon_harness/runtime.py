@@ -43,6 +43,14 @@ async def discard_event(kind: EventType, data: dict[str, JsonValue]) -> None:
     """No-op event sink for standalone workspace probes."""
 
 
+def host_output(value: JsonValue) -> tuple[JsonValue, bool]:
+    """A host tool's result as the model reads it: its text, and whether the call failed."""
+    if isinstance(value, dict) and isinstance(content := value.get("content"), list):
+        text = "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
+        return text, value.get("is_error") is True
+    return value, False
+
+
 @dataclass
 class TurnContext:
     request: TurnRequest
@@ -101,11 +109,16 @@ class TurnContext:
         execute: Callable[[], Awaitable[JsonValue]],
         *,
         mcp: bool = False,
+        host: bool = False,
     ) -> JsonValue:
-        """Own SDK tool workers even if the SDK abandons its invocation task."""
+        """Own SDK tool workers even if the SDK abandons its invocation task.
+
+        A `host` tool never executes here: the host's `result` decision is its output."""
         if self.stopping:
             raise HarnessError("turn_stopped", "Turn no longer accepts tools")
-        worker = asyncio.create_task(self._tool(call_id, name, arguments, execute, mcp=mcp))
+        worker = asyncio.create_task(
+            self._tool(call_id, name, arguments, execute, mcp=mcp, host=host)
+        )
         self.workers.add(worker)
 
         def finished(task: asyncio.Task[JsonValue]) -> None:
@@ -152,6 +165,7 @@ class TurnContext:
         execute: Callable[[], Awaitable[JsonValue]],
         *,
         mcp: bool,
+        host: bool,
     ) -> JsonValue:
         """Observe and authorize tools before any side effect, including MCP calls."""
         self.tool_calls += 1
@@ -172,7 +186,7 @@ class TurnContext:
                 "call_id": call_id,
                 "name": name,
                 "input": arguments,
-                "executor": "mcp" if mcp else "agent",
+                "executor": "host" if host else "mcp" if mcp else "agent",
             },
         )
         if self.tool_calls > self.request.limits.max_tool_calls:
@@ -181,7 +195,7 @@ class TurnContext:
         if self.permission(name) == "deny":
             return await result("Tool execution denied by policy", True)
         try:
-            if self.permission(name) == "ask":
+            if host or self.permission(name) == "ask":
                 action_id = str(uuid4())
                 future: asyncio.Future[ActionRequest] = asyncio.get_running_loop().create_future()
                 self.pending[action_id] = future
@@ -190,7 +204,7 @@ class TurnContext:
                         "requires_action",
                         {
                             "action_id": action_id,
-                            "kind": "tool_confirmation",
+                            "kind": "function_result" if host else "tool_confirmation",
                             "call_id": call_id,
                             "name": name,
                             "input": arguments,
@@ -199,10 +213,12 @@ class TurnContext:
                     decision = await future
                 finally:
                     self.pending.pop(action_id, None)
-                if decision.decision == "deny":
-                    return await result("Tool execution denied", True)
+                if decision.decision == "result" and host:
+                    return await result(*host_output(decision.result))
                 if decision.decision == "result":
                     return await result(decision.result)
+                if host or decision.decision == "deny":
+                    return await result("Tool execution denied", True)
             output = await execute()
         except asyncio.CancelledError:
             if not result_sent:

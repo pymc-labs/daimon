@@ -8,6 +8,7 @@ a double press or two consumers move a row exactly once.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -168,13 +169,14 @@ async def get_card(
     return _row(record) if record is not None else None
 
 
-async def list_cards(session: AsyncSession, *, tenant_id: uuid.UUID) -> list[HostCallCardRow]:
-    """Every card a tenant holds, oldest first."""
-    records = await session.scalars(
-        select(HostCallCard)
-        .where(HostCallCard.tenant_id == tenant_id)
-        .order_by(HostCallCard.created_at, HostCallCard.id)
-    )
+async def list_cards(
+    session: AsyncSession, *, tenant_id: uuid.UUID, thread_ids: Collection[str] | None = None
+) -> list[HostCallCardRow]:
+    """Every card a tenant holds, in `thread_ids` if given, oldest first."""
+    query = select(HostCallCard).where(HostCallCard.tenant_id == tenant_id)
+    if thread_ids is not None:
+        query = query.where(HostCallCard.thread_id.in_(list(thread_ids)))
+    records = await session.scalars(query.order_by(HostCallCard.created_at, HostCallCard.id))
     return [_row(record) for record in records]
 
 

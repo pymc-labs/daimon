@@ -27,7 +27,6 @@ from anthropic import AsyncAnthropic
 from daimon.adapters.slack.agent_post import post_as_agent
 from daimon.adapters.slack.blockkit import error_title_block
 from daimon.adapters.slack.interactions import resolve_web_client
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.output_delivery import SLACK_MAX_BYTES_PER_FILE, build_output_poster
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.adapters.slack.user_groups import user_group_lookup
@@ -56,6 +55,7 @@ from daimon.core.routine_files import deliver_routine_files, payload_for
 from daimon.core.routine_header import routine_header_shown
 from daimon.core.routine_hold import result_is_held
 from daimon.core.rule_views import keeps_routine_inside
+from daimon.core.slack_mrkdwn import escape_mrkdwn_preserving_mentions
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import get_routine
 from daimon.core.stores.tenants import get_tenant

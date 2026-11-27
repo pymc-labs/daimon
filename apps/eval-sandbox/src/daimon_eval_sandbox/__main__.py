@@ -155,7 +155,8 @@ def executor_argv(executor: str, env: dict[str, str]) -> list[str]:
         case "openai":
             # argv is world-readable in /proc; `--remote` takes a base URL, not a credential.
             remote, env_id = env["CODEX_REMOTE_URL"], env["CODEX_ENVIRONMENT_ID"]
-            return ["codex", "exec-server", "--remote", remote, "--environment-id", env_id]
+            return ["codex", "exec-server", "--remote", remote, "--environment-id", env_id,
+                    "--registration-bearer-stdin"]  # fmt: skip
         case "gemini":
             return [
                 "gemini-api",
@@ -174,6 +175,13 @@ def executor_argv(executor: str, env: dict[str, str]) -> list[str]:
             raise SystemExit(f"unknown executor {executor!r}")
 
 
+def executor_stdin(executor: str, env: dict[str, str]) -> bytes | None:
+    """The key the executor reads on stdin, taken out of `env`: the commands codex starts
+    inherit its environment and run as its user."""
+    key = env.pop("CODEX_API_KEY", None) if executor == "openai" else None
+    return None if key is None else f"{key}\n".encode()
+
+
 def _main() -> None:
     _wait()
     ca = MAIN_DIR / "ca.crt"
@@ -187,6 +195,7 @@ def _main() -> None:
     executor = str(pod["executor"])
     env = {**EXEC_ENV, **_strings(pod.get("exec_env"))}
     argv = executor_argv(executor, env)
+    stdin = executor_stdin(executor, env)
     if executor == "selfhosted":
         # The harness runs as root and drops each tool to its own uid; its tools get the
         # agent's environment, and no agent wrapper, which only the executor uid may run.
@@ -197,7 +206,7 @@ def _main() -> None:
         # setuid/setgid stay in the bounding set only so `agent-exec` (file caps) can drop to agent.
         command = [*_drop(EXEC_UID, groups="agent", bounding="-all,+setuid,+setgid"), *argv]
     os.umask(0o002)
-    sys.exit(subprocess.run(command, env=env, cwd=WORKSPACE).returncode)
+    sys.exit(subprocess.run(command, env=env, cwd=WORKSPACE, input=stdin).returncode)
 
 
 def manifest() -> dict[str, list[str]]:

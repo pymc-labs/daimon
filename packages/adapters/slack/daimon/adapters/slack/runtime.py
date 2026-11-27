@@ -12,7 +12,6 @@ import aiohttp
 import httpx
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from cryptography.fernet import MultiFernet
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.core.billing import BillingConfig, load_billing_config
 from daimon.core.channel_budget_notice import drain_budget_notices
 from daimon.core.config import Settings
@@ -27,6 +26,7 @@ from daimon.core.native_admins import GroupMembersCache
 from daimon.core.ops_events import drain_ops_events
 from daimon.core.scope import DeploymentDefault
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
+from daimon.core.slack_mrkdwn import escape_mrkdwn
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.errors import AdmissionDenialReason, BackendRefusalCause
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text

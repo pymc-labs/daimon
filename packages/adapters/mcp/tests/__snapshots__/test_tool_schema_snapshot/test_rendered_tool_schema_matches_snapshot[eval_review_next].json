@@ -1,0 +1,19 @@
+{
+  "description": [
+    "Get your next review task from a queue (`run~queue`), or none when none is left.",
+    "The task is yours for 30 minutes. Columns are named A, B... by place; in a blind queue",
+    "nothing names an arm or a model."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "queue": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "queue"
+    ],
+    "type": "object"
+  }
+}

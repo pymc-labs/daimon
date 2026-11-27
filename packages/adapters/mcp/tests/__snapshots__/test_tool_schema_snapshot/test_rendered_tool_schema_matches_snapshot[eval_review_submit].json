@@ -1,0 +1,307 @@
+{
+  "description": [
+    "Submit your scores for a review task: one per criterion the task asks for, naming",
+    "the column (A, B...) each is about. Closes the task for you."
+  ],
+  "parameters": {
+    "$defs": {
+      "Anchor": {
+        "additionalProperties": false,
+        "properties": {
+          "cells": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "element": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "end": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "item_id": {
+            "type": "string"
+          },
+          "page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "quote": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "region": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Region"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "sheet": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "target": {
+            "enum": [
+              "message",
+              "tool_call",
+              "world_call",
+              "output",
+              "page",
+              "image_region",
+              "table_range",
+              "text_range",
+              "card_element",
+              "diff_hunk"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "item_id"
+        ],
+        "type": "object"
+      },
+      "Region": {
+        "additionalProperties": false,
+        "properties": {
+          "h": {
+            "type": "number"
+          },
+          "w": {
+            "type": "number"
+          },
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "x",
+          "y",
+          "w",
+          "h"
+        ],
+        "type": "object"
+      },
+      "ScoreDraft": {
+        "additionalProperties": false,
+        "properties": {
+          "anchors": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/$defs/Anchor"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "criterion": {
+            "type": "string"
+          },
+          "rationale": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "supersedes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "target": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "value": {
+            "$ref": "#/$defs/ScoreValue"
+          }
+        },
+        "required": [
+          "criterion",
+          "value"
+        ],
+        "type": "object"
+      },
+      "ScoreValue": {
+        "additionalProperties": false,
+        "properties": {
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "pass": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "preference": {
+            "anyOf": [
+              {
+                "enum": [
+                  "a",
+                  "b",
+                  "tie"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "unknown": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "scores": {
+        "items": {
+          "$ref": "#/$defs/ScoreDraft"
+        },
+        "type": "array"
+      },
+      "task_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "task_id",
+      "scores"
+    ],
+    "type": "object"
+  }
+}

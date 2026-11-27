@@ -262,6 +262,10 @@ class _ConfiguredTransport:
         async with self._client() as client:
             return await self._sdk(client).create_environment(config)
 
+    async def create_self_hosted_environment(self) -> tuple[str, str]:
+        async with self._client() as client:
+            return await self._sdk(client).create_self_hosted_environment()
+
     async def upload_archive(
         self, environment_id: str, path: str, archive: bytes, *, overwrite: bool
     ) -> None:

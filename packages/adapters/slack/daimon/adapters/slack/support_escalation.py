@@ -70,7 +70,6 @@ from daimon.adapters.slack.click_replies import (
 from daimon.adapters.slack.gating import is_external_interactive
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.modal_limits import MAX_PLAIN_TEXT_INPUT_CHARS
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.place_access import (
     check_place_access,
     may_start_turn_at,
@@ -93,6 +92,7 @@ from daimon.core.authz import Action, Place, Subject, authorize
 from daimon.core.features.snapshot import FeaturePlace, place_feature
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.permissions import readers_limited_at
+from daimon.core.slack_mrkdwn import escape_mrkdwn
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.support_escalation import (
     SubmitOutcome,

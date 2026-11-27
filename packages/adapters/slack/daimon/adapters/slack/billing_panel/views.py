@@ -22,7 +22,6 @@ from datetime import UTC, datetime
 from typing import Any
 
 from daimon.adapters.slack.billing_panel.names import is_user_id
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn
 from daimon.adapters.slack.ui_render import mrkdwn_section, panel_blocks
 from daimon.adapters.slack.web_button import open_in_web_button
 from daimon.core.billing_panel import (
@@ -39,6 +38,7 @@ from daimon.core.billing_panel import (
     expiry_screen,
 )
 from daimon.core.promo_credit import ActiveTimedCredit
+from daimon.core.slack_mrkdwn import escape_mrkdwn
 
 TOPUP_ACTION_ID = "billing_topup"
 REDEEM_OPEN_ACTION_ID = "billing_redeem_open"

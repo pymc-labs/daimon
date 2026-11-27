@@ -3097,6 +3097,14 @@ class ComputeSettings(BaseModel):
         return self
 
 
+class JudgeModelSetting(BaseModel):
+    backend: str | None = Field(
+        default=None, description="Provider that serves the model. Unset: the default one."
+    )
+    model: str = Field(description="Model id.")
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+
+
 class EvalsSettings(BaseModel):
     signing_key: SecretStr | None = Field(
         default=None,
@@ -3158,6 +3166,33 @@ class EvalsSettings(BaseModel):
             "http://eval-worker:8090. Unset: no sandbox can be enclosed."
         ),
     )
+    world_port: int = Field(
+        default=8090,
+        ge=1,
+        le=65535,
+        description="Port the eval worker serves its fake world on.",
+    )
+    world_host: str = Field(
+        default="0.0.0.0",
+        description=(
+            "Address the eval worker serves its fake world on: the interface its sandbox "
+            "pods reach. Default: every interface."
+        ),
+    )
+    environment_id: str | None = Field(
+        default=None,
+        description=(
+            "Self-hosted environment eval items run in, made in the provider's console. Items "
+            "on it run one at a time, across workers. Unset: live arms cannot run."
+        ),
+    )
+    environment_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Environment key the eval sandbox's executor polls that environment with. Unset: "
+            "live arms cannot run."
+        ),
+    )
     sandbox_runtime: Literal["docker", "kubernetes"] | None = Field(
         default=None,
         description="Where eval sandbox pods run: a Docker host or a Kubernetes namespace.",
@@ -3213,11 +3248,61 @@ class EvalsSettings(BaseModel):
             "run as the executor and reach these hosts."
         ),
     )
+    harness_config: dict[str, SecretStr] = Field(
+        default_factory=dict[str, SecretStr],
+        description=(
+            "Settings for the self-hosted harness in a harness arm's pod, as a JSON object of "
+            "its environment variables: its model endpoint and credentials. Add the endpoint's "
+            "host to DAIMON_EVALS__PASSTHROUGH_HOSTS. Default: {} (none)."
+        ),
+    )
+    codex_config: dict[str, SecretStr] = Field(
+        default_factory=dict[str, SecretStr],
+        description=(
+            "Settings for codex exec-server in an OpenAI arm's pod, as a JSON object of its "
+            "environment variables: CODEX_REMOTE_URL and CODEX_API_KEY. The URL is readable "
+            "inside the pod, so it carries no credential; the key reaches codex on stdin only. "
+            "Default: {} (none)."
+        ),
+    )
     sandbox_rate_usd_per_hour: Decimal = Field(
         default=Decimal("0"),
         ge=0,
         allow_inf_nan=False,
         description="What an hour of one eval sandbox pod costs, for run cost reports.",
+    )
+    judge_models: list[JudgeModelSetting] = Field(
+        default_factory=list[JudgeModelSetting],
+        description=(
+            "The judge panel for eval runs that name none: each model scores each item and the "
+            "panel votes. Every model needs a known price, and none may share a model or a "
+            "provider with an arm it judges. Empty: judging names its models."
+        ),
+    )
+    admin_approval_usd: float = Field(
+        default=25.0,
+        gt=0,
+        description=(
+            "An eval run's spend cap above this, in USD, waits for the operator to approve it "
+            "(`daimon evals runs approve`)."
+        ),
+    )
+    workspace_cap_usd: float = Field(
+        default=100.0,
+        gt=0,
+        description=(
+            "What one workspace's open eval runs may be capped at together, in USD; a run "
+            "past it waits for the operator to approve it."
+        ),
+    )
+    worker_concurrency: int = Field(
+        default=2, ge=1, le=32, description="Eval items one eval worker runs at once."
+    )
+    kappa_warn: float = Field(
+        default=0.4,
+        ge=-1,
+        le=1,
+        description="A judge whose kappa against human scores is below this is flagged.",
     )
 
 

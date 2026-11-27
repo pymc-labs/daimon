@@ -51,10 +51,10 @@ _CLASSIFIED: dict[tuple[str, str], str] = {
     (_TEAMS + "commands.py", "I've answered `{name}` in our 1:1 chat."): (
         "a guest is answered with NO_CHAT_ACROSS_ORGS first"
     ),
-    (_TEAMS + "context.py", "Files can't be attached in a group chat. Mention it only if"): (
-        "a guest gets _GROUP_FILES_HINT_FOREIGN"
+    (_CORE + "chat_history.py", "Files can't be attached in a group chat. Mention it only if"): (
+        "a guest gets _TEAMS_GROUP_FILES_HINT_FOREIGN"
     ),
-    (_TEAMS + "context.py", "Files can't be attached in a group chat. This person is from"): (
+    (_CORE + "chat_history.py", "Files can't be attached in a group chat. This person is from"): (
         "the guest's own hint: it tells the model not to suggest a 1:1 chat"
     ),
     (_TEAMS + "installations.py", "The documented deep link"): "operator text, not shown",

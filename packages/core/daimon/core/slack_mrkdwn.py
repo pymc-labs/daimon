@@ -9,8 +9,8 @@ being interpreted as links or mentions. The escape order is **load-bearing**:
   2. ``<`` → ``&lt;``
   3. ``>`` → ``&gt;``
 
-This module is stdlib-only — no ``slack_sdk``, ``anthropic``, or ``daimon.core``
-imports. It forms part of the functional-core rendering layer.
+This module is pure: no ``slack_sdk`` or ``anthropic``, and the only ``daimon.core``
+import is the fence-aware splitter. It forms part of the functional-core rendering layer.
 
 Reference: https://docs.slack.dev/messaging/formatting-message-text
 """
@@ -19,6 +19,12 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Collection
+
+from daimon.core.message_split import split_fenced
+
+# Locked to 11800 by the live-workspace probe (DEFAULT path), leaving headroom under the
+# 12 000-char ceiling of a native markdown block.
+SLACK_LIMIT = 11800
 
 
 def escape_mrkdwn(text: str) -> str:
@@ -427,3 +433,19 @@ def markdown_block_fallback(block_text: str) -> str:
         lambda prose: _escape_raw_angles(prose, None),
         escape_mrkdwn,
     )
+
+
+def answer_chunks(
+    text: str, *, preserve_mentions: bool = True, limit: int = SLACK_LIMIT
+) -> list[str]:
+    """An answer as the ``markdown`` block texts Slack gets: links normalized, entities
+    escaped outside code, split on fences, each message sealed as sent (a split can leave
+    code lines outside their fence). Only mentions that were already prose stay live."""
+    # Linkify before escaping: it reads the raw markdown, and escaping adds no URLs or
+    # asterisks. Table cells are raw_text and keep their URLs as is.
+    escaped = escape_markdown_block(
+        linkify_emphasized_urls(normalize_slack_url_links(text)),
+        preserve_mentions=preserve_mentions,
+    )
+    mentions = prose_mentions(escaped)
+    return [seal_markdown_block(c, mentions=mentions) for c in split_fenced(escaped, limit)]

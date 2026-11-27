@@ -32,7 +32,6 @@ from daimon.adapters.slack.modal_limits import (
     finish_modal,
     fit_title,
 )
-from daimon.adapters.slack.mrkdwn import escape_mrkdwn, escape_mrkdwn_preserving_mentions
 from daimon.adapters.slack.setup_conversations import setup_button
 from daimon.adapters.slack.web_button import open_in_web_button
 from daimon.core.agent_detail_lists import DetailListName, format_detail_lists
@@ -67,6 +66,7 @@ from daimon.core.setup_conversations import (
     shared_keys_sentence,
 )
 from daimon.core.skills.ingest import SkillPreview
+from daimon.core.slack_mrkdwn import escape_mrkdwn, escape_mrkdwn_preserving_mentions
 from daimon.core.stores.domain import (
     ChannelSkillRow,
     McpTokenRow,

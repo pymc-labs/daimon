@@ -3,6 +3,7 @@
 Evals check how well an agent handles real work. A suite holds cases: a
 conversation, the world the agent can reach, and what a good answer does.
 Suites and their results travel between deployments as bundles.
+Runs, scoring and review are on [Eval runs](eval-runs.md).
 
 ## Turn it on
 
@@ -143,7 +144,8 @@ as `gh`, see the real clock instead of the case's.
 
 Limits: this encloses the agent's tools, not a hostile executor. A command the
 executor starts without a shell, such as the codex backend's `python3` or `curl`,
-and a direct run of the real shell binaries, run as the executor user. That user
+and a direct run of the real shell binaries, run as the executor user. The codex key
+reaches codex on stdin, so those commands never see it. The executor user
 reaches the provider's control plane and any
 [`passthrough_hosts`](configuration.md#daimon_evals__passthrough_hosts) untouched,
 and the gateway matches them by TLS server name, not by the request's Host header.
@@ -158,7 +160,8 @@ On Kubernetes, the eval worker's service account needs to create, read, list and
 delete pods, `pods/exec` and secrets in the namespace. The namespace needs the
 `privileged` pod security level. Pods get no service account token. Add a
 NetworkPolicy that admits connections to pods labelled `daimon.eval/item` only
-from the eval worker.
+from the eval worker. The worker reaches a harness pod over plain HTTP, so this
+policy keeps that traffic private.
 
 Sandbox tools trust an eval CA. Create its key once and store it as
 [`DAIMON_EVALS__CA_KEY`](configuration.md#daimon_evals__ca_key):

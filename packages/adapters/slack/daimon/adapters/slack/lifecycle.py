@@ -65,10 +65,6 @@ from daimon.adapters.slack.blockkit import (
 )
 from daimon.adapters.slack.errors import bound_request_id
 from daimon.adapters.slack.feedback import build_feedback_actions_block
-from daimon.adapters.slack.mrkdwn import (
-    markdown_block_fallback,
-    seal_markdown_block,
-)
 from daimon.adapters.slack.split import split_for_slack_safe
 from daimon.adapters.slack.support_escalation import build_ask_human_button
 from daimon.adapters.slack.tables import render_slack_tables
@@ -86,6 +82,10 @@ from daimon.core.outbound.opt_out import opt_out_names, tag_opt_outs
 from daimon.core.outbound.reach import DEFAULT_MAX_PEOPLE, turn_tally_key
 from daimon.core.pricing import MODEL_PRICING, cost_of_totals, format_cost
 from daimon.core.provider_turn_cost import LATE_TURN_COSTS
+from daimon.core.slack_mrkdwn import (
+    markdown_block_fallback,
+    seal_markdown_block,
+)
 from daimon.core.stores.reach_tallies import approved_people
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.turn.card_state import CardState as State

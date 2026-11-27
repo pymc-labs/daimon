@@ -58,7 +58,7 @@ from mux.contracts.events import (
 from mux.contracts.ids import ModelRef, PageRequest, ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.receipts import CancelReceipt, SendReceipt, StopObservation
-from mux.contracts.resources import Agent, AgentSpec, EnvironmentSpec
+from mux.contracts.resources import Agent, AgentSpec, Environment, EnvironmentSpec
 from mux.contracts.usage import UsageObservation
 from mux.drivers.gemini import (
     FLASH_PRIMARY,
@@ -114,6 +114,9 @@ class GeminiDeployment:
     environment: EnvironmentSpec
     native_agent: Agent | None = None
     max_output_tokens: int | None = None
+    #: A self-hosted environment made before the session: an eval item's, whose pod
+    #: holds the key the provider shows once. Its sessions run there, never in a new one.
+    self_hosted: Environment | None = None
 
 
 @dataclass(frozen=True)

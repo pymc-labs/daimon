@@ -48,6 +48,7 @@ _turn_call_sites = paths._turn_call_sites  # pyright: ignore[reportPrivateUsage]
 DISCORD = "packages/adapters/discord/daimon/adapters/discord"
 SLACK = "packages/adapters/slack/daimon/adapters/slack"
 TEAMS = "packages/adapters/teams/daimon/adapters/teams"
+EVALS = "packages/core/daimon/core/evals"
 WEB = "packages/adapters/web/daimon/adapters/web"
 MCP = "packages/adapters/mcp/daimon/adapters/mcp/tools"
 CORE_DM = "packages/core/daimon/core/direct_messages.py"
@@ -65,6 +66,7 @@ NOTICE_LIFECYCLES: dict[tuple[str, str], tuple[str, str]] = {
     (f"{TEAMS}/app.py", "_bind_and_run"): (f"{TEAMS}/lifecycle.py", "TeamsTurnLifecycle"),
     (f"{WEB}/turns.py", "_bind_and_run"): (f"{WEB}/lifecycle.py", "WebTurnLifecycle"),
     (CORE_DM, "_run_admitted_dm_turn"): (CORE_DM, "_CollectReply"),
+    (f"{EVALS}/runner/turns.py", "_turn"): (f"{EVALS}/chat/surface.py", "EvalSurfaceLifecycle"),
 }
 
 #: How each lifecycle shows the notice: the neutral card `test_plain_words_parity` checks.
@@ -74,6 +76,7 @@ SHOWN_BY = {
     "TeamsTurnLifecycle": "notice_card",
     "WebTurnLifecycle": "notice_json",
     "_CollectReply": "_tell",
+    "EvalSurfaceLifecycle": "add",
 }
 
 #: Turn callers that pass the question yet never keep it, so tell nothing, and why.

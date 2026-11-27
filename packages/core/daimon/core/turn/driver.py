@@ -87,6 +87,7 @@ from daimon.core.turn.approvals import (
 )
 from daimon.core.turn.ceiling import ceiling_error, current_turn_deadline, remaining_s
 from daimon.core.turn.degraded import degraded_failure_message
+from daimon.core.turn.host_tools import answer_host_tools, host_tools, only_host_calls
 from daimon.core.turn.io import (
     MuxTurnIO,
     TurnConnectionLost,
@@ -232,7 +233,7 @@ async def _read_after_quiet[R](
 
 def _answers_in_turn(tool_confirmation: ToolConfirmation) -> bool:
     """Whether this posture answers a `requires_action` idle and keeps going."""
-    return isinstance(tool_confirmation, AutoApprove | PolicyApproval)
+    return isinstance(tool_confirmation, AutoApprove | PolicyApproval) or bool(host_tools.get())
 
 
 async def _decide_blocked(
@@ -2194,6 +2195,19 @@ async def _consume_with_reconnect(
             if stop == "requires_action":
                 seen_before = event.id in seen_requires_action_event_ids
                 seen_requires_action_event_ids.add(event.id)
+                assert isinstance(event, BetaManagedAgentsSessionStatusIdleEvent)
+                pending = pending_confirmation_ids(event.stop_reason, confirmed=set())
+                if results := await answer_host_tools(
+                    state_cell[0], pending, answered=confirmed_tool_use_ids,
+                    posture=tool_confirmation,
+                ):  # fmt: skip
+                    # Sent only on a `requires_action` idle, as confirmations are (below).
+                    await io.send(results)
+                    log.info("turn.host_tools.answered", session_id=session_id,
+                             count=len(results))  # fmt: skip
+                if only_host_calls(state_cell[0], pending):
+                    # Answered now, or a repeat idle while their results land.
+                    continue
                 match tool_confirmation:
                     case AutoApprove() | PolicyApproval():
                         assert isinstance(event, BetaManagedAgentsSessionStatusIdleEvent)
