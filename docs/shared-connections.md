@@ -3,7 +3,7 @@
 ## Share a server with the workspace
 
 An admin can share an MCP server so agents and outside clients use it without
-their own sign-in, from chat or in the web app.
+their own sign-in.
 [`shared_connections`](features.md), on by default, turns them all off.
 
 <!-- knowledge: web -->
@@ -25,7 +25,7 @@ its user first; a chat call with no conversation is refused. Turn a tool off her
 for the workspace, or with tool rules for one agent (agent keys follow; Ask
 refuses them). Every call is audited.
 
-Admins add a connection from chat too; each change waits for their card, naming the
+Admins add a connection from chat; each change waits for their card, naming the
 tool, its server, parameters and the words callers get. A token goes through
 their private form, never chat. In a room, addresses and errors go to them by
 direct message, through `send_private_details`.
