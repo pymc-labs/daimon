@@ -13,8 +13,9 @@ results, so a feature that is Off here is not found (`_SEARCHING`).
 A tool whose setup this server lacks (`SERVER_SETUP`) leaves every list, that credential's too,
 and its call is refused as not set up: a worker can't judge that setup, and the server's
 settings, so that catalogue, stay fixed while it runs. So does a tool whose feature does not
-exist in the caller's workspace (`in_workspace`). Where pages are absent, or off for any other
-caller, the watch tools are listed without their page source and words (`without_pages`).
+exist in the caller's workspace (`in_workspace`). Where pages are absent or not set up, or off
+for any other caller, the watch tools are listed without their page source and words
+(`without_pages`).
 """
 
 from __future__ import annotations
@@ -304,7 +305,10 @@ class CapabilityGateMiddleware(Middleware):
             or not in_workspace(FEATURES[k], settings, auth.tenant_id)
         )
         tools = [t for t in tools if t.name not in unset or server_gate_key(t.name) is None]
-        pageless = not in_workspace(FEATURES["artifacts"], settings, auth.tenant_id)
+        pages = FEATURES["artifacts"]
+        pageless = not in_workspace(pages, settings, auth.tenant_id) or not server_setup_met(
+            pages, settings
+        )
         if _lists_everything(auth) and not _SEARCHING.get():
             return [without_pages(t) for t in tools] if pageless else tools
         try:
