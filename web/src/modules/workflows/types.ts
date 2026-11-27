@@ -1,7 +1,7 @@
 // The workflow spec (schema daimon.workflow/v1) and the shapes the workflows API returns.
 import type { AgentRef } from "@/lib/types"
 
-export const KINDS = ["agent", "branch", "transform", "code", "action", "approval", "wait", "for_each", "workflow", "post", "routine", "finish"] as const
+export const KINDS = ["agent", "branch", "transform", "code", "action", "approval", "wait", "for_each", "workflow", "post", "finish"] as const
 export type Kind = (typeof KINDS)[number]
 
 /** A JSON Schema subset: one field of inputs, outputs and approval forms. */
@@ -29,7 +29,7 @@ export type Node = {
   agent?: string; model?: string; instructions?: string; inputs?: Record<string, string>
   /** Agent, code: fields. Finish: an expression. */
   output?: Record<string, Field> | string
-  routes?: Record<string, string | Route>; tools?: "inherit" | string[]; writes?: "refuse" | "propose" | "allow" | "routine"
+  routes?: Record<string, string | Route>; tools?: "inherit" | string[]; writes?: "refuse" | "propose" | "allow" | "policy"
   builtins?: "none" | "read" | "all"; session?: string; can_ask?: boolean; can_finish_early?: boolean; untrusted_waiver?: string
   /** Agent, action: writes that go out unattended. Agent: skills from the library. */
   writes_to?: WriteScope[]; skills?: string[]
@@ -50,10 +50,10 @@ export type Node = {
   // wait
   for?: string; until?: string; event?: { source: string; match?: string }
   poll?: { agent?: string; tool: string; args?: Record<string, unknown>; every: string; until: string }
-  // routine: what it asks and where the result goes
-  prompt?: string
-  // post (also Deliver's fields); routine: a RoutineTarget
-  to?: string | RoutineTarget; thread?: string; also?: string[]; mention?: string[]; message?: string; files?: string
+  /** Agent: where it works (`home`, `origin`, a channel or thread id) and whether the run-as person's personal memory is mounted, which keeps its result private. */
+  at?: string; memory?: "personal"
+  // post (also Deliver's fields); `as_agent` posts under that agent's name and picture
+  to?: string; thread?: string; also?: string[]; mention?: string[]; message?: string; files?: string; as_agent?: string
   // for_each
   items?: string; as?: string; do?: Node; concurrency?: number; tolerate_failures?: number
   // workflow
@@ -63,9 +63,6 @@ export type Node = {
   /** Finish: where the result goes. Approval: where the ask is posted. */
   deliver?: Deliver | AskWhere | null
 }
-
-/** Where a routine step posts: a channel or thread by id, or the owner's DMs. */
-export type RoutineTarget = { kind: "channel" | "thread" | "dm"; id?: string }
 
 /** Where an approval is asked: the inbox only, a direct message, or a thread in a channel. */
 export type AskWhere = "inbox" | "dm" | "thread"

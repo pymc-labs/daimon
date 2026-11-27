@@ -507,18 +507,31 @@ home: {channel: ${channel}}
 triggers:
   - {id: schedule, kind: schedule, cron: "${cron}", timezone: ${tz}, catch_up: run-once}
 defaults: {agent: ${agent}}
+concurrency: {limit: 1, on_conflict: skip}
 start: run
 nodes:
   run:
     kind: agent
     title: ${name}
     instructions: ${text}
-    session: main
-    output: {summary: {type: string}}
+    at: ${channel}
+    writes: policy
+    can_finish_early: true
+    next: seen
+  seen:
+    kind: branch
+    cases:
+      - {when: "\${{ '${channel}' in steps.run.posted }}", to: done}
+    else: post
+  post:
+    kind: post
+    to: ${channel}
+    message: "\${{ steps.run.summary }}"
+    files: "\${{ steps.run.files }}"
+    as_agent: ${agent}
     next: done
   done:
     kind: finish
-    deliver: {to: home, message: "\${{ steps.run.output.summary }}"}
 `
 
 const BOARD = `schema: daimon.workflow/v1

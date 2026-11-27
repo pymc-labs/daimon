@@ -164,7 +164,7 @@ export function upstreamRefs(spec: Spec, id: string): RefGroup[] {
     const untrusted = untrustedOut(n)
     const refs: Ref[] = [{ path: `${base}.output`, type: n.kind === "for_each" ? "list" : "object", untrusted }]
     for (const [k, f] of Object.entries(outputFields(n))) refs.push({ path: `${base}.output.${k}`, type: fieldType(f), untrusted })
-    if (n.kind === "agent") refs.push({ path: `${base}.summary`, type: "text" })
+    if (n.kind === "agent") refs.push({ path: `${base}.summary`, type: "text" }, { path: `${base}.posted`, type: "list" })
     if (n.routes) refs.push({ path: `${base}.route`, type: "choice" })
     groups.push({ id: sid, label: titleOf(sid, n), kind: n.kind, refs })
   }
@@ -179,6 +179,16 @@ const BAD_EVENT_SOURCE = "An event source is a workflow, as `workflow:<id>`; oth
 const BAD_WAIT_SOURCE = "A wait's event is another workflow's run (`workflow:<id>`), a delivery to one of this workflow's webhook triggers (`trigger:<id>`) or `callback`"
 const waitSource = (spec: Spec, source: string) =>
   EVENT_SOURCE.test(source) || source === "callback" || (source.startsWith("trigger:") && !!spec.triggers?.some((t) => t.kind === "webhook" && `trigger:${t.id}` === source))
+
+// Where an agent works: home, origin, or a channel or thread id; never a person or an expression.
+const NOT_A_PLACE = /^(\s*|owner|run_as|person:.*|.*\$\{\{.*)$/s
+const PRIVATE_OUTPUT = (step: string) => `Step ${step} uses personal memory, so only a post to the person it runs as can use its result`
+/** What a step with personal memory still shows every expression. */
+const OPEN_PARTS = ["route", "status", "visits", "posted"]
+const agentOf = (n: Node) => (n.kind === "for_each" ? n.do : n)
+/** Steps with personal memory (a For each by its own id): only a post to the run-as person reads their result. */
+export const privateSteps = (spec: Spec) => new Set(Object.entries(spec.nodes).filter(([, n]) => agentOf(n)?.kind === "agent" && agentOf(n)?.memory === "personal").map(([id]) => id))
+const readsPrivate = (n: Node) => n.kind === "post" && n.to === "run_as" && !n.also?.length && !n.mention?.length
 
 const WRITE_TOOL = /send|tag|create|update|post|delete|comment|note|page|issue|folder|project/
 export const toolWrites = (tool?: string) => !!tool && WRITE_TOOL.test(tool.split("/")[1] ?? tool)
@@ -197,7 +207,10 @@ export function validate(spec: Spec): Validation {
   if (!Object.values(nodes).some((n) => n.kind === "finish")) err("no_finish", "No Finish step")
   if (spec.triggers?.some((t) => t.kind === "event" && !EVENT_SOURCE.test(t.source ?? ""))) err("bad_event_source", BAD_EVENT_SOURCE)
   const seen = reachable(spec)
+  const hidden = privateSteps(spec)
   for (const [id, n] of Object.entries(nodes)) {
+    if (n.kind === "agent" && n.at != null && NOT_A_PLACE.test(n.at)) err("bad_place", "Works in home, origin, or a channel or thread id", id)
+    if (n.kind === "agent" && n.at != null && n.memory === "personal") err("private_place", "A step with personal memory is private, so it works nowhere", id)
     if (n.kind === "wait" && n.event && !waitSource(spec, n.event.source)) err("bad_event_source", BAD_WAIT_SOURCE, id)
     const out = edgesOf(id, n)
     for (const e of out) if (!nodes[e.to]) err("unknown_target", `Unknown step: ${e.to}`, id)
@@ -209,6 +222,7 @@ export function validate(spec: Spec): Validation {
       const [ns, sid, part, field] = r.split(".")
       if (ns === "inputs" && sid && !spec.inputs?.properties[sid]) err("unknown_ref", `Unknown input: ${r}`, id)
       if (ns !== "steps" || !sid) continue
+      if (hidden.has(sid) && sid !== id && !readsPrivate(n) && !(part && OPEN_PARTS.includes(part))) { err("private_output", PRIVATE_OUTPUT(sid), id); continue }
       if (!nodes[sid]) err("unknown_ref", `Unknown step: ${r}`, id)
       else if (!up.has(sid)) err("not_upstream", `Not upstream: ${r}`, id)
       else if (part === "output" && field && Object.keys(outputFields(nodes[sid])).length && !outputFields(nodes[sid])[field]) err("unknown_ref", `Unknown field: ${r}`, id)
@@ -255,7 +269,7 @@ const boundBy = (spec: Spec, id: string) =>
 
 /** A write beyond the step's `writes_to` scopes. */
 export const writes = (n: Node) =>
-  (n.kind === "action" && toolWrites(n.tool) && !(n.writes_to ?? []).some((s) => s.tool === n.tool)) || (n.kind === "agent" && (n.writes === "allow" || n.writes === "routine"))
+  (n.kind === "action" && toolWrites(n.tool) && !(n.writes_to ?? []).some((s) => s.tool === n.tool)) || (n.kind === "agent" && n.writes === "allow")
 const ruleText = (r: ArgRule) =>
   [
     ...(r.in ?? []).map((x) => `is ${x}`),
@@ -342,7 +356,7 @@ export function newId(spec: Spec, base: string) {
 
 const DEFAULT_ID: Record<Kind, string> = {
   agent: "agent", branch: "branch", transform: "transform", code: "code", action: "action", approval: "approval",
-  wait: "wait", for_each: "each", workflow: "call", post: "post", routine: "routine", finish: "done",
+  wait: "wait", for_each: "each", workflow: "call", post: "post", finish: "done",
 }
 
 /** `ask`: an approval that takes a free-text answer from someone and carries on. */
@@ -362,7 +376,6 @@ export function blankNode(kind: Kind, next?: string, preset?: Preset): Node {
     case "for_each": return { kind, title: "For each", items: "", as: "item", do: { kind: "agent", instructions: "" }, concurrency: 3, next }
     case "workflow": return { kind, title: "Run workflow", workflow: "", version: "live", next }
     case "post": return { kind, title: "Post", to: "home", message: "", next }
-    case "routine": return { kind, title: "Routine", prompt: "", to: { kind: "dm" }, next }
     case "finish": return { kind, title: "Finish", outcome: "succeeded" }
   }
 }

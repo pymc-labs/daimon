@@ -76,6 +76,17 @@ const setRoute = (x: Node, name: string, to: string) => {
   x.routes![name] = typeof r === "string" ? to : { ...r, to }
 }
 
+const NOWHERE = "none"
+/** Where a step posts or works: its home, where the run started, a channel or thread, and (for a post) people. */
+function placeOptions(catalog: EditorProps["catalog"], current: string | undefined, people: boolean) {
+  const places = [
+    { value: "home", label: "Home channel" }, { value: "origin", label: "Where the run started" },
+    ...(people ? [{ value: "owner", label: "Owner" }, { value: "run_as", label: "Person it runs as" }] : []),
+    ...(catalog?.channels ?? []).map((c) => ({ value: c.id, label: `#${c.name}` })),
+  ]
+  return !current || places.some((o) => o.value === current) ? places : [...places, { value: current, label: current }]
+}
+
 export function AgentEditor(p: EditorProps) {
   const { n, set, ro, catalog } = p
   const key = n.agent ?? p.spec.defaults?.agent ?? "daimon"
@@ -85,6 +96,9 @@ export function AgentEditor(p: EditorProps) {
       <Section>
         <div className="space-y-3">
           <Field label="Agent"><Pick value={key} ro={ro} onChange={(v) => set((x) => { x.agent = v })} options={(catalog?.agents ?? []).map((a) => ({ value: a.key, label: a.name }))} /></Field>
+          <Field label="Works in"><Pick value={n.at ?? NOWHERE} ro={ro || n.memory === "personal"} onChange={(v) => set((x) => { x.at = v === NOWHERE ? undefined : v })}
+            options={[{ value: NOWHERE, label: "Nowhere in particular" }, ...placeOptions(catalog, n.at, false)]} /></Field>
+          <Field label="Personal memory"><Switch checked={n.memory === "personal"} disabled={ro} onCheckedChange={(v) => set((x) => { x.memory = v ? "personal" : undefined; if (v) x.at = undefined })} /></Field>
           <Field label="Session"><Pick value={n.session ?? "main"} ro={ro} onChange={(v) => set((x) => { x.session = v === "main" ? undefined : v })} options={[{ value: "main", label: "Main lane" }, { value: "fresh", label: "Fresh" }]} /></Field>
         </div>
       </Section>
@@ -101,7 +115,8 @@ export function AgentEditor(p: EditorProps) {
         <div className="space-y-3">
           <Field label="Tools"><Pick value={Array.isArray(n.tools) ? "custom" : "inherit"} ro={ro} onChange={(v) => set((x) => { x.tools = v === "inherit" ? undefined : [] })}
             options={[{ value: "inherit", label: `Inherit (${agent?.tools ?? 0})` }, { value: "custom", label: Array.isArray(n.tools) ? `Custom (${n.tools.length})` : "Custom" }]} /></Field>
-          <Field label="Writes"><Segmented value={n.writes ?? "refuse"} ro={ro} onChange={(v) => set((x) => { x.writes = v === "refuse" ? undefined : v })} options={[["refuse", "Refuse"], ["propose", "Propose"], ["allow", "Allow"], ...(n.writes === "routine" ? [["routine", "As routine"] as ["routine", string]] : [])]} /></Field>
+          <Field label="Writes"><Pick value={n.writes ?? "refuse"} ro={ro} onChange={(v) => set((x) => { x.writes = v === "refuse" ? undefined : (v as Node["writes"]) })}
+            options={[{ value: "refuse", label: "Refuse" }, { value: "propose", label: "Propose" }, { value: "allow", label: "Allow" }, { value: "policy", label: "As the server allows" }]} /></Field>
           <Field label="Built-ins"><Segmented value={n.builtins ?? "none"} ro={ro} onChange={(v) => set((x) => { x.builtins = v === "none" ? undefined : v })} options={[["none", "None"], ["read", "Read"], ["all", "All"]]} /></Field>
         </div>
       </Section>
@@ -338,19 +353,15 @@ export function FinishEditor(p: EditorProps) {
 export function PostEditor(p: EditorProps) {
   const { n, set, ro, catalog, spec } = p
   const [msg, setMsg] = useLocal(n.message ?? "", (v) => set((x) => { x.message = v || undefined }, 500))
-  const places = [
-    { value: "home", label: "Home channel" }, { value: "origin", label: "Where the run started" },
-    { value: "owner", label: "Owner" }, { value: "run_as", label: "Person it runs as" },
-    ...(catalog?.channels ?? []).map((c) => ({ value: c.id, label: `#${c.name}` })),
-  ]
-  const to = typeof n.to === "string" ? n.to : undefined
-  const known = places.some((o) => o.value === to)
+  const to = n.to
   return (
     <>
       <Section>
         <div className="space-y-3">
           <Field label="Post to"><Pick value={to ?? ""} ro={ro} placeholder="Choose" onChange={(v) => set((x) => { x.to = v })}
-            options={known || !to ? places : [...places, { value: to, label: to }]} /></Field>
+            options={placeOptions(catalog, to, true)} /></Field>
+          <Field label="Post as"><Pick value={n.as_agent ?? NOWHERE} ro={ro} onChange={(v) => set((x) => { x.as_agent = v === NOWHERE ? undefined : v })}
+            options={[{ value: NOWHERE, label: "Daimon" }, ...(catalog?.agents ?? []).map((a) => ({ value: a.key, label: a.name }))]} /></Field>
           <Field label="Thread"><Text value={n.thread ?? ""} ro={ro} placeholder="None" onChange={(v) => set((x) => { x.thread = v || undefined }, 400)} /></Field>
         </div>
       </Section>

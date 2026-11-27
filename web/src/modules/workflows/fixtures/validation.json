@@ -11,7 +11,10 @@
   "loop_limit",
   "bad_event_source",
   "rule_of_two",
-  "cost"
+  "cost",
+  "bad_place",
+  "private_place",
+  "private_output"
  ],
  "cases": [
   {
@@ -5674,26 +5677,41 @@
     "defaults": {
      "agent": "mmm"
     },
+    "concurrency": {
+     "limit": 1,
+     "on_conflict": "skip"
+    },
     "start": "run",
     "nodes": {
      "run": {
       "kind": "agent",
       "title": "Weekly channel readout",
       "instructions": "Summarize last week's channel contribution for Larkspur and flag any interval wider than 20%.",
-      "session": "main",
-      "output": {
-       "summary": {
-        "type": "string"
+      "at": "C0MMM",
+      "writes": "policy",
+      "can_finish_early": true,
+      "next": "seen"
+     },
+     "seen": {
+      "kind": "branch",
+      "cases": [
+       {
+        "when": "${{ 'C0MMM' in steps.run.posted }}",
+        "to": "done"
        }
-      },
+      ],
+      "else": "post"
+     },
+     "post": {
+      "kind": "post",
+      "to": "C0MMM",
+      "message": "${{ steps.run.summary }}",
+      "files": "${{ steps.run.files }}",
+      "as_agent": "mmm",
       "next": "done"
      },
      "done": {
-      "kind": "finish",
-      "deliver": {
-       "to": "home",
-       "message": "${{ steps.run.output.summary }}"
-      }
+      "kind": "finish"
      }
     }
    },
@@ -5704,6 +5722,8 @@
     "run": [
      "S"
     ],
+    "seen": [],
+    "post": [],
     "done": []
    },
    "seed": "readout"
@@ -5729,26 +5749,41 @@
     "defaults": {
      "agent": "pricing"
     },
+    "concurrency": {
+     "limit": 1,
+     "on_conflict": "skip"
+    },
     "start": "run",
     "nodes": {
      "run": {
       "kind": "agent",
       "title": "Overnight price test",
       "instructions": "Post the overnight price test readout.",
-      "session": "main",
-      "output": {
-       "summary": {
-        "type": "string"
+      "at": "C0PRICING",
+      "writes": "policy",
+      "can_finish_early": true,
+      "next": "seen"
+     },
+     "seen": {
+      "kind": "branch",
+      "cases": [
+       {
+        "when": "${{ 'C0PRICING' in steps.run.posted }}",
+        "to": "done"
        }
-      },
+      ],
+      "else": "post"
+     },
+     "post": {
+      "kind": "post",
+      "to": "C0PRICING",
+      "message": "${{ steps.run.summary }}",
+      "files": "${{ steps.run.files }}",
+      "as_agent": "pricing",
       "next": "done"
      },
      "done": {
-      "kind": "finish",
-      "deliver": {
-       "to": "home",
-       "message": "${{ steps.run.output.summary }}"
-      }
+      "kind": "finish"
      }
     }
    },
@@ -5759,6 +5794,8 @@
     "run": [
      "S"
     ],
+    "seen": [],
+    "post": [],
     "done": []
    },
    "seed": "price"
@@ -5784,26 +5821,41 @@
     "defaults": {
      "agent": "reviewer"
     },
+    "concurrency": {
+     "limit": 1,
+     "on_conflict": "skip"
+    },
     "start": "run",
     "nodes": {
      "run": {
       "kind": "agent",
       "title": "Stale pull requests",
       "instructions": "List pull requests open for more than a week.",
-      "session": "main",
-      "output": {
-       "summary": {
-        "type": "string"
+      "at": "C0ENG",
+      "writes": "policy",
+      "can_finish_early": true,
+      "next": "seen"
+     },
+     "seen": {
+      "kind": "branch",
+      "cases": [
+       {
+        "when": "${{ 'C0ENG' in steps.run.posted }}",
+        "to": "done"
        }
-      },
+      ],
+      "else": "post"
+     },
+     "post": {
+      "kind": "post",
+      "to": "C0ENG",
+      "message": "${{ steps.run.summary }}",
+      "files": "${{ steps.run.files }}",
+      "as_agent": "reviewer",
       "next": "done"
      },
      "done": {
-      "kind": "finish",
-      "deliver": {
-       "to": "home",
-       "message": "${{ steps.run.output.summary }}"
-      }
+      "kind": "finish"
      }
     }
    },
@@ -5814,6 +5866,8 @@
     "run": [
      "S"
     ],
+    "seen": [],
+    "post": [],
     "done": []
    },
    "seed": "prs"
@@ -6568,6 +6622,241 @@
     ],
     "done": []
    }
+  },
+  {
+   "name": "an agent works at home",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Place",
+    "visibility": "private",
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "run",
+    "nodes": {
+     "run": {
+      "kind": "agent",
+      "instructions": "Say hello.",
+      "at": "home",
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish"
+     }
+    },
+    "home": {
+     "channel": "C0HOME"
+    }
+   },
+   "errors": [],
+   "warnings": []
+  },
+  {
+   "name": "an agent works at a place that is a person or an expression",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Place",
+    "visibility": "private",
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "run",
+    "nodes": {
+     "run": {
+      "kind": "agent",
+      "instructions": "Say hello.",
+      "at": "run_as",
+      "next": "post"
+     },
+     "post": {
+      "kind": "post",
+      "message": "${{ steps.run.summary }}",
+      "next": "done",
+      "to": "home"
+     },
+     "done": {
+      "kind": "finish"
+     }
+    },
+    "home": {
+     "channel": "C0HOME"
+    }
+   },
+   "errors": [
+    "bad_place:run"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "an agent with personal memory works nowhere",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Place",
+    "visibility": "private",
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "run",
+    "nodes": {
+     "run": {
+      "kind": "agent",
+      "instructions": "Say hello.",
+      "memory": "personal",
+      "at": "home",
+      "next": "done"
+     },
+     "done": {
+      "kind": "finish"
+     }
+    },
+    "home": {
+     "channel": "C0HOME"
+    }
+   },
+   "errors": [
+    "private_place:run"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "only a post to the run-as person reads a personal result",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Place",
+    "visibility": "private",
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "run",
+    "nodes": {
+     "run": {
+      "kind": "agent",
+      "instructions": "Say hello.",
+      "memory": "personal",
+      "next": "post"
+     },
+     "post": {
+      "kind": "post",
+      "message": "${{ steps.run.summary }}",
+      "next": "done",
+      "to": "home"
+     },
+     "done": {
+      "kind": "finish"
+     }
+    },
+    "home": {
+     "channel": "C0HOME"
+    }
+   },
+   "errors": [
+    "private_output:post"
+   ],
+   "warnings": []
+  },
+  {
+   "name": "a post to the run-as person reads a personal result",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Place",
+    "visibility": "private",
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "run",
+    "nodes": {
+     "run": {
+      "kind": "agent",
+      "instructions": "Say hello.",
+      "memory": "personal",
+      "next": "post"
+     },
+     "post": {
+      "kind": "post",
+      "message": "${{ steps.run.summary }}",
+      "next": "done",
+      "to": "run_as"
+     },
+     "done": {
+      "kind": "finish"
+     }
+    },
+    "home": {
+     "channel": "C0HOME"
+    }
+   },
+   "errors": [],
+   "warnings": []
+  },
+  {
+   "name": "a personal step still shows where it posted",
+   "spec": {
+    "schema": "daimon.workflow/v1",
+    "name": "Place",
+    "visibility": "private",
+    "triggers": [
+     {
+      "id": "manual",
+      "kind": "manual"
+     }
+    ],
+    "defaults": {
+     "agent": "writer"
+    },
+    "start": "run",
+    "nodes": {
+     "run": {
+      "kind": "agent",
+      "instructions": "Say hello.",
+      "memory": "personal",
+      "next": "post"
+     },
+     "post": {
+      "kind": "post",
+      "message": "${{ 'home' in steps.run.posted }}",
+      "next": "done",
+      "to": "home"
+     },
+     "done": {
+      "kind": "finish"
+     }
+    },
+    "home": {
+     "channel": "C0HOME"
+    }
+   },
+   "errors": [],
+   "warnings": []
   }
  ]
 }

@@ -20,7 +20,6 @@ export const KIND: Record<Kind, { icon: LucideIcon; label: string; strip: string
   for_each: { icon: Repeat, label: "For each", strip: "bg-chart-2", text: "text-chart-2" },
   workflow: { icon: WorkflowIcon, label: "Workflow", strip: "bg-faint", text: "text-muted-foreground" },
   post: { icon: Send, label: "Post", strip: "bg-chart-3", text: "text-chart-3" },
-  routine: { icon: Clock, label: "Routine", strip: "bg-chart-1", text: "text-chart-1" },
   finish: { icon: Flag, label: "Finish", strip: "bg-success", text: "text-success" },
 }
 
@@ -86,7 +85,9 @@ export function factsOf(n: Node, spec: Spec, catalog?: Catalog): string[] {
     case "agent": {
       const key = n.agent ?? spec.defaults?.agent ?? "daimon"
       const fields = typeof n.output === "object" ? Object.keys(n.output).length : 0
-      return [catalog?.agents.find((a) => a.key === key)?.name ?? key, ...(fields ? [`${fields} ${fields === 1 ? "field" : "fields"}`] : [])]
+      const at = n.at === "home" ? spec.home?.channel : n.at
+      const place = catalog?.channels.find((c) => c.id === at)?.name
+      return [catalog?.agents.find((a) => a.key === key)?.name ?? key, ...(n.memory ? ["Personal"] : []), ...(at ? [place ? `#${place}` : n.at === "origin" ? "Where it started" : at] : []), ...(fields ? [`${fields} ${fields === 1 ? "field" : "fields"}`] : [])]
     }
     case "action": return [catalog?.tools.find((t) => t.id === n.tool)?.label ?? (n.tool || "No tool")]
     case "approval": return [[n.approvers ?? []].flat().map((p) => approverLabel(p, catalog)).join(", ")]
@@ -100,11 +101,6 @@ export function factsOf(n: Node, spec: Spec, catalog?: Catalog): string[] {
       const to = n.to === "home" ? spec.home?.channel : typeof n.to === "string" ? n.to : undefined
       const channel = catalog?.channels.find((c) => c.id === to)?.name
       return [channel ? `#${channel}` : to || "No target"]
-    }
-    case "routine": {
-      const to = typeof n.to === "object" ? n.to : undefined
-      const channel = catalog?.channels.find((c) => c.id === to?.id)?.name
-      return [n.agent ?? "daimon", to?.kind === "dm" ? "Owner" : channel ? `#${channel}` : to?.id || "No target"]
     }
     case "finish": {
       const to = finishDeliver(n)?.to === "home" ? spec.home?.channel : finishDeliver(n)?.to
