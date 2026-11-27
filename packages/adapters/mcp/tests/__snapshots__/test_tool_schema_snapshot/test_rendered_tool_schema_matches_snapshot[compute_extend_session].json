@@ -1,0 +1,39 @@
+{
+  "description": [
+    "Set your session's expiry to this many hours from now.",
+    "",
+    "Use this from the owner's conversation, or from the owner's agent-chat session.",
+    "Daimon shows a card by itself when one is needed: do not tell the person to expect",
+    "an approval step. Where no card shows, hours cannot exceed the default time. Use",
+    "the original attended conversation. Hours cannot exceed the operator TTL. This",
+    "does not change the idle window used by subsequent command/file writes."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "hours": {
+        "type": "integer"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "session_id": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "hours"
+    ],
+    "type": "object"
+  }
+}

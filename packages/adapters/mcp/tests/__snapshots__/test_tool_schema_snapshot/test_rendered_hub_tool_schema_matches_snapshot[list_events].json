@@ -1,0 +1,60 @@
+{
+  "description": [
+    "A session's transcript. The Daimon's reply is in ``agent.message`` events.",
+    "",
+    "Callers must still pass current membership and invoker-policy checks."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "daimon_id": {
+        "type": "string"
+      },
+      "handle": {
+        "type": "string"
+      },
+      "limit": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "order": {
+        "anyOf": [
+          {
+            "enum": [
+              "asc",
+              "desc"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "page": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "daimon_id",
+      "handle"
+    ],
+    "type": "object"
+  }
+}

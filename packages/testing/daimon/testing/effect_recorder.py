@@ -195,6 +195,7 @@ OBSERVED_TIME_FIELDS = frozenset(
         "delivered_at",
         "waiting_since",
         "last_attempt_at",
+        "last_turn_at",
     }
 )
 SCHEDULED_TIME_FIELDS = frozenset(

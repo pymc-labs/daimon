@@ -1,0 +1,33 @@
+{
+  "description": [
+    "Permanently delete a session and its files. Export needed files first.",
+    "",
+    "The owner may stop it from any of their conversations. A current tenant admin",
+    "may emergency-stop it without access to commands, files or other contents.",
+    "Failed provider deletion remains pending for automatic cleanup."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "session_id": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id"
+    ],
+    "type": "object"
+  }
+}

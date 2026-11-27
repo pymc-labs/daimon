@@ -1,0 +1,33 @@
+{
+  "description": [
+    "Turn file attachments on or off for a visitor invite, accepted or not. Pass this",
+    "active turn's origin_context_id. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "allow": {
+        "type": "boolean"
+      },
+      "invite_id": {
+        "type": "string"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "invite_id",
+      "allow"
+    ],
+    "type": "object"
+  }
+}

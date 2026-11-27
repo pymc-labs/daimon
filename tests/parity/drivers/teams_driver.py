@@ -51,6 +51,7 @@ from daimon.core.config import (
 )
 from daimon.core.continuity.dispatch import dispatch_pending_continuations
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.native_admins import GroupLookupFailed
 from daimon.core.posted_controls import CardKind
@@ -59,6 +60,10 @@ from daimon.core.purge import AccountPurgeResult
 from daimon.core.purge import purge_account as core_purge_account
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
+from daimon.core.stores.teams_installations import (
+    delete_teams_installation,
+    record_teams_installation,
+)
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.deps import build_turn_deps
@@ -473,7 +478,18 @@ class TeamsDriver:
         sessionmaker: async_sessionmaker[AsyncSession],
         workspace_id: str,
     ) -> None:
-        raise NotImplementedError("removing the Teams app archives nothing on purpose")
+        # The adapter's removal handler runs this store call; its route is tested in
+        # `packages/adapters/teams/tests/test_installations.py`.
+        tenant_id = derive_tenant_uuid(platform="teams", workspace_id=workspace_id)
+        async with sessionmaker.begin() as session:
+            await record_teams_installation(
+                session,
+                tenant_id=tenant_id,
+                team_id="19:only",
+                group_id=str(uuid.uuid4()),
+                name=None,
+            )
+            await delete_teams_installation(session, tenant_id=tenant_id, team_id="19:only")
 
     # -- posted-control lifecycle -------------------------------------------
 

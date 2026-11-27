@@ -1,0 +1,10 @@
+{
+  "description": [
+    "List the caller's pending timers in this workspace, soonest first."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

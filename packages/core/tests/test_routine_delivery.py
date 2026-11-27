@@ -133,6 +133,16 @@ def test_routine_controls_omit_web_links_when_the_channel_is_held() -> None:
     assert '"web"' not in text, "and no web control at all"
 
 
+def test_routine_controls_carry_the_knows_daimon_hint_unless_held() -> None:
+    row = _row()
+    assert "self_knowledge" not in render_routine_controls(row, platform="discord")
+    assert '"self_knowledge"' in render_routine_controls(row, platform="discord", knows=True)
+    held = render_routine_controls(row, platform="discord", knows=True, held=True)
+    assert "self_knowledge" not in held, "a held fire refuses the tools, so no hint"
+    isolated = render_routine_controls(row, platform="discord", knows=True, daimon_tools=False)
+    assert "self_knowledge" not in isolated, "an isolated agent has no Daimon tools"
+
+
 def test_routine_controls_name_the_destination_and_schedule() -> None:
     text = render_routine_controls(_row(), platform="discord")
     assert text.startswith("<turn_controls>\n{")

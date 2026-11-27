@@ -6,12 +6,7 @@
 <meta name="color-scheme" content="only light">
 <title>Report</title>
 <link rel="stylesheet" href="/viewer/app.css">
-<script type="module">
-import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs";
-pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.worker.min.mjs";
-window.pdfjsLib = pdfjsLib;
-window.dispatchEvent(new Event("pdfjs-ready"));
-</script>
+<script type="module" src="/viewer/pdfjs-init.js"></script>
 </head>
 <body>
 <main class="viewer">

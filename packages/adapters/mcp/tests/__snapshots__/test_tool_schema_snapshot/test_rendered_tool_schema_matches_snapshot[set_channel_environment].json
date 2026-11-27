@@ -1,0 +1,45 @@
+{
+  "description": [
+    "Choose the environment a channel's turns run in, or the workspace default.",
+    "For example, run #growth in the pymc environment. Changes where the agent runs,",
+    "not which agent answers; use ``set_agent_default`` for that.",
+    "",
+    "Omit ``channel_id`` to set the workspace default, which every channel without",
+    "its own environment uses. The environment must already exist",
+    "(``list_environments``). Conversations pick it up from their next message.",
+    "Setting either default requires an admin. Unrestricted networking in",
+    "a sealed channel needs an admin and their confirmation, as does a",
+    "workspace default sealed channels would run in: pass",
+    "``confirm_open_network=true`` only after the caller confirms it.",
+    "",
+    "Pass the parent channel's id: ``parent_channel_id`` from turn_controls; a",
+    "thread id resolves to its parent. The caller must be able to see the channel."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "channel_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "confirm_open_network": {
+        "default": false,
+        "type": "boolean"
+      },
+      "environment_name": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "environment_name"
+    ],
+    "type": "object"
+  }
+}

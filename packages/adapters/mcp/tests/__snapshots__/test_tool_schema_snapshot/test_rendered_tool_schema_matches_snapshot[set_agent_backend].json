@@ -1,0 +1,71 @@
+{
+  "description": [
+    "Change which provider's model the agent uses, or clear it with backend=null.",
+    "",
+    "The agent's owner or an admin, for direct coding-tool or API requests. Chat",
+    "turns use request_agent_backend_switch.",
+    "The returned preview names compatibility limits and list prices.",
+    "Each person's own conversation with the agent moves to the new provider on",
+    "their next message; shared threads stay on the old one; channel settings",
+    "still apply.",
+    "expected_revision refuses a setting changed since it was read.",
+    "preview_only returns the compatibility and cost preview without applying it.",
+    "model picks one of the provider's selectable models (Gemini: gemini-3.8-flash or",
+    "gemini-4-argon); omit it for the provider's default."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "backend": {
+        "anyOf": [
+          {
+            "enum": [
+              "anthropic",
+              "openai",
+              "gemini",
+              "selfhosted"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "expected_revision": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "model": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "name": {
+        "type": "string"
+      },
+      "preview_only": {
+        "default": false,
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "name",
+      "backend"
+    ],
+    "type": "object"
+  }
+}

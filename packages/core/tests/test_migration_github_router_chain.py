@@ -77,7 +77,8 @@ async def test_staging_at_0186_with_tables_reruns_and_downgrades(
             command.downgrade(config, "0174a_github_router_sessions")
             sync.commit()
             _assert_router_objects(sync)
-            # The inspection began a transaction; 0215's autocommit block needs alembic's own.
+            # Inspecting began a transaction; the retention migrations and 0215 run autocommit
+            # blocks, which alembic only supports when the run itself owns the transaction.
             sync.commit()
             command.upgrade(config, "head")
             _assert_head(sync, HEAD)

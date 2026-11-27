@@ -1,0 +1,133 @@
+{
+  "description": [
+    "PATCH-update a routine, including owner-only DM delivery where supported.",
+    "",
+    "Only provided fields are changed.",
+    "",
+    "``destination_kind`` + ``destination_id`` set where results go (see",
+    "``create_routine``); ``clear_destination=true`` removes it, and the",
+    "routine's spend still counts toward the same channel's budget. Saved",
+    "creation-time source channel/thread restrictions survive every edit.",
+    "Legacy routines with unknown provenance keep ordinary destination edits",
+    "but must be recreated from the source channel/thread to select DM delivery.",
+    "",
+    "``catch_up_policy`` selects ``skip`` or one coalesced ``run-once`` after downtime.",
+    "",
+    "``agent_name`` reassigns the routine to a different daimon-tagged agent;",
+    "the tool resolves it to a live MA agent id at the call boundary."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_name": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "catch_up_policy": {
+        "anyOf": [
+          {
+            "enum": [
+              "skip",
+              "run-once"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "clear_destination": {
+        "default": false,
+        "type": "boolean"
+      },
+      "cron_expr": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "destination_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "destination_kind": {
+        "anyOf": [
+          {
+            "enum": [
+              "channel",
+              "thread",
+              "dm"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "enabled": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "routine_id": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "timezone": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "trigger_message": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "routine_id"
+    ],
+    "type": "object"
+  }
+}

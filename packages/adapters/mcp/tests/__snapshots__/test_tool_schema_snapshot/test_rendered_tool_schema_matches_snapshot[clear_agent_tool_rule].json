@@ -1,0 +1,32 @@
+{
+  "description": [
+    "Clear one agent's tool rule."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_name": {
+        "type": "string"
+      },
+      "channel_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "tool_key": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "agent_name",
+      "tool_key"
+    ],
+    "type": "object"
+  }
+}

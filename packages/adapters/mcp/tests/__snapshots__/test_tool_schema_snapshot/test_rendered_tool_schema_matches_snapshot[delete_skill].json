@@ -1,0 +1,21 @@
+{
+  "description": [
+    "Delete a skill such as eda from the workspace, destroying all versions for every agent.",
+    "",
+    "Refused while any agent or channel still uses the skill; the refusal names them.",
+    "Detach with ``remove_skill`` and ``remove_channel_skill`` first. For detaching",
+    "one agent's reference, use ``remove_skill`` instead. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "name": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "name"
+    ],
+    "type": "object"
+  }
+}

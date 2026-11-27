@@ -9,8 +9,12 @@ credits in total, and a request costs one.
 
 ## Set it up
 
-Admins set everything under **Admin** > **Support** in the web app. Every
+Admins set everything with `daimon support` and in chat. Every
 change is recorded in the audit log and applies to the next request.
+
+<!-- knowledge: web -->
+The web app has the same settings under **Admin** > **Support**.
+<!-- /knowledge -->
 
 1. Turn Ask a person on for the workspace.
 2. Choose where it shows, for an agent or a channel.
