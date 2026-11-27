@@ -35,8 +35,8 @@ the same way, so the agent and Slack and Discord sessions never carry it,
 and `requires: microsoft_accounts` keeps it off Teams sessions too until
 Microsoft accounts are set up.
 
-`workflow-authoring` guides the workflow tools. It is limited to `platforms: [web]`,
-so only the web app's chat carries it.
+`workflow-authoring` guides the workflow tools. It is limited to
+`platforms: [discord, slack, teams, web]`, so every chat app carries it.
 
 `skills/lead-intake` provides opt-in Gmail qualification and dossier guidance for
 native lead intake. It rejects unsolicited selling and operational mail before

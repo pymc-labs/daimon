@@ -1216,7 +1216,7 @@ async def test_platform_limited_skills_stay_off_the_seeded_agent_and_its_spec_ha
     assert [(ref.type, ref.skill_id, ref.platforms) for ref in limited] == [
         *(("anthropic", name, ("teams",)) for name in ("docx", "pptx", "xlsx")),
         ("custom", "microsoft-365", ("teams",)),
-        ("custom", "workflow-authoring", ("web",)),
+        ("custom", "workflow-authoring", ("discord", "slack", "teams", "web")),
     ], "the default agent's platform-limited skills"
     without = shipped.model_copy(
         update={"skills": [ref for ref in shipped.skills if ref.platforms is None]}

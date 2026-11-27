@@ -326,7 +326,7 @@ def _default_agent(*, managed: bool = True) -> BetaManagedAgentsAgent:
 def test_the_default_agents_office_skills_are_added_on_teams_only(
     platform: str, configured: bool
 ) -> None:
-    """`defaults/` limits docx, pptx, xlsx and microsoft-365 to Teams; others add nothing.
+    """`defaults/` limits docx, pptx, xlsx and microsoft-365 to Teams; others add workflow-authoring.
 
     microsoft-365 also requires Microsoft accounts to be set up.
     """
@@ -335,7 +335,7 @@ def test_the_default_agents_office_skills_are_added_on_teams_only(
     refs = platform_skill_refs(_default_agent(), platform, limited)
     office = ["docx", "pptx", "xlsx"]
     expected = (office + ["microsoft-365"] * configured) if platform == "teams" else []
-    assert [ref.skill_id for ref in refs] == expected, (
+    assert [ref.skill_id for ref in refs] == [*expected, "workflow-authoring"], (
         "only a Teams turn gets the Office skills, and microsoft-365 only where it is set up"
     )
     assert (
@@ -344,21 +344,22 @@ def test_the_default_agents_office_skills_are_added_on_teams_only(
     ), "an agent the defaults pipeline does not manage never gets them, whatever its name"
 
 
-def test_only_the_web_chat_adds_workflow_authoring() -> None:
+def test_every_chat_platform_adds_workflow_authoring() -> None:
     limited = load_platform_skills(_DEFAULTS, features=frozenset())
     platforms = ("discord", "slack", "teams", "web")
     on = {
         p: [r.skill_id for r in platform_skill_refs(_default_agent(), p, limited)]
         for p in platforms
     }
-    assert on["web"] == ["workflow-authoring"], on
-    assert all("workflow-authoring" not in on[p] for p in ("discord", "slack", "teams")), on
+    assert all(on[p][-1:] == ["workflow-authoring"] for p in platforms), on
+    assert all(on[p] == ["workflow-authoring"] for p in ("discord", "slack", "web")), on
 
 
 async def test_platform_skills_count_toward_the_cap_and_a_dropped_skill_is_logged(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """The default agent's 11 skills leave room for the rest of the cap, 4 fewer on Teams.
+    """The default agent's 11 skills leave room for the rest of the cap, 1 fewer on Slack and
+    Discord and 5 fewer on Teams.
 
     The provider's limit counts the whole session `skills` list, so the Office
     built-ins and `microsoft-365` added on Teams count first; a channel that
@@ -367,8 +368,10 @@ async def test_platform_skills_count_toward_the_cap_and_a_dropped_skill_is_logge
     agent = _default_agent()
     tenant_id = uuid.uuid4()
     m365 = tenant_scoped_display_title(tenant_id=tenant_id, name="microsoft-365")
+    wfa = tenant_scoped_display_title(tenant_id=tenant_id, name="workflow-authoring")
+    uploads = [_skill("skill_m365", m365), _skill("skill_wfa", wfa)]
     office = await turn_platform_skills(
-        _client([_skill("skill_m365", m365)]),
+        _client(uploads),
         tenant_id=tenant_id,
         platform="teams",
         agent=agent,
@@ -378,22 +381,24 @@ async def test_platform_skills_count_toward_the_cap_and_a_dropped_skill_is_logge
     assert [(s.type, s.skill_id, s.version) for s in office] == [
         *(("anthropic", name, "latest") for name in ("docx", "pptx", "xlsx")),
         ("custom", "skill_m365", "latest"),
-    ], "the built-ins need no lookup; the seeded upload is found by title; all run at latest"
-    assert skill_room(agent) == AGENT_SKILL_CAP - 11, "on Slack and Discord the room is as before"
-    assert skill_room(agent, office) == AGENT_SKILL_CAP - 15, "on Teams the platform's count too"
+        ("custom", "skill_wfa", "latest"),
+    ], "the built-ins need no lookup; the seeded uploads are found by title; all run at latest"
+    chat = tuple(s for s in office if s.skill_id == "skill_wfa")
+    assert skill_room(agent, chat) == AGENT_SKILL_CAP - 12, "on Slack and Discord it takes one"
+    assert skill_room(agent, office) == AGENT_SKILL_CAP - 16, "on Teams the platform's count too"
     unconfigured = await turn_platform_skills(
-        _client([_skill("skill_m365", m365)]),
+        _client(uploads),
         tenant_id=tenant_id,
         platform="teams",
         agent=agent,
         platform_skills=load_platform_skills(_DEFAULTS, features=frozenset()),
         now=_NOW,
     )
-    assert skill_room(agent, unconfigured) == AGENT_SKILL_CAP - 14, (
+    assert skill_room(agent, unconfigured) == AGENT_SKILL_CAP - 15, (
         "without Microsoft accounts, Teams keeps the room microsoft-365 would take"
     )
 
-    room, room_slack = AGENT_SKILL_CAP - 15, AGENT_SKILL_CAP - 11
+    room, room_slack = AGENT_SKILL_CAP - 16, AGENT_SKILL_CAP - 12
 
     async def turn(count: int, platform_skills: Sequence[MaSkill] = office) -> list[str]:
         picked = await turn_channel_skills(
@@ -420,8 +425,8 @@ async def test_platform_skills_count_toward_the_cap_and_a_dropped_skill_is_logge
         [f"skill_{i}" for i in range(room, room + 4)],
         [f"skill_{i}" for i in range(room, room + 5)],
     ], "the dropped skills are named once, not on every turn, and again only when they change"
-    assert await turn(room_slack, ()) == [f"skill_{i}" for i in range(room_slack)], (
-        "without them, the Slack and Discord room fits"
+    assert await turn(room_slack, chat) == [f"skill_{i}" for i in range(room_slack)], (
+        "without the Office skills, the Slack and Discord room fits"
     )
 
 
@@ -529,16 +534,16 @@ async def test_a_teams_channel_counts_the_default_agents_office_skills_when_addi
 ) -> None:
     """On Teams the default agent's built-ins count toward the cap and keep their names.
 
-    The default agent holds 11 skills and Teams adds 4, so a Teams channel may
+    The default agent holds 11 skills, Slack adds 1 and Teams adds 5, so a Teams channel may
     add 4 fewer than a Slack one; a custom skill named like a built-in would clash with it.
     """
     tenant = await make_tenant(db_session)
     titles = {
         name: tenant_scoped_display_title(tenant_id=tenant.id, name=name)
-        for name in ("report", "docx", "microsoft-365")
+        for name in ("report", "docx", "microsoft-365", "workflow-authoring")
     }
     client = _client([_skill(f"skill_{name}", title) for name, title in titles.items()])
-    current = [_row(f"skill_{i}", f"s{i}") for i in range(AGENT_SKILL_CAP - 15)]
+    current = [_row(f"skill_{i}", f"s{i}") for i in range(AGENT_SKILL_CAP - 16)]
 
     async def choose(skill: str, platform: str) -> ChannelSkillChoice | str:
         return await _choose_channel_skill(

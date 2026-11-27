@@ -1,6 +1,6 @@
 ---
 name: workflow-authoring
-description: Read, change and test a workflow's draft with the workflow tools. Use when someone asks you to build, change, fix or explain a workflow, or has one open in the web app.
+description: Read, change and test a workflow's draft with the workflow tools. Use when someone asks you to build, change, fix or explain a workflow, or has one open.
 ---
 
 # Workflow authoring
@@ -21,6 +21,9 @@ live until someone publishes it.
 
 Publish only when the person asks. An agent key cannot publish.
 
+In Discord, Slack and Teams, link the workflow page for the full canvas and do not paste
+the spec.
+
 ## Steps
 
 | Kind | Use it to |
@@ -38,6 +41,10 @@ Publish only when the person asks. An agent key cannot publish.
 | `finish` | End the run, with an `output` and an optional `deliver` or `state` |
 
 Every path ends at a `finish`. A loop needs `max_visits`.
+
+An agent step may work `at` `home`, `origin` or a channel or thread id. With
+`memory: personal` it reads the run-as person's memory, works nowhere, and only a post
+`to: run_as` may use its result. `steps.<id>.posted` lists where it posted itself.
 
 An agent step lists `skills` by name from the workspace library; an unknown name is an
 error. An `approval` with `otherwise` sends a reply that names no option to that step.
@@ -86,7 +93,8 @@ untrusted input.
 
 A step that must write with nobody watching lists `writes_to`: a `tool`, a `where`
 rule per argument (`in`, `prefix`, `domains` or `created_by`) and `free` arguments.
-Prefer it to `writes: allow`. Leave `writes: routine` to routines that moved.
+Prefer it to `writes: allow`. `writes: policy` writes only as the server allows every
+unattended run.
 
 `stage` on a step and a `card` on the spec put runs on a board. `card.date` names the
 field a calendar uses.

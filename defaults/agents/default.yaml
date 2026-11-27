@@ -234,10 +234,10 @@ skills:
     skill_id: microsoft-365
     platforms: [teams]
     requires: microsoft_accounts
-  # Guides the workflow tools in the web app's Ask Daimon chat, whose turns name it.
+  # Guides the workflow tools in every chat app and the web app's Ask Daimon chat.
   - type: custom
     skill_id: workflow-authoring
-    platforms: [web]
+    platforms: [discord, slack, teams, web]
 tools:
   - type: agent_toolset_20260401
     configs:
