@@ -54,6 +54,7 @@ from daimon.core.server_skills.sync import (
 )
 from daimon.core.skill_library import MirrorDoc, mirror_doc
 from daimon.core.skill_library_files import SkillRef, fork_library_skill
+from daimon.core.skill_repos import mirror_sync_deps
 from daimon.core.skills.ingest import SkillIngestError
 from daimon.core.stores import server_skills as store
 from daimon.core.stores import web_people
@@ -271,20 +272,36 @@ async def _add_impl(
     return ServerSkills(server=node.label, added=await _shown(runtime, auth, ref))
 
 
+async def _mirror_sync(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    mirror: ServerSkillRow,
+    run: Callable[[SyncDeps], Awaitable[CheckResult]],
+) -> CheckResult:
+    """`run` with the sync that keeps `mirror`: its repository's, else the node's."""
+    async with httpx.AsyncClient() as http:
+        deps = mirror_sync_deps(
+            mirror,
+            runtime.settings.github,
+            runtime.settings.github_app,
+            _edit_deps(runtime),
+            http=http,
+            now=_now,
+        )
+        return await run(deps or _sync_deps(runtime, _node(runtime, auth)))
+
+
 async def _check_impl(runtime: McpRuntime, auth: AuthIdentity, skill_id: str) -> ServerSkillCheck:
-    node = _node(runtime, auth)
     await _require_editor(runtime, auth)
     _require_library_admin(auth)
     mirror = await _mirror(runtime, auth, skill_id)
-    return await _checked(
-        runtime, auth, mirror, await check_mirror(_sync_deps(runtime, node), mirror.id)
-    )
+    result = await _mirror_sync(runtime, auth, mirror, lambda deps: check_mirror(deps, mirror.id))
+    return await _checked(runtime, auth, mirror, result)
 
 
 async def _approve_impl(
     runtime: McpRuntime, auth: AuthIdentity, skill_id: str, digest: str, origin_context_id: str
 ) -> ServerSkillCheck:
-    node = _node(runtime, auth)
     await _require_editor(runtime, auth)
     _require_library_admin(auth)
     # An approved update puts new scripts and allowed tools in front of everyone.
@@ -294,12 +311,10 @@ async def _approve_impl(
     mirror = await _mirror(runtime, auth, skill_id)
     if mirror.pending_digest is None:
         raise ToolError("No update is waiting.")
-    return await _checked(
-        runtime,
-        auth,
-        mirror,
-        await approve_update(_sync_deps(runtime, node), mirror.id, digest=digest),
+    result = await _mirror_sync(
+        runtime, auth, mirror, lambda deps: approve_update(deps, mirror.id, digest=digest)
     )
+    return await _checked(runtime, auth, mirror, result)
 
 
 async def _checked(

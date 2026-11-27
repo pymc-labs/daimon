@@ -6,13 +6,18 @@ from collections.abc import Iterable
 from typing import Final
 
 from daimon.core import ports
-from daimon.core.capability_tools import CAPABILITY_KEYS, CAPABILITY_TOOLS
+from daimon.core.capability_tools import (
+    CAPABILITY_KEYS,
+    CAPABILITY_TOOLS,
+    LIBRARY_SKILLS,
+    SERVING_TOOLS,
+)
 from daimon.core.data_tools import DATA_READS
 from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
 
 GATED_KEYS: Final[tuple[str, ...]] = (
-    *CAPABILITY_KEYS, "repo_memory", "web_awareness", "self_knowledge",
+    *CAPABILITY_KEYS, "repo_memory", "web_awareness", "self_knowledge", LIBRARY_SKILLS,
 )  # fmt: skip
 
 WEB_APP_TOOLS: Final[frozenset[str]] = frozenset(
@@ -60,6 +65,7 @@ _TOOLS: Final[dict[str, frozenset[str]]] = {
     "repo_memory": REPO_MEMORY_TOOLS,
     "web_awareness": WEB_APP_TOOLS,
     "self_knowledge": SELF_KNOWLEDGE_TOOLS,
+    LIBRARY_SKILLS: SERVING_TOOLS,
 }
 _FEATURE_OF: Final[dict[str, str]] = {tool: key for key, tools in _TOOLS.items() for tool in tools}
 _REGISTERED: Final[dict[str, frozenset[str]]] = {}

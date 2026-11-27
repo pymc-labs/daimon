@@ -1102,6 +1102,7 @@ async def run_skill_repo_credential_submission(
                 branch=branch,
                 path=path,
                 tenant_id=consumed.tenant_id,
+                records=runtime.sessionmaker,
                 seeded_skill_names=seeded_skill_names,
                 is_admin=await resolve_is_admin(
                     client, user_id=user_id, host_team_id=team_id, action=None

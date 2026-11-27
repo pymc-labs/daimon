@@ -6,6 +6,11 @@ from typing import Final
 
 from daimon.core.data_tools import DATA_READS, DATA_SOURCE_TOOLS, DATA_SOURCES, DATA_TOOLS
 
+LIBRARY_SKILLS: Final = "library_skills"
+SERVING_TOOLS: Final = frozenset({"list_library_skills", "read_library_skill"})
+"""The library's skills (`daimon.adapters.mcp.tools.skill_serving`); never offered to chat, so
+only the server gates them (`daimon.core.features.tool_gate`), not a session's toolset."""
+
 CAPABILITY_TOOLS: Final[dict[str, frozenset[str]]] = {
     "watches": frozenset(
         {

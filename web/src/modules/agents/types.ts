@@ -134,7 +134,8 @@ export type SkillFiles = { skill_id: string; version: string; files: { path: str
 
 export type Template = { id: string; name: string; purpose: string; icon: string; skills: number; servers: number; model: string }
 
-export type Catalog = { models: CatalogModel[]; skills: Skill[]; channels: Place[]; tools: { name: string; label: string }[] }
+/** `scopes`: the data scope of each library skill limited to one, by skill id. */
+export type Catalog = { models: CatalogModel[]; skills: Skill[]; channels: Place[]; tools: { name: string; label: string }[]; scopes?: Record<string, string> }
 
 // The `data_server` connection node: `/api/agents/{id}/nodes/data_server`, passed through from its server.
 

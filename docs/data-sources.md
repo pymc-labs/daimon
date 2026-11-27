@@ -162,6 +162,7 @@ tenants:
     scopes: [{id: shared:eng, kind: shared, name: Engineering}]
     sources:
       - {id: wiki, kind: postgres, name: Wiki, credentials: {dsn: "env:WIKI_DSN"}, publish: true}
+    skill_repos: [{repo: owner/skills, branch: main, paths: [skills], scope: shared:eng}]
 ```
 
 A `workspace` is Daimon's workspace id, or `<platform>:<id>` with the platform's own id for

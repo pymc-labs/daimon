@@ -1,0 +1,20 @@
+{
+  "description": [
+    "Who may read a library skill: a data scope name, or none for everyone who may use",
+    "the library. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "skill_id": {
+        "maxLength": 200,
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "skill_id"
+    ],
+    "type": "object"
+  }
+}

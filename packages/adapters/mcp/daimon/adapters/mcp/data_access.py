@@ -56,6 +56,7 @@ from daimon.data.reading import open_read
 from daimon.data.schema import Schemas
 from daimon.data.sync.engine import Env
 from fastmcp.exceptions import ToolError
+from psycopg import Error
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -93,6 +94,20 @@ async def data_audience_for(runtime: McpRuntime, auth: AuthIdentity) -> DataAudi
     if isinstance(found, DataRefusal):
         raise ToolError(_REFUSALS[found.reason])
     return found
+
+
+async def held_scopes(runtime: McpRuntime, auth: AuthIdentity) -> tuple[str, ...]:
+    """The scopes the caller's answer may read, as the data tools resolve them; none when
+    no data may be read here."""
+    try:
+        audience = await data_audience_for(runtime, auth)
+        async with pool.connection(runtime.settings) as conn:
+            schemas = Schemas.of(runtime.settings.data)
+            salt = f"agent:{auth.chat_agent_id or auth.agent_id}"
+            r = await open_read(conn, schemas, auth.tenant_id, audience, salt=salt)
+    except (ToolError, Error):
+        return ()
+    return r.ctx.scopes
 
 
 async def readable_by_audience(
@@ -150,8 +165,12 @@ async def data_origin(runtime: McpRuntime, auth: AuthIdentity, *, now: datetime)
         if routine.destination_kind in ("channel", "thread") and routine.destination_id:
             return await _room(runtime, auth, asker, routine.destination_id, None, now=now)
         return DataOrigin("private", asker)
-    if auth.agent_id is not None and auth.bound_channel_id is not None:
-        return await _room(runtime, auth, asker, auth.bound_channel_id, None, now=now)
+    if auth.agent_id is not None:
+        if not auth.coding_key:
+            return DataOrigin("none")  # only a person's coding key reads, as its maker
+        if auth.bound_channel_id is not None:
+            # Minted in a limited channel: its rule follows the key.
+            return await _room(runtime, auth, asker, auth.bound_channel_id, None, now=now)
     return DataOrigin("private", asker)
 
 

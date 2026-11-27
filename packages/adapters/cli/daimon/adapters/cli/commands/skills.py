@@ -125,6 +125,7 @@ async def sync_skills(
             branch=branch,
             path=path,
             tenant_id=tenant_id,
+            records=rt.sessionmaker,
             seeded_skill_names=seeded_skill_names,
             # The operator owns the library.
             is_admin=True,

@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 from daimon.core._models import Account
+from daimon.core.capability_tools import LIBRARY_SKILLS
 from daimon.core.mcp_skills.install import ServerSkill
 from daimon.core.mcp_skills.manifest import SkillEntry, parse_entry
 from daimon.core.server_skills import follows as follows_module
@@ -30,8 +31,9 @@ from daimon.core.server_skills.sync import (
 from daimon.core.skill_library_files import skill_lock
 from daimon.core.skills.ingest import SkillBundle
 from daimon.core.stores import server_skills as store
+from daimon.core.stores import workspace_skills as kept
 from daimon.core.stores.domain import ServerSkillRow
-from daimon.testing.factories import make_account, make_held_update, make_tenant
+from daimon.testing.factories import make_account, make_held_update, make_tenant, turn_on
 from daimon.testing.mcp_skills import SkillsServer, skill_md
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -187,6 +189,38 @@ async def test_text_update_reaches_every_provider_but_pinned_agents(
     assert world.second.agents == {"other": "2"}
     row = await _row(world)
     assert row.status == "current" and "guide.md" in row.manifest
+
+
+async def test_a_published_update_is_kept_as_a_version(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    world = await _world(db_session, db_session_factory)
+    async with db_session_factory.begin() as session:
+        await turn_on(session, tenant_id=world.mirror.tenant_id, key=LIBRARY_SKILLS)
+    world.upstream.server.skills[NAME]["guide.md"] = b"More.\n"
+    await check_mirror(world.deps, world.mirror.id)
+
+    async with db_session_factory() as session:
+        skill = await kept.get_skill(session, tenant_id=world.mirror.tenant_id, skill_id="skill_1")
+        assert skill is not None and skill.current_version == "2"
+        files = await kept.list_files(
+            session, tenant_id=world.mirror.tenant_id, skill_id="skill_1", version="2"
+        )
+    assert "guide.md" in {f.path for f in files}
+
+
+async def test_a_repository_read_without_the_app_holds_even_a_text_update(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    world = await _world(db_session, db_session_factory)
+
+    async def anonymous() -> bool:
+        return True
+
+    deps = dataclasses.replace(world.deps, approve_every_change=anonymous)
+    world.upstream.server.skills[NAME]["guide.md"] = b"More.\n"
+    assert await check_mirror(deps, world.mirror.id) == "pending"
+    assert world.first.published == [] and world.second.published == []
 
 
 async def test_a_failing_provider_keeps_its_agents_and_retries(

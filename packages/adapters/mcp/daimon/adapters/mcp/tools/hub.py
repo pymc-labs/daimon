@@ -239,9 +239,9 @@ async def _resolve_daimon(
 
 
 async def _auth_for(
-    runtime: McpRuntime, hub: HubIdentity, tenant: HubTenant, agent: BetaManagedAgentsAgent
+    runtime: McpRuntime, hub: HubIdentity, tenant: HubTenant, agent: BetaManagedAgentsAgent | None
 ) -> AuthIdentity:
-    """Identity for the caller's account in ``tenant``.
+    """Identity for the caller's account in ``tenant``, acting through ``agent`` when given.
 
     ``role`` and ``is_admin`` are both pinned to the non-admin value rather
     than copied from the account row: the hub registers no admin tools, and
@@ -267,7 +267,11 @@ async def _auth_for(
         role=Role.USER,
         platform=hub.platform,
         external_id=tenant.workspace_id,
-        agent_id=derive_agent_uuid(tenant_id=tenant.tenant_id, ma_agent_id=str(agent.id)),
+        agent_id=(
+            None
+            if agent is None
+            else derive_agent_uuid(tenant_id=tenant.tenant_id, ma_agent_id=str(agent.id))
+        ),
         platform_user_id=hub.platform_user_id,
         is_admin=False,
         # The hub token is the person's own platform login, verified at sign-in.

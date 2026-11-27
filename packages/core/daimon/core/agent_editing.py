@@ -14,7 +14,7 @@ import contextlib
 import uuid
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
-from typing import Any, Final, Literal, cast, get_args
+from typing import Any, Final, Literal, Protocol, cast, get_args
 
 import anthropic
 import anyio
@@ -34,6 +34,7 @@ from daimon.core.agent_pins import agent_pin_names
 from daimon.core.anthropic_guard import anthropic_configured
 from daimon.core.authz import Action, AgentReach, Subject, Surface, authorize, build_agent_ref
 from daimon.core.channel_rules import ChannelRuleRefused, set_agent_rule
+from daimon.core.config import Settings
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
 from daimon.core.defaults.mcp_merge import DAIMON_MCP_SERVER_NAME, get_reserved_mcp_rejection
@@ -132,6 +133,18 @@ class AgentActor:
         return resource_scope(tenant_id=str(self.tenant_id), account_id=str(self.account_id))
 
 
+class SkillWriter(Protocol):
+    """Who a library skill is created for: a person editing, or the workspace itself."""
+
+    @property
+    def tenant_id(self) -> uuid.UUID: ...
+
+    @property
+    def account_id(self) -> uuid.UUID | None: ...
+
+    def scope(self) -> Scope: ...
+
+
 @dataclass(frozen=True)
 class AgentEditDeps:
     client: AsyncAnthropic
@@ -145,6 +158,8 @@ class AgentEditDeps:
     resolver_cache: ResolverCache | None = None
     # The deployment's own default agent: an agent rule is judged against it.
     deployment_default: DeploymentDefault = DeploymentDefault()
+    # Reads the data scopes a person holds; without it only admins open a scoped skill.
+    settings: Settings | None = None
 
 
 @dataclass(frozen=True)

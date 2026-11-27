@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from collections import defaultdict
 from collections.abc import Mapping
-from typing import Literal
+from typing import Literal, Protocol
 
 import anthropic
 import httpx
@@ -118,8 +118,13 @@ class SyncedSkill(BaseModel):
     detail: str | None = None
 
 
+class InTenant(Protocol):
+    @property
+    def tenant_id(self) -> uuid.UUID: ...
+
+
 def own_skills(
-    actor: AgentActor, rows: list[SkillListResponse]
+    actor: InTenant, rows: list[SkillListResponse]
 ) -> list[tuple[SkillListResponse, str]]:
     """Anthropic's skills and this workspace's own by bare name; others are left out."""
     out: list[tuple[SkillListResponse, str]] = []
@@ -355,6 +360,7 @@ async def sync_from_github(
             branch=branch.strip() or "main",
             path=path.strip().strip("/"),
             tenant_id=actor.tenant_id,
+            records=deps.session_factory,
             seeded_skill_names=seeded,
             is_admin=True,
             token=None,

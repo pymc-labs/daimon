@@ -8,7 +8,7 @@ admin. Operator tokens read them with ``tenant:read`` and change them with
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import cast
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -30,8 +30,10 @@ from daimon.core.errors import SkillsListTruncatedError
 from daimon.core.permissions import SEALED_REFUSAL
 from daimon.core.security_audit import record_authz_denial, record_policy_decision
 from daimon.core.stores import channel_skills as store
+from daimon.core.stores import workspace_skills
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import ChannelSkillRow
+from daimon.core.workspace_skills import scoped_skill_note
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -154,7 +156,13 @@ async def _add(
         rows = await store.list_channel_skills(
             session, tenant_id=auth.tenant_id, platform=platform, channel_id=target
         )
-    return await _shown(runtime, auth, target, rows)
+        scoped = await workspace_skills.scopes_among(
+            session, tenant_id=auth.tenant_id, skill_ids=[added.skill_id]
+        )
+    shown = await _shown(runtime, auth, target, rows)
+    if not scoped:
+        return shown
+    return replace(shown, summary=f"{shown.summary} {scoped_skill_note(scoped.values())}")
 
 
 async def _remove(

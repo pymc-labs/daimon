@@ -103,6 +103,7 @@ def _web_edit_deps(runtime: McpRuntime) -> AgentEditDeps:
         denied_tools=settings.tool_safety.denied,
         resolver_cache=runtime.resolver_cache,
         deployment_default=runtime.deployment_default,
+        settings=settings,
     )
 
 

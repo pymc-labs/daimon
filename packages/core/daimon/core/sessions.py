@@ -122,12 +122,17 @@ from daimon.core.session_snapshot import (
     session_tools,
     snapshot_from_created_session,
 )
+from daimon.core.skill_audience import skills_to_drop
 from daimon.core.skills.unresolved import (
     report_skill_unavailable,
     skill_unavailable,
     unresolved_skill_id,
 )
-from daimon.core.stores import agent_files, agent_memory_stores, github_router_sessions
+from daimon.core.stores import (
+    agent_files,
+    agent_memory_stores,
+    github_router_sessions,
+)
 from daimon.core.stores import agent_mcp_credentials as credential_store
 from daimon.core.stores.agent_daimon_tools import record_enabled_daimon_tools
 from daimon.core.stores.channel_skills import list_skill_channel_rules
@@ -741,6 +746,8 @@ async def create_session(
     relay_dm_routine: DmRoutineRelay | None = None,
     github_mcp_router: bool = False,
     identity: SessionIdentity = DEFAULT_IDENTITY,
+    withheld_skills: frozenset[str] = frozenset(),
+    held_skill_scopes: frozenset[str] | None = None,
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
 
@@ -785,6 +792,11 @@ async def create_session(
     ``channel_skills`` are the turn's extra skills (the platform's, then the
     channel's), added after the agent's own (`session_skills`, the shape the
     drift check hashes too).
+
+    ``withheld_skills`` are the scoped skills a chat turn's admission took off ``agent``
+    (`daimon.core.skill_audience`); ``held_skill_scopes`` the scopes its audience holds, None
+    when unchecked. A scoped skill outside them is left out too, and either way the skills
+    go as an override, so the provider never mounts the agent's stored ones.
 
     ``identity`` is the session's identity features: a memory store whose feature
     is off is not mounted (personal memory still needs ``personal_memory``), and
@@ -1301,10 +1313,21 @@ async def create_session(
         )
         gated = list(tools) != list(visible_tools(agent, hidden))
         healed = list(servers) != list(visible_mcp_servers(agent, hidden))
+        scoped = set(withheld_skills)
+        if session_factory is not None and tenant_id is not None:
+            scoped |= await skills_to_drop(
+                session_factory,
+                tenant_id,
+                held_skill_scopes,
+                {s.skill_id for s in (*agent.skills, *channel_skills)},
+            )
+        if scoped:
+            _log.warning("session.scoped_skills_withheld", agent_id=agent.id, skills=sorted(scoped))
         if (
             hidden
             or gated
             or healed
+            or scoped
             or channel_skills
             or (agent.skills and not identity.agent_skills)
             or model_override is not None
@@ -1347,13 +1370,14 @@ async def create_session(
                 )
             if system_override is not None:
                 overrides["system"] = system_override
-            if channel_skills or not identity.agent_skills:
+            if channel_skills or scoped or not identity.agent_skills:
                 # A full replacement too: the agent's own at the versions it pins.
                 overrides["skills"] = [
                     cast(BetaManagedAgentsSkillParams, skill.model_dump(mode="json"))
                     for skill in session_skills(
                         agent, channel_skills, agent_skills=identity.agent_skills
                     )
+                    if skill.skill_id not in scoped
                 ]
                 _log.info("session.channel_skills_applied", agent_id=agent.id)
             agent_argument = overrides

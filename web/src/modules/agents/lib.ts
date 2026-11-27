@@ -22,6 +22,8 @@ export const RULE: Record<ToolRule, { label: string; cls: string }> = {
   deny: { label: "Deny", cls: "bg-destructive/10 text-destructive" },
 }
 
+/** Where a skill limited to a data scope loads. */
+export const scopeLabel = (scope: string) => `Only where everyone holds ${scope}`
 export const placeName = (p: Place) => (p.kind === "channel" ? channelLabel(p.name) : p.name)
 
 type Op = { t: " " | "+" | "-"; s: string }

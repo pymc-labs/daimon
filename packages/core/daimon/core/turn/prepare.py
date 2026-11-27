@@ -493,6 +493,8 @@ async def create_ma_session(
             # A DM routine's fire, opened DM included; a replacement session keeps it.
             relay_dm_routine=admission.dm_routine_relay,
             identity=identity,
+            withheld_skills=admission.withheld_skills or frozenset(),
+            held_skill_scopes=admission.held_skill_scopes,
         )
 
     while True:

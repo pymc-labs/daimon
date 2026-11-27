@@ -5613,6 +5613,70 @@ class ServerSkillDeployment(Base):
     updated_at: Mapped[TsNow]
 
 
+class WorkspaceSkill(Base):
+    """A library skill's local record: its latest version and who may see it.
+
+    One row per (tenant, provider skill id), written when a version is published. A NULL
+    `scope` is an unscoped skill, visible to everyone who may use the library; a name
+    is a scope the data package resolves per caller (`daimon.core.workspace_skills`).
+    """
+
+    __tablename__ = "workspace_skills"
+
+    tenant_id: Mapped[TenantPk]
+    skill_id: Mapped[str] = mapped_column(primary_key=True)
+    name: Mapped[str]
+    scope: Mapped[str | None]
+    current_version: Mapped[str]
+    updated_at: Mapped[TsNowOnUpdate]
+
+
+class WorkspaceSkillVersion(Base):
+    """One published version of a workspace skill, with `digest` naming its files."""
+
+    __tablename__ = "workspace_skill_versions"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "skill_id"],
+            ["workspace_skills.tenant_id", "workspace_skills.skill_id"],
+            ondelete="CASCADE",
+            name="fk_workspace_skill_versions_skill",
+        ),
+    )
+
+    tenant_id: Mapped[TenantPk]
+    skill_id: Mapped[str] = mapped_column(primary_key=True)
+    version: Mapped[str] = mapped_column(primary_key=True)
+    digest: Mapped[str]
+    created_at: Mapped[TsNow]
+
+
+class WorkspaceSkillFile(Base):
+    """One file of a workspace skill version, kept so a version is served without the provider."""
+
+    __tablename__ = "workspace_skill_files"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "skill_id", "version"],
+            [
+                "workspace_skill_versions.tenant_id",
+                "workspace_skill_versions.skill_id",
+                "workspace_skill_versions.version",
+            ],
+            ondelete="CASCADE",
+            name="fk_workspace_skill_files_version",
+        ),
+    )
+
+    tenant_id: Mapped[TenantPk]
+    skill_id: Mapped[str] = mapped_column(primary_key=True)
+    version: Mapped[str] = mapped_column(primary_key=True)
+    path: Mapped[str] = mapped_column(primary_key=True)
+    sha256: Mapped[str]
+    size: Mapped[int]
+    content: Mapped[bytes]
+
+
 class AgentSkillFollow(Base):
     """Whether an agent follows a mirrored skill's updates; no row means it does."""
 

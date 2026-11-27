@@ -149,6 +149,9 @@
   "POST /api/agents/server-skills": {
    "tool": "add_server_skill"
   },
+  "POST /api/agents/skill-repos": {
+   "tool": "add_library_repository"
+  },
   "POST /api/agents/skills": {
    "tool": "add_skill"
   },
@@ -356,6 +359,9 @@
   },
   "PUT /api/agents/skills/{skill_id}/files": {
    "tool": "save_library_skill_files"
+  },
+  "PUT /api/agents/skills/{skill_id}/scope": {
+   "tool": "set_skill_scope"
   },
   "PUT /api/agents/{agent_id}/github/working": {
    "tool": "set_working_repo"

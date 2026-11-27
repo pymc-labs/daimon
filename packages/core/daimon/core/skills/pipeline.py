@@ -13,6 +13,7 @@ from daimon.core.errors import DaimonError
 from daimon.core.skills.discover import discover_skills
 from daimon.core.skills.fetch import fetch_repo
 from daimon.core.skills.sync import sync_skills
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
 
@@ -25,6 +26,7 @@ async def run_skill_sync(
     branch: str = "main",
     path: str = "",
     tenant_id: uuid.UUID,
+    records: async_sessionmaker[AsyncSession],
     seeded_skill_names: frozenset[str],
     is_admin: bool,
     token: str | None = None,
@@ -49,6 +51,7 @@ async def run_skill_sync(
             path: Optional subdirectory to scope discovery to. Empty string means
                   discover from repo root.
             tenant_id: Owning tenant — determines the canonical title prefix.
+            records: Where each published version is kept (`record_zip`).
             seeded_skill_names: Names ``sync_skills`` refuses because a
                 default skill already owns them.
             is_admin: Whether the importer may replace an existing library
@@ -83,6 +86,7 @@ async def run_skill_sync(
             client,
             found,
             tenant_id=tenant_id,
+            records=records,
             seeded_skill_names=seeded_skill_names,
             is_admin=is_admin,
         )

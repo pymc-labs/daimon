@@ -1,0 +1,11 @@
+{
+  "description": [
+    "The skills in this workspace's library you may read, each with its latest version and",
+    "files. Read one with `read_library_skill`."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

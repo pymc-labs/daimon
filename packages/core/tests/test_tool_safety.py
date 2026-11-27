@@ -283,6 +283,7 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
         "configs": [
             {"name": name, "enabled": True, "permission_policy": {"type": "always_ask"}}
             for name in (
+                "add_library_repository",
                 "add_server_skill",
                 "add_skill",
                 "approve_data_rule_set",
@@ -307,6 +308,7 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
                 "set_agent_helpers",
                 "set_agent_owners",
                 "set_agent_web_access",
+                "set_skill_scope",
                 "start_long_job",
                 "update_watch",
                 "update_web_person",

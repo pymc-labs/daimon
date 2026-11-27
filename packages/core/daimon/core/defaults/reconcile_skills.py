@@ -43,6 +43,7 @@ from daimon.core.mux_compat import create_skill, publish_skill_version
 from daimon.core.skill_zip import build_skill_zip
 from daimon.core.skills.attachments import delete_skill_unless_attached
 from daimon.core.stores.seeded_skills import load_seeded_skill, record_seeded_skill
+from daimon.core.workspace_skills import record_zip
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
@@ -145,13 +146,18 @@ async def reconcile_skill(
                 skill_id=ma_match.id,
                 had_fingerprint=recorded is not None,
             )
-            with pkg.path.open("rb") as fh:
-                await publish_skill_version(
-                    client,
-                    ma_match.id,
-                    data=fh.read(),
-                    scope=resource_scope(tenant_id=str(tenant_id)),
-                )
+            data = pkg.path.read_bytes()
+            pushed = await publish_skill_version(
+                client, ma_match.id, data=data, scope=resource_scope(tenant_id=str(tenant_id))
+            )
+            await record_zip(
+                session_factory,
+                tenant_id=tenant_id,
+                skill_id=ma_match.id,
+                name=spec.name,
+                version=pushed.version,
+                zip_bytes=data,
+            )
             if db_session is None:
                 async with session_factory() as seed_session:
                     await record_seeded_skill(
@@ -177,13 +183,21 @@ async def reconcile_skill(
 
         if dry_run:
             return ResourceOutcome(kind="skill", name=spec.name, action=Action.CREATED)
-        with pkg.path.open("rb") as fh:
-            created = await create_skill(
-                client,
-                display_title=display_title,
-                data=fh.read(),
-                scope=resource_scope(tenant_id=str(tenant_id)),
-            )
+        data = pkg.path.read_bytes()
+        created = await create_skill(
+            client,
+            display_title=display_title,
+            data=data,
+            scope=resource_scope(tenant_id=str(tenant_id)),
+        )
+        await record_zip(
+            session_factory,
+            tenant_id=tenant_id,
+            skill_id=created.id,
+            name=spec.name,
+            version=created.latest_version,
+            zip_bytes=data,
+        )
         if db_session is None:
             async with session_factory() as seed_session:
                 await record_seeded_skill(

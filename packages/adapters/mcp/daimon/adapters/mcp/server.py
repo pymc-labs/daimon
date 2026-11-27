@@ -113,6 +113,7 @@ from daimon.adapters.mcp.tools.self_knowledge import register_self_knowledge_too
 from daimon.adapters.mcp.tools.server_skills import register_server_skill_tools
 from daimon.adapters.mcp.tools.setup_target import register_setup_target_tools
 from daimon.adapters.mcp.tools.skill_library_edits import register_skill_library_edit_tools
+from daimon.adapters.mcp.tools.skill_serving import register_skill_serving_tools
 from daimon.adapters.mcp.tools.skill_uploads import register_skill_upload_tools
 from daimon.adapters.mcp.tools.support import register_support_tools
 from daimon.adapters.mcp.tools.task_continuity import register_task_continuity_tools
@@ -603,6 +604,7 @@ def create_mcp_app(
     compute.register_compute_tools(mcp, runtime)
     register_lead_intake_tools(mcp, runtime)
     register_data_tools(mcp, runtime)  # data_* reads, behind data_reads
+    register_skill_serving_tools(mcp, runtime)  # the library's skills, by scope
     register_data_admin_tools(mcp, runtime)  # the data pages' admin, from chat
     register_data_connect_tools(mcp, runtime)  # a person's own data sign-ins
     from daimon.adapters.mcp.tools.watches import register_watch_tools

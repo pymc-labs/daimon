@@ -27,6 +27,7 @@ from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.defaults.loader import parse_skill_markdown
 from daimon.core.defaults.ma_index import download_skill_version
 from daimon.core.errors import DaimonError, TurnError
+from daimon.core.skill_audience import skills_to_drop
 from daimon.core.skill_zip import MAX_UNCOMPRESSED_BYTES
 from daimon.core.skills.ingest import SkillIngestError, retained_archive_files
 from daimon.core.skills.latest_versions import LATEST_VERSIONS
@@ -770,6 +771,15 @@ async def turn_session_skills(
             represented_source(source, request.target_spec) if source is not None else None
         )
         pins = represented.session_skills if represented is not None else ()
+        # The capture pins the agent's skills as they were; a scoped one mounts only
+        # where this turn's audience holds its scope (`daimon.core.skill_audience`).
+        drop = await skills_to_drop(
+            request.deps.sessionmaker,
+            request.tenant_id,
+            request.admission.held_skill_scopes,
+            [p.id for p in pins],
+        )
+        pins = tuple(p for p in pins if p.id not in drop)
         record = source.source if source is not None else None
         left: tuple[str, ...] = ()
         names = dict(represented.skill_names) if represented is not None else {}

@@ -9,6 +9,7 @@ account, which is where a version's author comes from: the provider records none
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 import uuid
@@ -18,7 +19,7 @@ from contextlib import asynccontextmanager
 
 import anthropic
 from daimon.core.agent_admin import require_admin
-from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError
+from daimon.core.agent_editing import AgentActor, AgentEditDeps, AgentEditError, SkillWriter
 from daimon.core.agent_skill_files import (
     MAX_EDIT_BYTES,
     SkillFilesDoc,
@@ -29,16 +30,20 @@ from daimon.core.agent_skill_files import (
 from daimon.core.agent_target import ChangeRecorder
 from daimon.core.defaults.ma_index import list_skills_lenient
 from daimon.core.defaults.metadata import tenant_scoped_display_title
+from daimon.core.ma import delete_skill_and_versions
 from daimon.core.mux_compat import create_skill, publish_skill_version
 from daimon.core.skill_library import library_skill, own_skills
 from daimon.core.skills.ingest import SkillIngestError, bundle_from_files
+from daimon.core.stores import workspace_skills as workspace_skills_store
 from daimon.core.stores.server_skills import mirror_of_skill
+from daimon.core.workspace_skills import ScopeUnsaved, record_zip
 from mux.contracts.errors import ProviderError, ScopeViolation
 from pydantic import BaseModel
 from sqlalchemy import text
 
 __all__ = [
     "SkillRef",
+    "SkillWriter",
     "create_custom_skill",
     "create_library_skill",
     "custom_skill_names",
@@ -46,7 +51,9 @@ __all__ = [
     "read_library_files",
     "restore_library_version",
     "save_library_files",
+    "set_skill_scope",
     "skill_lock",
+    "skill_scope",
 ]
 
 _NAME = re.compile(r"[^a-z0-9]+")
@@ -141,6 +148,14 @@ async def _publish(
         raise AgentEditError(
             "The skill could not be saved. Try again.", kind="unavailable"
         ) from exc
+    await record_zip(
+        deps.session_factory,
+        tenant_id=actor.tenant_id,
+        skill_id=skill_id,
+        name=name,
+        version=published.version,
+        zip_bytes=bundle.zip_bytes,
+    )
     if audited is not None:
         async with deps.session_factory() as session, session.begin():
             await audited(session, _target(name, published.version))
@@ -239,16 +254,20 @@ async def create_library_skill(
     return ref
 
 
-async def custom_skill_names(deps: AgentEditDeps, *, actor: AgentActor) -> frozenset[str]:
+async def custom_skill_names(deps: AgentEditDeps, *, actor: SkillWriter) -> frozenset[str]:
     """The names the tenant's own library skills hold."""
     rows, _truncated = await list_skills_lenient(deps.client)
     return frozenset(bare for row, bare in own_skills(actor, rows) if row.source == "custom")
 
 
 async def create_custom_skill(
-    deps: AgentEditDeps, *, actor: AgentActor, files: dict[str, bytes]
+    deps: AgentEditDeps, *, actor: SkillWriter, files: dict[str, bytes], scope: str | None = None
 ) -> SkillRef:
-    """A new library skill holding `files`, named by their SKILL.md, after every ingest check."""
+    """A new library skill holding `files`, named by their SKILL.md, after every ingest check.
+
+    `scope` is recorded with the skill; when it can't be, the new skill is deleted again and
+    the create fails, so a scoped skill is never served unscoped.
+    """
     try:
         bundle = bundle_from_files(files)
     except SkillIngestError as exc:
@@ -268,6 +287,21 @@ async def create_custom_skill(
     version = created.latest_version or ""
     if version in ("", "latest"):
         raise AgentEditError("The skill could not be created. Try again.", kind="unavailable")
+    try:
+        await record_zip(
+            deps.session_factory,
+            tenant_id=actor.tenant_id,
+            skill_id=created.id,
+            name=slug,
+            version=version,
+            zip_bytes=bundle.zip_bytes,
+            scope=scope,
+        )
+    except ScopeUnsaved as exc:
+        # Best effort: a leftover would be backfilled unscoped, so it is deleted at once.
+        with contextlib.suppress(Exception):
+            await delete_skill_and_versions(deps.client, created.id, scope=actor.scope())
+        raise AgentEditError("The skill's scope could not be saved.", kind="unavailable") from exc
     return SkillRef(id=created.id, name=slug, version=version)
 
 
@@ -292,7 +326,8 @@ async def fork_library_skill(
     name: str,
     audited: ChangeRecorder | None = None,
 ) -> SkillRef:
-    """An editable copy of a server skill's latest version, under `name`; it follows nothing."""
+    """An editable copy of a server skill's latest version, under `name`, with its scope; it
+    follows nothing."""
     require_admin(actor, "The skill library")
     row, _old = await library_skill(deps, actor, skill_id)
     slug = slug_of(name)
@@ -305,10 +340,48 @@ async def fork_library_skill(
     renamed = _renamed(skill_md, slug)
     if renamed is None:
         raise AgentEditError("This skill has no name to change.", kind="invalid")
+    async with deps.session_factory() as session:
+        kept = await workspace_skills_store.get_skill(
+            session, tenant_id=actor.tenant_id, skill_id=skill_id
+        )
     ref = await create_custom_skill(
-        deps, actor=actor, files={**files, "SKILL.md": renamed.encode("utf-8")}
+        deps,
+        actor=actor,
+        files={**files, "SKILL.md": renamed.encode("utf-8")},
+        scope=None if kept is None else kept.scope,
     )
     if audited is not None:
         async with deps.session_factory() as session, session.begin():
             await audited(session, _target(ref.name, ref.version))
     return ref
+
+
+async def skill_scope(deps: AgentEditDeps, *, actor: AgentActor, skill_id: str) -> str | None:
+    """Who may read a skill (None: everyone who may use the library), for an admin."""
+    require_admin(actor, "The skill library")
+    async with deps.session_factory() as session:
+        kept = await workspace_skills_store.get_skill(
+            session, tenant_id=actor.tenant_id, skill_id=skill_id
+        )
+    if kept is None:
+        raise AgentEditError("No such skill.", kind="not_found")
+    return kept.scope
+
+
+async def set_skill_scope(
+    deps: AgentEditDeps,
+    *,
+    actor: AgentActor,
+    skill_id: str,
+    scope: str | None,
+    audited: ChangeRecorder | None = None,
+) -> None:
+    """Set who may read a skill (None: everyone who may use the library), for an admin."""
+    require_admin(actor, "The skill library")
+    async with deps.session_factory() as session, session.begin():
+        if not await workspace_skills_store.set_scope(
+            session, tenant_id=actor.tenant_id, skill_id=skill_id, scope=scope
+        ):
+            raise AgentEditError("No such skill.", kind="not_found")
+        if audited is not None:
+            await audited(session, skill_id)

@@ -114,9 +114,10 @@ HUB_NOTE = (
     "A second surface, separate from the tools above: one app per platform, mounted at "
     "`/discord/mcp` and `/slack/mcp` behind that platform's OAuth login, and present "
     "only when the matching `DAIMON_HUB__*` client credentials are set. These tools "
-    "carry no visibility tags, so a logged-in caller sees all of them; each takes a "
-    "`daimon_id` from `list_daimons`, because one person reaches several workspaces "
-    "here."
+    "carry no visibility tags, so a logged-in caller sees all of them (the data tools "
+    "only where `data_reads` is On in one of their workspaces); each takes a "
+    "`daimon_id` from `list_daimons`, or a `workspace` for the data and skill tools, "
+    "because one person reaches several workspaces here."
 )
 
 # Sentence-final periods that are not sentence ends.

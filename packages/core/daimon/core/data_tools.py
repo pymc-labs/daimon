@@ -13,7 +13,7 @@ from pydantic import JsonValue
 
 DATA_READS: Final = "data_reads"
 DATA_TOOLS: Final[frozenset[str]] = frozenset(
-    {"data_sources", "data_search", "data_get", "data_file", "data_sql"}
+    {"data_sources", "data_context", "data_search", "data_get", "data_file", "data_sql"}
 )
 """The data tools registered behind `data_reads` (`daimon.adapters.mcp.tools.data`)."""
 DATA_SOURCES: Final = "data_sources"

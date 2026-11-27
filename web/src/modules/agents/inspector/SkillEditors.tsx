@@ -11,6 +11,7 @@ import { useConfirm } from "@/lib/confirm"
 import { pressProps } from "@/lib/filters"
 import { addServerSkill, saveSkillFiles, useApplyUpdate, useServerSkills, useSetFollow, useSkillFiles, useSkillFollows } from "../api"
 import { Dot, NotSupported, Pill } from "../bits"
+import { scopeLabel } from "../lib"
 import { SkillFilesEditor } from "./SkillFilesEditor"
 import { SkillSource, SkillsRelease } from "../setup/SkillSource"
 import type { ServerSkillOption, Skill, SkillFollow } from "../types"
@@ -30,6 +31,7 @@ export function SkillsEditor(p: Props) {
   const lost = p.unsupported ?? NOTHING
   const qc = useQueryClient()
   const have = new Set(config.skills.map((s) => s.skill_id))
+  const scopes = catalog?.scopes ?? {}
   const follows = useSkillFollows(agent.id).data ?? {}
   const menu = useServerSkills(!ro).data
   const [adding, setAdding] = useState<string | null>(null)
@@ -61,7 +63,7 @@ export function SkillsEditor(p: Props) {
               {lost.skills.has(s.skill_id) && <NotSupported />}
               {changed.has(`skill:${s.skill_id}`) && <Dot />}
               {follows[s.skill_id] ? <MirrorBadge follow={follows[s.skill_id]!} pinned={s.version} />
-                : <span className="truncate text-xs text-faint">{s.type === "anthropic" ? "Anthropic" : s.skill_id}</span>}
+                : <span className="truncate text-xs text-faint">{s.type === "anthropic" ? "Anthropic" : scopes[s.skill_id] ? scopeLabel(scopes[s.skill_id]!) : s.skill_id}</span>}
               {!ro && (
                 <button onClick={(e) => { e.stopPropagation(); update((c) => { c.skills = c.skills.filter((x) => x.skill_id !== s.skill_id) }, 0) }}
                   className="ml-auto rounded p-1 text-faint opacity-0 group-hover:opacity-100 hover:bg-background hover:text-foreground" aria-label={`Remove ${s.title}`}>
@@ -98,7 +100,7 @@ export function SkillsEditor(p: Props) {
                   <CommandItem key={s.skill_id} value={`${s.title} ${s.skill_id}`} onSelect={() => add(s)} className="items-start py-2">
                     <Plus className="mt-0.5" />
                     <span className="min-w-0">
-                      <span className="block text-sm">{s.title}{s.type === "anthropic" && <span className="ml-2 text-xs text-faint">Anthropic</span>}</span>
+                      <span className="block text-sm">{s.title}{s.type === "anthropic" && <span className="ml-2 text-xs text-faint">Anthropic</span>}{scopes[s.skill_id] && <span className="ml-2 text-xs text-faint">{scopeLabel(scopes[s.skill_id]!)}</span>}</span>
                       <span className="line-clamp-1 text-xs text-muted-foreground">{s.description}</span>
                     </span>
                   </CommandItem>

@@ -197,6 +197,9 @@ EXEMPT: dict[str, str] = {
     "POST /api/agents/server-skills": (
         "workspace level: no channel and no agent (the skill library)"
     ),
+    "POST /api/agents/skill-repos": (
+        "workspace level: no channel and no agent (the skill library)"
+    ),
     "POST /api/agents/skills/{skill_id}/check": (
         "workspace level: no channel and no agent (the skill library)"
     ),
@@ -207,6 +210,9 @@ EXEMPT: dict[str, str] = {
         "workspace level: no channel and no agent (the skill library)"
     ),
     "POST /api/agents/skills": ("workspace level: no channel and no agent (the skill library)"),
+    "PUT /api/agents/skills/{skill_id}/scope": (
+        "workspace level: no channel and no agent (the skill library)"
+    ),
     "PUT /api/agents/skills/{skill_id}/files": (
         "workspace level: no channel and no agent (the skill library)"
     ),

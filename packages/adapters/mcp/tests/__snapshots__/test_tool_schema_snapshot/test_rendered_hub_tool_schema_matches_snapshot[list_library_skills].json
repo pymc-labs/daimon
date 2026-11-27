@@ -1,0 +1,26 @@
+{
+  "description": [
+    "The skills in this workspace's library you may read, each with its latest version and",
+    "files. Read one with `read_library_skill`.",
+    "",
+    "`workspace`: the chat space to use, by name or id as `list_daimons` shows them; leave it out when you reach only one."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "workspace": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "The workspace to use."
+      }
+    },
+    "type": "object"
+  }
+}

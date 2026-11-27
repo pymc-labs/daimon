@@ -87,6 +87,8 @@ class AuthIdentity:
     seal_ids: frozenset[str] = frozenset()
     # Set from the token's `mcp_tokens` row by the verifier; None for jti-less tokens.
     is_chat_execution: bool = False
+    # A key a person made to drive an agent (`purpose="coding"`), set from its row.
+    coding_key: bool = False
     token_kind: McpTokenKind | None = None
     token_label: str | None = None
     token_jti: uuid.UUID | None = None

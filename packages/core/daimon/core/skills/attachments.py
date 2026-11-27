@@ -29,6 +29,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_TENANT
 from daimon.core.errors import UserFacingError
 from daimon.core.ma import delete_skill_and_versions, update_agent_with_version_retry
 from daimon.core.mux_compat import update_agent
+from daimon.core.stores import workspace_skills
 from daimon.core.stores.channel_skills import (
     list_skill_channel_rules,
     remove_skill_from_every_channel,
@@ -113,7 +114,7 @@ async def delete_skill_unless_attached(
 
     Runs in `session`'s open transaction: checks again, detaches (channel
     rows are deleted on `session`, so they commit with it), then deletes every
-    version and the skill, and forgets every saved upload or sync of it, so
+    version and the skill, and forgets every saved upload, sync or local copy of it, so
     re-adding the same content creates a new skill instead of re-pinning this id.
 
     `own_agent_ids` are agents whose pin the caller is retiring with the skill
@@ -134,6 +135,7 @@ async def delete_skill_unless_attached(
         await remove_skill_from_every_channel(session, skill_id=skill_id)
     await delete_skill_and_versions(client, skill_id, scope=scope)
     await delete_user_skills_for_skill_id(session, anthropic_id=skill_id)
+    await workspace_skills.forget_skill(session, skill_id=skill_id)
     return GuardedDelete(deleted=True, attachments=attachments)
 
 

@@ -13,8 +13,10 @@ from daimon.adapters.mcp.tools import skill_library_edits as library
 from daimon.core.agent_editing import AgentEditError
 from daimon.core.agent_github import NOT_CONFIGURED, ResyncResults
 from daimon.core.config import WebSettings
+from daimon.core.server_skills.sync import UpstreamGone
 from daimon.core.skill_library import SyncedSkill
 from daimon.core.skill_library_files import SkillRef
+from daimon.core.skill_repos import RepoSkillOutcome
 from fastmcp.exceptions import ToolError
 
 from .parity_fakes import fake_runtime, make_auth
@@ -37,6 +39,7 @@ def runtime(monkeypatch):
     for module in (edits, library):
         monkeypatch.setattr(module, "require_card", confirmed)
     monkeypatch.setattr(web_url, "role_of_account", admin_role)
+    monkeypatch.setattr(library, "require_admin", lambda *_a: None)
 
     async def aware(_rt: Any, _auth: Any, links: Any) -> Any:
         return links
@@ -117,6 +120,82 @@ async def test_library_restore_when_admin_then_name_version_and_link(runtime, mo
     monkeypatch.setattr(library.skill_library_files, "restore_library_version", fake_restore)
     out = await library._restore_impl(runtime, make_auth(), "notes", "3")
     assert (out.name, out.version) == ("Notes", "9"), "the version written, not the one restored"
+
+
+async def test_library_scope_when_set_then_card_first_and_read_back(runtime, monkeypatch):
+    asked: list[str] = []
+    stored: dict[str, Any] = {}
+
+    async def card(_rt: Any, _auth: Any, *, tool_name: str, **_k: Any) -> None:
+        asked.append(tool_name)
+
+    async def fake_set(_deps, **kw: Any):
+        stored[kw["skill_id"]] = kw["scope"]
+
+    async def fake_get(_deps, *, skill_id: str, **_k: Any):
+        return stored[skill_id]
+
+    monkeypatch.setattr(library, "require_card", card)
+    monkeypatch.setattr(library.skill_library_files, "set_skill_scope", fake_set)
+    monkeypatch.setattr(library.skill_library_files, "skill_scope", fake_get)
+    out = await library._set_scope_impl(runtime, make_auth(), "notes", "team", "ctx")
+    assert asked == ["set_skill_scope"], "a scope decides who reads, so a person confirms"
+    assert (await library._scope_impl(runtime, make_auth(), "notes")) == out, (
+        "reads answer directly"
+    )
+    assert asked == ["set_skill_scope"], "the read asked for no card"
+
+
+async def test_library_card_tools_refuse_a_non_admin_before_asking_for_the_card(
+    runtime, monkeypatch
+):
+    asked: list[str] = []
+
+    async def card(*_a: Any, tool_name: str, **_k: Any) -> None:
+        asked.append(tool_name)
+
+    def refuse(*_a: Any) -> None:
+        raise AgentEditError("The skill library needs an admin.", kind="forbidden")
+
+    monkeypatch.setattr(library, "require_card", card)
+    monkeypatch.setattr(library, "require_admin", refuse)
+    for call in (
+        library._restore_impl(runtime, make_auth(), "notes", "3", "ctx"),
+        library._set_scope_impl(runtime, make_auth(), "notes", "team", "ctx"),
+        library._add_repo_impl(runtime, make_auth(), "acme/skills", "main", [], None, "ctx"),
+    ):
+        with pytest.raises(ToolError, match="needs an admin"):
+            await call
+    assert asked == [], "no card for someone who may not make the change"
+
+
+async def test_library_add_repo_when_confirmed_then_outcomes_and_unreadable_repo_is_a_tool_error(
+    runtime, monkeypatch
+):
+    asked: list[str] = []
+
+    async def card(_rt: Any, _auth: Any, *, tool_name: str, **_k: Any) -> None:
+        asked.append(tool_name)
+
+    async def added(*_a: Any, decl: Any, **_k: Any):
+        if decl.repo == "acme/missing":
+            raise UpstreamGone
+        assert (decl.branch, decl.paths, decl.scope) == ("main", ("skills",), "team")
+        return [RepoSkillOutcome("notes", "added")]
+
+    async def audited(*_a: Any) -> None:
+        return None
+
+    monkeypatch.setattr(library, "require_card", card)
+    monkeypatch.setattr(library, "add_skill_repo", added)
+    monkeypatch.setattr(library, "audit_to", lambda *_a: audited)
+    out = await library._add_repo_impl(
+        runtime, make_auth(), "acme/skills", "main", ["skills"], "team", "ctx"
+    )
+    assert [(o.name, o.action) for o in out.skills] == [("notes", "added")]
+    assert asked == ["add_library_repository"], "adding reaches the whole library, so it is carded"
+    with pytest.raises(ToolError, match="could not be read"):
+        await library._add_repo_impl(runtime, make_auth(), "acme/missing", "main", [], None, "ctx")
 
 
 async def test_resync_when_owner_then_results_and_agent_link(runtime, monkeypatch):

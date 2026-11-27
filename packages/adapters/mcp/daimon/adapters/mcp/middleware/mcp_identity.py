@@ -34,6 +34,7 @@ import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, resolve_role
 from daimon.adapters.mcp.auth.verifier import (
     CHAT_EXECUTION_CLAIM,
+    CODING_KEY_CLAIM,
     FOREIGN_HOME_CLAIM,
     SCOPES_CLAIM,
     TOKEN_JTI_CLAIM,
@@ -48,8 +49,10 @@ from daimon.adapters.mcp.middleware.tool_rule_backstop import (
 )
 from daimon.core.admin_authority import AuthorityCache, resolve_authority
 from daimon.core.anthropic_guard import AnthropicDisabled, without_anthropic
+from daimon.core.capability_tools import SERVING_TOOLS
 from daimon.core.channel_backend import is_selfhosted_channel
 from daimon.core.config import Settings
+from daimon.core.data_tools import DATA_TOOLS
 from daimon.core.host_memory import HOST_MEMORY_TAG, HOST_MEMORY_TOOLS
 from daimon.core.host_web_fetch import HOST_WEB_FETCH_TAG
 from daimon.core.mcp_auth import HOST_BUILTINS_CLAIM
@@ -89,6 +92,8 @@ HELD_DENIAL_REASON = "held_tool_not_allowed"
 
 #: Requests whose answer depends on which tools a chat agent may see.
 _TOOL_METHODS = frozenset({"tools/list", "tools/call"})
+#: What a coding key sees beyond the agent-chat surface.
+CODING_KEY_TOOLS = DATA_TOOLS | SERVING_TOOLS
 
 #: Requests whose answer depends on the caller's admin standing.
 _AUTHORITY_METHODS = _TOOL_METHODS | {
@@ -708,6 +713,12 @@ class IdentityMiddleware(Middleware):
         if agent_id is not None:
             await disable_components(fastmcp_ctx, match_all=True)
             await enable_components(fastmcp_ctx, tags={"agent-chat"})
+            if identity.coding_key:
+                # Held to its maker's standing, it reads data and skills as its maker.
+                await enable_components(fastmcp_ctx, names=set(CODING_KEY_TOOLS))
+        if identity.is_chat_execution:
+            # Chat agents read skills through `list_skills` and `get_skill` only.
+            await disable_components(fastmcp_ctx, names=set(SERVING_TOOLS))
         return await self._dispatch_for_backend(context, call_next, identity)
 
     async def _dispatch_for_backend(
@@ -836,6 +847,7 @@ def _hold_from_claims(claims: Mapping[str, object]) -> TurnHold | None:
 
 class _TokenFields(TypedDict):
     is_chat_execution: bool
+    coding_key: bool
     token_kind: McpTokenKind | None
     token_label: str | None
     token_jti: uuid.UUID | None
@@ -853,6 +865,7 @@ def _token_fields(claims: Mapping[str, object]) -> _TokenFields:
     label = claims.get(TOKEN_LABEL_CLAIM)
     return _TokenFields(
         is_chat_execution=claims.get(CHAT_EXECUTION_CLAIM) is True,
+        coding_key=claims.get(CODING_KEY_CLAIM) is True,
         token_kind=_TOKEN_KINDS.get(kind) if isinstance(kind, str) else None,
         token_label=label if isinstance(label, str) else None,
         token_jti=_uuid_or_none(jti) if isinstance(jti, str) else None,

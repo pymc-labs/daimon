@@ -105,6 +105,7 @@ async def sessions_create(
         mcp_settings=rt.settings.mcp,
         agent_uuid=agent_uuid,
         session_factory=rt.sessionmaker,
+        tenant_id=tenant_id,
         github_fallback_pat=None,
         github_app_id=rt.settings.github_app.app_id,
         github_app_private_key=(

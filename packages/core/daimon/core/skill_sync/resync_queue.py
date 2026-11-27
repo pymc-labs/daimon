@@ -100,6 +100,7 @@ async def drain_github_push_resync_queue(
                 anthropic_client=anthropic_client,
                 github_settings=github_settings,
                 github_app=github_app,
+                attempts=job.attempts,
             )
             current_time = datetime.now(UTC)
             async with sessionmaker.begin() as session:

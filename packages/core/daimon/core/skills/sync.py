@@ -41,6 +41,8 @@ from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import create_skill, publish_skill_version
 from daimon.core.skill_zip import build_skill_zip
 from daimon.core.skills.discover import DiscoveredSkill
+from daimon.core.workspace_skills import record_zip
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _log = structlog.get_logger(__name__)
 
@@ -64,6 +66,7 @@ async def sync_skills(
     tenant_id: uuid.UUID,
     seeded_skill_names: frozenset[str],
     is_admin: bool,
+    records: async_sessionmaker[AsyncSession] | None = None,
 ) -> list[ResourceOutcome]:
     """Create or update each skill in *skills* on MA.
 
@@ -97,6 +100,7 @@ async def sync_skills(
             (``list_seeded_skill_names``), which an import may not reuse.
         is_admin: Whether the importer may push a new version onto an existing
             library skill.
+        records: Where each published version is kept (`record_zip`); None keeps none.
 
     Returns:
         One :class:`~daimon.core.defaults.report.ResourceOutcome` per input
@@ -138,16 +142,17 @@ async def sync_skills(
                             f"admin can replace it. {_rename_hint(skill.spec.name)}"
                         ),
                     )
+                data = pkg.path.read_bytes()
                 if ma_match is not None:
-                    with pkg.path.open("rb") as fh:
-                        await publish_skill_version(
-                            client,
-                            ma_match.id,
-                            data=fh.read(),
-                            filename="SKILL.zip",
-                            media_type="application/zip",
-                            scope=resource_scope(tenant_id=str(tenant_id)),
-                        )
+                    pushed = await publish_skill_version(
+                        client,
+                        ma_match.id,
+                        data=data,
+                        filename="SKILL.zip",
+                        media_type="application/zip",
+                        scope=resource_scope(tenant_id=str(tenant_id)),
+                    )
+                    skill_id, version = ma_match.id, pushed.version
                     outcomes.append(
                         ResourceOutcome(
                             kind="skill",
@@ -171,15 +176,15 @@ async def sync_skills(
                                 f"another skill. {_rename_hint(skill.spec.name)}"
                             ),
                         )
-                    with pkg.path.open("rb") as fh:
-                        created = await create_skill(
-                            client,
-                            display_title=canonical,
-                            data=fh.read(),
-                            filename="SKILL.zip",
-                            media_type="application/zip",
-                            scope=resource_scope(tenant_id=str(tenant_id)),
-                        )
+                    created = await create_skill(
+                        client,
+                        display_title=canonical,
+                        data=data,
+                        filename="SKILL.zip",
+                        media_type="application/zip",
+                        scope=resource_scope(tenant_id=str(tenant_id)),
+                    )
+                    skill_id, version = created.id, created.latest_version
                     outcomes.append(
                         ResourceOutcome(
                             kind="skill",
@@ -187,6 +192,15 @@ async def sync_skills(
                             action=Action.CREATED,
                             anthropic_id=created.id,
                         )
+                    )
+                if records is not None:
+                    await record_zip(
+                        records,
+                        tenant_id=tenant_id,
+                        skill_id=skill_id,
+                        name=skill.spec.name,
+                        version=version,
+                        zip_bytes=data,
                     )
             finally:
                 pkg.path.unlink(missing_ok=True)

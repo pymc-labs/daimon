@@ -23,7 +23,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Final, Literal, NoReturn, Protocol
 
@@ -60,6 +60,7 @@ from daimon.core.permissions import agent_permissions, ruled_agents
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.session_snapshot import MaSkill
 from daimon.core.specs import SkillRef
+from daimon.core.stores import workspace_skills
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.channel_changes import record_change
 from daimon.core.stores.channel_skills import add_channel_skill, list_channel_skills
@@ -671,8 +672,10 @@ async def turn_channel_skills(
     rows: Sequence[ChannelSkillRow] | None = None,
     cache: ResolverCache | None = None,
     platform_skills: Sequence[MaSkill] = (),
+    held_scopes: Collection[str] = (),
 ) -> tuple[BetaManagedAgentsCustomSkill, ...]:
-    """The extra skills a turn in `channel_id` runs with, after `platform_skills`.
+    """The extra skills a turn in `channel_id` runs with, after `platform_skills`; a skill
+    limited to a data scope only when the turn's audience holds it (`held_scopes`).
 
     One DB read; the skills list is read only when the channel adds something,
     to keep a clashing mount (which would fail the session) out. With `cache`
@@ -681,11 +684,15 @@ async def turn_channel_skills(
     oldest first), with a warning naming them, logged once per channel and
     process until the dropped set changes.
     """
-    if rows is None:
-        async with sessionmaker() as session:
+    async with sessionmaker() as session:
+        if rows is None:
             rows = await list_channel_skills(
                 session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
             )
+        scopes = await workspace_skills.scopes_among(
+            session, tenant_id=tenant_id, skill_ids=[row.skill_id for row in rows]
+        )
+    rows = [row for row in rows if scopes.get(row.skill_id) in (None, *held_scopes)]
     if not rows:
         return ()
     bodies: dict[str, str] | None

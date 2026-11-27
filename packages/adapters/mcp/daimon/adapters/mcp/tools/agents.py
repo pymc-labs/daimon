@@ -95,9 +95,11 @@ from daimon.core.permissions import SEALED_REFUSAL
 from daimon.core.routing_facts import build_unrouted_note
 from daimon.core.skill_sync import SyncRepoFailure, sync_agent_skills, sync_report_failures
 from daimon.core.specs import AgentSpec, SkillRepo, merge_default_agent_toolset
+from daimon.core.stores import workspace_skills as workspace_skills_store
 from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, TurnOriginRow
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from daimon.core.tool_safety import get_mcp_server_name_rejection
+from daimon.core.workspace_skills import scoped_skill_note
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.config import DEFAULT_BACKEND, ThreadMode
@@ -397,6 +399,7 @@ def _edit_deps(runtime: McpRuntime) -> agent_editing.AgentEditDeps:
         session_factory=runtime.session_factory,
         public_url=public_url,
         denied_tools=runtime.settings.tool_safety.denied,
+        settings=runtime.settings,
     )
 
 
@@ -1139,6 +1142,7 @@ async def _update_agent_impl(
     # Resolve skill names outside the closure — name resolution does not depend on
     # the agent's current state and must not be repeated on each retry attempt.
     resolved_skills: list[BetaManagedAgentsSkillParams] | None = None
+    scoped: dict[str, str] = {}
     if skills is not None:
         try:
             caller = await load_isolation_view(
@@ -1155,6 +1159,12 @@ async def _update_agent_impl(
             )
         except DefaultsError as exc:
             raise ToolError(str(exc)) from exc
+        async with runtime.session_factory() as session:
+            scoped = await workspace_skills_store.scopes_among(
+                session,
+                tenant_id=auth.tenant_id,
+                skill_ids=[skill["skill_id"] for skill in resolved_skills],
+            )
 
     if other is not None:
         await _change_agent_model(runtime, auth, name, agent, other)
@@ -1200,6 +1210,8 @@ async def _update_agent_impl(
                 )
             )
         )
+    if scoped:
+        applies_lines.append(scoped_skill_note(scoped.values()))
     if applies_lines:
         result = result.model_copy(update={"applies": "\n".join(applies_lines)})
     return result

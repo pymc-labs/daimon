@@ -29,6 +29,9 @@ _MODULES = ("daimon.adapters.web.nodes", "daimon.adapters.web.server_skills")
 # Routes of a node module that name no node and reach no server, with the reason.
 NODE_FREE = {
     ("POST", "/api/agents/skills/{skill_id}/fork"): "copies a library skill",
+    ("POST", "/api/agents/skill-repos"): "adds skills from a GitHub repository",
+    ("GET", "/api/agents/skills/{skill_id}/scope"): "reads a library skill's scope",
+    ("PUT", "/api/agents/skills/{skill_id}/scope"): "sets a library skill's scope",
     ("GET", "/api/agents/{agent_id}/skill-follows"): "reads the agent's own follow choices",
     ("PUT", "/api/agents/{agent_id}/skill-follows"): "writes them; fetches only when served",
     ("POST", "/api/agents/{agent_id}/skill-follows/{skill_id}/apply"): "applies a held update",

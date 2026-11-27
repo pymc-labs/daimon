@@ -58,7 +58,7 @@ from daimon.core.session_preparation import (
 )
 from daimon.core.session_snapshot import hash_env_bytes, hash_tools
 from daimon.core.skills.unresolved import SkillUnavailable
-from daimon.core.stores import usage_events
+from daimon.core.stores import usage_events, workspace_skills
 from daimon.core.stores.access_policy import lock_access_policy, set_access_policy
 from daimon.core.stores.agent_files import list_agent_files
 from daimon.core.stores.agent_memory_stores import (
@@ -1452,6 +1452,93 @@ async def test_a_channels_skills_are_added_at_create_and_read_as_current_on_the_
     assert isinstance(third, PreparedTurn)
     assert third.ma_session_id != first.ma_session_id, "a removed channel skill leaves the session"
     assert transport.state.sessions[third.ma_session_id].agent.skills == []
+
+
+@pytest.mark.parametrize("active", [False, True], ids=["idle", "active"])
+async def test_a_scoped_skill_withheld_from_a_new_audience_never_reaches_its_next_turn(
+    active: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An idle session is replaced without the agent's own skill and carries none of its
+    work; an active one is never handed back. The provider mounts an agent's stored skills
+    for a bare id, so the withheld one must go as an override even in a DM."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    scoped = BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_fin", version="v1")
+    transport.state.ma.agents[_AGENT_ID]["skills"] = [scoped.model_dump(mode="json")]
+    carrying = _agent().model_copy(update={"skills": [scoped]})
+    holding = replace(_admission(account=account, agent=carrying), withheld_skills=frozenset())
+    first = await _prepare(deps, holding, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    assert [s.skill_id for s in transport.state.sessions[first.ma_session_id].agent.skills] == [
+        "skill_fin"
+    ], "a holding audience mounts the agent's skill"
+    row = await _live_row(db_session_factory, tenant=tenant, account=account)
+    assert row is not None
+    if active:
+        async with db_session_factory.begin() as session:
+            await mark_turn_active(session, id=row.id, active_turn_message_id="in-flight", now=_NOW)
+    transfers: list[str] = []
+
+    async def _transfer(*, old_session_id: str, **_kwargs: Any) -> PreparedReplacement:
+        transfers.append(old_session_id)
+        raise AssertionError("work done with the skill must not be carried")
+
+    # Admission hands over the agent without the skill it withholds.
+    lacking = replace(_admission(account=account), withheld_skills=frozenset({"skill_fin"}))
+    second = await _prepare(deps, lacking, tenant=tenant, account=account, transfer=_transfer)
+
+    if active:
+        assert isinstance(second, PreparationBusy)
+        assert "skills" in second.pending_reasons
+        assert transport.creates == 1
+    else:
+        assert isinstance(second, PreparedTurn)
+        assert second.ma_session_id != first.ma_session_id
+        assert transport.state.sessions[second.ma_session_id].agent.skills == [], (
+            "the replacement runs without the agent's stored skill"
+        )
+        assert transfers == [], "nothing of the old session is carried over"
+
+
+@pytest.mark.parametrize("held", [frozenset({"ops"}), None], ids=["unheld", "unchecked"])
+async def test_a_scoped_skill_admission_did_not_withhold_still_stays_off(
+    held: frozenset[str] | None,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A scoped skill on the agent that admission never saw drops by the held scopes."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await workspace_skills.record_version(
+        db_session,
+        tenant_id=tenant.id,
+        skill_id="skill_fin",
+        name="fin",
+        version="v1",
+        digest="d",
+        files={"SKILL.md": b"x"},
+        scope="finance",
+    )
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    scoped = BetaManagedAgentsCustomSkill(type="custom", skill_id="skill_fin", version="v1")
+    transport.state.ma.agents[_AGENT_ID]["skills"] = [scoped.model_dump(mode="json")]
+    admission = replace(
+        _admission(account=account, agent=_agent().model_copy(update={"skills": [scoped]})),
+        withheld_skills=frozenset(),
+        held_skill_scopes=held,
+    )
+    prepared = await _prepare(deps, admission, tenant=tenant, account=account)
+    assert isinstance(prepared, PreparedTurn)
+    assert transport.state.sessions[prepared.ma_session_id].agent.skills == [], (
+        "the session runs without a skill whose scope the audience does not hold"
+    )
 
 
 def _with_features(admission: Admission, **values: str) -> Admission:

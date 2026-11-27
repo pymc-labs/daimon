@@ -1,0 +1,39 @@
+{
+  "description": [
+    "Set who may read a library skill: a data scope name, or null for everyone who may",
+    "use the library. A person confirms on a card first. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "maxLength": 200,
+        "minLength": 1,
+        "type": "string"
+      },
+      "scope": {
+        "anyOf": [
+          {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "skill_id": {
+        "maxLength": 200,
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "skill_id",
+      "scope",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

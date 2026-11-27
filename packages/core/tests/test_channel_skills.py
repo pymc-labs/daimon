@@ -35,6 +35,7 @@ from daimon.core.defaults.metadata import (
 from daimon.core.ma_resolver import ResolverCache
 from daimon.core.session_snapshot import MaSkill
 from daimon.core.specs import SkillRef
+from daimon.core.stores import workspace_skills
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.channel_changes import list_changes
 from daimon.core.stores.channel_skills import (
@@ -115,6 +116,77 @@ async def test_a_library_skill_is_chosen_by_name_at_its_latest_version(
         "pdf-tools",
         None,
     )
+
+
+async def _scoped(db_session: AsyncSession, tenant_id: uuid.UUID, skill_id: str) -> None:
+    await workspace_skills.record_version(
+        db_session,
+        tenant_id=tenant_id,
+        skill_id=skill_id,
+        name="pdf-tools",
+        version="v2",
+        digest="d",
+        files={"SKILL.md": b"x"},
+        scope="finance",
+    )
+    await db_session.commit()
+
+
+async def test_a_scoped_library_skill_can_be_added_to_a_channel(
+    db_session: AsyncSession,
+) -> None:
+    tenant = await make_tenant(db_session)
+    title = tenant_scoped_display_title(tenant_id=tenant.id, name="pdf-tools")
+    await _scoped(db_session, tenant.id, "skill_lib")
+
+    choice = await _choose_channel_skill(
+        db_session,
+        _client([_skill("skill_lib", title)]),
+        tenant_id=tenant.id,
+        skill="pdf-tools",
+        agent=ma_agent(name="shared"),
+        platform_skills={},
+    )
+
+    assert not isinstance(choice, str) and choice.skill_id == "skill_lib"
+
+
+@pytest.mark.parametrize(
+    ("held", "mounted"), [((), ["skill_b"]), (("finance",), ["skill_a", "skill_b"])]
+)
+async def test_a_scoped_channel_skill_mounts_only_where_the_audience_holds_its_scope(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    held: tuple[str, ...],
+    mounted: list[str],
+) -> None:
+    tenant = await make_tenant(db_session)
+    for skill_id, name in (("skill_a", "a"), ("skill_b", "b")):
+        await add_channel_skill(
+            db_session,
+            tenant_id=tenant.id,
+            platform="slack",
+            channel_id="C1",
+            skill_id=skill_id,
+            version="v1",
+            name=name,
+            owner_agent_name=None,
+            actor_account_id=None,
+        )
+    await _scoped(db_session, tenant.id, "skill_a")
+
+    picked = await turn_channel_skills(
+        db_session_factory,
+        _client([]),
+        tenant_id=tenant.id,
+        platform="slack",
+        channel_id="C1",
+        agent=ma_agent(name="shared"),
+        agent_names=("shared",),
+        held_scopes=held,
+    )
+
+    assert [skill.skill_id for skill in picked] == mounted
 
 
 async def test_another_agents_upload_and_another_tenants_skill_are_refused(

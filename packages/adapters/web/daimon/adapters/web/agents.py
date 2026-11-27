@@ -58,6 +58,7 @@ from daimon.core.stores import agent_drafts as drafts_store
 from daimon.core.stores import agent_mcp_credentials as credentials_store
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import web_people as people_store
+from daimon.core.stores import workspace_skills as workspace_skills_store
 from daimon.core.tenant_summary import load_tenant_summary
 from fastapi import APIRouter, HTTPException
 from mux.contracts.config import DEFAULT_BACKEND
@@ -75,6 +76,8 @@ class Catalog(BaseModel):
     skills: list[SkillDoc]
     channels: list[agent_view.PlaceDoc]
     tools: list[ToolLabel]
+    scopes: dict[str, str] = {}
+    """The data scope of each library skill limited to one, by skill id."""
 
 
 class Template(BaseModel):
@@ -296,6 +299,9 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
                 default=runtime.deployment_default,
                 now=runtime.now(),
             )
+            scopes = await workspace_skills_store.scopes_among(
+                session, tenant_id=tenant_id, skill_ids=[row.id for row in rows]
+            )
         backends = make_backend_service(
             runtime.sessionmaker, runtime.settings.turn, capture_source=NO_CAPTURE
         )
@@ -319,6 +325,7 @@ def agents_router(runtime: WebRuntime) -> APIRouter:
                 is_admin=is_admin(caller.role),
             ),
             tools=[ToolLabel(name=name, label=name) for name in agent_editing.BUILTIN_NAMES],
+            scopes=scopes,
         )
 
     @router.get("/templates")

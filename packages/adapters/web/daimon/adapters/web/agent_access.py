@@ -62,6 +62,7 @@ def change_deps(runtime: WebRuntime, caller: WebCaller | None = None) -> AgentCh
             denied_tools=runtime.settings.tool_safety.denied,
             resolver_cache=runtime.resolver_cache,
             deployment_default=runtime.deployment_default,
+            settings=runtime.settings,
         ),
         view=AgentViewDeps(
             client=runtime.anthropic,

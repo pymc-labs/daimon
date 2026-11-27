@@ -1,0 +1,22 @@
+{
+  "description": [
+    "Read one file of a library skill by its name (its main file by default), as its latest",
+    "version holds it. `list_library_skills` names the files."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "name": {
+        "type": "string"
+      },
+      "path": {
+        "default": "SKILL.md",
+        "type": "string"
+      }
+    },
+    "required": [
+      "name"
+    ],
+    "type": "object"
+  }
+}

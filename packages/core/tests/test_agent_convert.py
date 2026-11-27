@@ -521,7 +521,7 @@ async def test_a_turn_reads_a_converted_records_skills_from_its_catalog_copy(
         lambda *_a: SimpleNamespace(session_skills=pins, skill_names={}),
     )
     request = SimpleNamespace(
-        admission=SimpleNamespace(backend_revision_origin="agent"),
+        admission=SimpleNamespace(backend_revision_origin="agent", held_skill_scopes=None),
         source=SimpleNamespace(source=record),
         target_spec=None,
         tenant_id=tenant.id,

@@ -1740,6 +1740,27 @@ class ServerSkillDeploymentRow(BaseModel):
     version: str
 
 
+class WorkspaceSkillRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    skill_id: str
+    name: str
+    scope: str | None
+    current_version: str
+    updated_at: datetime
+
+
+class WorkspaceSkillFileRow(BaseModel):
+    """A file of one version, without its bytes."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    path: str
+    sha256: str
+    size: int
+
+
 WebInviteKind = Literal["invite", "sign_in", "owner"]
 WebInviteRole = Literal["visitor", "member"]
 WebAgentWho = Literal["everyone", "groups", "invites"]

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from typing import Any, cast
 
+import httpx
 from daimon.core import agent_changes, session_snapshot
-from daimon.core.agent_editing import PlaceEdit
+from daimon.core.agent_editing import AgentActor, PlaceEdit
 from daimon.core.agent_view import (
     AgentConfigDoc,
     AgentFacts,
@@ -18,8 +21,13 @@ from daimon.core.agent_view import (
     PlaceDoc,
     SkillDoc,
 )
+from daimon.core.defaults.metadata import tenant_scoped_display_title
+from daimon.core.stores import workspace_skills
 from daimon.core.stores.agent_tool_rules import AgentToolRule
+from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _ALLOW = {"type": "always_allow"}
 _IDENTITY = frozenset(session_snapshot._IDENTITY_FIELDS)  # pyright: ignore[reportPrivateUsage]
@@ -489,4 +497,46 @@ def test_revert_target_carries_the_old_versions_helpers() -> None:
     old = _config(helpers=[_WRITER])
     assert agent_changes.revert_target(current, old).helpers == [_WRITER], (
         "a revert restores the helpers the version had"
+    )
+
+
+async def test_an_agent_edit_may_add_a_scoped_library_skill(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    tenant = await make_tenant(db_session)
+    await workspace_skills.record_version(
+        db_session,
+        tenant_id=tenant.id,
+        skill_id="sk_scoped",
+        name="notes",
+        version="1",
+        digest="d",
+        files={"SKILL.md": b"x"},
+        scope="finance",
+    )
+    await db_session.commit()
+    now = datetime(2026, 9, 13, tzinfo=UTC).isoformat()
+    listed = {
+        "id": "sk_scoped",
+        "created_at": now,
+        "display_title": tenant_scoped_display_title(tenant_id=tenant.id, name="notes"),
+        "latest_version": "1",
+        "source": "custom",
+        "type": "skill",
+        "updated_at": now,
+    }
+    client = build_fake_anthropic(
+        lambda _request: httpx.Response(200, json={"data": [listed], "next_page": None})
+    )
+    deps = SimpleNamespace(edit=SimpleNamespace(client=client, session_factory=db_session_factory))
+    target = _config(
+        skills=[SkillDoc(type="custom", skill_id="sk_scoped", title="Notes", version="1")]
+    )
+
+    # It mounts only where the turn's audience holds the scope (`daimon.core.skill_audience`).
+    await agent_changes._check_added_skills(  # pyright: ignore[reportPrivateUsage]
+        cast(Any, deps),
+        actor=cast(AgentActor, SimpleNamespace(tenant_id=tenant.id)),
+        base=_config(skills=[]),
+        target=target,
     )

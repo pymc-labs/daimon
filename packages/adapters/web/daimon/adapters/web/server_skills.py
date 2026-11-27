@@ -13,6 +13,7 @@ from typing import Final
 
 import httpx
 import structlog
+from anthropic.types.beta.skill_list_response import SkillListResponse
 from daimon.adapters.web.agent_access import Editor, Viewer, actor_of, change_deps, edit_refusal
 from daimon.adapters.web.agent_audit import recorded
 from daimon.adapters.web.caller import WebCaller
@@ -28,6 +29,8 @@ from daimon.adapters.web.runtime import WebRuntime
 from daimon.adapters.web.static import NOT_FOUND
 from daimon.core.agent_admin import require_admin
 from daimon.core.agent_editing import AgentEditError
+from daimon.core.capability_tools import LIBRARY_SKILLS
+from daimon.core.features.snapshot import FeaturePlace, resolve_features
 from daimon.core.mcp_rpc import McpStatusError
 from daimon.core.mcp_skills.install import ServerSkill, fetch_server_skill
 from daimon.core.mcp_skills.protocol import Endpoint, fetch_serves_skills
@@ -48,20 +51,41 @@ from daimon.core.server_skills.node import (
     list_server_skills,
     skill_sync_deps,
 )
+from daimon.core.server_skills.repo import valid_branch
+from daimon.core.server_skills.source import SystemWriter
 from daimon.core.server_skills.sync import (
     CheckResult,
     SyncDeps,
+    UpstreamGone,
+    UpstreamUnreachable,
     approve_update,
     check_mirror,
     follow_now,
 )
 from daimon.core.skill_library import MirrorDoc, mirror_doc
-from daimon.core.skill_library_files import SkillRef, fork_library_skill
+from daimon.core.skill_library_files import (
+    SkillRef,
+    fork_library_skill,
+    set_skill_scope,
+    skill_scope,
+)
+from daimon.core.skill_repos import (
+    RepoSkillOutcome,
+    SkillRepoDecl,
+    Upstreams,
+    add_skill_repo,
+    mirror_sync_deps,
+    repo_upstream,
+    skill_repo_loader,
+    sync_declared_skill_repos,
+)
 from daimon.core.skills.ingest import SkillIngestError
 from daimon.core.stores import server_skills as store
 from daimon.core.stores.domain import ServerSkillRow, WebPersonRow
+from daimon.core.stores.tenants import list_tenants_by_platform
+from daimon.core.workspace_skills_sync import list_account_skills, record_library_skills
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.exc import SQLAlchemyError
 
 __all__ = [
@@ -69,6 +93,7 @@ __all__ = [
     "server_skills_router",
     "sync_deps",
     "sync_server_skills_forever",
+    "sync_source_skills_forever",
 ]
 
 log = structlog.get_logger(__name__)
@@ -98,7 +123,7 @@ async def sync_server_skills(runtime: WebRuntime, node: DataServerNode) -> None:
     """Check every mirror once; one that fails is retried on the next pass."""
     deps = sync_deps(runtime, node.skills_node())
     async with runtime.sessionmaker() as session:
-        mirrors = await store.list_mirrors(session)
+        mirrors = [m for m in await store.list_mirrors(session) if m.server == node.server.name]
     for mirror in mirrors:
         try:
             await check_mirror(deps, mirror.id)
@@ -113,6 +138,125 @@ async def sync_server_skills_forever(runtime: WebRuntime, node: DataServerNode) 
         try:
             await sync_server_skills(runtime, node)
         except SQLAlchemyError:
+            log.warning("server_skill.sync_failed", exc_info=True)
+        await asyncio.sleep(CHECK_INTERVAL_S)
+
+
+def _mirror_deps(
+    runtime: WebRuntime, mirror: ServerSkillRow, upstreams: Upstreams | None = None
+) -> SyncDeps | None:
+    settings = runtime.settings
+    return mirror_sync_deps(
+        mirror,
+        settings.github,
+        settings.github_app,
+        change_deps(runtime).edit,
+        http=runtime.http_client,
+        now=runtime.now,
+        local=runtime.skill_sources,
+        upstreams=upstreams,
+    )
+
+
+#: Workspaces whose library the backfill has recorded since this process started. Later
+#: skills are recorded as they are published, so the backfill runs once for each.
+_backfilled: set[uuid.UUID] = set()
+
+
+async def _library_skills_tenants(runtime: WebRuntime) -> list[uuid.UUID]:
+    """The workspaces with `library_skills` On whose library is not yet recorded."""
+    tenants = await list_tenants_by_platform(runtime.sessionmaker)
+    return [
+        t.id
+        for t in tenants
+        if t.id not in _backfilled
+        and (
+            await resolve_features(
+                runtime.sessionmaker,
+                runtime.settings,
+                FeaturePlace(t.id, t.platform),
+                keys=(LIBRARY_SKILLS,),
+            )
+        ).on(LIBRARY_SKILLS)
+    ]
+
+
+async def _declared_repos(runtime: WebRuntime, upstreams: Upstreams) -> None:
+    settings = runtime.settings
+    loader = skill_repo_loader(settings)
+    if loader is None:
+        return
+    edit = change_deps(runtime).edit
+    await sync_declared_skill_repos(
+        loader,
+        edit=edit,
+        upstream_for=lambda decl: repo_upstream(
+            settings.github,
+            settings.github_app,
+            edit,
+            tenant_id=decl.tenant_id,
+            repo=decl.repo,
+            branch=decl.branch,
+            http=runtime.http_client,
+            now=runtime.now,
+            upstreams=upstreams,
+        ),
+        now=runtime.now,
+    )
+
+
+async def sync_source_skills(runtime: WebRuntime) -> None:
+    """One pass: record each workspace's library skills not yet kept (once per workspace, from
+    one listing), add declared repositories' skills (after the backfill, so a declared scope
+    lands on the kept record), then check every mirror whose source runs in process, each
+    repository downloaded once. A failing step is logged and retried on the next pass."""
+    upstreams: Upstreams = {}
+    edit = change_deps(runtime).edit
+    if pending := await _library_skills_tenants(runtime):
+        listed: list[SkillListResponse] = []
+        try:
+            listed = await list_account_skills(edit)
+        # Boundary: a failed listing is retried on the next pass.
+        except Exception:
+            log.warning("workspace_skill.backfill_failed", exc_info=True)
+            pending = []
+        for tenant_id in pending:
+            try:
+                skipped = await record_library_skills(
+                    edit, writer=SystemWriter(tenant_id), rows=listed
+                )
+                if not skipped:  # unreadable skills are retried on the next pass
+                    _backfilled.add(tenant_id)
+            # Boundary: one workspace's library must not stop the others or the loop.
+            except Exception:
+                log.warning(
+                    "workspace_skill.backfill_failed", tenant_id=str(tenant_id), exc_info=True
+                )
+    try:
+        await _declared_repos(runtime, upstreams)
+    # Boundary: the declared file must not stop the mirror checks.
+    except Exception:
+        log.warning("skill_repo.declared_failed", exc_info=True)
+    async with runtime.sessionmaker() as session:
+        mirrors = await store.list_mirrors(session)
+    for mirror in mirrors:
+        deps = _mirror_deps(runtime, mirror, upstreams)
+        if deps is None:
+            continue
+        try:
+            await check_mirror(deps, mirror.id)
+        # Boundary: one mirror's surprise must not stop the others or the loop.
+        except Exception:
+            log.warning("server_skill.check_failed", mirror_id=str(mirror.id), exc_info=True)
+
+
+async def sync_source_skills_forever(runtime: WebRuntime) -> None:
+    """Check every in-process mirror now and then every `CHECK_INTERVAL_S`, until cancelled."""
+    while True:
+        try:
+            await sync_source_skills(runtime)
+        # Boundary: one failed pass must never end mirror polling.
+        except Exception:
             log.warning("server_skill.sync_failed", exc_info=True)
         await asyncio.sleep(CHECK_INTERVAL_S)
 
@@ -138,6 +282,36 @@ class ApproveBody(BaseModel):
 
 class ForkBody(BaseModel):
     name: str = Field(min_length=1, max_length=64)
+
+
+class SkillReposBody(BaseModel):
+    repo: str = Field(min_length=3, max_length=200, pattern=r"^[\w.-]+/[\w.-]+$")
+    branch: str = Field(default="main", min_length=1, max_length=200)
+    paths: list[str] = Field(default_factory=list[str], max_length=50)
+    scope: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @field_validator("branch")
+    @classmethod
+    def _branch(cls, value: str) -> str:
+        if not valid_branch(value):
+            raise ValueError("not a branch name")
+        return value
+
+
+class SkillScopeBody(BaseModel):
+    scope: str | None = Field(min_length=1, max_length=200)
+    """None: everyone who may use the library."""
+
+
+class SkillScopeDoc(BaseModel):
+    skill_id: str
+    scope: str | None
+
+
+class RepoSkillResult(BaseModel):
+    name: str
+    action: str
+    detail: str | None
 
 
 class MirrorCheck(BaseModel):
@@ -182,14 +356,22 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
             lambda asker: ask_node(exchange, runtime.http_client, skills, asker, call),
         )
 
-    async def _mirror(caller_tenant: uuid.UUID, skill_id: str) -> ServerSkillRow:
+    async def _mirror(caller: WebCaller, skill_id: str) -> ServerSkillRow:
         async with runtime.sessionmaker() as session:
             mirror = await store.mirror_of_skill(
-                session, tenant_id=caller_tenant, skill_id=skill_id
+                session, tenant_id=caller.person.tenant_id, skill_id=skill_id
             )
         if mirror is None:
+            await node_or_404(caller)  # an unserved workspace sees no node route
             raise HTTPException(status_code=404, detail="No such server skill.")
         return mirror
+
+    async def _sync_for(caller: WebCaller, mirror: ServerSkillRow) -> SyncDeps:
+        """The sync that keeps `mirror` current: its in-process source's, else the node's."""
+        deps = _mirror_deps(runtime, mirror)
+        if deps is not None:
+            return deps
+        return sync_deps(runtime, (await node_or_404(caller)).skills_node())
 
     async def _checked(mirror: ServerSkillRow, result: CheckResult) -> MirrorCheck:
         async with runtime.sessionmaker() as session:
@@ -244,30 +426,84 @@ def server_skills_router(runtime: WebRuntime) -> APIRouter:
 
     @router.post("/skills/{skill_id}/check")
     async def check(caller: Editor, skill_id: str) -> MirrorCheck:  # pyright: ignore[reportUnusedFunction]
-        node = await node_or_404(caller)
+        mirror = await _mirror(caller, skill_id)
+        deps = await _sync_for(caller, mirror)
         try:
             require_admin(actor_of(caller), "The skill library")
         except AgentEditError as exc:
             raise edit_refusal(exc) from exc
-        mirror = await _mirror(caller.person.tenant_id, skill_id)
-        return await _checked(
-            mirror, await check_mirror(sync_deps(runtime, node.skills_node()), mirror.id)
-        )
+        return await _checked(mirror, await check_mirror(deps, mirror.id))
 
     @router.post("/skills/{skill_id}/approve")
     async def approve(caller: Editor, skill_id: str, body: ApproveBody) -> MirrorCheck:  # pyright: ignore[reportUnusedFunction]
-        node = await node_or_404(caller)
+        mirror = await _mirror(caller, skill_id)
+        deps = await _sync_for(caller, mirror)
         try:
             require_admin(actor_of(caller), "The skill library")
         except AgentEditError as exc:
             raise edit_refusal(exc) from exc
-        mirror = await _mirror(caller.person.tenant_id, skill_id)
         if mirror.pending_digest is None:
             raise HTTPException(status_code=409, detail="No update is waiting.")
-        result = await approve_update(
-            sync_deps(runtime, node.skills_node()), mirror.id, digest=body.digest
-        )
+        result = await approve_update(deps, mirror.id, digest=body.digest)
         return await _checked(mirror, result)
+
+    @router.post("/skill-repos", status_code=201)
+    async def add_repo(caller: Editor, body: SkillReposBody) -> list[RepoSkillResult]:  # pyright: ignore[reportUnusedFunction]
+        actor = actor_of(caller)
+        decl = SkillRepoDecl(
+            tenant_id=actor.tenant_id,
+            repo=body.repo,
+            branch=body.branch,
+            paths=tuple(body.paths),
+            scope=body.scope,
+        )
+        try:
+            outcomes: list[RepoSkillOutcome] = await add_skill_repo(
+                change_deps(runtime).edit,
+                runtime.settings.github,
+                runtime.settings.github_app,
+                actor=actor,
+                decl=decl,
+                http=runtime.http_client,
+                now=runtime.now,
+            )
+        except AgentEditError as exc:
+            raise edit_refusal(exc) from exc
+        except UpstreamGone as exc:
+            raise HTTPException(
+                status_code=422, detail="That repository could not be read."
+            ) from exc
+        except UpstreamUnreachable as exc:
+            raise HTTPException(
+                status_code=502, detail="GitHub didn't answer. Try again soon."
+            ) from exc
+        async with runtime.sessionmaker.begin() as session:
+            await recorded(runtime, caller, "Added skill repository")(session, body.repo)
+        return [RepoSkillResult(name=o.name, action=o.action, detail=o.detail) for o in outcomes]
+
+    @router.get("/skills/{skill_id}/scope")
+    async def get_scope(caller: Editor, skill_id: str) -> SkillScopeDoc:  # pyright: ignore[reportUnusedFunction]
+        try:
+            scope = await skill_scope(
+                change_deps(runtime).edit, actor=actor_of(caller), skill_id=skill_id
+            )
+        except AgentEditError as exc:
+            raise edit_refusal(exc) from exc
+        return SkillScopeDoc(skill_id=skill_id, scope=scope)
+
+    @router.put("/skills/{skill_id}/scope")
+    async def put_scope(caller: Editor, skill_id: str, body: SkillScopeBody) -> SkillScopeDoc:  # pyright: ignore[reportUnusedFunction]
+        try:
+            await set_skill_scope(
+                change_deps(runtime).edit,
+                actor=actor_of(caller),
+                skill_id=skill_id,
+                scope=body.scope,
+                audited=recorded(runtime, caller, "Changed skill scope"),
+            )
+        except AgentEditError as exc:
+            raise edit_refusal(exc) from exc
+        return SkillScopeDoc(skill_id=skill_id, scope=body.scope)
 
     @router.post("/skills/{skill_id}/fork", status_code=201)
     async def fork(caller: Editor, skill_id: str, body: ForkBody) -> SkillRef:  # pyright: ignore[reportUnusedFunction]
