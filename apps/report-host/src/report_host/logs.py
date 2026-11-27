@@ -3,7 +3,8 @@
 Report links carry the reader's capability in `?k=`, and the upload and
 publish routes carry theirs in the path (`/upload/{turn_token}`,
 `/publish/{capability_token}`, `/admin/reports/{slug}/recipients/{token}`).
-uvicorn's access log would otherwise print every one of them.
+uvicorn's access log would otherwise print every one of them, and the
+client address beside it.
 """
 
 from __future__ import annotations
@@ -35,6 +36,9 @@ class RedactRequestTargets(logging.Filter):
         ):
             # uvicorn's AccessFormatter reads ``record.args`` by position.
             args = list(record.args)
+            # The client address is personal data nothing here needs; the
+            # formatter reads args by position, so the slot holds "-".
+            args[0] = "-"
             if isinstance(args[2], str):
                 args[2] = redact_request_text(args[2])
             record.args = tuple(args)

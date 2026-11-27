@@ -1,0 +1,12 @@
+{
+  "description": [
+    "Read tenant lead counts, oldest pending age and mailbox coverage.",
+    "",
+    "Readers are those of the sales channel configured now."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

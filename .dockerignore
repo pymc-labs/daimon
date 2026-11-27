@@ -2,7 +2,7 @@
 .venv
 .planning
 .claude
-docs/
+docs/assets/
 tests/
 packages/**/tests/
 **/__pycache__

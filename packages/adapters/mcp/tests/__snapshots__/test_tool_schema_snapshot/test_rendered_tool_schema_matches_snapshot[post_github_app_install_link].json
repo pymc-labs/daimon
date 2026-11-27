@@ -1,0 +1,30 @@
+{
+  "description": [
+    "Install the GitHub App: post a link inviting the user to grant repository access.",
+    "",
+    "For requests to set up or hook up GitHub for an agent, use",
+    "``github_connect`` instead.",
+    "Never suggest a GitHub token; existing bound tokens keep being used.",
+    "",
+    "Posts a link button in this channel opening GitHub's install page. It cannot",
+    "tell whether installation happened. Installing alone neither verifies this",
+    "tenant's access nor binds a working repo; use ``github_connect`` and",
+    "verify access through the requested operation afterwards."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "channel_id": {
+        "type": "string"
+      },
+      "purpose": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "channel_id",
+      "purpose"
+    ],
+    "type": "object"
+  }
+}

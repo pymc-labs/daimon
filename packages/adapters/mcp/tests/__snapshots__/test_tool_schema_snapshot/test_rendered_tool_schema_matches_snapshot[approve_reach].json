@@ -1,0 +1,35 @@
+{
+  "description": [
+    "Ask the person on a card before posting more widely than the turn's limit.",
+    "",
+    "Call it when a send or thread tool refuses with the limit. Pass the whole",
+    "turn's counts and ``where`` naming the channels. The person sees one card;",
+    "on Approve, post within those counts. On Cancel, or where no card can",
+    "show, post nothing and offer one thread with a checklist instead. One card",
+    "a turn is enough, so plan everything before asking."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "people": {
+        "type": "integer"
+      },
+      "places": {
+        "type": "integer"
+      },
+      "threads": {
+        "type": "integer"
+      },
+      "where": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "threads",
+      "places",
+      "people",
+      "where"
+    ],
+    "type": "object"
+  }
+}

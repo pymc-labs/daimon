@@ -1,0 +1,26 @@
+{
+  "description": [
+    "Rename a Discord thread; ``name`` is the new title (1-100 characters).",
+    "",
+    "Use when the user asks to rename or retitle a thread, including the",
+    "one you are chatting in — ``thread_id`` is the thread's channel id.",
+    "Anyone who can post in a thread daimon opened may rename it; other",
+    "threads need Manage Threads."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "name": {
+        "type": "string"
+      },
+      "thread_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "thread_id",
+      "name"
+    ],
+    "type": "object"
+  }
+}

@@ -1,0 +1,170 @@
+{
+  "description": [
+    "Change the workspace's modules and default agent, who may start turns (everyone or",
+    "exactly ``invoker_people``) and the direct-message settings. ``dm_default_agent`` is the",
+    "agent a DM starts with (\"\" clears it); ``dm_rules`` replaces the ordered rule list, first",
+    "match wins."
+  ],
+  "parameters": {
+    "$defs": {
+      "DmRule": {
+        "additionalProperties": false,
+        "description": "One direct-message rule: whom it matches (``subject_id`` for a user or group),\nthe agent they get (none: the default agent) and whether they may switch.",
+        "properties": {
+          "agent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "locked": {
+            "default": false,
+            "type": "boolean"
+          },
+          "subject": {
+            "enum": [
+              "user",
+              "group",
+              "everyone"
+            ],
+            "type": "string"
+          },
+          "subject_id": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "minLength": 1,
+                "pattern": "^[\\w:.@-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "subject"
+        ],
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "default_agent": {
+        "default": "",
+        "type": "string"
+      },
+      "dm_default_agent": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "dm_enabled": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "dm_memory_read_only": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "dm_rules": {
+        "anyOf": [
+          {
+            "items": {
+              "$ref": "#/$defs/DmRule"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "everyone_invokes": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "invoker_people": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "modules": {
+        "anyOf": [
+          {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "propertyNames": {
+              "enum": [
+                "chat",
+                "agents",
+                "channels",
+                "routines",
+                "credits",
+                "integrations"
+              ]
+            },
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "origin_context_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

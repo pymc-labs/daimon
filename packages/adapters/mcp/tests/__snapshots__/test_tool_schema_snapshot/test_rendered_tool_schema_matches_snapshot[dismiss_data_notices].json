@@ -1,0 +1,11 @@
+{
+  "description": [
+    "Mark your notices about data-source links an admin changed as read. They show in",
+    "list_my_data until then."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

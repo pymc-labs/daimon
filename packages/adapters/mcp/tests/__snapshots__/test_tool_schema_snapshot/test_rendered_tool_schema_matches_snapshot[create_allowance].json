@@ -1,0 +1,75 @@
+{
+  "description": [
+    "Set an allowance for a person (person id), a group (name, or ``everyone``) or",
+    "an invite (id): a limit in billed dollars, monthly or in total, for every agent",
+    "or one. A cap is monthly, for everyone or one person, with no agent or end date."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "amount_usd": {
+        "anyOf": [
+          {
+            "type": "number"
+          },
+          {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "type": "string"
+          }
+        ]
+      },
+      "cap": {
+        "default": false,
+        "type": "boolean"
+      },
+      "expires_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "subject": {
+        "type": "string"
+      },
+      "subject_kind": {
+        "enum": [
+          "person",
+          "group",
+          "invite"
+        ],
+        "type": "string"
+      },
+      "window": {
+        "default": "month",
+        "enum": [
+          "month",
+          "total"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [
+      "subject_kind",
+      "subject",
+      "amount_usd"
+    ],
+    "type": "object"
+  }
+}

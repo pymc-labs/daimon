@@ -82,6 +82,9 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 COPY --chown=daimon:daimon defaults/ ./defaults/
 COPY --chown=daimon:daimon packages/ ./packages/
 COPY --from=web --chown=daimon:daimon /web/dist ./packages/adapters/web/daimon/adapters/web/static/
+# Read by the `self_knowledge` tools, with packages/ (DAIMON_SELF_KNOWLEDGE__*). After the
+# code layers: a docs edit rebuilds nothing before it.
+COPY --chown=daimon:daimon docs/ ./docs/
 COPY --chown=daimon:daimon assets/daimon-face.png ./assets/daimon-face.png
 
 USER daimon
@@ -94,6 +97,16 @@ RUN --mount=type=bind,from=builder,source=/app/uv.lock,target=/app/uv.lock \
     && python -c "import openai; from daimon.core.turn.runtimes import hosted_backend; assert hosted_backend('openai.persistent_workspace')" \
     && python -c "import google.genai" \
     && python -m compileall -q -j 0 packages
+
+# The self_knowledge tools serve the generated reference pages too, which are
+# never committed: build them, and the llms.txt index that describes them.
+RUN --mount=type=bind,source=scripts,target=/app/scripts \
+    --mount=type=bind,source=apps,target=/app/apps \
+    --mount=type=bind,source=mkdocs.yml,target=/app/mkdocs.yml \
+    python scripts/generate_config_reference.py \
+    && python scripts/generate_feature_reference.py \
+    && python scripts/generate_mcp_tool_catalogue.py \
+    && python scripts/generate_llms_txt.py
 
 # The commit this image was built from; daimon logs it as `release`. Last, so a
 # new commit does not invalidate the layers above.

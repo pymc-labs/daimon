@@ -304,8 +304,8 @@ def test_every_agent_chat_send_keeps_the_question() -> None:
         assert len(keeps) >= len(sends) and min(keeps) > min(sends), (
             f"{fn.name} sends a message without keeping it after the send"
         )
-    turn_tools = {
-        fn.name
+    turn_fns = {
+        fn.name: fn
         for fn in ast.walk(tree)
         if isinstance(fn, ast.AsyncFunctionDef)
         and any(
@@ -316,6 +316,19 @@ def test_every_agent_chat_send_keeps_the_question() -> None:
         )
         and not fn.name.startswith("_")
     }
+    # `await_turn` reaches `_continue_turn_impl` only to resume a paused turn, with no
+    # message: there is no question to keep, and its call shows as any other tool call.
+    resumes_only = {"await_turn", "resume"}
+    for name in resumes_only:
+        messages = [
+            n.args[3]
+            for n in ast.walk(turn_fns[name])
+            if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "_continue_turn_impl"
+        ]
+        assert messages and all(
+            isinstance(m, ast.Constant) and m.value is None for m in messages
+        ), f"{name} sends a message: it must keep the question like the turn tools"
+    turn_tools = set(turn_fns) - resumes_only
     assert turn_tools and turn_tools <= MONITORED_QUESTION_TOOLS, turn_tools
 
 

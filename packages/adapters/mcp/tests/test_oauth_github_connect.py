@@ -9,6 +9,7 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -19,6 +20,7 @@ from cryptography.fernet import Fernet
 from daimon.adapters.mcp import oauth_github
 from daimon.adapters.mcp.oauth_github import build_oauth_github_routes
 from daimon.adapters.mcp.server import create_mcp_app
+from daimon.core import github_connect_flow
 from daimon.core.config import (
     AnthropicSettings,
     CryptoSettings,
@@ -26,9 +28,26 @@ from daimon.core.config import (
     GithubAppSettings,
     McpSettings,
     Settings,
+    WebSettings,
 )
 from daimon.core.github_connect_delivery import claim_next, settle
+from daimon.core.github_connect_flow import GitHubConnectFlow
+from daimon.core.github_connect_views import (
+    FLOW_COOKIE,
+    MAX_CONFIRM_BODY_BYTES,
+    MAX_CONFIRM_FIELDS,
+    ConnectInstallation,
+    ConnectOutcome,
+    ConnectPage,
+    ConnectRepo,
+    ConnectSelection,
+    PendingInstallation,
+    agent_editor_view,
+    selection_from_json,
+    workspace_picker_view,
+)
 from daimon.core.github_credentials import build_multifernet
+from daimon.core.native_admins import AdminAttestationUnavailable
 from daimon.core.stores import github_access, github_app_installations, github_connect
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.domain import Role
@@ -53,7 +72,7 @@ _INSTALLATION_WRITE = {
 @pytest.fixture(autouse=True)
 def _existing_live_admin(monkeypatch: pytest.MonkeyPatch) -> None:
     """Existing route scenarios exercise GitHub; live platform cases override this stub."""
-    monkeypatch.setattr(oauth_github, "_attest_native_admin", AsyncMock(return_value=True))
+    monkeypatch.setattr(github_connect_flow, "attest_native_admin", AsyncMock(return_value=True))
 
 
 def _settings(key: str, *, configured: bool = True) -> Settings:
@@ -90,14 +109,42 @@ def test_routes_not_mounted_when_unconfigured(
     assert "/oauth/github/confirm" not in paths
 
 
+async def test_connect_and_setup_redirect_to_the_web_app_when_it_runs() -> None:
+    """Old links and a setup URL on this host land on the same page in the web app."""
+    key = Fernet.generate_key().decode()
+    web = WebSettings(public_url=HttpUrl("https://web.example.com"))
+    connect, _callback, setup, _confirm = build_oauth_github_routes(
+        settings=_settings(key).model_copy(update={"web": web}),
+        sessionmaker=async_sessionmaker(class_=AsyncSession),
+        fernet=build_multifernet((key,)),
+    )
+    app = Starlette(
+        routes=[
+            Route("/oauth/github/connect/{token}", connect),
+            Route("/oauth/github/setup", setup),
+        ]
+    )
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="https://mcp.test"
+    ) as client:
+        opened = await client.get("/oauth/github/connect/tok_1")
+        installed = await client.get("/oauth/github/setup?installation_id=7&state=s1")
+    assert opened.headers["location"] == "https://web.example.com/oauth/github/connect/tok_1", (
+        "an old link should open in the web app"
+    )
+    assert installed.headers["location"] == (
+        "https://web.example.com/oauth/github/setup?installation_id=7&state=s1"
+    ), "setup should keep its query"
+
+
 def test_picker_names_owner_type_for_screen_readers() -> None:
     installations = [
-        oauth_github._Installation(
+        ConnectInstallation(
             id=index,
             owner_id=index,
             owner_login=login,
             repository_selection="selected",
-            repos=(oauth_github._Repo(index, index, index, f"{login}/repo", "admin"),),
+            repos=(ConnectRepo(index, index, index, f"{login}/repo", "admin"),),
             owner_type=owner_type,
         )
         for index, login, owner_type in (
@@ -106,15 +153,17 @@ def test_picker_names_owner_type_for_screen_readers() -> None:
         )
     ]
     page = oauth_github._confirmation_page(
-        root="https://mcp.test",
-        state="state",
-        invitation_hash="invitation",
-        secret="secret",
-        cancel_url="https://discord.com",
-        installations=installations,
-        platform="discord",
-        workspace="Test Server",
-        agent_name="Test Agent",
+        workspace_picker_view(
+            root="https://mcp.test",
+            state="state",
+            invitation_hash="invitation",
+            secret="secret",
+            cancel_url="https://discord.com",
+            installations=installations,
+            platform="discord",
+            workspace="Test Server",
+            agent_name="Test Agent",
+        )
     )
     assert '<span class="web-sr-only">Organization</span>company' in page.body.decode()
     assert '<span class="web-sr-only">Personal account</span>person' in page.body.decode()
@@ -139,29 +188,31 @@ def test_picker_names_owner_type_for_screen_readers() -> None:
 def test_picker_preselects_only_available_requested_repo(
     requested_repo: str | None, already_added: frozenset[int], expected: str
 ) -> None:
-    installation = oauth_github._Installation(
+    installation = ConnectInstallation(
         id=1,
         owner_id=1,
         owner_login="company",
         repository_selection="selected",
         repos=(
-            oauth_github._Repo(1, 1, 1, "company/repo", "admin"),
-            oauth_github._Repo(2, 1, 1, "company/private", None),
+            ConnectRepo(1, 1, 1, "company/repo", "admin"),
+            ConnectRepo(2, 1, 1, "company/private", None),
         ),
         owner_type="Organization",
     )
     page = oauth_github._confirmation_page(
-        root="https://mcp.test",
-        state="state",
-        invitation_hash="invitation",
-        secret="secret",
-        cancel_url="https://discord.com",
-        installations=[installation],
-        platform="discord",
-        workspace="Test Server",
-        agent_name="Test Agent",
-        already_added=already_added,
-        requested_repo=requested_repo,
+        workspace_picker_view(
+            root="https://mcp.test",
+            state="state",
+            invitation_hash="invitation",
+            secret="secret",
+            cancel_url="https://discord.com",
+            installations=[installation],
+            platform="discord",
+            workspace="Test Server",
+            agent_name="Test Agent",
+            already_added=already_added,
+            requested_repo=requested_repo,
+        )
     )
     assert expected in page.body.decode()
     assert 'value="2"' not in page.body.decode()
@@ -179,12 +230,12 @@ def test_picker_preselects_only_available_requested_repo(
 def test_agent_editor_preselects_requested_repo_in_add_dialog(
     requested_repo: str | None, already_granted: bool, expected: bool
 ) -> None:
-    installation = oauth_github._Installation(
+    installation = ConnectInstallation(
         id=1,
         owner_id=1,
         owner_login="acme",
         repository_selection="selected",
-        repos=(oauth_github._Repo(1, 1, 1, "acme/data", "admin"),),
+        repos=(ConnectRepo(1, 1, 1, "acme/data", "admin"),),
     )
     grants = (
         [
@@ -207,19 +258,21 @@ def test_agent_editor_preselects_requested_repo_in_add_dialog(
         else []
     )
     page = oauth_github._agent_editor_page(
-        root="https://mcp.test",
-        state="state",
-        invitation_hash="invitation",
-        secret="secret",
-        agent_name="Test Agent",
-        workspace="Test Server",
-        platform="discord",
-        grants=grants,
-        installations=[installation],
-        snapshot="snapshot",
-        cancel_url="https://discord.com",
-        install_url="https://github.com/apps/test/installations/new",
-        requested_repo=requested_repo,
+        agent_editor_view(
+            root="https://mcp.test",
+            state="state",
+            invitation_hash="invitation",
+            secret="secret",
+            agent_name="Test Agent",
+            workspace="Test Server",
+            platform="discord",
+            grants=grants,
+            installations=[installation],
+            snapshot="snapshot",
+            cancel_url="https://discord.com",
+            install_url="https://github.com/apps/test/installations/new",
+            requested_repo=requested_repo,
+        )
     )
     dialog = page.body.decode().split('<dialog id="repo-picker"', 1)[1].split("</dialog>", 1)[0]
     assert ('class="gh-picker-toggle" type="checkbox" checked>' in dialog) is expected
@@ -248,7 +301,7 @@ async def test_pending_installation_request_matches_signed_in_person(
     def app_jwt(private_key: str, app_id: str, *, now: int) -> str:
         return "app-jwt"
 
-    monkeypatch.setattr(oauth_github, "build_app_jwt", app_jwt)
+    monkeypatch.setattr(github_connect_flow, "build_app_jwt", app_jwt)
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/app/installation-requests"
@@ -262,12 +315,12 @@ async def test_pending_installation_request_matches_signed_in_person(
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        assert await oauth_github.has_pending_installation_request(
+        assert await github_connect_flow.has_pending_installation_request(
             client, app_id="42", private_key="pem", github_user_id=17
-        ) == oauth_github._PendingInstallationRequest(True, "example")
-        assert await oauth_github.has_pending_installation_request(
+        ) == PendingInstallation(True, "example")
+        assert await github_connect_flow.has_pending_installation_request(
             client, app_id="42", private_key="pem", github_user_id=20
-        ) == oauth_github._PendingInstallationRequest(False)
+        ) == PendingInstallation(False)
 
 
 def test_pending_page_names_verified_organization_safely() -> None:
@@ -492,7 +545,7 @@ async def test_requested_repo_picker_posts_only_selected_repo(
 
     key = Fernet.generate_key().decode()
     settings = _settings(key)
-    monkeypatch.setattr(oauth_github, "build_app_jwt", lambda *_args, **_kwargs: "app-jwt")
+    monkeypatch.setattr(github_connect_flow, "build_app_jwt", lambda *_args, **_kwargs: "app-jwt")
 
     def client_factory() -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=httpx.MockTransport(github_handler))
@@ -526,10 +579,8 @@ async def test_requested_repo_picker_posts_only_selected_repo(
         assert 'name="access" value="write" checked' in picker.text
         async with committing_sessionmaker() as session:
             assert await github_access.list_authorized_repos(session, tenant_id=tenant_id) == []
-        live = AsyncMock(
-            side_effect=[False, oauth_github.AdminAttestationUnavailable("lookup failed"), True]
-        )
-        monkeypatch.setattr(oauth_github, "_attest_native_admin", live)
+        live = AsyncMock(side_effect=[False, AdminAttestationUnavailable("lookup failed"), True])
+        monkeypatch.setattr(github_connect_flow, "attest_native_admin", live)
         for expected_status in (403, 503):
             refused = await browser.post(
                 "/oauth/github/confirm", data={"state": state, "repo": "102", "access": "read"}
@@ -580,11 +631,11 @@ async def test_connection_happy_path_and_rechecks(
 
     async def pending_check(
         client: httpx.AsyncClient, *, app_id: str, private_key: str, github_user_id: int
-    ) -> oauth_github._PendingInstallationRequest:
+    ) -> PendingInstallation:
         assert app_id == "42" and private_key == "pem" and github_user_id == 17
-        return oauth_github._PendingInstallationRequest(approval_pending)
+        return PendingInstallation(approval_pending)
 
-    monkeypatch.setattr(oauth_github, "has_pending_installation_request", pending_check)
+    monkeypatch.setattr(github_connect_flow, "has_pending_installation_request", pending_check)
 
     def github_handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
@@ -657,7 +708,7 @@ async def test_connection_happy_path_and_rechecks(
     settings = _settings(key)
     fernet = build_multifernet((key,))
     monkeypatch.setattr(
-        "daimon.adapters.mcp.oauth_github.build_app_jwt",
+        "daimon.core.github_connect_flow.build_app_jwt",
         lambda *_args, **_kwargs: "app-jwt",
     )
 
@@ -975,24 +1026,24 @@ async def test_connection_happy_path_and_rechecks(
 def _agent_picker(
     *, already_added: frozenset[int] = frozenset(), needed: dict[int, bool] | None = None
 ) -> str:
-    repos = tuple(
-        oauth_github._Repo(index, 5, 7, f"lab/repo-{index}", "admin") for index in (1, 2, 3)
-    )
-    installation = oauth_github._Installation(
+    repos = tuple(ConnectRepo(index, 5, 7, f"lab/repo-{index}", "admin") for index in (1, 2, 3))
+    installation = ConnectInstallation(
         id=7, owner_id=5, owner_login="lab", repository_selection="all", repos=repos
     )
     return oauth_github._confirmation_page(
-        root="https://mcp.test",
-        state="state",
-        invitation_hash="invitation",
-        secret="secret",
-        cancel_url="https://discord.com",
-        installations=[installation],
-        platform="discord",
-        workspace="Test Server",
-        agent_name="ResearchBot",
-        already_added=already_added,
-        needed=needed,
+        workspace_picker_view(
+            root="https://mcp.test",
+            state="state",
+            invitation_hash="invitation",
+            secret="secret",
+            cancel_url="https://discord.com",
+            installations=[installation],
+            platform="discord",
+            workspace="Test Server",
+            agent_name="ResearchBot",
+            already_added=already_added,
+            needed=needed,
+        )
     ).body.decode()
 
 
@@ -1046,31 +1097,32 @@ def test_editor_stages_remove_undo_and_summarizes_every_change() -> None:
         )
         for repo_id, name in ((1, "lab/visible"), (2, "lab/hidden"))
     ]
-    install = oauth_github._Installation(
+    install = ConnectInstallation(
         id=7,
         owner_id=5,
         owner_login="lab",
         repository_selection="selected",
         repos=(
-            oauth_github._Repo(1, 5, 7, "lab/visible", "admin"),
-            oauth_github._Repo(2, 5, 7, "lab/hidden", None),
-            oauth_github._Repo(3, 5, 7, "lab/new", "admin"),
+            ConnectRepo(1, 5, 7, "lab/visible", "admin"),
+            ConnectRepo(2, 5, 7, "lab/hidden", None),
+            ConnectRepo(3, 5, 7, "lab/new", "admin"),
         ),
     )
     body = oauth_github._agent_editor_page(
-        root="https://mcp.test",
-        state="state",
-        invitation_hash="invitation",
-        secret="secret",
-        agent_name="ResearchBot",
-        workspace="Test Server",
-        platform="discord",
-        grants=grants,
-        installations=[install],
-        snapshot="snapshot",
-        cancel_url="https://mcp.test/cancel",
-        install_url="https://github.com/apps/sample-app/installations/new",
-        missing_names=("lab/hidden",),
+        agent_editor_view(
+            root="https://mcp.test",
+            state="state",
+            invitation_hash="invitation",
+            secret="secret",
+            agent_name="ResearchBot",
+            workspace="Test Server",
+            platform="discord",
+            grants=grants,
+            installations=[install],
+            snapshot="snapshot",
+            cancel_url="https://mcp.test/cancel",
+            install_url="https://github.com/apps/sample-app/installations/new",
+        )
     ).body.decode()
     assert "lab/hidden" not in body
     assert "Hidden repo" in body
@@ -1113,27 +1165,29 @@ def test_editor_hides_unlisted_private_grants_even_under_truncated_owner() -> No
             (3, "lost/stale"),
         )
     ]
-    install = oauth_github._Installation(
+    install = ConnectInstallation(
         id=7,
         owner_id=5,
         owner_login="big",
         repository_selection="selected",
-        repos=(oauth_github._Repo(1, 5, 7, "big/visible", "admin"),),
+        repos=(ConnectRepo(1, 5, 7, "big/visible", "admin"),),
         truncated=True,
     )
     body = oauth_github._agent_editor_page(
-        root="https://mcp.test",
-        state="state",
-        invitation_hash="invitation",
-        secret="secret",
-        agent_name="ResearchBot",
-        workspace="Test Server",
-        platform="discord",
-        grants=grants,
-        installations=[install],
-        snapshot="snapshot",
-        cancel_url="https://mcp.test/cancel",
-        install_url="https://github.com/apps/sample-app/installations/new",
+        agent_editor_view(
+            root="https://mcp.test",
+            state="state",
+            invitation_hash="invitation",
+            secret="secret",
+            agent_name="ResearchBot",
+            workspace="Test Server",
+            platform="discord",
+            grants=grants,
+            installations=[install],
+            snapshot="snapshot",
+            cancel_url="https://mcp.test/cancel",
+            install_url="https://github.com/apps/sample-app/installations/new",
+        )
     ).body.decode()
     past_cap_row = body.split('data-repo-id="2"', 1)[1].split("</article>", 1)[0]
     stale_row = body.split('data-repo-id="3"', 1)[1].split("</article>", 1)[0]
@@ -1286,8 +1340,8 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
     ) -> object:
         return SimpleNamespace(name="Editor", metadata={})
 
-    monkeypatch.setattr(oauth_github, "find_agent_by_derived_uuid", find_agent)
-    monkeypatch.setattr(oauth_github, "build_app_jwt", lambda *_args, **_kwargs: "app-jwt")
+    monkeypatch.setattr(github_connect_flow, "find_agent_by_derived_uuid", find_agent)
+    monkeypatch.setattr(github_connect_flow, "build_app_jwt", lambda *_args, **_kwargs: "app-jwt")
     key = Fernet.generate_key().decode()
     connect, callback, setup, confirm = build_oauth_github_routes(
         settings=_settings(key),
@@ -1383,9 +1437,9 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
         admin_ids.clear()
         with monkeypatch.context() as pending_patch:
             pending_patch.setattr(
-                oauth_github,
+                github_connect_flow,
                 "has_pending_installation_request",
-                AsyncMock(return_value=oauth_github._PendingInstallationRequest(True, "editor")),
+                AsyncMock(return_value=PendingInstallation(True, "editor")),
             )
             _state, _hidden, unavailable = await page()
         assert "An editor owner must approve Daimon" in unavailable
@@ -1456,7 +1510,7 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
 
         # A chat write between the display read and signature read must not
         # sign a newer state than the page displayed.
-        original_list = oauth_github.list_agent_repos
+        original_list = github_connect_flow.list_agent_repos
         injected = False
         reads = 0
 
@@ -1481,9 +1535,9 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
                     )
             return rows
 
-        monkeypatch.setattr(oauth_github, "list_agent_repos", list_then_chat_write)
+        monkeypatch.setattr(github_connect_flow, "list_agent_repos", list_then_chat_write)
         state, hidden, rendered = await page()
-        monkeypatch.setattr(oauth_github, "list_agent_repos", original_list)
+        monkeypatch.setattr(github_connect_flow, "list_agent_repos", original_list)
         assert injected and "repo-103" in rendered
         assert (await save(hidden, remove="103")).status_code == 409
 
@@ -1519,7 +1573,7 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
         operator_live = AsyncMock(
             side_effect=AssertionError("operator invitation requested live admin lookup")
         )
-        monkeypatch.setattr(oauth_github, "_attest_native_admin", operator_live)
+        monkeypatch.setattr(github_connect_flow, "attest_native_admin", operator_live)
         assert (await save(hidden, repo="101")).status_code == 200
         operator_live.assert_not_awaited()
 
@@ -1730,8 +1784,8 @@ async def editor_env(
     ) -> object:
         return SimpleNamespace(name="Editor", metadata={})
 
-    monkeypatch.setattr(oauth_github, "find_agent_by_derived_uuid", find_agent)
-    monkeypatch.setattr(oauth_github, "build_app_jwt", lambda *_args, **_kwargs: "app-jwt")
+    monkeypatch.setattr(github_connect_flow, "find_agent_by_derived_uuid", find_agent)
+    monkeypatch.setattr(github_connect_flow, "build_app_jwt", lambda *_args, **_kwargs: "app-jwt")
     key = Fernet.generate_key().decode()
     connect, callback, setup, confirm = build_oauth_github_routes(
         settings=_settings(key),
@@ -1984,7 +2038,7 @@ async def test_installation_lists_cap_each_owner_and_isolate_one_failure() -> No
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(github_handler)) as client:
-        owners = await oauth_github._installations(client, "test-token")
+        owners = await github_connect_flow.list_installations(client, "test-token")
     assert len(owners[0].repos) == 2000
     assert owners[0].total == 4800 and owners[0].truncated
     assert owners[1].fetch_state == "error" and owners[1].repos == ()
@@ -1996,7 +2050,7 @@ async def test_installation_lists_cap_each_owner_and_isolate_one_failure() -> No
 async def test_confirm_refuses_an_oversize_body_before_any_work(editor_env: _EditorEnv) -> None:
     state, hidden = await editor_env.open_editor()
     calls_before = len(editor_env.github_calls)
-    oversize = oauth_github._MAX_CONFIRM_BODY_BYTES + 1
+    oversize = MAX_CONFIRM_BODY_BYTES + 1
 
     declared = await editor_env.browser.post(
         "/oauth/github/confirm",
@@ -2028,7 +2082,7 @@ async def test_confirm_refuses_a_declared_oversize_body_without_reading_it(
         content=body(),
         headers={
             "content-type": "application/x-www-form-urlencoded",
-            "content-length": str(oauth_github._MAX_CONFIRM_BODY_BYTES + 1),
+            "content-length": str(MAX_CONFIRM_BODY_BYTES + 1),
         },
     )
 
@@ -2041,8 +2095,8 @@ async def test_confirm_refuses_too_many_fields(editor_env: _EditorEnv) -> None:
     state, hidden = await editor_env.open_editor()
     calls_before = len(editor_env.github_calls)
     # Small in bytes, so only the field-count limit can stop it.
-    body = urlencode(hidden) + "&a=1" * (oauth_github._MAX_CONFIRM_FIELDS + 1)
-    assert len(body) < oauth_github._MAX_CONFIRM_BODY_BYTES
+    body = urlencode(hidden) + "&a=1" * (MAX_CONFIRM_FIELDS + 1)
+    assert len(body) < MAX_CONFIRM_BODY_BYTES
 
     response = await editor_env.browser.post(
         "/oauth/github/confirm",
@@ -2056,13 +2110,13 @@ async def test_confirm_refuses_too_many_fields(editor_env: _EditorEnv) -> None:
 
 def test_noscript_large_owner_list_uses_one_access_field() -> None:
     installations = [
-        oauth_github._Installation(
+        ConnectInstallation(
             id=owner,
             owner_id=owner,
             owner_login=f"org-{owner}",
             repository_selection="selected",
             repos=tuple(
-                oauth_github._Repo(
+                ConnectRepo(
                     owner * 10_000 + index,
                     owner,
                     owner,
@@ -2075,19 +2129,21 @@ def test_noscript_large_owner_list_uses_one_access_field() -> None:
         for owner in range(1, 4)
     ]
     page = oauth_github._agent_editor_page(
-        root="https://mcp.test",
-        state="state",
-        invitation_hash="invitation",
-        secret="secret",
-        agent_name="Editor",
-        workspace="Test",
-        platform="discord",
-        grants=[],
-        installations=installations,
-        snapshot="snapshot",
-        cancel_url="https://mcp.test/cancel",
-        install_url="https://github.test/setup",
-        github_user_id=1,
+        agent_editor_view(
+            root="https://mcp.test",
+            state="state",
+            invitation_hash="invitation",
+            secret="secret",
+            agent_name="Editor",
+            workspace="Test",
+            platform="discord",
+            grants=[],
+            installations=installations,
+            snapshot="snapshot",
+            cancel_url="https://mcp.test/cancel",
+            install_url="https://github.test/setup",
+            github_user_id=1,
+        )
     ).body.decode()
     fallback = page.split("<noscript><section", 1)[1].split("</noscript>", 1)[0]
     assert fallback.count('name="repo"') == 6000
@@ -2100,7 +2156,7 @@ def test_noscript_large_owner_list_uses_one_access_field() -> None:
     assert page.count('name="access" value="write"') == 1
     # Every checkbox can be checked without parse_qs reaching max_num_fields.
     assert 6000 + len(_hidden_pairs(page)) + fallback.count('name="remove"') + 1 < (
-        oauth_github._MAX_CONFIRM_FIELDS
+        MAX_CONFIRM_FIELDS
     )
 
 
@@ -2142,7 +2198,7 @@ async def test_confirm_stops_reading_a_chunked_body_past_the_cap(editor_env: _Ed
     response = await editor_env.browser.send(request)
 
     assert response.status_code == 413
-    assert sent * len(chunk) <= oauth_github._MAX_CONFIRM_BODY_BYTES + 2 * len(chunk)
+    assert sent * len(chunk) <= MAX_CONFIRM_BODY_BYTES + 2 * len(chunk)
     assert sent < total_chunks
     await _no_github_calls_after(editor_env, calls_before)
 
@@ -2151,7 +2207,7 @@ async def test_confirm_stops_reading_a_chunked_body_past_the_cap(editor_env: _Ed
 async def test_confirm_does_not_trust_a_short_content_length(editor_env: _EditorEnv) -> None:
     state, hidden = await editor_env.open_editor()
     calls_before = len(editor_env.github_calls)
-    payload = b"x=" + b"y" * (oauth_github._MAX_CONFIRM_BODY_BYTES + 1)
+    payload = b"x=" + b"y" * (MAX_CONFIRM_BODY_BYTES + 1)
 
     response = await editor_env.browser.post(
         "/oauth/github/confirm",
@@ -2204,6 +2260,45 @@ async def test_failed_save_retry_form_keeps_state_and_the_ticked_repos(
 
 
 @pytest.mark.asyncio
+async def test_failed_save_retry_selection_as_json_saves_the_agent(
+    editor_env: _EditorEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The web app re-posts a dumped `retry_selection`; it must not read as unknown fields."""
+    outcomes: list[tuple[GitHubConnectFlow, ConnectOutcome]] = []
+    save = GitHubConnectFlow.save
+
+    async def spy(self: GitHubConnectFlow, root: str, **kwargs: Any) -> ConnectOutcome:
+        outcome = await save(self, root, **kwargs)
+        outcomes.append((self, outcome))
+        return outcome
+
+    monkeypatch.setattr(GitHubConnectFlow, "save", spy)
+    _, hidden = await editor_env.open_editor()
+    editor_env.details_down = True
+    await editor_env.browser.post(
+        "/oauth/github/confirm",
+        data={**hidden, "access": "write", "working": "keep", "repo": ["101", "102"]},
+    )
+    flow, failed = outcomes[-1]
+    assert isinstance(failed, ConnectPage) and failed.view.kind == "transient_error", failed
+    assert failed.view.retry_selection is not None, "a failed save keeps its selection"
+
+    body = failed.view.retry_selection.model_dump_json().encode()
+    selection = selection_from_json(body)
+    assert isinstance(selection, ConnectSelection), selection
+    editor_env.details_down = False
+    retried = await save(
+        flow,
+        "https://mcp.test",
+        flow_cookie=editor_env.browser.cookies[FLOW_COOKIE],
+        selection=selection,
+    )
+
+    assert isinstance(retried, ConnectPage) and retried.view.kind == "saved_agent", retried
+    assert await editor_env.saved_repo_ids() == [101, 102]
+
+
+@pytest.mark.asyncio
 async def test_failed_get_keeps_a_try_again_link_with_state(editor_env: _EditorEnv) -> None:
     state, _hidden = await editor_env.open_editor()
     editor_env.listing_down = True
@@ -2244,7 +2339,7 @@ async def test_slow_github_hits_the_total_deadline_with_selections_kept(
     editor_env: _EditorEnv, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     state, hidden = await editor_env.open_editor()
-    monkeypatch.setattr(oauth_github, "_INSTALLATIONS_DEADLINE_SECONDS", 0.05)
+    monkeypatch.setattr(github_connect_flow, "INSTALLATIONS_DEADLINE_SECONDS", 0.05)
     editor_env.listing_delay = 30.0  # would hold the request open without the deadline
 
     posted = await editor_env.browser.post(
@@ -2269,9 +2364,9 @@ async def test_admin_check_outage_on_save_keeps_the_selection(
 ) -> None:
     state, hidden = await editor_env.open_editor()
     monkeypatch.setattr(
-        oauth_github,
-        "_attest_native_admin",
-        AsyncMock(side_effect=oauth_github.AdminAttestationUnavailable("down")),
+        github_connect_flow,
+        "attest_native_admin",
+        AsyncMock(side_effect=AdminAttestationUnavailable("down")),
     )
 
     failed = await editor_env.browser.post(

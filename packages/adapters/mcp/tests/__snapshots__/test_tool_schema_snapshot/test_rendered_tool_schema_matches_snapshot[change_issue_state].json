@@ -1,0 +1,29 @@
+{
+  "description": [
+    "Resolve, mute or reopen an issue by its ``fingerprint`` (from list_issues). Resolve",
+    "hides it until a newer event arrives; mute hides it until it is reopened. Only an",
+    "admin or owner may do this; an operator token never can."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "action": {
+        "enum": [
+          "resolve",
+          "mute",
+          "reopen"
+        ],
+        "type": "string"
+      },
+      "fingerprint": {
+        "maxLength": 64,
+        "type": "string"
+      }
+    },
+    "required": [
+      "fingerprint",
+      "action"
+    ],
+    "type": "object"
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "description": [
+    "List events for one of your sessions (SDK pass-through, single page).",
+    "",
+    "A conversation from a sealed channel is refused unless",
+    "``origin_context_id`` is this turn's origin inside that channel."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "limit": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "order": {
+        "anyOf": [
+          {
+            "enum": [
+              "asc",
+              "desc"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "page": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id"
+    ],
+    "type": "object"
+  }
+}

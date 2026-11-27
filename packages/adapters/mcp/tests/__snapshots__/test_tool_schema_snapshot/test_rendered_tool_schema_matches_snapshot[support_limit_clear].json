@@ -1,0 +1,59 @@
+{
+  "description": [
+    "Remove a support limit, or one person's own limit at a place. Admin-only.",
+    "",
+    "Clearing a place's limit declines its pending requests at no charge.",
+    "Requests there then use the limit above it, or the default credits per",
+    "person. Example: ``scope=\"channel\"``, ``scope_id=\"222\"``."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "expected_revision": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "person": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "scope": {
+        "enum": [
+          "workspace",
+          "agent",
+          "channel"
+        ],
+        "type": "string"
+      },
+      "scope_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "scope"
+    ],
+    "type": "object"
+  }
+}

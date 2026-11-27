@@ -1,0 +1,34 @@
+{
+  "description": [
+    "Call one shared tool of a workspace's connected MCP servers, as listed by",
+    "list_shared_tools. Before a tool with ``writes`` true, ask your user first."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "arguments": {
+        "anyOf": [
+          {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "name": {
+        "type": "string"
+      },
+      "workspace_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "workspace_id",
+      "name"
+    ],
+    "type": "object"
+  }
+}

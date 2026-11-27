@@ -313,3 +313,22 @@ async def test_dev_sign_in_refuses_other_methods(web_client: WebClientFactory) -
             headers={"X-Daimon-Web": "1", "Origin": "http://localhost:5173"},
         )
     assert res.status_code == 400, "only the dev user signs in through the mock route"
+
+
+async def test_legal_links_follow_the_operators_settings(web_client: WebClientFactory) -> None:
+    """The sign-in page and menu read the policy and terms from one place; terms is optional."""
+    async with web_client(settings=discord_settings()) as client:
+        bare = (await client.get("/auth/legal")).json()
+    async with web_client(
+        settings=discord_settings(
+            privacy_policy_url="https://example.com/privacy",
+            terms_url="https://example.com/terms",
+        )
+    ) as client:
+        set_up = (await client.get("/auth/legal")).json()
+    assert bare["terms"] is None, "no terms page is shown until DAIMON_TERMS_URL is set"
+    assert bare["privacy"], "the privacy link is always present"
+    assert set_up == {
+        "privacy": "https://example.com/privacy",
+        "terms": "https://example.com/terms",
+    }, set_up

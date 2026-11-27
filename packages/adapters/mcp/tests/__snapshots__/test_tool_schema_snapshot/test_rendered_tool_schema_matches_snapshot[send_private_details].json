@@ -1,0 +1,20 @@
+{
+  "description": [
+    "Send yourself (the asker) a direct message holding the [[private:...]] placeholders",
+    "a data tool gave you this turn, written around them. Each opens there, only for the",
+    "person it was fetched for. Keep answering in this conversation and say what went by",
+    "direct message."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "message": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "message"
+    ],
+    "type": "object"
+  }
+}

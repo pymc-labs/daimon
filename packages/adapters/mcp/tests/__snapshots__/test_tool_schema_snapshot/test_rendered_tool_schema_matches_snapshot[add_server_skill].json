@@ -1,0 +1,40 @@
+{
+  "description": [
+    "Only for the connected data server: list the skills it offers, or take one",
+    "by name or URI into the library, kept current with that server. A person confirms on",
+    "a card, and you pass your ``origin_context_id``. Not for any other source, nor for giving",
+    "an agent what the library already holds."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "skill": {
+        "anyOf": [
+          {
+            "maxLength": 2048,
+            "minLength": 1,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

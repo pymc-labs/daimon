@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Literal
 
 from daimon.core.access_policy import DM_SCOPE_PREFIX
 from daimon.core.platform_words import Place, turn_words, works_in_sentence
+from daimon.core.self_knowledge import controls_hint
 from daimon.core.stores.domain import (
     CHAT_PLATFORMS,
     ChatPlatform,
@@ -223,6 +224,7 @@ async def turn_origin(
     helper_of: uuid.UUID | None = None,
     helper_key: str | None = None,
     own_dm_reach: bool = False,
+    public_thread: bool = False,
 ) -> AsyncIterator[TurnOriginRow]:
     """Commit a distinct origin for this execution and remove it after execution.
 
@@ -244,6 +246,7 @@ async def turn_origin(
     `own_dm_reach` is the admission's decision that the turn may read a limited room its
     person can read themselves: true only for an interactive owner DM turn and a routine the
     scheduler fires into its owner's DM. A helper's turn never has it.
+    `public_thread` is the platform's word that `thread_id` is a public thread.
     """
     now = datetime.now(UTC)
     async with sessionmaker.begin() as session:
@@ -271,6 +274,7 @@ async def turn_origin(
             helper_of=helper_of,
             helper_key=helper_key,
             own_dm_reach=own_dm_reach,
+            public_thread=public_thread,
             # A helper works inside the turn that asked it: never a wake's own turn.
             origin_id=None if helper_of is not None else _wake_origin_id(),
         )
@@ -340,6 +344,7 @@ def render_turn_origin(
     moved: Mapping[str, str | None] | None = None,
     web: TenantLinks | None = None,
     features: FeatureSnapshot | None = None,
+    daimon_tools: bool = True,
 ) -> str:
     """Render server-provided location and identity separately from user history.
 
@@ -383,7 +388,9 @@ def render_turn_origin(
     is the person's own words — it is truncated to `MAX_REQUESTED_WORK_CHARS`
     and JSON-encoded like everything else, never interpolated into the prose.
 
-    `features` sets `web_awareness`; None renders everything.
+    `features` sets `web_awareness`, and `self_knowledge` adds its hint (`controls_hint`) where
+    it is On, the turn is not held and the agent has Daimon's tools (`daimon_tools`, from
+    `SessionToolset`); None renders everything but that hint.
     """
     if features is not None and not features.on("web_awareness"):
         web = None
@@ -431,6 +438,12 @@ def render_turn_origin(
         controls["web"] = {"url": web.root(), "pages": web.pages()}
     else:
         web = None
+    knows = None if features is None else features.features.get("self_knowledge")
+    held = origin.sender_foreign or origin.shared_channel
+    if hint := controls_hint(
+        on=knows is not None and knows.on, held=held, daimon_tools=daimon_tools
+    ):
+        controls["self_knowledge"] = hint
     if handoff is not None:
         controls["handoff"] = {
             "from_name": handoff.from_name,

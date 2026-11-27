@@ -20,12 +20,13 @@ SESSION_KEYS: Final[tuple[str, ...]] = (
     "agent_env_file",
     *CAPABILITY_KEYS,
 )
-TOOLSET_KEYS: Final[tuple[str, ...]] = (*SESSION_KEYS, "repo_memory", "web_awareness")
-"""What `SessionToolset.of` reads: `repo_memory` and `web_awareness` also hide their tools,
-while they bind per turn."""
-HIDING_KEYS: Final[tuple[str, ...]] = (*CAPABILITY_KEYS, "repo_memory", "web_awareness")
+_TURN_HIDING: Final[tuple[str, ...]] = ("repo_memory", "web_awareness", "self_knowledge")
+TOOLSET_KEYS: Final[tuple[str, ...]] = (*SESSION_KEYS, *_TURN_HIDING)
+"""What `SessionToolset.of` reads: `repo_memory`, `web_awareness` and `self_knowledge` also
+hide their tools, while they bind per turn."""
+HIDING_KEYS: Final[tuple[str, ...]] = (*CAPABILITY_KEYS, *_TURN_HIDING)
 """What `hidden_daimon_tools` reads; no backend narrows any of them."""
-TURN_KEYS: Final[tuple[str, ...]] = ("web_awareness",)
+TURN_KEYS: Final[tuple[str, ...]] = ("web_awareness", "self_knowledge")
 PER_TURN_KEYS: Final[tuple[str, ...]] = (
     "mcp_briefing", "repo_memory", "context_provider", "origin_fragments",
     "monitor_direct_messages",
@@ -149,6 +150,8 @@ class SessionToolset:
     """`agent_env_file`: the agent's keys are mounted as `.env`."""
     web_app: bool = True
     """`web_awareness`: the web app's own tools (`WEB_APP_TOOLS`) are offered."""
+    self_knowledge: bool = True
+    """`self_knowledge`: the docs and source tools (`SELF_KNOWLEDGE_TOOLS`) are offered."""
     off_capabilities: frozenset[str] = frozenset()
     """Capabilities that are Off (a tier or their default) or whose setup is missing: their tools
     are not offered. Platform, backend and dependency gaps at the default tier hide nothing."""
@@ -181,6 +184,7 @@ class SessionToolset:
         env = features.features.get("agent_env_file")
         web = features.features.get("web_awareness")
         data = features.features.get(DATA_SOURCES)
+        knows = features.features.get("self_knowledge")
         return cls(
             daimon_tools=not isolated,
             builtins=builtins,
@@ -188,6 +192,7 @@ class SessionToolset:
             memory_on=memory is not None and memory.on,
             env_file=env is None or env.on,
             web_app=web is None or not hides_tools(web),
+            self_knowledge=knows is None or not hides_tools(knows),
             off_capabilities=frozenset(
                 key
                 for key in CAPABILITY_KEYS
@@ -204,6 +209,7 @@ class SessionToolset:
             or not self.repo_memory
             or not self.env_file
             or not self.web_app
+            or not self.self_knowledge
             or bool(self.off_capabilities)
         )
 
@@ -216,7 +222,8 @@ class SessionToolset:
         """Daimon tools this place turns off on the session's `daimon-mcp` toolset."""
         memory = () if self.repo_memory else ("repo_memory",)
         web = () if self.web_app else ("web_awareness",)
-        hidden = gated_tools((*self.off_capabilities, *memory, *web))
+        knows = () if self.self_knowledge else ("self_knowledge",)
+        hidden = gated_tools((*self.off_capabilities, *memory, *web, *knows))
         return hidden - DATA_SETUP_TOOLS if self.data_setup else hidden
 
     def apply_builtins(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -270,13 +277,17 @@ def agent_toolset(
     features: FeatureSnapshot | None, agent: BetaManagedAgentsAgent
 ) -> SessionToolset:
     """The toolset a session of `agent` runs with at the place `features` was resolved."""
+    if features is None:
+        return DEFAULT_TOOLSET
+    return SessionToolset.of(features, builtins_of(agent), isolated=is_isolated(agent))
+
+
+def is_isolated(agent: BetaManagedAgentsAgent) -> bool:
+    """Whether `agent` is isolated (`daimon_isolated`): it gets no Daimon tools."""
     # Imported here: `defaults` reaches the session snapshot, which imports this module.
     from daimon.core.defaults.metadata import MA_METADATA_KEY_ISOLATED
 
-    if features is None:
-        return DEFAULT_TOOLSET
-    isolated = (agent.metadata or {}).get(MA_METADATA_KEY_ISOLATED) == "true"
-    return SessionToolset.of(features, builtins_of(agent), isolated=isolated)
+    return (agent.metadata or {}).get(MA_METADATA_KEY_ISOLATED) == "true"
 
 
 DEFAULT_TOOLSET: Final = SessionToolset()

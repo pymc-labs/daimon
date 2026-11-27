@@ -1,0 +1,48 @@
+{
+  "description": [
+    "Link an account the data sources know to a person (link: provider, workspace,",
+    "subject as listed, person), turn down a suggestion (reject: the same), unlink an",
+    "account (unlink: provider, workspace, subject), or hide or show a person's name in",
+    "what agents read (hide_names, show_names: person). Runs on the asker's Approve card.",
+    "Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "action": {
+        "enum": [
+          "link",
+          "reject",
+          "unlink",
+          "hide_names",
+          "show_names"
+        ],
+        "type": "string"
+      },
+      "origin_context_id": {
+        "type": "string"
+      },
+      "person": {
+        "default": "",
+        "type": "string"
+      },
+      "provider": {
+        "default": "",
+        "type": "string"
+      },
+      "subject": {
+        "default": "",
+        "type": "string"
+      },
+      "workspace": {
+        "default": "",
+        "type": "string"
+      }
+    },
+    "required": [
+      "action",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

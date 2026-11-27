@@ -279,6 +279,9 @@
     "teams": "daimon.adapters.teams.billing_panel"
    }
   },
+  "POST /api/github/connect/{step}": {
+   "exempt": "the GitHub connect pages every platform's link opens; the invitation is the authority"
+  },
   "POST /api/integrations/connections": {
    "tool": "change_shared_connection"
   },

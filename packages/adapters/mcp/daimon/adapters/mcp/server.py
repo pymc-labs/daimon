@@ -110,6 +110,7 @@ from daimon.adapters.mcp.tools.repo_memory import register_repo_memory_tools
 from daimon.adapters.mcp.tools.routine_run import register_routine_run_tool
 from daimon.adapters.mcp.tools.scope_settings import register_scope_settings_tools
 from daimon.adapters.mcp.tools.secret_shares import register_secret_share_tools
+from daimon.adapters.mcp.tools.self_knowledge import register_self_knowledge_tools
 from daimon.adapters.mcp.tools.server_skills import register_server_skill_tools
 from daimon.adapters.mcp.tools.setup_target import register_setup_target_tools
 from daimon.adapters.mcp.tools.shared_connection_admin import (
@@ -594,6 +595,7 @@ def create_mcp_app(
     register_repo_memory_tools(mcp, runtime)
     register_agent_memory_tools(mcp, runtime)
     register_host_web_fetch_tool(mcp, runtime)
+    register_self_knowledge_tools(mcp, runtime)  # this release's docs and source, read-only
     register_github_remove_repo_tools(mcp, runtime)
     register_wizard_tools(mcp, runtime)
     skills.register_skill_tools(mcp, runtime)
@@ -740,7 +742,7 @@ def create_mcp_app(
             RELAY_ROUTE,
             build_identity_relay_route,
         )
-        from daimon.core.mcp_identity import IdentityTokenCache, load_signing_key
+        from daimon.core.mcp_identity import IdentitySigner, load_signing_key
 
         app.add_route(
             RELAY_ROUTE,
@@ -749,7 +751,7 @@ def create_mcp_app(
                 auth=effective_auth,
                 sessionmaker=effective_sessionmaker,
                 tokens=(
-                    IdentityTokenCache(load_signing_key(identity.signing_key.get_secret_value()))
+                    IdentitySigner(load_signing_key(identity.signing_key.get_secret_value()))
                     if identity.signing_key is not None
                     else None
                 ),

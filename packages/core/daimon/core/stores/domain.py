@@ -204,6 +204,7 @@ class TenantRow(BaseModel):
     turn_cap: int | None = None
     last_reconcile_error: str | None = None
     archived_at: datetime | None = None
+    retired_at: datetime | None = None
     registered_at: datetime
     created_at: datetime
 
@@ -1355,6 +1356,7 @@ class TurnOriginRow(BaseModel):
     helper_key: str | None = None
     own_dm_reach: bool = False
     reach_read: bool = False
+    public_thread: bool = False
 
     @property
     def session_thread_id(self) -> str:

@@ -13,6 +13,7 @@ archive_thread
 ask
 ask_helper
 attach_mcp_server
+await_turn
 cancel_long_job
 cancel_timer
 cancel_turn
@@ -171,6 +172,8 @@ post_wizard
 preview_watch_edit
 publish_report
 read_channel
+read_daimon_docs
+read_daimon_source
 read_thread
 redeem_promo_code
 remove_agent_key
@@ -205,6 +208,8 @@ rotate_watch_key
 run_routine
 save_agent_skill_files
 save_library_skill_files
+search_daimon_docs
+search_daimon_source
 search_messages
 self_delete_file
 self_list_files

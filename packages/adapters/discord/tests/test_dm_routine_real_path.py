@@ -721,6 +721,228 @@ async def test_routine_session_is_the_owners_live_dm_session(harness: Harness, r
     assert set(stores_a.values()) == {"read_only" if read_only else "read_write"}
 
 
+RELAY = "https://mcp.example/mcp-identity/grove"
+OWNER_DM = "777001"
+#: The relay credential's binding keys a DM turn's session has without this feature.
+RELAY_TODAY = {
+    "daimon_chat_relay",
+    "daimon_relay_agent_name",
+    "daimon_relay_session",
+    "daimon_relay_grant",
+}
+
+
+def _opened(
+    dm_channel: object = OWNER_DM, status: int = 200
+) -> Callable[[httpx.Request], httpx.Response]:
+    def reply(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"id": dm_channel})
+
+    return reply
+
+
+def _sign_dm_routines(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    on: bool = True,
+    reply: Callable[[httpx.Request], httpx.Response] | None = None,
+) -> list[httpx.Request]:
+    """Attach a signed server to the agent, set `dm_routine_claims`, and route the
+    scheduler's real `open_discord_dm` to an offline Discord. Returns its requests."""
+    from daimon.core.config import DiscordSettings, McpIdentitySettings, SignedIdentityServer
+    from daimon.core.discord_membership import open_discord_dm
+    from pydantic import SecretStr
+
+    agent: dict[str, Any] = harness.upstream.state.ma.agents["ag_daimon"]
+    agent["mcp_servers"].append({"type": "url", "name": "grove", "url": RELAY})
+    agent["tools"].append({**SLACK_TOOLSET, "mcp_server_name": "grove"})
+    server = SignedIdentityServer(
+        name="grove",
+        url="https://grove.example/mcp",
+        issuer="daimon",
+        audience="https://grove.example",
+        channel_scoped=False,
+        routine_claims=True,
+        dm_routine_claims=on,
+    )
+    harness.settings = harness.settings.model_copy(
+        update={
+            "discord": DiscordSettings(bot_token=SecretStr("bot-token")),
+            "mcp_identity": McpIdentitySettings(servers=[server]),
+        }
+    )
+    harness.deps = replace(harness.deps, relay_unscoped=frozenset({"grove"}))
+    requests: list[httpx.Request] = []
+    answer_open = reply or _opened()
+
+    def discord(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return answer_open(request)
+
+    async def offline_open(token: str, user_id: str) -> str:
+        return await open_discord_dm(token, user_id, transport=httpx.MockTransport(discord))
+
+    monkeypatch.setattr("daimon.adapters.scheduler.main.open_discord_dm", offline_open)
+    return requests
+
+
+def _credentials(harness: Harness, sid: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """A session's relay credential and its ordinary Daimon MCP credential."""
+    credentials = [
+        credential
+        for vault in harness.upstream.state.sessions[sid].vault_ids
+        for credential in harness.upstream.credentials[vault].values()
+    ]
+    (relay,) = [c for c in credentials if c["auth"]["mcp_server_url"] == RELAY]
+    (daimon,) = [c for c in credentials if c["metadata"].get("daimon_chat_session")]
+    return relay, daimon
+
+
+def _relay_claim(harness: Harness, credential: dict[str, Any]) -> dict[str, str]:
+    import jwt
+    from daimon.core.mcp_identity import RELAY_CLAIM
+
+    token = harness.upstream.crypto.decrypt(harness.upstream.encrypted_tokens[credential["id"]])
+    return jwt.decode(token, b"t" * 32, algorithms=["HS256"])[RELAY_CLAIM]
+
+
+async def _today(harness: Harness, sid: str) -> dict[str, str]:
+    """The relay claim a DM turn's session signs without this feature."""
+    from daimon.core.stores.thread_sessions import get_thread_session_by_id
+
+    relay, _ = _credentials(harness, sid)
+    key = _relay_claim(harness, relay)["session"]
+    async with harness.factory() as db:
+        mapping = await get_thread_session_by_id(db, id=uuid.UUID(key))
+    assert mapping is not None and mapping.ma_session_id == sid, "the session's own row"
+    grant = harness.upstream.state.sessions[sid].metadata["daimon_chat_session_id"]
+    return {"agent_name": "daimon", "session": key, "grant": grant}
+
+
+@pytest.mark.parametrize("on", [True, False], ids=["on", "off"])
+async def test_a_signed_dm_routine_binds_its_owners_opened_dm_into_the_relay_credential(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, on: bool
+):
+    """The owner's first-ever DM is opened, sending nothing, and bound with the routine,
+    its owner, the live execution and its revision. Off: today's binding, nothing opened."""
+    from daimon.core.mcp_identity import parse_relay_claim
+
+    requests = _sign_dm_routines(harness, monkeypatch, on=on)
+    assert await harness.conversation() is None, "the owner never wrote to the bot"
+    reply = await harness.routine()
+    async with harness.factory() as db:
+        row = await get_routine(db, reply.routine_id, tenant_id=harness.tenant.id)
+    assert row is not None and reply.text == "private answer"
+    relay, daimon = _credentials(harness, reply.session_id)
+    claim, today = _relay_claim(harness, relay), await _today(harness, reply.session_id)
+    execution = daimon["metadata"]["daimon_routine_execution"]
+    assert daimon["metadata"]["daimon_routine_id"] == str(row.id), "the ordinary credential"
+    assert not any("relay" in key for key in daimon["metadata"]), "and no relay binding"
+    if not on:
+        assert claim == today
+        assert {k for k in relay["metadata"] if "relay" in k} == RELAY_TODAY
+        assert requests == []
+        return
+    bound = {
+        "routine": str(row.id),
+        "owner": OWNER_A,
+        "destination": "dm::",
+        "execution": execution,
+        "revision": row.updated_at.isoformat(),
+        "dm_channel": OWNER_DM,
+    }
+    assert claim == {**today, **bound}, "one fire, the routine's revision, the owner's DM"
+    assert parse_relay_claim(claim).claim() == claim, "the relay parses it whole"
+    assert {k: relay["metadata"].get(f"daimon_relay_{k}") for k in bound} == bound
+    (opened,) = requests
+    assert (opened.method, opened.url.path) == ("POST", "/api/v10/users/@me/channels")
+    assert json.loads(opened.content) == {"recipient_id": OWNER_A}, "opened; no message sent"
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        _opened(status=403),
+        _opened(status=429),
+        _opened(dm_channel=None),
+        _opened(dm_channel="not-a-channel"),
+    ],
+    ids=["refused", "rate_limited", "no_channel", "malformed"],
+)
+async def test_a_failed_dm_open_runs_the_turn_with_todays_binding(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    reply: Callable[[httpx.Request], httpx.Response],
+):
+    events: list[Any] = []
+
+    def report(_sm: object, event: object, **_: object) -> None:
+        events.append(event)
+
+    monkeypatch.setattr(direct_messages, "report_ops_event", report)
+    requests = _sign_dm_routines(harness, monkeypatch, reply=reply)
+    with capture_logs() as logs:
+        result = await harness.routine()
+    assert result.text == "private answer", "the turn runs"
+    relay, _ = _credentials(harness, result.session_id)
+    assert _relay_claim(harness, relay) == await _today(harness, result.session_id)
+    assert {k for k in relay["metadata"] if "relay" in k} == RELAY_TODAY
+    assert len(requests) == 1, "one open, never retried, nothing sent"
+    status = reply(requests[0]).status_code
+    reason = str(status) if status != 200 else "ValueError"
+    (failed,) = [entry for entry in logs if entry["event"] == "routine.dm_open_failed"]
+    assert (failed["routine_id"], failed["reason"]) == (str(result.routine_id), reason)
+    (event,) = events
+    assert (event.code, event.routine_id, event.reason) == (
+        "bridge.relay_failed",
+        result.routine_id,
+        reason,
+    )
+
+
+async def test_an_owner_refused_on_reauthorization_opens_no_dm(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+):
+    """Admitted, then refused on the fresh check before the open: no DM, no session."""
+    requests = _sign_dm_routines(harness, monkeypatch)
+    real_admit = direct_messages.admit
+
+    async def admit_then_leave(*args: Any, **kwargs: Any) -> Any:
+        admission = await real_admit(*args, **kwargs)
+        harness.members[OWNER_A] = False
+        return admission
+
+    monkeypatch.setattr(direct_messages, "admit", admit_then_leave)
+    row = await _routine_row(harness)
+    await harness.fire(row)
+    assert requests == [], "no DM opened"
+    assert not harness.upstream.state.sessions
+    after = await harness.reload(row)
+    assert after is not None and after.last_error and after.delivery_payload is None
+
+
+async def test_a_replacement_session_keeps_the_dm_routine_binding(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+):
+    requests = _sign_dm_routines(harness, monkeypatch)
+    harness.upstream.kill_first_send = True
+    reply = await harness.routine()
+    assert reply.text == "private answer"
+    (dead,) = harness.upstream.dead
+    claims = [
+        _relay_claim(harness, _credentials(harness, sid)[0]) for sid in (dead, reply.session_id)
+    ]
+    assert dead != reply.session_id
+    pinned = ("routine", "owner", "destination", "execution", "revision", "dm_channel")
+    fire = {k: claims[0][k] for k in pinned}
+    assert fire["dm_channel"] == OWNER_DM
+    assert claims[1] == {**await _today(harness, reply.session_id), **fire}, (
+        "the successor signs the same fire, with its own session and grant"
+    )
+    assert len(requests) == 1, "opened once for the fire"
+
+
 @pytest.mark.parametrize(
     ("policy", "allowed"),
     [
@@ -844,19 +1066,35 @@ async def test_routine_answer_reaches_only_the_owners_dm_and_bills_its_budget(
     assert spent > 0, "the run is billed to the routine's budget channel"
 
 
-async def test_revoked_owner_gets_no_run_and_no_delivery(harness: Harness):
+async def test_revoked_owner_gets_no_run_and_no_delivery(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+):
+    opened = _sign_dm_routines(harness, monkeypatch)
     row = await _routine_row(harness)
     harness.members[OWNER_A] = False
     await harness.fire(row)
     assert not harness.upstream.sent, "nothing reached the model"
+    assert opened == [], "and no DM was opened"
     after = await harness.reload(row)
     assert after is not None and after.last_error and after.delivery_status is None
 
 
+@pytest.mark.parametrize("opted_in", [False, True])
 async def test_an_openai_agent_without_the_sandbox_opt_in_is_refused_before_any_session(
-    harness: Harness, monkeypatch: pytest.MonkeyPatch
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, opted_in: bool
 ):
-    """OpenAI's shell cannot be left out of its session, so the fire stops before one."""
+    """OpenAI's shell cannot be left out of its session, so the fire stops before one.
+    A provider routine never opens the owner's DM: no relay credential signs for it."""
+    opened = _sign_dm_routines(harness, monkeypatch)
+    sandboxed_runs: list[Any] = []
+    if opted_in:
+        from daimon.core import provider_routine
+
+        async def sandboxed(_deps: Any, admission: Any, *_a: Any, **_k: Any) -> Any:
+            sandboxed_runs.append(admission)
+            return admission
+
+        monkeypatch.setattr(provider_routine, "with_routine_sandbox", sandboxed)
     real_admit = direct_messages.admit
 
     async def native_admit(*args: Any, **kwargs: Any) -> Any:
@@ -867,6 +1105,12 @@ async def test_an_openai_agent_without_the_sandbox_opt_in_is_refused_before_any_
     monkeypatch.setattr(direct_messages, "admit", native_admit)
     row = await _routine_row(harness)
     await harness.fire(row)
+    assert opened == []
+    if opted_in:
+        # Admitted with the opt-in, past where a Managed Agents fire opens the DM; this
+        # stub revision builds no provider turn.
+        assert len(sandboxed_runs) == 1
+        return
     assert not harness.upstream.state.sessions, "no session was created"
     after = await harness.reload(row)
     assert after is not None
@@ -1492,8 +1736,10 @@ async def test_channel_routine_stays_headless_without_personal_memory(harness: H
 
 
 @pytest.mark.parametrize("gate", ["role", "admin_switch", "dm_disabled", "recipient", "source"])
-async def test_current_authority_refuses_before_session_allocation(harness: Harness, gate: str):
-
+async def test_current_authority_refuses_before_session_allocation(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, gate: str
+):
+    opened = _sign_dm_routines(harness, monkeypatch)
     row = await _routine_row(harness)
     if gate == "role":
         policy = TenantAccessPolicy(invoker_role_ids=("123",))
@@ -1527,6 +1773,7 @@ async def test_current_authority_refuses_before_session_allocation(harness: Harn
         await set_access_policy(db, tenant_id=row.tenant_id, policy=policy)
     await harness.fire(row)
     assert not harness.upstream.state.sessions
+    assert opened == [], "refused before any DM is opened"
     after = await harness.reload(row)
     assert after is not None and after.last_error and after.delivery_payload is None
 

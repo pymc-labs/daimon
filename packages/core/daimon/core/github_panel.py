@@ -34,6 +34,7 @@ from daimon.core.stores.github_panel_grants import (
 )
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.security_audit import append_event
+from daimon.core.web_links import WebLinks
 from sqlalchemy.ext.asyncio import AsyncSession
 
 __all__ = [
@@ -173,9 +174,13 @@ def safe_github_error(error: ValueError) -> str:
 
 
 def connect_root(settings: Settings) -> str | None:
-    """Return the browser route only when the complete App flow is configured."""
+    """Where every Connect GitHub link opens: the web app when it runs, else the MCP host.
+
+    None unless the complete App flow is configured.
+    """
     app = settings.github_app
-    root = settings.mcp.app_root_url
+    web = WebLinks.from_settings(settings.web)
+    root = web.base if web is not None else settings.mcp.app_root_url
     if (
         root is None
         or app.app_id is None

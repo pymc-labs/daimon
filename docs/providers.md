@@ -64,8 +64,11 @@ docker compose run --rm init "daimon agents backend set <agent-name-or-id> opena
 This sends every channel that uses the agent to OpenAI. To route single
 channels instead, use `daimon channels rule set` and scope the runtime file row
 with `--platform`, `--channel-id` and `--account-id` on `daimon openai init`.
-An admin can also pin a channel from its page on the web. A self-hosted
-model is a channel pin, or an agent's model where the operator granted it.
+A self-hosted model is a channel pin, or an agent's model where the operator granted it.
+
+<!-- knowledge: web -->
+An admin can also pin a channel from its page in the web app.
+<!-- /knowledge -->
 
 A channel's own pin outranks the agent's provider there. An admin can clear it
 from chat by asking Daimon to clear the channel's pin and confirming the card.
@@ -81,12 +84,16 @@ stop.
 ## Switch with a model pick
 
 Picking a model on another provider is the switch. `/model` on Discord, the
-Model shortcut on Slack, the `model` command on Teams, the web model editor and
-chat header, and the agent panels all list every model your install can run with
-its price. A pick applies at once, like any model change. What the new
+Model shortcut on Slack, the `model` command on Teams and the agent panels all list
+every model your install can run with its price. A pick applies at once, like any
+model change. What the new
 provider can't carry is off there and named after the pick, until you switch
 back. Earlier messages carry over, and so do saved files where the new provider
 keeps a workspace. A refusal names its cause and changes nothing.
+
+<!-- knowledge: web -->
+The web app's model editor and chat header list the same models.
+<!-- /knowledge -->
 
 Asking an agent in chat to move itself or the conversation to another provider
 is different: `request_agent_backend_switch` and `set_thread_model` preview first,
@@ -133,7 +140,7 @@ Memory settings show as needing setup.
   and channel memory, under the same rules as on Claude. The stores live on
   Anthropic.
 - **Web fetch.** Daimon opens public https pages for the agent, checks every
-  redirect and cuts long text. The place's web page setting decides. Self-hosted
+  redirect and cuts long text. The place's Open web pages setting decides. Self-hosted
   agents get it too.
 - **Connectors.** The agent's own connectors run through Daimon with a
   credential for that reply only, and the provider never sees a sign-in. Each tool keeps the
@@ -148,7 +155,7 @@ Memory settings show as needing setup.
   `/workspace/.daimon/.env` in the provider's sandbox, so the provider receives
   them. Copies of itself get none. Turn it off with the `provider_keys_file` feature.
 - **Confirmations.** A tool that needs one posts an Approve and Deny card on
-  Discord, Slack, Teams and the web. Only the asker answers, and an approved
+  Discord, Slack and Teams. Only the asker answers, and an approved
   call runs once. An unattended reply runs only what its rules allow. An agent's
   `ask` and channel tool rules use the same card, and a built-in tool a channel
   or thread switches off leaves the reply. Turn the card off with the
@@ -159,6 +166,10 @@ Memory settings show as needing setup.
   conversation; Gemini takes none. Fast stays on Claude.
 - **Spend limit.** The host prices a reply's usage while it runs, as the runtime
   file section below describes.
+
+<!-- knowledge: web -->
+On the web app, the Approve and Deny card appears in the chat.
+<!-- /knowledge -->
 
 ## Run on OpenAI
 

@@ -60,7 +60,7 @@ from daimon.testing.factories import (
     make_tenant,
     make_wizard_session,
 )
-from sqlalchemy import func, select
+from sqlalchemy import Uuid, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -1035,6 +1035,11 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "dm_carry_overs": "dm_carry_overs",
         "held_timers": "held_timers",
         "credential_requests": "credential_requests",
+        "task_continuations": "task_continuations",
+        "turn_outcomes": "turn_outcomes",
+        "thread_sessions": "thread_sessions",
+        "switch_cards": "switch_cards",
+        "long_job_cancel_audit": "long_job_cancel_audit",
         "secret_shares": "secret_shares",
         "wizard_sessions": "wizard_sessions",
         "message_feedback": "message_feedback",
@@ -1092,7 +1097,8 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
     Replaces a field-parity-only guard that was structurally blind to a table the
     purge never knew about — exactly how mcp_tokens slipped through. The reflected
     schema is the source of truth; PURGED and ALLOWLIST are the human dispositions.
-    A table is in scope if it has an FK to accounts.id OR a principal_id column.
+    A table is in scope if it has an FK to accounts.id, a principal_id column, or a
+    UUID account id column with no FK at all.
     """
     # Tables the orchestrator deletes, keyed by why they are in scope.
     purged: dict[str, str] = {
@@ -1127,12 +1133,25 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         "web_people": "account_id FK -> accounts.id",
         "monitored_events": "account_id FK -> accounts.id; monitoring.delete_for_account",
         "ops_events": "account_id FK -> accounts.id; ops_events.delete_for_account",
+        "gemini_records": "account_id with no FK; gemini.delete_records_for_account",
         "workspace_admins": "account_id FK -> accounts.id",
         # The person's user id leaves every grant; updated_by is SET NULL.
         "daimon_admins": "subject_id and granted_by are erased by platform principal",
         # Text account_id / principal_id with no FK: erased by `stores.mux_erasure`,
         # except operations against a shared slot, which are counted as retained.
         "operation": "text account_id and principal_id (mux erasure)",
+        # UUID account ids with no FK, deleted by `stores.account_records`.
+        "task_continuations": "requester_account_id (account_records)",
+        "turn_outcomes": "account_id (account_records)",
+        "thread_sessions": "account_id (account_records)",
+        "credential_requests": "account_id; by principal, then account_records",
+        "backend_switch_cards": "account_id (account_records)",
+        "slack_turn_contexts": "account_id; slack_turn_contexts.delete_turn_contexts_for_account",
+        "gemini_runtime_state": "account_id; gemini_runtime_state.delete_records_for_account",
+        "security_audit_events": "account_id erased by security_audit.erase_account_for_privacy",
+        "agent_personal_memory_store": "account_id; deleted with the person's memory stores",
+        "long_job_cancel_audit": "owner_account_id and requested_by (account_records)",
+        "mcp_oauth_flows": "cascades from its credential request",
         # An agent-chat session's record of where it came from: erasure clears its grant,
         # channel and account (`erasure.ERASABLE`, `agent_chat_session_links`).
         "usage_reconcile_progress": "agent_chat_account_id, no FK; cleared with grant and channel",
@@ -1202,7 +1221,6 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # is undefined for them; deferred to a future tenant-purge path.
             "agent_files",
             "agent_google_binding",
-            "thread_sessions",
             # Billing carve-outs retained for integrity.
             "usage_events",
             "tenant_user_caps",
@@ -1276,6 +1294,10 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # shared by everyone there; `set_by` is attribution only, severed by
             # ON DELETE SET NULL. Deleting the row would change the place for others.
             "feature_values",
+            # Erasure bookkeeping: the work queue of upstream deletes, and the bare
+            # tombstone that refuses a stale writer naming an erased account.
+            "privacy_session_deletes",
+            "erased_account",
             # An imported timer's note waits for an operator to confirm it and is emptied
             # when settled; account_id is ON DELETE CASCADE, so erasing the account removes it.
             "held_timers",
@@ -1289,9 +1311,6 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
         }
     )
 
-    # Account ids with no FK, which the rules below cannot see, and so name here. Each
-    # table must then be purged or allowed like any other.
-    account_columns_without_fk = {("usage_reconcile_progress", "agent_chat_account_id")}
     in_scope: dict[str, str] = {}
     for name, table in Base.metadata.tables.items():
         reasons: list[str] = []
@@ -1299,17 +1318,15 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             reasons.append("FK->accounts.id")
         if "principal_id" in table.columns:
             reasons.append("principal_id column")
-        reasons += [
-            f"{column}: an account id with no FK"
-            for listed, column in account_columns_without_fk
-            if listed == name and column in table.columns
-        ]
+        if any(
+            (column.name == "account_id" or column.name.endswith("_account_id"))
+            and isinstance(column.type, Uuid)
+            and not column.foreign_keys
+            for column in table.columns
+        ):
+            reasons.append("account id column without FK")
         if reasons:
             in_scope[name] = ", ".join(reasons)
-    assert all(
-        column in Base.metadata.tables[table].columns
-        for table, column in account_columns_without_fk
-    ), "drop a listed account column that is gone"
 
     uncovered = {
         name: why for name, why in in_scope.items() if name not in purged and name not in allowlist
@@ -1445,3 +1462,26 @@ async def test_collect_purge_preview_linked_principals_example_omits_platform_na
     assert preview.linked_principals.example == "42", (
         "linked account examples must not name another chat platform"
     )
+
+
+def test_legal_links_hide_terms_until_the_operator_sets_one() -> None:
+    """Privacy is always linked; terms only once `DAIMON_TERMS_URL` is set."""
+    from daimon.core.config import Settings
+    from daimon.core.privacy import legal_links
+
+    base: dict[str, object] = {"database": {"url": "postgresql+asyncpg://u:p@h/db"}}
+    bare = legal_links(Settings(_env_file=None, **base))  # pyright: ignore[reportCallIssue, reportArgumentType]
+    full = legal_links(
+        Settings(  # pyright: ignore[reportCallIssue]
+            _env_file=None,  # pyright: ignore[reportCallIssue]
+            privacy_policy_url="https://example.com/privacy",  # pyright: ignore[reportArgumentType]
+            terms_url="https://example.com/terms",  # pyright: ignore[reportArgumentType]
+            **base,  # pyright: ignore[reportArgumentType]
+        )
+    )
+    assert bare.privacy.endswith("PRIVACY.md"), "the default policy link is the in-repo page"
+    assert bare.terms is None, "no terms link by default"
+    assert (full.privacy, full.terms) == (
+        "https://example.com/privacy",
+        "https://example.com/terms",
+    ), "both links come from the operator's settings"

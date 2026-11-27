@@ -1,0 +1,55 @@
+{
+  "description": [
+    "Disconnect an MCP server such as Linear or Notion from an agent. Detach",
+    "the named connection and its tools while preserving other servers and",
+    "skills, and forget the shared token stored for it; the change reaches the",
+    "agent on its next message, not the one running now.",
+    "",
+    "``attach_mcp_server`` adds public endpoints; ``request_mcp_token`` and",
+    "``request_mcp_oauth`` enroll authenticated connections. The built-in",
+    "daimon server cannot be removed. Use this when a connection keeps",
+    "failing: an admin can disconnect from any agent, built-in Daimon",
+    "included; a member can disconnect from an agent that is not a channel or",
+    "workspace default.",
+    "Pass this turn's ``origin_context_id`` so its channel counts."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_name": {
+        "type": "string"
+      },
+      "expected_ma_agent_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "server_name": {
+        "description": "Name of the attached MCP server to disconnect.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "agent_name",
+      "server_name"
+    ],
+    "type": "object"
+  }
+}

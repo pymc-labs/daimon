@@ -1,0 +1,26 @@
+{
+  "description": [
+    "Approve a redaction rule set's waiting version (sha, as listed). Runs on the",
+    "asker's Approve card. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "name": {
+        "type": "string"
+      },
+      "origin_context_id": {
+        "type": "string"
+      },
+      "sha": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "name",
+      "sha",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

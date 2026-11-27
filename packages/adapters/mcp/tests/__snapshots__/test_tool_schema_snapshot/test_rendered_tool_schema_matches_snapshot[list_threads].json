@@ -1,0 +1,32 @@
+{
+  "description": [
+    "List active and archived public threads for a channel.",
+    "",
+    "Archived private threads are not listed. Where every post is a thread, this",
+    "lists the 50 most recently active with their reply counts. Sealed channels",
+    "need origin_context_id, as read_channel does."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "channel_id": {
+        "type": "string"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "channel_id"
+    ],
+    "type": "object"
+  }
+}

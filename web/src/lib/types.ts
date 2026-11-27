@@ -50,6 +50,8 @@ export type Person = {
 }
 
 /** Sign-in methods the server offers; `dev` signs in locally without leaving the page. */
+/** The operator's legal pages; `terms` is null until they set one. */
+export type Legal = { privacy: string; terms: string | null }
 export type Provider = { id: string; label: string; kind: "redirect" | "dev" }
 
 /** A cross-reference to a named object; `name` is null once it no longer exists. */

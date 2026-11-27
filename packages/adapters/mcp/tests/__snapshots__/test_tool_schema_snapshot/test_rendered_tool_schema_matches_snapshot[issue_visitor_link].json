@@ -1,0 +1,19 @@
+{
+  "description": [
+    "Issue a one-time sign-in link for a web visitor. The link is sent to the caller by",
+    "direct message, never shown here. Admin-only; refused for a person at or above the",
+    "caller's role."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "person_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "person_id"
+    ],
+    "type": "object"
+  }
+}

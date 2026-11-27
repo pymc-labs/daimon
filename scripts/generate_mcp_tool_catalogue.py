@@ -1,4 +1,4 @@
-"""Generate docs/mcp-tools.md, and the name list core reads, from the live MCP tool registry.
+"""Generate docs/mcp-tools.md from the live MCP tool registry.
 
 Builds the real server the way ``create_mcp_app`` builds it in production —
 fully-configured Settings so no registration group is silently skipped — and
@@ -24,14 +24,13 @@ configured Settings would quietly produce a shorter catalogue.
 The `/mcp` tool names also go to ``packages/core/daimon/core/daimon_tool_names.txt``, so a
 shared connection never serves a tool under one of Daimon's own names.
 
-Run: uv run python scripts/generate_mcp_tool_catalogue.py [--check]
+Run: uv run python scripts/generate_mcp_tool_catalogue.py
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import difflib
 import inspect
 import os
 import re
@@ -65,6 +64,10 @@ from daimon.core.defaults.loader import DeploymentDefault
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from fastmcp.tools.tool import Tool
 from pydantic import HttpUrl, PostgresDsn, SecretStr
+
+# The siblings below import the same way run as a script or imported as `scripts.<name>`.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _knowledge import web_only
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CATALOGUE_PATH = REPO_ROOT / "docs" / "mcp-tools.md"
@@ -104,7 +107,7 @@ TAG_LABELS: dict[str, str] = {
     "scope:tenant:read": "operator tokens with tenant:read",
     "slack": "Slack callers",
     "teams": "Teams callers",
-    "web": "web app callers",
+    "web": "web callers",
 }
 UNTAGGED_LABEL = "all callers"
 
@@ -239,8 +242,13 @@ def _first_sentence(description: str | None) -> str:
     return collapsed[: ends[-1]]
 
 
-def _visibility(tool: Tool) -> str:
-    labels = sorted(TAG_LABELS[tag] for tag in tool.tags if tag in TAG_LABELS)
+def _visibility(tool: Tool, *, in_web_module: bool) -> str:
+    """The row's callers. The web tag is named only in a `web_` module, whose section sits
+    between the web markers; a table cell cannot, so elsewhere the tag is left out."""
+    keep = (tag for tag in tool.tags if tag in TAG_LABELS and (in_web_module or tag != "web"))
+    labels = sorted(TAG_LABELS[tag] for tag in keep)
+    if "web" in tool.tags and not labels and not in_web_module:
+        raise RuntimeError(f"{tool.name} is for the web app only: move it into a `web_` module")
     unknown = sorted(tag for tag in tool.tags if tag not in TAG_LABELS)
     if unknown:
         raise RuntimeError(
@@ -275,7 +283,10 @@ def _group_tools(tools: Sequence[Tool]) -> list[ToolGroup]:
                 ToolRow(
                     name=tool.name,
                     purpose=_first_sentence(tool.description),
-                    visibility=_visibility(tool),
+                    visibility=_visibility(
+                        tool,
+                        in_web_module=module_name.removeprefix(TOOLS_PACKAGE).startswith("web_"),
+                    ),
                 )
                 for tool in sorted(by_module[module_name], key=lambda t: t.name)
             ),
@@ -307,9 +318,10 @@ def _render_group(group: ToolGroup, *, heading: str, note: str = "") -> list[str
 
 
 def _header(total: int, hub_total: int) -> list[str]:
-    tag_lines = [
-        f"- **{label}** — carries the `{tag}` tag." for tag, label in sorted(TAG_LABELS.items())
-    ]
+    tag_lines: list[str] = []
+    for tag, label in sorted(TAG_LABELS.items()):
+        line = f"- **{label}** — carries the `{tag}` tag."
+        tag_lines.extend(web_only([line]) if tag == "web" else [line])
     return [
         "# MCP tool catalogue",
         "",
@@ -357,7 +369,7 @@ def _header(total: int, hub_total: int) -> list[str]:
     ]
 
 
-def render_catalogue() -> dict[Path, str]:
+def render_files() -> dict[Path, str]:
     """Each generated file and its text."""
     with _isolated_env():
         main_tools, hub_tools = asyncio.run(_collect_surfaces())
@@ -376,9 +388,10 @@ def render_catalogue() -> dict[Path, str]:
 
     lines = _header(len(main_tools), len(hub_tools))
     for group in groups:
-        lines.extend(
-            _render_group(group, heading=f"`{group.module_name.removeprefix(TOOLS_PACKAGE)}`")
-        )
+        name = group.module_name.removeprefix(TOOLS_PACKAGE)
+        section = _render_group(group, heading=f"`{name}`")
+        # Web-app modules are hidden from agents that have the web app off.
+        lines.extend(web_only(section) if name.startswith("web_") else section)
 
     for group in _group_tools(hub_tools):
         lines.extend(
@@ -392,39 +405,16 @@ def render_catalogue() -> dict[Path, str]:
     return {CATALOGUE_PATH: "\n".join(lines).rstrip("\n") + "\n", NAMES_PATH: names}
 
 
+def render_catalogue() -> str:
+    return render_files()[CATALOGUE_PATH]
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Generate docs/mcp-tools.md from the live MCP tool registry.",
-    )
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="Verify the committed page matches generator output; exit nonzero on drift.",
-    )
-    args = parser.parse_args(argv)
-
-    generated = render_catalogue()
-
-    if args.check:
-        stale = False
-        for path, text in generated.items():
-            current = path.read_text() if path.exists() else ""
-            if current != text:
-                shown = path.relative_to(REPO_ROOT)
-                diff = difflib.unified_diff(
-                    current.splitlines(keepends=True),
-                    text.splitlines(keepends=True),
-                    fromfile=f"{shown} (committed)",
-                    tofile=f"{shown} (generated)",
-                )
-                sys.stderr.writelines(diff)
-                print(f"\n{shown} is out of date.", file=sys.stderr)
-                stale = True
-        if stale:
-            print("Run: uv run python scripts/generate_mcp_tool_catalogue.py", file=sys.stderr)
-        return int(stale)
-
-    for path, text in generated.items():
+    # No --check: the docs workflow builds the page, which is never committed.
+    argparse.ArgumentParser(
+        description="Generate docs/mcp-tools.md from the live MCP tool registry."
+    ).parse_args(argv)
+    for path, text in render_files().items():
         path.write_text(text)
     return 0
 

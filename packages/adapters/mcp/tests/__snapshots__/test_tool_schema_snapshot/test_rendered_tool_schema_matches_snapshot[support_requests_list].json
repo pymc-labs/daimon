@@ -1,0 +1,56 @@
+{
+  "description": [
+    "List support requests, newest first; pending only by default. Admin-only.",
+    "",
+    "Pass ``scope`` and ``scope_id`` to list one place's requests. ``undelivered``",
+    "keeps the requests no support channel received and no person handled",
+    "(``delivered`` false): pending ones, and ones already charged at submit.",
+    "Ones a person settled or declined are never listed, and ``pending`` is",
+    "ignored then. Example: ``pending=False``, ``undelivered=True``."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "limit": {
+        "default": 50,
+        "type": "integer"
+      },
+      "pending": {
+        "default": true,
+        "type": "boolean"
+      },
+      "scope": {
+        "anyOf": [
+          {
+            "enum": [
+              "workspace",
+              "agent",
+              "channel"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "scope_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "undelivered": {
+        "default": false,
+        "type": "boolean"
+      }
+    },
+    "type": "object"
+  }
+}

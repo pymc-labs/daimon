@@ -16,8 +16,12 @@ service turns the store off, and a workspace can turn the
 [`data_sources` feature](features.md#data-sources) off for itself.
 
 If the database user lacks CREATE on the database or CREATEROLE, the migration logs
-`data_store_skipped` and Daimon starts anyway, with the web app's Data pages hidden. Run
-`daimon data init` as that user, or with `--admin-url` for one that can.
+`data_store_skipped` and Daimon starts anyway. Run `daimon data init` as that user, or with
+`--admin-url` for one that can.
+
+<!-- knowledge: web -->
+Until then the web app's Data pages are hidden.
+<!-- /knowledge -->
 
 `daimon data init` is safe to run again. Settings are
 [`DAIMON_DATA__*`](configuration.md#daimon_data__schema_name); set
@@ -68,9 +72,12 @@ list its host name or address range in `DAIMON_DATA__PRIVATE_HOSTS`.
 
 A record a source shares with some of its users reads for a Daimon account only through a
 link to one of those users. Daimon links an account only on a proof the source or chat
-platform verified. That is a web app sign-in with Discord, Slack or Microsoft, a GitHub
-link, or the person signing in to the source. A person who only chats has no link until
-they sign in to the web app.
+platform verified. That is a GitHub link or the person signing in to the source.
+
+<!-- knowledge: web -->
+A web app sign-in with Discord, Slack or Microsoft is one too. A person who only chats has
+no link until they sign in to the web app.
+<!-- /knowledge -->
 
 A workspace admin can link any account by hand, their own included, and the
 audit trail records it. A link an admin ends or rejects stays ended when the person signs in again.
@@ -82,39 +89,50 @@ Google sign-in for data sources needs a Google OAuth client in
 
 A source has a freshness floor and ceiling in minutes. Its lifetime is three sync intervals,
 at least the floor and at most the ceiling. Once its last complete sync is older than that,
-its records are hidden from every read until the next complete sync. Without a ceiling a source is never hidden.
+its records are hidden from every read until the next complete sync. Without a ceiling a
+source is never hidden.
 
-A connector can also check a record with the source at read time; a source that cannot is read as stored. A live source is asked at search time instead: it stores nothing,
+A connector can also check a record with the source at read time, and a source that
+cannot is read as stored. A live source is asked at search time instead: it stores nothing,
 only callers holding its scope reach it, and one that fails or is slow is skipped.
 
 ## Publishing
 
-A new source starts in shadow, unread. Publishing it needs evidence. If the
+A new source starts in shadow, where no one reads it. Publishing it needs evidence. If the
 connector can ask the source whether a person may open a record, Daimon compares a sample
 of linked people and records and needs a clean run no older than 36 hours. Any case of Daimon
 showing more than the source does blocks publishing; showing less only warns. Other sources
 publish after a complete sync.
 
+<!-- knowledge: web -->
 ## In the web app
 
-With the feature on, the web app has a Data section for search and browsing, showing each person only what they may read. Owners and admins add, pause, publish and retire sources in Integrations > Data sources. Workspace admins manage scopes, grants, identity links and
-redaction sets under Admin > Data access, or from chat. Self-grants and self-links are allowed and marked in the audit trail. Declared sources show as bound and are read-only there. People link and
+With the feature on, the web app has a Data section for search and browsing, which shows each
+person only what they may read. Owners and admins add, pause, publish and retire sources under
+Integrations > Data sources. Workspace admins manage scopes, grants, identity links and
+redaction sets under Admin > Data access, or from chat. Granting oneself a scope or linking an
+account to oneself is allowed and marked in the audit trail. Declared sources show as bound and are read-only there. People link and
 connect their own accounts on their Profile.
+<!-- /knowledge -->
 
-From chat, admins can add a source, even the first, or refresh a credential. The value
+## From chat
+
+From chat, admins can add a source, even the first, or refresh its credential. The value
 goes through a private form only the asker opens, straight onto the source. In a room, emails,
 sign-ins and redaction rules reach the agent sealed; it sends them to the asker by direct message.
 
 ## Who sees an answer
 
-An answer shows only what everyone who sees it may read: the asker and, in a room, its members. Discord rooms keep their members; Slack and Teams rooms are read on each call. A
+An answer shows only what everyone who will see it may read: the asker and, in a room, its
+members. Discord rooms keep their members; Slack and Teams rooms are read on each call. A
 Slack room whose members cannot be read gets answers that hold only what everyone may read.
 
 Teams reads members with `ChannelMember.Read.Group` and `ChatMember.Read.Chat`, which a team
 owner or chat member grants when adding or updating the app, or `ChannelMember.Read.All` and
-`ChatMember.Read.All`, which a tenant admin grants once ([Teams](teams.md)). Where members cannot be read, answers hold only what everyone may read and say when consent is missing.
+`ChatMember.Read.All`, which a tenant admin grants once ([Teams](teams.md)). Where members
+cannot be read, answers hold only what everyone may read, and say when consent is missing.
 A Teams room with a guest, another organisation's member or a shared channel gets no data
-and is held from then on, so an agent that read data starts afresh.
+and is held from then on, so an agent that read data starts afresh there.
 
 After a data read, a conversation asks only agents that read data too, and their reads count
 as its own. A memory saved after a data read records what was read; recalling it counts as
@@ -159,7 +177,8 @@ A `connections` entry (`id`, `url`, `token: "env:NAME"`) declares a
 ## Who can read a record
 
 `daimon data access-check --tenant <id> --source <id>` shows a source's state and freshness.
-Add `--record <id>` for the record's holders, and `--account <id>` to say whether that account can read it, and why not.
+Add `--record <id>` for the record's holders, and `--account <id>` to say whether that account
+can read it, and why not.
 
 ## Vector search
 
