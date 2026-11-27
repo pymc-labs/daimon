@@ -87,8 +87,11 @@ from daimon.adapters.mcp.resource_ports import (
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._agent_chat_safety import (
     PAUSED_HINT,
+    RECHECK_S,
     TURN_STOPPED,
     TurnFeed,
+    Woke,
+    caught_up,
     earlier_turn_open,
     gate,
     local_worker,
@@ -478,8 +481,10 @@ AWAIT_TURN_MAX_S = 240.0
 # What one call may take over its wait for the reads and the resume around it. A
 # call that outlives both returns "running", inside the five minutes a host allows.
 _AWAIT_GRACE_S = 30.0
-# How often a waiting call tells its client that it is still alive.
-_WAIT_TICK_S = 20.0
+# After a stream event says a turn ended, how often and how many times `ask` reads a
+# session status that still says running before it goes back to waiting.
+_SETTLE_TRIES = 10
+_SETTLE_GAP_S = 0.3
 # What ends an `await_turn` wait: the agent said something, or the turn stopped.
 _TURN_NEWS: frozenset[str] = TURN_STOPPED | {"agent.message"}
 
@@ -1595,7 +1600,7 @@ async def _deliver_turn_charts_impl(
 
 
 OnTick = Callable[[], Awaitable[None]]
-"""Called about every `_WAIT_TICK_S` while a call waits, to tell its client it is alive."""
+"""Called about every `RECHECK_S` while a call waits, to tell its client it is alive."""
 
 
 async def _wait_for_news(
@@ -1604,38 +1609,16 @@ async def _wait_for_news(
     *,
     worker: asyncio.Task[bool] | None,
     seconds: float,
-    on_tick: OnTick | None = None,
-) -> None:
-    """Sleep until the session has news, and at most `seconds`.
+) -> Woke | None:
+    """Sleep until the session has news, and at most `seconds` or `RECHECK_S`.
 
-    News is an event in `kinds`, a stream that went quiet or closed, or the end of
-    this process's confirmation `worker` (a worker that gives up leaves the turn
-    paused without any event). The caller reads the session's state after every
-    return; this never reads it, so a wait costs no upstream calls.
+    News is an event in `kinds`, which is returned, a stream that went quiet or
+    closed, or the end of this process's confirmation `worker` (a worker that gives
+    up leaves the turn paused without any event). The caller reads the session's
+    state after every return, news or none: a wait never trusts the stream alone,
+    so an event it missed costs at most `RECHECK_S`.
     """
-    reader = asyncio.ensure_future(feed.next(kinds))
-    waiting: set[asyncio.Future[Any]] = {reader} if worker is None else {reader, worker}
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + seconds
-    try:
-        while (left := deadline - loop.time()) > 0:
-            done, _ = await asyncio.wait(
-                waiting, timeout=min(left, _WAIT_TICK_S), return_when=asyncio.FIRST_COMPLETED
-            )
-            if done:
-                break
-            if on_tick is not None:
-                await on_tick()
-    finally:
-        if reader.done():
-            if not reader.cancelled():
-                reader.result()
-        else:
-            # The stream is mid-read: drop it, and the next `open` subscribes afresh.
-            reader.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await reader
-            await feed.close()
+    return await feed.next(kinds, within=min(seconds, RECHECK_S), or_done=worker)
 
 
 class TurnNews(BaseModel):
@@ -1873,8 +1856,8 @@ async def _await_turn_impl(
 
     Returns at the first of: the agent said something since `after`; the turn
     ended; it is paused and cannot go on; the session is terminated; or
-    `wait_seconds` passed (at most `AWAIT_TURN_MAX_S`). Nothing is polled: the
-    session is read once, then again only after the stream brings an event.
+    `wait_seconds` passed (at most `AWAIT_TURN_MAX_S`). The session is read once,
+    then again when the stream brings an event, and at least every `RECHECK_S`.
 
     A turn agent chat started that is paused with no worker answering it (the
     service restarted, or the worker reached the unattended run limit) is resumed
@@ -1925,10 +1908,13 @@ async def _await_turn(
     """`_await_turn_impl`'s loop: read the turn, return on news, else sleep on `feed`."""
     deadline = clock() + bound
     resumed = False
+    woke: Woke | None = None
     while True:
         if bound > 0:
             # Subscribed before the state is read, so no event falls between them.
             await feed.open()
+        # The state is read from the event list, once it shows the event that woke us.
+        await caught_up(runtime, auth, handle, woke)
         current = await _get_session_impl(runtime, auth, handle, on_read=on_read)
         turn = await _newest_turn(
             runtime, auth, handle, expected=await recorded_turn_id(runtime, handle)
@@ -1989,13 +1975,11 @@ async def _await_turn(
             return news(
                 "running", _STILL_RUNNING_HINT, activity=await _activity(runtime, auth, handle)
             )
-        await _wait_for_news(
-            feed,
-            _TURN_NEWS,
-            worker=local_worker(runtime, handle),
-            seconds=remaining,
-            on_tick=on_tick,
+        woke = await _wait_for_news(
+            feed, _TURN_NEWS, worker=local_worker(runtime, handle), seconds=remaining
         )
+        if woke is None and on_tick is not None:
+            await on_tick()
 
 
 @observed_agent_turn
@@ -2016,10 +2000,10 @@ async def _ask_impl(
     """Start a turn (or continue one given ``handle``), wait boundedly for idle, and
     return its final reply.
 
-    The wait is on the session's event stream (``TurnFeed``), not a poll: the
-    session is read after the send, then again only when the stream says the turn
-    stopped. The stream is opened before that first read, so a turn that ends in
-    between is not missed.
+    The wait is on the session's event stream (``TurnFeed``), not a poll every
+    second: the session is read after the send, then again when the stream says the
+    turn stopped, and at least every ``RECHECK_S``. The stream is opened before that
+    first read, so a turn that ends in between is not missed.
 
     The reply is read from THIS turn's side of the boundary the send
     returned. That matters most on the resume path: a resumable session is
@@ -2042,10 +2026,19 @@ async def _ask_impl(
     turn_started_at = dt.datetime.fromisoformat(started["turn_started_at"])
     deadline = clock() + timeout_seconds
     feed = feed or TurnFeed(runtime, auth, handle)
+    woke: Woke | None = None
     try:
         while True:
             await feed.open()
+            await caught_up(runtime, auth, handle, woke)
             current = await _get_session_impl(runtime, auth, handle, on_read=on_read)
+            if woke is not None and woke.stop not in (None, "requires_action"):
+                # The stream says the turn ended; the status read can trail it a moment.
+                for _ in range(_SETTLE_TRIES):
+                    if current.status != "running":
+                        break
+                    await asyncio.sleep(_SETTLE_GAP_S)
+                    current = await _get_session_impl(runtime, auth, handle, on_read=on_read)
             # Only terminated is treated as terminal: the status value set is
             # upstream-controlled (see SessionInfo.status), so an unmodeled
             # transient status keeps waiting until the deadline instead of
@@ -2129,7 +2122,7 @@ async def _ask_impl(
                     f"{timeout_seconds:g} seconds and is still working; wait for it with "
                     f"await_turn and handle {handle}" + (f"\n{notice}" if notice else "")
                 )
-            await _wait_for_news(
+            woke = await _wait_for_news(
                 feed, TURN_STOPPED, worker=local_worker(runtime, handle), seconds=remaining
             )
     finally:

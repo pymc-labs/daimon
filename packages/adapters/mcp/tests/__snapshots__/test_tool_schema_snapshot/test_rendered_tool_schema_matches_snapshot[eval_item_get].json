@@ -1,0 +1,22 @@
+{
+  "description": [
+    "Read one eval run item: its transcript, calls and outcome. `blind` hides the arm",
+    "and model; reviewers always get it so."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "blind": {
+        "default": false,
+        "type": "boolean"
+      },
+      "item_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "item_id"
+    ],
+    "type": "object"
+  }
+}

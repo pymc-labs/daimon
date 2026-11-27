@@ -1,0 +1,80 @@
+{
+  "description": [
+    "Export suites and runs as a bundle. People are replaced by labels unless an admin",
+    "keeps them. Returns a short-lived download link; the file stays in the deployment's",
+    "artifact storage until its retention removes it. Encrypted bundles are exported from the",
+    "command line."
+  ],
+  "parameters": {
+    "$defs": {
+      "ExportRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "include_identities": {
+            "default": false,
+            "type": "boolean"
+          },
+          "runs": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "suites": {
+            "default": [],
+            "items": {
+              "$ref": "#/$defs/SuitePick"
+            },
+            "type": "array"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      },
+      "SuitePick": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "request": {
+        "$ref": "#/$defs/ExportRequest"
+      }
+    },
+    "required": [
+      "request"
+    ],
+    "type": "object"
+  }
+}

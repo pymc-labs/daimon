@@ -1,0 +1,25 @@
+{
+  "description": [
+    "List your latest 100 jobs; current human tenant admins may list all tenant jobs.",
+    "",
+    "Source-restricted jobs contain only id, state, owner and scheduling metadata.",
+    "Supply origin_context_id when reading inside a restricted source."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

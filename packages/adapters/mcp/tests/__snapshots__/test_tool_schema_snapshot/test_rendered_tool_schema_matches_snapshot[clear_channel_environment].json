@@ -1,0 +1,35 @@
+{
+  "description": [
+    "Stop a channel picking its own environment, so it uses the workspace default.",
+    "For example, put #growth back on the default environment. A no-op when the",
+    "channel has none of its own.",
+    "",
+    "Omit ``channel_id`` to clear the workspace default, leaving the deployment",
+    "default. Clearing either default requires an admin. If sealed, the",
+    "default has unrestricted networking; then an admin must confirm it, as",
+    "for ``set_channel_environment``, and as when clearing the workspace default",
+    "leaves sealed channels on such a default. A thread id resolves to its parent",
+    "channel."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "channel_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "confirm_open_network": {
+        "default": false,
+        "type": "boolean"
+      }
+    },
+    "type": "object"
+  }
+}

@@ -166,9 +166,12 @@ This holds for admins too. The channel's own agent follows the same rule. The
 rule covers permissions, prompt, tools and connections, budget, skills,
 environments, feature switches including memory, and coding keys. It also covers
 the agent's memory text. The panel in the channel and the chat tool in the
-channel count as inside. The web app, the hub, a DM, an agent key, a resumed turn
-and a routine do not. The web app still shows the channel read-only. The
-operator CLI is the recovery path.
+channel count as inside. The hub, a DM, an agent key, a resumed turn
+and a routine do not. The operator CLI is the recovery path.
+
+<!-- knowledge: web -->
+The web app does not count as inside either, and shows such a channel read-only.
+<!-- /knowledge -->
 
 Archiving an agent or an environment clears every channel that picks it. So the
 archive is refused while a private channel picks it, unless you are inside that

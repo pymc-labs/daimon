@@ -26,7 +26,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 #: A revoked row is kept this long past its `expires_at` as a short forensic
 #: trail. GitHub installation tokens live one hour, so the token is long dead.
-#: The permanent record is the `security_audit_events` row, which is never pruned.
+#: The lasting record is the `security_audit_events` row, kept for
+#: `DAIMON_RETENTION__SECURITY_AUDIT_DAYS`.
 REVOKED_RETENTION: Final = timedelta(days=7)
 #: A `pending` row exists only so the minter can record the token it is about to
 #: receive; it never holds a token (`encrypted_token` is null). The row is

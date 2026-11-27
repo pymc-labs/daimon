@@ -1,0 +1,565 @@
+{
+  "description": [
+    "Save the next version of an eval suite. `cases` pins case revisions (no revision:",
+    "the latest); leave it out to keep the cases it pins."
+  ],
+  "parameters": {
+    "$defs": {
+      "CallPattern": {
+        "additionalProperties": false,
+        "properties": {
+          "effect": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "server": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "service": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "surface": {
+            "anyOf": [
+              {
+                "enum": [
+                  "mcp",
+                  "http",
+                  "cli",
+                  "builtin",
+                  "provider_tool"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "tool": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      },
+      "JudgeConfig": {
+        "additionalProperties": false,
+        "properties": {
+          "aggregate": {
+            "default": "majority",
+            "enum": [
+              "majority",
+              "mean",
+              "all"
+            ],
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "instructions": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "kind": {
+            "enum": [
+              "rubric",
+              "pairwise",
+              "reference"
+            ],
+            "type": "string"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/$defs/ModelChoice"
+            },
+            "type": "array"
+          },
+          "sees": {
+            "default": [
+              "reply",
+              "chat",
+              "files",
+              "history"
+            ],
+            "items": {
+              "enum": [
+                "reply",
+                "chat",
+                "files",
+                "tool_calls",
+                "world_calls",
+                "reference",
+                "history"
+              ],
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "swap_positions": {
+            "default": true,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "models"
+        ],
+        "type": "object"
+      },
+      "ModelChoice": {
+        "additionalProperties": false,
+        "properties": {
+          "backend": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "effort": {
+            "anyOf": [
+              {
+                "enum": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "type": "object"
+      },
+      "NetworkPolicy": {
+        "additionalProperties": false,
+        "properties": {
+          "deny": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "package_registries": {
+            "anyOf": [
+              {
+                "enum": [
+                  "passthrough",
+                  "deny"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "passthrough": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      },
+      "ReviewDefaults": {
+        "additionalProperties": false,
+        "properties": {
+          "blind": {
+            "default": true,
+            "type": "boolean"
+          },
+          "layout": {
+            "default": "side_by_side",
+            "enum": [
+              "single",
+              "side_by_side"
+            ],
+            "type": "string"
+          },
+          "reviewers_per_item": {
+            "default": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "StatsDefaults": {
+        "additionalProperties": false,
+        "properties": {
+          "cluster_by": {
+            "default": "source_thread",
+            "enum": [
+              "case",
+              "source_thread"
+            ],
+            "type": "string"
+          },
+          "non_inferiority_margin": {
+            "default": 0.05,
+            "type": "number"
+          },
+          "primary": {
+            "default": "pass_rate",
+            "enum": [
+              "pass_rate",
+              "rubric_score",
+              "preference"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "SuiteCasePick": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "split": {
+            "default": "test",
+            "enum": [
+              "dev",
+              "test",
+              "holdout"
+            ],
+            "type": "string"
+          },
+          "weight": {
+            "default": 1,
+            "type": "number"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "SuiteDefaults": {
+        "additionalProperties": false,
+        "properties": {
+          "clock": {
+            "default": "case",
+            "enum": [
+              "case",
+              "real"
+            ],
+            "type": "string"
+          },
+          "judges": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/$defs/JudgeConfig"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "network": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/NetworkPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "repeats": {
+            "default": 1,
+            "type": "integer"
+          },
+          "review": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReviewDefaults"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "simulator": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ModelChoice"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "stats": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/StatsDefaults"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      },
+      "SuiteDraft": {
+        "additionalProperties": false,
+        "description": "A new suite or the next version of one. `cases` None keeps the cases it pins.",
+        "properties": {
+          "cases": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/$defs/SuiteCasePick"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "defaults": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SuiteDefaults"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "id": {
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "tool_aliases": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/$defs/ToolAlias"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      },
+      "ToolAlias": {
+        "additionalProperties": false,
+        "properties": {
+          "args_map": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "from": {
+            "$ref": "#/$defs/CallPattern"
+          },
+          "to_effect": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "to_tool": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ToolTarget"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "from"
+        ],
+        "type": "object"
+      },
+      "ToolTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "server": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "tool": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool"
+        ],
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "draft": {
+        "$ref": "#/$defs/SuiteDraft"
+      }
+    },
+    "required": [
+      "draft"
+    ],
+    "type": "object"
+  }
+}

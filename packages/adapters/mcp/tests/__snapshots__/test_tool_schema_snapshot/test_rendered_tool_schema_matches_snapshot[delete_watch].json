@@ -1,0 +1,18 @@
+{
+  "description": [
+    "Delete your watch and its retained evidence after cancelling queued wakes; admins may",
+    "delete within their workspace."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "watch_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "watch_id"
+    ],
+    "type": "object"
+  }
+}

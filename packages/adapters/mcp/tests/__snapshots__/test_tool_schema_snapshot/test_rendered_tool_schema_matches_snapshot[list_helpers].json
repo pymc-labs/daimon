@@ -1,0 +1,17 @@
+{
+  "description": [
+    "The agents you may ask for help during this turn with `ask_helper`: id, name, purpose."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

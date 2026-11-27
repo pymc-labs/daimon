@@ -1,0 +1,61 @@
+{
+  "description": [
+    "Ask one of your helpers (`list_helpers`) to do part of this turn's work, on its own model, and get its reply.",
+    "",
+    "It works for the same person in this conversation, with its own tools, keys and",
+    "rules; nothing it writes is posted. Asking the same helper again continues its",
+    "conversation in this thread. `self`, when listed, is a fresh copy of you each time:",
+    "ask it several times without waiting to work in parallel. While `status` is",
+    "`queued` or `running`, call `wait_for_helpers` with the `ask_id`. Helpers stop when your turn ends, so wait",
+    "for their replies before you answer.",
+    "",
+    "To pass it files: for each, call `create_file_upload_url`, PUT the file with the",
+    "curl it returns, and pass the handle id in `files`. Files the helper sends back",
+    "are in the answer's `files`: download one with `curl -sS -o <name> \"<url>\"`, or",
+    "pass its `id` to another helper's `files`. Deliver one to the person as you would",
+    "a file you made. The links expire an hour after the ask."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "files": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "Handle ids of files to pass to the helper (see below)."
+      },
+      "helper": {
+        "description": "A helper's name or agent id from list_helpers.",
+        "type": "string"
+      },
+      "message": {
+        "description": "Everything the helper needs: the task, the facts and what to send back. It can't see this conversation's history or files you don't pass.",
+        "maxLength": 20000,
+        "type": "string"
+      },
+      "origin_context_id": {
+        "type": "string"
+      },
+      "wait": {
+        "default": true,
+        "description": "False to start it and ask other helpers before waiting.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "origin_context_id",
+      "helper",
+      "message"
+    ],
+    "type": "object"
+  }
+}

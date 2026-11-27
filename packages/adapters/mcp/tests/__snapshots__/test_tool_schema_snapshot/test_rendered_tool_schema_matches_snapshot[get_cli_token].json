@@ -1,0 +1,23 @@
+{
+  "description": [
+    "Mint a short-lived CLI access token for the named service.",
+    "",
+    "Fails with a ``ToolError`` when the calling agent has no credential",
+    "bound for that service — see the ``cli-auth`` skill for the",
+    "per-agent binding flow. On success, returns the token as plaintext",
+    "for the Google CLI."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "service": {
+        "const": "gcloud",
+        "type": "string"
+      }
+    },
+    "required": [
+      "service"
+    ],
+    "type": "object"
+  }
+}

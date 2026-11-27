@@ -1,0 +1,23 @@
+{
+  "description": [
+    "Check an eval case against the format without saving it: problems and warnings."
+  ],
+  "parameters": {
+    "$defs": {
+      "JsonValue": {}
+    },
+    "additionalProperties": false,
+    "properties": {
+      "case": {
+        "additionalProperties": {
+          "$ref": "#/$defs/JsonValue"
+        },
+        "type": "object"
+      }
+    },
+    "required": [
+      "case"
+    ],
+    "type": "object"
+  }
+}

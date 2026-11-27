@@ -1,0 +1,22 @@
+{
+  "description": [
+    "Un-publish a report you published.",
+    "",
+    "Revokes the report's credential and removes it from the host —",
+    "every link you handed out stops working. This cannot be undone;",
+    "re-publishing the same slug mints a new credential and new links,",
+    "so anyone who needs access again must be sent their new link."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "slug": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "slug"
+    ],
+    "type": "object"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "description": [
+    "Search Daimon's own documentation for some plain text, ignoring case.",
+    "",
+    "Returns each matching line as `page:line: text`; read the page with read_daimon_docs."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "query": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "type": "object"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "description": [
+    "Wait for helpers' replies; returns when all of them finish or after about a minute. Call again for any still `queued` or `running`."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "ask_ids": {
+        "description": "ask_id values from ask_helper.",
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "origin_context_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "origin_context_id",
+      "ask_ids"
+    ],
+    "type": "object"
+  }
+}

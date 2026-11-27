@@ -204,7 +204,7 @@ async def start_conversation(session: AsyncSession, *, conversation: DirectMessa
             raise DirectMessageBusy(
                 "Wait for the current DM reply before starting a new conversation."
             ) from None
-    values = conversation.model_dump()
+    values = {**conversation.model_dump(), "updated_at": func.now()}
     if row is None:
         session.add(DirectMessageConversation(**values))
     else:
@@ -258,6 +258,7 @@ async def claim_message(
             "dm.claim_taken_over", platform=fence.platform, claimed_at=row.claimed_at.isoformat()
         )
     row.claimed_at = claimed_at
+    row.updated_at = func.now()
     row.recent_message_ids = [*row.recent_message_ids, *unseen][-50:]
     await session.flush()
     return DirectMessageRow.model_validate(row)
@@ -304,6 +305,7 @@ async def finish_message(
     if row is None or row.claimed_at is None or row.claimed_at != conversation.claimed_at:
         return False
     row.claimed_at = None
+    row.updated_at = func.now()
     if history is not None:
         row.history = history
     await session.flush()

@@ -159,10 +159,18 @@ class WriteRequest(BaseModel):
     # How long to keep a read-only notebook, as the upload token's
     # ``notebook_ttl_seconds``. Ignored for the editor.
     ttl_seconds: int | None = None
+    # The tenant publishing it, recorded so the notebook can be deleted with
+    # the rest of that tenant's (``DELETE /admin/tenants/{id}/notebooks``).
+    tenant: UUID | None = None
 
 
 def _register_read_only(
-    state: AdminState, np: NotebookProcess, *, permanent: bool, ttl_seconds: int | None
+    state: AdminState,
+    np: NotebookProcess,
+    *,
+    permanent: bool,
+    ttl_seconds: int | None,
+    tenant: str | None = None,
 ) -> float | None:
     """Record a just-published read-only notebook; returns its ``expires_at``.
 
@@ -170,7 +178,8 @@ def _register_read_only(
     and any value is clamped to ``max_notebook_ttl_seconds``. Re-publishing
     a slug restarts its lifetime from now, except that a blog stays a blog:
     re-uploading one without ``permanent`` must not quietly schedule it for
-    deletion. Deleting it is the way back to a scratch notebook.
+    deletion. Deleting it is the way back to a scratch notebook. A re-publish
+    that names no tenant keeps the one already recorded.
     """
     path = state.settings.resolved_blogs_file
     existing = load_blogs(path).get(np.slug)
@@ -196,9 +205,26 @@ def _register_read_only(
             title=existing.title if existing is not None else None,
             access_token=np.access_token,
             expires_at=expires_at,
+            tenant=tenant or (existing.tenant if existing is not None else None),
         ),
     )
     return expires_at
+
+
+async def _remove_registered(state: AdminState, slug: str) -> None:
+    """Forget a notebook, stop it and remove its files; the slug's lock is held.
+
+    Unregisters first, so the registry stops naming the slug before anything
+    blocking (kill) starts. That lets the sweep's self-heal, re-reading the
+    registry under the same lock, see the slug is already gone rather than
+    racing to respawn it.
+    """
+    unregister_blog(state.settings.resolved_blogs_file, slug)
+    np = state.processes.pop(slug, None)
+    if np is not None:
+        await asyncio.to_thread(kill, np)
+    remove_slug_tree(state.settings.data_dir, slug, uids_file=state.settings.resolved_uids_file)
+    state.snapshot_pids()
 
 
 def _iso(epoch: float | None) -> str | None:
@@ -505,7 +531,11 @@ def create_admin_router(state: AdminState) -> APIRouter:
             if mode == "edit":
                 return _editor_response(state, np)
             expires_at = _register_read_only(
-                state, np, permanent=False, ttl_seconds=body.ttl_seconds
+                state,
+                np,
+                permanent=False,
+                ttl_seconds=body.ttl_seconds,
+                tenant=str(body.tenant) if body.tenant else None,
             )
             return _read_only_response(state, np, expires_at)
 
@@ -611,7 +641,13 @@ def create_admin_router(state: AdminState) -> APIRouter:
             )
         async with state.lock_for(slug):
             np = await _spawn_tracked(state, slug, source_bytes, mode="run")
-            expires_at = _register_read_only(state, np, permanent=True, ttl_seconds=None)
+            expires_at = _register_read_only(
+                state,
+                np,
+                permanent=True,
+                ttl_seconds=None,
+                tenant=str(body.tenant) if body.tenant else None,
+            )
             return _read_only_response(state, np, expires_at)
 
     @router.get("/admin/blogs", dependencies=[Depends(require_admin)])
@@ -649,19 +685,34 @@ def create_admin_router(state: AdminState) -> APIRouter:
     async def delete_blog(slug: str) -> None:  # pyright: ignore[reportUnusedFunction]
         slug = safe_slug(slug)
         async with state.lock_for(slug):
-            # Unregister first, while the lock is held, so the registry stops
-            # naming this slug before anything blocking (kill) starts. This is
-            # what lets the sweep's self-heal, re-reading the registry under
-            # the same lock, see the slug is already gone rather than racing
-            # to respawn it.
-            unregister_blog(state.settings.resolved_blogs_file, slug)
-            np = state.processes.pop(slug, None)
-            if np is not None:
-                await asyncio.to_thread(kill, np)
-            remove_slug_tree(
-                state.settings.data_dir, slug, uids_file=state.settings.resolved_uids_file
-            )
-            state.snapshot_pids()
+            await _remove_registered(state, slug)
+
+    @router.delete("/admin/tenants/{tenant_id}/notebooks", dependencies=[Depends(require_admin)])
+    async def delete_tenant_notebooks(tenant_id: str) -> dict[str, int]:  # pyright: ignore[reportUnusedFunction]
+        """Delete every registered notebook and blog a tenant published.
+
+        Only notebooks that recorded their tenant at publish time are found:
+        those uploaded with a token that names one, or published with a
+        `tenant` in the request. Editor notebooks are not registered, so they
+        are not found here; they stop at the process lifetime
+        (`subprocess_ttl_seconds`) and their files are removed with it.
+        """
+        try:
+            tenant = str(UUID(tenant_id))
+        except ValueError as err:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "not a tenant id") from err
+        deleted = 0
+        for slug, record in list(load_blogs(state.settings.resolved_blogs_file).items()):
+            if record.tenant != tenant:
+                continue
+            async with state.lock_for(slug):
+                # Re-read under the lock: a re-publish may have moved the slug.
+                current = load_blogs(state.settings.resolved_blogs_file).get(slug)
+                if current is None or current.tenant != tenant:
+                    continue
+                await _remove_registered(state, slug)
+                deleted += 1
+        return {"deleted": deleted}
 
     @router.post("/admin/sweep", dependencies=[Depends(require_admin)])
     async def sweep() -> dict[str, object]:  # pyright: ignore[reportUnusedFunction]
@@ -762,6 +813,7 @@ def create_admin_router(state: AdminState) -> APIRouter:
                 np,
                 permanent=claims.op == "blog",
                 ttl_seconds=claims.notebook_ttl_seconds,
+                tenant=claims.tenant,
             )
             return _read_only_response(state, np, expires_at)
 

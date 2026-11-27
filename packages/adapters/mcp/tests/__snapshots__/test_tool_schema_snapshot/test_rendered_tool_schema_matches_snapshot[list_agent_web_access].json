@@ -1,0 +1,24 @@
+{
+  "description": [
+    "List each agent's web chat access: on or off, who may use it and the channel it is",
+    "kept to, if any. Admin-only.",
+    "``next_page`` goes back as ``after``."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "after": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

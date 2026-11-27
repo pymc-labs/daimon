@@ -1,0 +1,15 @@
+{
+  "description": [
+    "Return the current wall-clock time in the given IANA timezone as ISO-8601."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "tz": {
+        "default": "UTC",
+        "type": "string"
+      }
+    },
+    "type": "object"
+  }
+}

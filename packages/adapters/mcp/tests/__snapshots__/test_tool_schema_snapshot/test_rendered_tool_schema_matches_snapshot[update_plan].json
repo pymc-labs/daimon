@@ -1,0 +1,54 @@
+{
+  "description": [
+    "Show the task's plan as a checklist on the progress card.",
+    "",
+    "Use it only when this turn's progress_plans block says progress plans",
+    "are on; otherwise nothing is shown. Send the whole list each time, in",
+    "order, with at most one step in_progress. Updating the plan is not a",
+    "reply: carry on with the task afterwards."
+  ],
+  "parameters": {
+    "$defs": {
+      "PlanStep": {
+        "additionalProperties": false,
+        "description": "One step of the plan, as the person reads it on the card.",
+        "properties": {
+          "status": {
+            "enum": [
+              "pending",
+              "in_progress",
+              "completed"
+            ],
+            "type": "string"
+          },
+          "step": {
+            "description": "A few plain words.",
+            "maxLength": 120,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "step",
+          "status"
+        ],
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "steps": {
+        "items": {
+          "$ref": "#/$defs/PlanStep"
+        },
+        "maxItems": 12,
+        "minItems": 1,
+        "type": "array"
+      }
+    },
+    "required": [
+      "steps"
+    ],
+    "type": "object"
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "description": [
+    "Read one kept conversation (a ``conversation_id`` from list_monitored_activity)",
+    "in order: questions, answers, coding-tool calls with their outcome, and ``notice``",
+    "when the person was told. Works only in a direct message with the admin or the web",
+    "chat; pass this active turn's origin_context_id. The read is audited. Admins only.",
+    "``next_page`` goes back as ``after``."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "after": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "agent_id": {
+        "type": "string"
+      },
+      "conversation_id": {
+        "type": "string"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "agent_id",
+      "conversation_id"
+    ],
+    "type": "object"
+  }
+}
