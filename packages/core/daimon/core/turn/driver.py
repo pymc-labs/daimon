@@ -629,6 +629,8 @@ async def _watch_silence(
 # clients retry reads eight times) could otherwise hold the turn until its
 # ceiling on a single question; a read that runs out is a transient failure.
 _STATUS_READ_TIMEOUT_S = 30.0
+DEFAULT_STREAM_READ_TIMEOUT_S = 120.0
+"""The stream read timeout of a backend that names none (Managed Agents)."""
 
 # A replay walks the session's whole log, so a long-lived thread can outgrow the
 # default budget. Inside a turn it may use what the ceiling leaves, less this
@@ -824,7 +826,7 @@ async def run_turn(
     cancel: asyncio.Event,
     render_interval_s: float = 0.05,
     interrupt_timeout_s: float = 120.0,
-    stream_read_timeout_s: float = 120.0,
+    stream_read_timeout_s: float | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
     billing: BillingPosture,
     tool_confirmation: ToolConfirmation = _DEFAULT_TOOL_CONFIRMATION,
@@ -843,8 +845,10 @@ async def run_turn(
 ) -> TurnState:
     """Open the SSE stream, post the user message, and pump to terminal idle.
 
-    `stream_read_timeout_s` (default 120.0) is the per-call read timeout
-    passed to `events.stream(...)`. A wire probe found the server sending
+    `stream_read_timeout_s` (default: the turn I/O's own `stream_read_timeout_s`,
+    else 120.0) is the per-call read timeout passed to `events.stream(...)`.
+    Gemini names its own: its streams stay silent while the model thinks.
+    For Managed Agents, a wire probe found the server sending
     `:keepalive` SSE comment frames every 30s on every connection from
     connect; those bytes reset httpx's read clock even though the SDK's SSE
     decoder drops comment lines before the driver ever sees them. 120s is
@@ -899,11 +903,21 @@ async def run_turn(
         backend=backend,
         scope=scope,
         session_ref=session_ref,
-        read_timeout_s=stream_read_timeout_s,
+        read_timeout_s=(
+            stream_read_timeout_s
+            if stream_read_timeout_s is not None
+            else DEFAULT_STREAM_READ_TIMEOUT_S
+        ),
         profile=profile,
         backend_request=backend_request,
         persistence=persistence,
         provider_actions=provider_actions,
+    )
+    read_timeout_s: float = (
+        stream_read_timeout_s
+        if stream_read_timeout_s is not None
+        else cast("float | None", getattr(io, "stream_read_timeout_s", None))
+        or DEFAULT_STREAM_READ_TIMEOUT_S
     )
     if isinstance(billing, BillingExempt):
         log.info("turn.billing_exempt", session_id=session_id, reason=billing.reason)
@@ -1008,7 +1022,7 @@ async def run_turn(
             cancel=cancel,
             render_interval_s=render_interval_s,
             interrupt_timeout_s=interrupt_timeout_s,
-            stream_read_timeout_s=stream_read_timeout_s,
+            stream_read_timeout_s=read_timeout_s,
             now=now,
             entry="resume" if resume_existing else "run",
             billing=billing,
@@ -2077,6 +2091,12 @@ async def _consume_with_reconnect(
                 if silence is not None:
                     silence.status = status
                 if status in {"running", "rescheduling"}:
+                    # A provider whose stream omits what a status read stores
+                    # (Gemini: a running interaction's usage) replays it from
+                    # stored history into the same open stream.
+                    idle_running = getattr(io, "idle_running", None)
+                    if callable(idle_running):
+                        idle_running()
                     continue
                 log.info("turn.idle_check_ended", session_id=session_id, idle_check_s=idle_check_s)
                 raise _EventlessCycle(reason="read_timeout")

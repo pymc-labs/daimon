@@ -15,7 +15,7 @@ def test_access_record_target_is_redacted() -> None:
         __file__,
         1,
         '%s - "%s %s HTTP/%s" %d',
-        ("127.0.0.1:1", "GET", "/r/q3-review?k=reader-secret-1&x=2", "1.1", 200),
+        ("203.0.113.7:1", "GET", "/r/q3-review?k=reader-secret-1&x=2", "1.1", 200),
         None,
     )
 
@@ -24,6 +24,8 @@ def test_access_record_target_is_redacted() -> None:
     message = record.getMessage()
     assert "reader-secret-1" not in message
     assert "/r/q3-review?k=[redacted]&x=[redacted]" in message
+    assert "203.0.113.7" not in message, "an access line must not name the client"
+    assert message.endswith("200"), "method and status stay"
 
 
 def test_capability_paths_are_redacted() -> None:

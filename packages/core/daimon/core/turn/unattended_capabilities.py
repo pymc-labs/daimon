@@ -159,6 +159,15 @@ def capability_policy(
     return policy
 
 
+def routine_builtins_withheld(origin: str | None, attended: bool | None, opted_in: bool) -> bool:
+    """A routine fire without its admin's sandbox opt-in runs with no built-in tools.
+
+    Managed Agents disables them on the session (`session_gate`); another provider
+    leaves them out of the session it creates for the fire.
+    """
+    return origin == "routine" and attended is False and not opted_in
+
+
 def unattended_entry_point(origin: TurnContext) -> UnattendedEntryPoint:
     """The entry point of a prepared turn nobody attends, by its origin.
 

@@ -36,6 +36,9 @@ class RoutineStep:
                 s, tenant_id=run.tenant_id, workflow_id=run.workflow_id
             )
             tenant = await tenants.get_tenant(s, run.tenant_id)
+            version = await workflows.get_version(
+                s, tenant_id=run.tenant_id, workflow_id=run.workflow_id, number=run.version
+            )
             owner = flow.owner_account_id if flow else None
             ids = (
                 await identity.platform_external_ids(
@@ -57,6 +60,7 @@ class RoutineStep:
             run_id=run.id,
             owner=ids.get(owner) if owner else None,
             agent_id=agent_id,
+            revision=version.published_at.isoformat() if version else None,
         )
         store = WorkflowFireStore(self.sm, subject, flow, run, work.step.id)
         status = await fire(

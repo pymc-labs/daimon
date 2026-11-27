@@ -22,8 +22,12 @@ Keep the deployment id and auth key the same across restarts.
 
 Cloud computers stay off after this set-up. A server admin then turns on the
 [`compute` feature](features.md#cloud-computers) for a workspace or one agent,
-with `/settings` in chat, the web app or `daimon features`. To turn it on
-everywhere, set `DAIMON_FEATURES__COMPUTE=on` on every Daimon service.
+with `/settings` in chat or `daimon features`. To turn it on everywhere, set
+`DAIMON_FEATURES__COMPUTE=on` on every Daimon service.
+
+<!-- knowledge: web -->
+The web app turns it on too.
+<!-- /knowledge -->
 
 A value already set for a workspace, agent, channel or thread keeps it, so an
 Off there stays off, and only a server admin can change it. Turning the feature
@@ -99,9 +103,9 @@ confirms. Keep the scheduler running while any session remains. A Discord
 server admin can emergency-stop a session without seeing its files.
 
 Daimon waits up to 40 seconds for a command's result. A command that needs
-longer keeps running, and the scheduler posts one message in the conversation
-when it ends, unless the conversation already read the result or stopped the
-machine. In a thread, Daimon can read the command's output and the machine's
+longer keeps running. In a chat, the scheduler posts one message in the
+conversation when it ends, unless the conversation already read the result or
+stopped the machine. In a thread, Daimon can read the command's output and the machine's
 files for that message. Outside a thread it reports only the end of the output.
 
 For that message Daimon cannot run commands or change the machine until the
@@ -116,6 +120,29 @@ on that machine; a chat message alone does not reset it.
 Google can restart a machine at any time. A restart clears its files and ends
 running commands. Each is reported as stopped, with the last output Daimon
 saved, and is never rerun.
+
+## Use it from agent chat
+
+A person who uses an agent through agent chat, from an MCP client such as Claude
+Code, can use cloud computers there too. A server admin turns on [Cloud computers
+from agent chat](features.md#cloud-computers-from-agent-chat) for a workspace or
+one agent. The `compute` feature must be on as well.
+
+No card can show in agent chat, so a machine starts with the default idle time
+and is given no more than that at a time. Each agent-chat session uses only the
+machines it started; the person lists and stops all their machines from any
+conversation.
+
+The per-person limit bounds how many machines a person has. A machine stops after
+its idle time, but commands and file writes renew it, so a machine in use has no
+total time or dollar limit. A launch retried after an uncertain answer starts a
+second machine.
+
+Agent chat gets no message when a command ends and no expiry warning. The agent
+checks a command again in a later turn.
+
+Any key of the same person that drives the session can use these machines too,
+not only their own sign-in. Turn the feature on only where that is acceptable.
 
 ## Bound the cost
 

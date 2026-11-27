@@ -20,7 +20,7 @@ from daimon.core.defaults.ma_index import find_agent_by_derived_uuid, list_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.github_connect_cards import resolve_connect_card
 from daimon.core.github_credentials import build_multifernet, encrypt_token
-from daimon.core.github_panel import can_manage_agent_github
+from daimon.core.github_panel import can_manage_agent_github, connect_root
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.platform_words import DESCRIPTIONS
 from daimon.core.stores.accounts import set_role
@@ -104,17 +104,8 @@ class GitHubCog(commands.GroupCog, group_name="github", group_description="GitHu
         await interaction.response.defer(ephemeral=True, thinking=True)
         admin = is_platform_admin(interaction)  # pyright: ignore[reportArgumentType]
         runtime = cast(DiscordRuntime, interaction.client.runtime)  # type: ignore[attr-defined]
-        root = runtime.settings.mcp.app_root_url
-        config = runtime.settings.github_app
-        if root is None or not all(
-            (
-                config.app_id,
-                config.app_slug,
-                config.private_key,
-                config.client_id,
-                config.client_secret,
-            )
-        ):
+        root = connect_root(runtime.settings)
+        if root is None:
             await interaction.followup.send(
                 embed=build_notice_embed("GitHub setup is unavailable."), ephemeral=True
             )

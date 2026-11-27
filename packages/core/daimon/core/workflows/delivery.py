@@ -798,6 +798,7 @@ async def result_job(
         run_id=None if run is None else run.id,
         owner=payload.get("owner"),
         agent_id=str(payload.get("agent_id") or ""),
+        revision=version.published_at.isoformat(),
     )
     owner, lease = _uuid(payload.get("speaker")), row.lease_owner or ""
 

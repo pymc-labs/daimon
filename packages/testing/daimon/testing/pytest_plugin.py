@@ -99,14 +99,6 @@ async def _drain_ops_events() -> AsyncIterator[None]:  # pyright: ignore[reportU
         await ops_events.drain_ops_events()
 
 
-@pytest.fixture(autouse=True)
-def _reread_anthropic_key() -> None:  # pyright: ignore[reportUnusedFunction]
-    """Tests set and unset the Anthropic key: each reads it anew, never a test's before."""
-    keys = sys.modules.get("daimon.core.provider_keys")
-    if keys is not None:
-        keys.anthropic_key_present.cache_clear()
-
-
 @pytest.fixture
 def instant_routine_file_settle(monkeypatch: pytest.MonkeyPatch) -> None:
     """Run a routine fire's generated-file settle polls without waiting them out.

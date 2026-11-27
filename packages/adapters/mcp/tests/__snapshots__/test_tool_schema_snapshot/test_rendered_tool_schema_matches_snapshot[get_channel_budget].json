@@ -1,0 +1,38 @@
+{
+  "description": [
+    "Show a channel's spending budget: its limit, window and what it has spent.",
+    "",
+    "Pass the channel id; a thread id resolves to its parent channel. Only a",
+    "platform admin acting directly with a personal CLI",
+    "credential may read budgets; chat and routines are refused. ``budget`` is null when the",
+    "channel has none. Read ``summary`` back to the user."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "channel_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

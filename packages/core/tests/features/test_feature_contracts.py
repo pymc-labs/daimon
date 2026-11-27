@@ -106,9 +106,11 @@ _NARROWED: dict[str, str] = {
     "tool_safety": "operator-only security switch",
     "host_call_gate": "operator-only rollback switch",
     "mcp_connector_relay": "operator-only: sends connector data to another provider",
+    "provider_keys_file": "operator-only: sends an agent's keys to another provider",
     "unattended_capabilities": "read for unattended runs, which have no channel or thread",
     "require_routine_destination": "read when a routine is created, at the workspace",
     "compute_wake_runs": "a server admin's choice for the team or one agent, read by a wake turn",
+    "compute_agent_chat": "a server admin's choice for the team or one agent; agent chat has no thread",
     "watch_approval": "an operator's choice for the team or one agent; a channel or thread cannot loosen it",
     "compute_approval": "an operator's choice for the team or one agent; a channel or thread cannot loosen it",
     "secret_sharing": "a workspace or agent choice: a share has no channel or thread",
@@ -117,6 +119,7 @@ _NARROWED: dict[str, str] = {
     "long_jobs_max_deadline": "checked when a job starts, from its workspace and agent",
     "callback_watch_lifetime": "a server admin's limit, read when a callback watch is made",
     "daily_model_cap": "counts the team's spend, so a workspace or agent limit",
+    "conversation_retention": "a workspace's record policy, swept with no agent or thread",
     "thread_providers": "an agent owner's consent, checked when a conversation's model is picked",
     "monitor_direct_messages": "kept per agent: a DM or web chat has no channel to set",
     "monitor_mcp": "kept per agent: an MCP call has no channel or thread",
@@ -364,6 +367,52 @@ def test_every_turn_origin_render_gets_the_turn_features() -> None:
         assert passes, f"{path.name}:{call.lineno} must pass features= or **backend_facts()"
 
 
+# Every function that builds a `<turn_controls>` element. Those that open a person's or a
+# routine's turn call `controls_hint` (Knows Daimon); the MCP agent chat and the CLI send their
+# message as it is, so they render no controls and are not found here.
+_CONTROLS = "core/daimon/core"
+_CONTROLS_RENDERERS = {
+    f"{_CONTROLS}/turn_origin.py::render_turn_origin": "chat, direct messages, helpers, web",
+    f"{_CONTROLS}/routine_delivery.py::render_routine_controls": "a routine fire's destination",
+}
+_CONTROLS_EXEMPT = {
+    f"{_CONTROLS}/handoff_context.py::render_checkpoint_controls": "a host checkpoint, no person",
+}
+
+
+def _controls_renderers() -> dict[str, bool]:
+    """`path::function` of each function holding a `<turn_controls>` literal, and whether it
+    calls `controls_hint`."""
+    found: dict[str, bool] = {}
+    for path in _PRODUCT:
+        for fn in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            nodes = list(ast.walk(fn))
+            if any(
+                isinstance(n, ast.Constant)
+                and isinstance(n.value, str)
+                and n.value == "<turn_controls>\n"
+                for n in nodes
+            ):
+                where = f"{path.relative_to(_ROOT / 'packages').as_posix()}::{fn.name}"
+                found[where] = any(
+                    isinstance(n, ast.Call) and getattr(n.func, "id", "") == "controls_hint"
+                    for n in nodes
+                )
+    return found
+
+
+def test_every_controls_renderer_adds_the_knows_daimon_hint() -> None:
+    """One core helper (`controls_hint`) puts the hint in a turn's controls, held turns left out."""
+    found = _controls_renderers()
+    assert set(found) == {*_CONTROLS_RENDERERS, *_CONTROLS_EXEMPT}, (
+        "a new `<turn_controls>` renderer: call controls_hint or list it as exempt with a reason"
+    )
+    missing = [name for name in _CONTROLS_RENDERERS if not found[name]]
+    assert not missing, f"these renderers must call controls_hint: {missing}"
+
+
 _LINK_BUILDERS = {"panel_links", "for_tenant", "TenantLinks"}
 _UNGATED_LINKS = {
     "core/web_links.py::panel_links": "a builder",
@@ -371,6 +420,16 @@ _UNGATED_LINKS = {
     "core/turn/deps.py::build_turn_deps": "a turn's links; `render_turn_origin` drops them",
     "core/turn/admission.py::_web_links": "same: the test above checks every render's features",
     "core/features/eval_key.py::sample_controls": "a fixed example turn for the eval, never sent",
+    "core/github_panel.py::connect_root": (
+        "the connect flow's host is deployment-wide: the GitHub App has one setup URL, so it "
+        "cannot follow a per-place feature"
+    ),
+    "core/github_connect_flow.py::_back": (
+        "the back link to the agent page exists only for an invitation minted in the web app"
+    ),
+    "adapters/mcp/oauth_github.py::build_oauth_github_routes": (
+        "same: the back link to the agent page exists only for an invitation minted in the web app"
+    ),
 }
 # `aware_at` is `links_at` without links; `load_here_card` asks `links_at` at its answering
 # agent; `_where_aware` asks `aware_at` at the MCP caller's places.
@@ -466,7 +525,7 @@ def test_every_session_creation_gets_the_place_toolset() -> None:
     } - {_TURN_PATH}
     assert as_built == _KEPT_AS_BUILT.keys(), (
         "a session reused outside the turn path's drift check (`session_compat`) keeps its "
-        "tools as built: list it with a reason and say so in docs/features.md"
+        "tools as built: list it with a reason and say so in its spec in features/registry.py"
     )
     for path, call in calls:
         assert any(k.arg == "toolset" for k in call.keywords), (
@@ -518,6 +577,7 @@ _KEY_READERS = {
     "_chosen": 2,
     "_card_skipped": 4,
     "deployment_on": 1,
+    "deployment_on_everywhere": 1,
 }
 """Calls that read a feature key, and the position of the key among their arguments."""
 _SNAPSHOT_READS = {"on", "value", "get"}
@@ -597,6 +657,10 @@ _CONFIG_SWITCHES: dict[str, str] = {
     "CryptoSettings.allow_plaintext": _OPS,
     "HarnessAuthBinding.auth_mode": _SHAPE,
     "SignedIdentityServer.requester_meta": _SHAPE,
+    "SignedIdentityServer.agent_chat_requester": _SHAPE,
+    "SignedIdentityServer.routine_claims": _SHAPE,
+    "SignedIdentityServer.wake_claims": _SHAPE,
+    "SignedIdentityServer.dm_routine_claims": _SHAPE,
     "SignedIdentityServer.channel_scoped": _OPS,  # how a server scopes its answers, a per-server trust setting
     "SelfHostedSettings.admission_enabled": _OPS,
     "SelfHostedSettings.single_tenant": _OPS,

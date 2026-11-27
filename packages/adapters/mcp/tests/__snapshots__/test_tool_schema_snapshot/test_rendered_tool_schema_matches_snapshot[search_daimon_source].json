@@ -1,0 +1,24 @@
+{
+  "description": [
+    "Search Daimon's own source code for some plain text, ignoring case.",
+    "",
+    "Searches `packages/`, or only the file or folder `path` names.",
+    "Returns each matching line as `path:line: text`."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "path": {
+        "default": "",
+        "type": "string"
+      },
+      "query": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "type": "object"
+  }
+}

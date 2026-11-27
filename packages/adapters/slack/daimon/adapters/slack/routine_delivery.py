@@ -83,7 +83,7 @@ async def _dm_fallback(
     policy: DirectMessagePolicy,
     output_client: AsyncAnthropic,
     may_post: Callable[[], Awaitable[bool]],
-    sessionmaker: async_sessionmaker[AsyncSession] | None = None,
+    sessionmaker: async_sessionmaker[AsyncSession],
 ) -> DeliveryOutcome:
     creator = job.created_by_user_id
     if creator is None or not policy.allows(creator):
@@ -125,6 +125,8 @@ async def _dm_fallback(
             post=build_output_poster(client, channel_id=channel, thread_ts=None),
             notice=notice,
             may_post=may_post,
+            sessions=sessionmaker,
+            tenant_id=row.tenant_id,
         )
     except SlackApiError as err:
         log.warning(
@@ -441,6 +443,8 @@ def make_slack_poster(runtime: SlackRuntime) -> Poster:
             ),
             notice=notice,
             may_post=may_post,
+            sessions=runtime.sessionmaker,
+            tenant_id=row.tenant_id,
         )
         return DeliveryOutcome(status="delivered")
 

@@ -15,6 +15,7 @@ concurrently, outside the migration transaction, so turns keep writing usage mea
 Downgrading drops the workflow tables and their data, with the rows only a workflow holds.
 
 downgrade: destructive
+schema: contract
 """
 
 import sqlalchemy as sa

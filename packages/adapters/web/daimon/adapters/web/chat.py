@@ -11,7 +11,7 @@ from daimon.adapters.web import directory
 from daimon.adapters.web.caller import FILES_OFF, WebCaller, requires
 from daimon.adapters.web.cards import CardChoice
 from daimon.adapters.web.chat_json import agent_json, message_json, notice_json, session_json
-from daimon.adapters.web.chat_model import thread_model
+from daimon.adapters.web.chat_model import listed_models, thread_model
 from daimon.adapters.web.chat_switch_back import switch_back
 from daimon.adapters.web.chat_thread_model import (
     Picked,
@@ -227,9 +227,14 @@ def chat_router(runtime: WebRuntime) -> APIRouter:
         threads = cut(found, page, response, lambda t: (t.updated_at, t.id))
         listed = {t.id: agent_of(caller, t.agent_id) for t in threads}
         avatars = await faces(caller, list(listed.values()))
+        models = await listed_models(runtime, caller, threads, listed)
         return [
             session_json(
-                t, listed[t.id], running=is_running(t.id), avatar=avatars.get(t.agent_id, "")
+                t,
+                listed[t.id],
+                running=is_running(t.id),
+                avatar=avatars.get(t.agent_id, ""),
+                model=models[t.id],
             )
             for t in threads
         ]

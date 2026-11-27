@@ -1,0 +1,77 @@
+{
+  "description": [
+    "List the workspace's audit log, newest first. ``source`` is where an entry came from:",
+    "admin changes made outside chat, or ``security`` for chat tool calls and panel writes.",
+    "Filter by acting person, ``kind`` (see list_audit_kinds) and UTC days ``first`` to",
+    "``last`` (YYYY-MM-DD). Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "first": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "kind": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "last": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "limit": {
+        "default": 50,
+        "type": "integer"
+      },
+      "person_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "source": {
+        "anyOf": [
+          {
+            "enum": [
+              "web",
+              "security"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

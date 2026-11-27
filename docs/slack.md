@@ -41,10 +41,13 @@ then reinstall the app so the workspace approves the scopes:
 | Direct messages from agents | `im:write` scope |
 | [DM access](direct-messages.md) by user group | `usergroups:read` scope |
 | Slack Connect channels | The `channel_shared`, `channel_unshared` and `member_joined_channel` events |
-| Web access that follows workspace membership | The `team_join` and `user_change` events |
 | Channel lifecycle tracking | The `message.channels`, `message.groups` and channel archive, unarchive and delete events |
 | File delivery | `files:write` scope |
 | Agent names and avatars | `chat:write.customize` scope, requested at install when [agent identity](agent-identity.md) is on |
+
+<!-- knowledge: web -->
+The web app's access follows workspace membership through the `team_join` and `user_change` events.
+<!-- /knowledge -->
 
 Slack file and DM errors tell the admin to reinstall when a scope is missing.
 After adding `chat:write.customize`, restart the Slack and MCP services.
@@ -163,8 +166,9 @@ Before enabling, finish the DM setup in the manifest: the two scopes, the
 > before any rollback.
 
 Private turns start a fresh session each time. Recent private history is
-replayed, but workspace files and OAuth grants held only in a shared vault are
-not copied.
+replayed, and the sign-ins Daimon holds for the agent and for you are copied
+into the session's own vault, but workspace files and OAuth grants held only
+in a shared vault are not copied.
 
 ### Ask a person
 
@@ -191,8 +195,13 @@ channel.
 `/agent-setup` opens the agents roster, and `/here` shows only the caller a
 card with the agent that answers in the channel. `/settings` shows and changes
 every feature at the channel or workspace level (see [features](features.md));
-for a thread's own setting, ask Daimon in that thread or use the thread's Settings page in
-the web app. Members see only agents whose
+for a thread's own setting, ask Daimon in that thread.
+
+<!-- knowledge: web -->
+A thread's own setting is also on the web app's thread Settings page.
+<!-- /knowledge -->
+
+Members see only agents whose
 rules allow them to answer at that location, while admins see all. Knowing an
 agent's name does not grant edit rights.
 

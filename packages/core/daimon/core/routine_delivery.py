@@ -69,6 +69,7 @@ from daimon.core.delivery import (
     poll_once,
     run_poller,
 )
+from daimon.core.features.snapshot import place_feature_or_none
 from daimon.core.fire.subject import RoutineFacts
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
@@ -77,6 +78,7 @@ from daimon.core.outbound.opt_out import opt_out_names
 from daimon.core.permissions import any_writers_none, limiting_ids_at
 from daimon.core.platform_words import turn_words
 from daimon.core.routine_files import decode_payload, payload_for
+from daimon.core.self_knowledge import controls_hint
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.direct_messages import dm_enabled
@@ -126,6 +128,7 @@ __all__ = [
     "render_fallback_post",
     "render_routine_controls",
     "routine_agent_name",
+    "routine_knows",
     "run_delivery_poller",
 ]
 
@@ -227,6 +230,17 @@ async def routine_links(
     )
 
 
+async def routine_knows(
+    sessions: async_sessionmaker[AsyncSession], settings: Settings, row: RoutineFacts, platform: str
+) -> bool:
+    """Whether `self_knowledge` is On where a routine fires (`routine_feature_place`)."""
+    from daimon.core.rule_views import routine_feature_place  # imports this module
+
+    place = routine_feature_place(row, platform=platform)
+    found = await place_feature_or_none(sessions, settings, place, "self_knowledge")
+    return found is not None and found.on
+
+
 #: How a run with nothing to deliver ends, on every destination kind and platform.
 #: A model keeps to a marker far more reliably than to writing nothing at all.
 NO_POST_MARKER: Final[str] = "NO_POST"
@@ -272,7 +286,9 @@ def render_routine_controls(
     platform: str,
     direct_post: DirectPost = "allowed",
     web: TenantLinks | None = None,
+    knows: bool = False,
     held: bool = False,
+    daimon_tools: bool = True,
 ) -> str:
     """Host-supplied facts that open a routine fire with a destination.
 
@@ -283,7 +299,9 @@ def render_routine_controls(
     nouns and commands, as in a chat turn; a destination is always a channel
     or a thread, so the place is a channel. `web` (`routine_links`) adds the routine's own
     workspace on the web, as a chat turn's controls do; a `held` fire, into a channel shared
-    with another organisation, gets none.
+    with another organisation, gets none. `knows` (`routine_knows`) adds the Knows Daimon hint,
+    left out of a held fire and of an agent without Daimon's tools (`daimon_tools`) as well
+    (`controls_hint`).
     """
     target = delivery_target(row, platform=platform)
     controls: dict[str, object] = {
@@ -315,6 +333,8 @@ def render_routine_controls(
     links = None if held else web
     if links is not None:
         controls["web"] = {"url": links.root()}
+    if hint := controls_hint(on=knows, held=held, daimon_tools=daimon_tools):
+        controls["self_knowledge"] = hint
     if row.destination_kind == "dm":
         delivery = (
             "Daimon delivers your final reply privately to the routine owner. "

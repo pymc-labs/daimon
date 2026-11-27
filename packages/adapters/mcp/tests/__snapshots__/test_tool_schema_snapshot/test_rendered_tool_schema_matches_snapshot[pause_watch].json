@@ -1,0 +1,18 @@
+{
+  "description": [
+    "Pause your watch and cancel its queued wakes. Workspace admins may pause another",
+    "owner's watch."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "watch_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "watch_id"
+    ],
+    "type": "object"
+  }
+}

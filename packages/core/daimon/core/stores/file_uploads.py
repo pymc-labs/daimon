@@ -21,6 +21,7 @@ from typing import Any, cast
 
 from daimon.core._models import FileUpload, WebMessage
 from daimon.core.stores.domain import FileUploadRow, UploadedFile
+from daimon.core.stores.retention import Position
 from sqlalchemy import (
     CursorResult,
     Select,
@@ -266,6 +267,91 @@ async def delete_unreferenced_web_uploads(
     conditions = [FileUpload.person_id.is_not(None), unreferenced]
     if person_id is not None:
         conditions.append(FileUpload.person_id == person_id)
+    if handle_ids is not None:
+        conditions.append(FileUpload.id.in_(list(handle_ids)))
+    if created_before is not None:
+        conditions.append(FileUpload.created_at < created_before)
+    result = await session.execute(delete(FileUpload).where(and_(*conditions)))
+    return cast(CursorResult[Any], result).rowcount
+
+
+async def delete_stale_unowned_uploads(
+    session: AsyncSession,
+    *,
+    created_before: datetime,
+    limit: int,
+    cursor: Position | None = None,
+) -> int:
+    """Delete up to `limit` files with no web person (MCP and tool uploads) made
+    before the cutoff and carried by no message; returns how many. Routine outputs
+    waiting on delivery keep their own 7-day rule.
+
+    A file a message still carries stays, so with a `cursor` a batch starts after
+    the last one deleted instead of reading those again.
+    """
+    stale = select(FileUpload.id).where(
+        FileUpload.person_id.is_(None),
+        FileUpload.created_at < created_before,
+        FileUpload.title.is_distinct_from(ROUTINE_OUTPUT_TITLE),
+        ~_carrying_message().exists(),
+    )
+    if cursor is not None and cursor.after is not None:
+        stale = stale.where(FileUpload.created_at >= cursor.after)
+    oldest = stale.order_by(FileUpload.created_at).limit(limit)
+    result = await session.execute(
+        delete(FileUpload).where(FileUpload.id.in_(oldest)).returning(FileUpload.created_at)
+    )
+    gone = list(result.scalars())
+    if cursor is not None and gone:
+        cursor.after = max(gone)
+    return len(gone)
+
+
+#: The title of a provider routine's output staged for delivery (`routine_files`).
+ROUTINE_OUTPUT_TITLE = "routine-output"
+
+
+async def stage_upload(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    title: str,
+    display_filename: str,
+    content_type: str,
+    content: bytes,
+    now: datetime,
+) -> str:
+    """Store bytes the host already holds as a landed agent upload; return its handle."""
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise UploadTooLargeError(
+            f"upload is {len(content)} bytes, over the {MAX_UPLOAD_BYTES} byte limit"
+        )
+    row = FileUpload(
+        id=secrets.token_urlsafe(_HANDLE_BYTES),
+        tenant_id=tenant_id,
+        title=title,
+        display_filename=display_filename,
+        content_type=content_type,
+        content=content,
+        created_at=now,
+    )
+    session.add(row)
+    await session.flush()
+    return row.id
+
+
+async def delete_uploads(
+    session: AsyncSession,
+    *,
+    title: str,
+    tenant_id: uuid.UUID | None = None,
+    handle_ids: Collection[str] | None = None,
+    created_before: datetime | None = None,
+) -> int:
+    """Delete agent uploads with `title`, narrowed to a tenant's handles or an age; how many."""
+    conditions = [FileUpload.title == title, FileUpload.person_id.is_(None)]
+    if tenant_id is not None:
+        conditions.append(FileUpload.tenant_id == tenant_id)
     if handle_ids is not None:
         conditions.append(FileUpload.id.in_(list(handle_ids)))
     if created_before is not None:

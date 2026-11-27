@@ -1,9 +1,16 @@
-"""Versioned routine outbox envelopes holding provider references, never bytes."""
+"""Versioned routine outbox envelopes holding file references, never bytes.
+
+A Managed Agents fire's files are referenced by their Files API ids. Another
+provider's files live in the fire's own session, which delivery cannot reach, so
+they are read while that runtime is live and staged as `file_uploads` rows.
+"""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+import uuid
+from collections.abc import Awaitable, Callable, Sequence
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import anthropic
@@ -19,7 +26,18 @@ from daimon.core.output_delivery import (
     poll_output_files,
     render_oversize_notice,
 )
+from daimon.core.output_runtime import OutputRuntime
+from daimon.core.stores.file_uploads import (
+    MAX_UPLOAD_BYTES,
+    ROUTINE_OUTPUT_TITLE,
+    UploadTooLargeError,
+    delete_uploads,
+    get_upload,
+    stage_upload,
+)
+from mux.errors import MuxError, UnsupportedCapability
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
     from daimon.core.fire.delivery import DeliveryFacts
@@ -36,6 +54,8 @@ class RoutineFile(BaseModel):
     filename: str
     mime_type: str
     size_bytes: int = Field(gt=0, le=MAX_BYTES_CEILING)
+    # A `file_uploads` handle (`stage_routine_files`), not a Files API id.
+    staged: bool = False
 
 
 class RoutinePayload(BaseModel):
@@ -117,24 +137,150 @@ async def collect_routine_files(
                     size_bytes=meta.size_bytes,
                 )
             )
+    return _envelope(text, files, notices)
+
+
+def _envelope(text: str, files: Sequence[RoutineFile], notices: Sequence[str]) -> str:
     if not files and not notices:
         return plain_payload(text) or ""
     return (
-        PREFIX + RoutinePayload(text="\n\n".join([text, *notices]), files=files).model_dump_json()
+        PREFIX
+        + RoutinePayload(text="\n\n".join([text, *notices]), files=list(files)).model_dump_json()
     )
 
 
+async def stage_routine_files(
+    sessions: async_sessionmaker[AsyncSession],
+    outputs: OutputRuntime | None,
+    *,
+    tenant_id: uuid.UUID,
+    text: str,
+) -> str:
+    """Read a provider fire's files while its runtime is live and stage them for delivery.
+
+    The same envelope, cap of ten files and notices as `collect_routine_files`; a file
+    over what a staged row holds stays in the workspace and is named in text.
+    """
+    if outputs is None:
+        return plain_payload(text) or ""
+    files: list[RoutineFile] = []
+    notices: list[str] = []
+    try:
+        listed = await outputs.list_outputs()
+    except UnsupportedCapability:  # a backend with no workspace listing has nothing to send
+        return plain_payload(text) or ""
+    except MuxError as error:
+        listed = ()
+        log.exception(
+            "routine.files_staging_failed",
+            session_id=outputs.session_id,
+            causes=backend_refusal_causes(error),
+        )
+        notices.append("Generated files could not be attached.")
+    try:
+        for meta in listed:
+            if meta.filename.startswith(HANDOFF_FILENAME_PREFIX) or meta.size_bytes == 0:
+                continue
+            limit = min(MAX_UPLOAD_BYTES, meta.max_read_bytes or MAX_UPLOAD_BYTES)
+            if meta.size_bytes > limit:
+                skipped = SkippedFile(
+                    file_id=meta.id, filename=meta.filename, size_bytes=meta.size_bytes
+                )
+                notices.append(render_oversize_notice(skipped, max_bytes=limit))
+                continue
+            if len(files) == MAX_FILES:
+                notices.append(
+                    "More generated files remain with the agent: "
+                    "this delivery can attach at most 10 files."
+                )
+                break
+            content = await outputs.read_output(meta.id)
+            if not content:
+                continue
+            async with sessions.begin() as db:
+                handle = await stage_upload(
+                    db,
+                    tenant_id=tenant_id,
+                    title=ROUTINE_OUTPUT_TITLE,
+                    display_filename=meta.filename,
+                    content_type=meta.mime_type,
+                    content=content,
+                    now=datetime.now(UTC),
+                )
+            files.append(
+                RoutineFile(
+                    file_id=handle,
+                    filename=meta.filename,
+                    mime_type=meta.mime_type,
+                    size_bytes=len(content),
+                    staged=True,
+                )
+            )
+    except (MuxError, UploadTooLargeError) as error:
+        # File collection must not discard a routine's completed reply.
+        log.exception(
+            "routine.files_staging_failed",
+            session_id=outputs.session_id,
+            causes=backend_refusal_causes(error),
+        )
+        notices.append("Generated files could not be attached.")
+    return _envelope(text, files, notices)
+
+
 async def deliver_routine_files(
-    client: AsyncAnthropic,
+    client: AsyncAnthropic | None,
     payload: str | None,
     *,
     max_bytes: int,
     post: Callable[[DeliverableFile], Awaitable[None]],
     notice: Callable[[str], Awaitable[None]],
     may_post: Callable[[], Awaitable[bool]],
+    sessions: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
 ) -> None:
-    """Fail on the first uncertain upload; the outbox owns retries and settlement."""
-    for ref in decode_payload(payload).files:
+    """Fail on the first uncertain upload; the outbox owns retries and settlement.
+
+    Delivery is never retried, so staged files are deleted once it ends, either way.
+    """
+    refs = decode_payload(payload).files
+    try:
+        await _deliver(client, refs, max_bytes, post, notice, may_post, sessions, tenant_id)
+    finally:
+        if staged := [ref.file_id for ref in refs if ref.staged]:
+            async with sessions.begin() as db:
+                await delete_uploads(
+                    db, title=ROUTINE_OUTPUT_TITLE, tenant_id=tenant_id, handle_ids=staged
+                )
+
+
+async def _read(
+    client: AsyncAnthropic | None,
+    ref: RoutineFile,
+    sessions: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+) -> bytes:
+    if not ref.staged:
+        if client is None:
+            raise RuntimeError("Generated file delivery is unavailable; it will not be retried.")
+        return await download_output_file(client, ref.file_id)
+    async with sessions() as db:
+        upload = await get_upload(db, tenant_id=tenant_id, handle_id=ref.file_id)
+    if upload is None or upload.content is None or upload.title != ROUTINE_OUTPUT_TITLE:
+        raise RuntimeError("A generated file is gone; delivery stopped.")
+    return upload.content
+
+
+async def _deliver(
+    client: AsyncAnthropic | None,
+    refs: Sequence[RoutineFile],
+    max_bytes: int,
+    post: Callable[[DeliverableFile], Awaitable[None]],
+    notice: Callable[[str], Awaitable[None]],
+    may_post: Callable[[], Awaitable[bool]],
+    sessions: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+) -> None:
+    for ref in refs:
         if not await may_post():
             raise RuntimeError("The routine destination or owner changed; delivery stopped.")
         if ref.size_bytes > max_bytes:
@@ -147,12 +293,12 @@ async def deliver_routine_files(
                 )
             )
             continue
-        content = await download_output_file(client, ref.file_id)
+        content = await _read(client, ref, sessions, tenant_id)
         if len(content) != ref.size_bytes:
             raise ValueError("Generated file size changed; delivery stopped.")
         if not await may_post():
             raise RuntimeError("The routine destination or owner changed; delivery stopped.")
-        await post(DeliverableFile(**ref.model_dump(), content=content))
+        await post(DeliverableFile(**ref.model_dump(exclude={"staged"}), content=content))
 
 
 def unsupported_files_note(payload: str | None) -> str:

@@ -96,12 +96,16 @@ async def test_privacy_sweep_boundary_retries_after_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sweep = unittest.mock.AsyncMock(side_effect=[RuntimeError("temporary"), None])
+    retire = unittest.mock.AsyncMock(side_effect=[RuntimeError("temporary"), None])
     monkeypatch.setattr("daimon.adapters.scheduler.main.sweep_privacy_session_deletes", sweep)
+    monkeypatch.setattr("daimon.adapters.scheduler.main.tenant_retirement.sweep", retire)
     client = unittest.mock.Mock()
     sm = unittest.mock.Mock()
-    await _sweep_privacy_deletes(client, sm)
-    await _sweep_privacy_deletes(client, sm)
-    assert sweep.await_count == 2
+    settings = unittest.mock.Mock()
+    await _sweep_privacy_deletes(client, sm, settings)
+    await _sweep_privacy_deletes(client, sm, settings)
+    assert sweep.await_count == 2, "account erasures are retried after a failure"
+    assert retire.await_count == 2, "tenant retirement cleanup is retried after a failure"
 
 
 async def test_app_vault_archive_retries_after_failure(
@@ -2021,6 +2025,9 @@ async def test_fire_stamps_a_sealed_destinations_seal_on_the_routine_session(
     async def fake_resolve(*args: object, **kwargs: object) -> str:
         return "agent_z"
 
+    async def fake_agent(*args: object, **kwargs: object) -> object:
+        return types.SimpleNamespace(metadata={})
+
     fire = await _build_fire(
         client=fake_client,
         sm=db_session_factory,
@@ -2033,6 +2040,7 @@ async def test_fire_stamps_a_sealed_destinations_seal_on_the_routine_session(
             "daimon.adapters.scheduler.main.run_turn", side_effect=capturing_run_turn
         ),
         unittest.mock.patch("daimon.adapters.scheduler.main.resolve_agent", fake_resolve),
+        unittest.mock.patch("daimon.adapters.scheduler.main.retrieve_agent_cached", fake_agent),
         unittest.mock.patch("daimon.adapters.scheduler.main.resolve_environment", fake_resolve),
     ):
         await fire(row)
@@ -3008,6 +3016,52 @@ async def test_run_loops_keeps_ticking_while_privacy_upstream_is_slow() -> None:
 
     assert ticks == 3
     assert cancelled
+
+
+async def test_run_loops_keeps_ticking_and_settling_while_retention_runs_long() -> None:
+    """The retention sweep has its own loop: a long sweep delays neither the tick nor usage."""
+    stop = asyncio.Event()
+    retention_started = asyncio.Event()
+    ticks = settles = 0
+    cancelled = False
+
+    async def tick() -> None:
+        nonlocal ticks
+        await retention_started.wait()
+        ticks += 1
+        if ticks == 3:
+            stop.set()
+
+    async def usage() -> None:
+        nonlocal settles
+        settles += 1
+
+    async def slow_retention() -> None:
+        nonlocal cancelled
+        retention_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    async with asyncio.timeout(5):
+        await _run_loops(
+            tick=tick,
+            housekeeping=unittest.mock.AsyncMock(),
+            github_sessions=unittest.mock.AsyncMock(),
+            usage_sweep=usage,
+            privacy_sweep=unittest.mock.AsyncMock(),
+            retention_sweep=slow_retention,
+            compute_sweep=unittest.mock.AsyncMock(),
+            compute_task_poll=unittest.mock.AsyncMock(),
+            interval_s=0.01,
+            stop_event=stop,
+        )
+
+    assert ticks == 3, "ticks continued while the retention sweep was running"
+    assert settles >= 1, "usage settlement ran while the retention sweep was running"
+    assert cancelled, "stopping cancels the sweep in flight"
 
 
 @pytest.mark.parametrize(
@@ -4305,7 +4359,8 @@ async def test_selfhosted_routine_refuses_before_any_anthropic_access(
         cron_expr="* * * * *",
         timezone_="UTC",
         trigger_message="private scheduled content",
-        channel_id="origin",
+        # The saved channel is the destination's own, where admission reads the backend.
+        channel_id="dest" if at_destination else "origin",
         destination_kind="channel",
         destination_id="dest",
     )
@@ -4323,18 +4378,23 @@ async def test_selfhosted_routine_refuses_before_any_anthropic_access(
     assert after.last_error == "selfhosted_routines_unsupported"
 
 
+@pytest.mark.parametrize("quiet", [False, True])
 @pytest.mark.parametrize("pinned", ["channel", "agent"])
-async def test_routine_on_a_gemini_channel_or_agent_is_refused_not_run_on_claude(
+async def test_routine_on_a_gemini_channel_or_agent_runs_on_gemini_not_claude(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     pinned: str,
+    quiet: bool,
 ) -> None:
-    """A routine whose channel or agent is on Gemini records a plain refusal before any
-    Anthropic access, where it used to run on Claude unnoticed."""
+    """A routine whose channel or agent is on Gemini runs as an unattended provider turn,
+    with no Anthropic access, and its reply is delivered (or kept quiet) as on Claude."""
     from typing import cast
 
+    from daimon.core.anthropic_guard import without_anthropic
     from daimon.core.channel_backend import channel_ref, record_born_backend, set_channel_backend
+    from daimon.core.provider_routine import ProviderRoutineRun
+    from daimon.core.turn.state import TurnState
     from mux.contracts.config import BackendConfig
 
     class NoAnthropic:
@@ -4342,10 +4402,17 @@ async def test_routine_on_a_gemini_channel_or_agent_is_refused_not_run_on_claude
             raise AssertionError(f"native routine accessed Anthropic.{name}")
 
     tenant = await make_tenant(db_session)
+    await tenant_ledger.insert_entry(
+        db_session,
+        tenant_id=tenant.id,
+        delta_usd=Decimal("10.00"),
+        reason="trial_credit",
+        idempotency_key=f"trial:{tenant.id}",
+    )
     if pinned == "channel":
         await set_channel_backend(
             db_session,
-            channel_ref(tenant.id, tenant.platform, "origin"),
+            channel_ref(tenant.id, tenant.platform, "4200"),
             BackendConfig(
                 backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash"
             ),
@@ -4368,24 +4435,49 @@ async def test_routine_on_a_gemini_channel_or_agent_is_refused_not_run_on_claude
         cron_expr="* * * * *",
         timezone_="UTC",
         trigger_message="scheduled content",
-        channel_id="origin",
+        channel_id="4200",
         destination_kind="channel",
-        destination_id="origin",
+        destination_id="4200",
     )
     await db_session.commit()
+    seen: dict[str, object] = {}
+
+    async def fake_admit(deps: object, routine: RoutineRow, **kwargs: object) -> object:
+        seen["admitted"] = routine.agent_name
+        return SimpleNamespace(agent=SimpleNamespace(id="agt_native", name="test", metadata={}))
+
+    async def fake_run(deps: object, admission: object, **kwargs: object) -> ProviderRoutineRun:
+        seen["prompt"] = kwargs["prompt"]
+        text = "NO_POST: nothing new" if quiet else "Weekly summary: all green."
+        return ProviderRoutineRun(text, TurnState(content=[]))
+
+    monkeypatch.setattr("daimon.adapters.scheduler.main.admit_provider_routine", fake_admit)
+    monkeypatch.setattr("daimon.adapters.scheduler.main.run_provider_routine", fake_run)
     fire = await _build_fire(
         client=cast(AsyncAnthropic, NoAnthropic()),
         sm=db_session_factory,
         settings=_make_test_settings(monkeypatch),
         deployment_default=DeploymentDefault(),
         resolver_cache=new_resolver_cache(),
+        dm_turn_deps=cast("Any", SimpleNamespace()),
     )
-    await fire(row)
+    with without_anthropic():
+        await fire(row)
     after = await get_routine(db_session, row.id, tenant_id=tenant.id)
     assert after is not None
-    assert after.last_error is not None and "set to Google" in after.last_error, (
-        "the refusal should name the provider the routine is set to"
+    assert after.last_error is None, "a Gemini routine runs instead of being refused"
+    assert seen["admitted"] == "test", "the fire is admitted for the routine's own agent"
+    prompt = str(seen["prompt"])
+    assert "scheduled routine run" in prompt and prompt.endswith("scheduled content"), (
+        "the provider turn opens with the same routine controls as a Claude fire"
     )
+    if quiet:
+        assert after.delivery_payload == "" and after.last_result_tail == "nothing new", (
+            "a quiet run posts nothing and keeps its reason"
+        )
+    else:
+        assert after.delivery_status == "pending", "Daimon posts the reply the agent did not"
+        assert after.delivery_payload == "Weekly summary: all green."
 
 
 @pytest.mark.parametrize("platform", ["discord", "slack", "teams"])

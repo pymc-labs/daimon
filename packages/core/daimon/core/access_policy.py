@@ -340,6 +340,10 @@ def is_invoker_allowed(
 DM_SCOPE_PREFIX = "dm:"
 # An unattended channel turn's queue scope; the real channel is the origin's parent.
 CHANNEL_SCOPE_PREFIX = "ch:"
+# The conversation of a cloud computer an agent-chat session uses, after its credential's
+# grant. Only compute reads it (`compute_sessions.ComputePlace`): it is no channel, thread
+# or DM, and no origin, seal or audience check ever sees it.
+AGENT_CHAT_SCOPE_PREFIX = "agentchat:"
 
 
 def place_thread_id(thread_id: str | None) -> str | None:

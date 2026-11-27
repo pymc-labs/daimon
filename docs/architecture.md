@@ -44,7 +44,6 @@ authenticated call back from the agent's sandbox.
 | `daimon.adapters.discord` | `packages/adapters/discord/` | Discord I/O, rendering, permissions, slash commands. |
 | `daimon.adapters.slack` | `packages/adapters/slack/` | Slack I/O, Block Kit rendering, per-user OAuth. |
 | `daimon.adapters.teams` | `packages/adapters/teams/` | Teams HTTP ingress, Adaptive Card rendering, private replies, file delivery. |
-| `daimon.adapters.web` | `packages/adapters/web/` | Web app server: Discord, Slack and Microsoft sign-in, sessions, connection nodes, the JSON API and the built single-page app. |
 | `daimon.adapters.mcp` | `packages/adapters/mcp/` | The MCP server the agent calls, plus the OAuth, webhook and hub HTTP routes. |
 | `daimon.adapters.scheduler` | `packages/adapters/scheduler/` | Routine dispatch, long-job workers and maintenance sweeps. |
 | `daimon.adapters.sidecar` | `packages/adapters/sidecar/` | Signed watch callbacks and poll scheduling. Runs no turns and holds no provider key. |
@@ -52,6 +51,10 @@ authenticated call back from the agent's sandbox.
 | `daimon.testing` | `packages/testing/` | Shared fixtures. |
 | `mux` | `packages/mux/` | The provider-neutral managed-agent contract, a separate namespace. See [mux.md](mux.md). |
 | `notebook_host`, `report_host` | `apps/*/src/` | Standalone services that reach Daimon over HTTP only. |
+
+<!-- knowledge: web -->
+`daimon.adapters.web` (`packages/adapters/web/`) is the web app server: sign-in, sessions, connection nodes, the JSON API and the built app.
+<!-- /knowledge -->
 
 ### Why the boundaries exist
 
@@ -102,7 +105,7 @@ configuration, and no provider call happens before the cheap checks.
    conversation with `/model` replaces the agent's own, or falls back with a
    note.
 5. Resolve the agent and environment to live provider ids, reconciling
-   defaults if a tag no longer resolves.
+   defaults if a tag does not resolve.
 6. Check the tenant balance, the spend allowance and the channel budget. See
    [billing](billing.md).
 
@@ -201,7 +204,7 @@ an admin. So an admin is exempt only where the output reaches no one else.
 | `fork_agent` of an agent with a rule | refused | refused |
 | Agent chat, and any agent-scoped key or bearer token with no platform user | rules apply | rules apply |
 | An agent key minted in a channel with limited readers, or one its agent's rule names | runs inside that channel only | runs inside that channel only |
-| Settings of a channel with limited readers, or of its own agent | rules apply | change only from inside the channel; web, hub, DM, agent key and routine refused |
+| Settings of a channel with limited readers, or of its own agent | rules apply | change only from inside the channel; every other surface refused |
 
 - **One decision function.** `daimon.core.authz.authorize` decides channel
   rules, agent rules, the invoker allowlist, [agent invoker
@@ -262,7 +265,7 @@ names ending in `_KEY`, `_TOKEN` or `_PASSWORD`.
 
 A turn does not create a session per message. The `thread_sessions` table maps
 a tenant, platform and thread to one provider session. Its `status` is `live`,
-`dead` (the provider no longer has it), `superseded` (it points at its
+`dead` (the provider lacks it), `superseded` (it points at its
 successor) or `retired` (an explicit fresh start). That lineage lets a thread
 survive a session replacement with its context intact.
 
@@ -280,13 +283,10 @@ and bill against that.
 
 ### Same-thread handoff
 
-A thread can move to another agent without a new thread. The person asks the
-agent, which calls `hand_off_task`, or, after a channel's agent changes, uses
-the **Switch to agent** button.
-
-Both call `core/thread_handoff.py`, which checks `authorize` and writes only
-the new binding. The new agent answers at once if the person asked, otherwise
-at their next message, replacing the old session. Its transcript carries over
+A thread can move to another agent without a new thread; see
+[Handoffs](helpers.md#handoffs) for how a person asks. Both paths call
+`core/thread_handoff.py`, which checks `authorize` and writes only the new
+binding. The new agent replaces the old session, and its transcript carries over
 only if it could read it.
 
 ## Entry points that are not a chat message
@@ -338,8 +338,15 @@ HTTP with capability tokens.
 | Why a turn ended | `turn/termination.py`, `turn/notices.py` |
 | Access decisions | `core/authz.py` |
 | Config cascade | `core/stores/scoped_config_read.py`, `core/scope.py` |
-| Per-place settings: `/settings`, `get_settings`/`change_setting` and the web Settings section all read and write here | `core/features/service.py`, `core/settings_panel.py` |
-| Web page styles | `uv run python scripts/generate_web_css.py` after editing `static/input.css` (Linux x64; CI runs it with `--check`) |
+| Per-place settings: `/settings` and `get_settings`/`change_setting` read and write here | `core/features/service.py`, `core/settings_panel.py` |
+
+<!-- knowledge: web -->
+After editing `static/input.css`, rebuild the styles (Linux x64):
+
+```bash
+uv run python scripts/generate_web_css.py
+```
+<!-- /knowledge -->
 
 See also [routines](routines.md), [mcp-tools](mcp-tools.md) and
 [configuration](configuration.md).

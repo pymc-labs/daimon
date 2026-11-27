@@ -11,6 +11,7 @@ import { featuresHandlers } from "./features"
 import { chatHandlers } from "./chat"
 import { coreHandlers } from "./core"
 import { creditsHandlers } from "./credits"
+import { githubConnectHandlers } from "./github-connect"
 import { integrationsHandlers } from "./integrations"
 import { opsHandlers } from "./ops"
 import { profileHandlers } from "./profile"
@@ -22,5 +23,5 @@ import { workflowsInboxHandlers } from "./workflows-inbox"
 
 // Module handlers first, so a module can override a core route it owns.
 export const worker = setupWorker(
-  ...chatHandlers, ...serverSkillsHandlers, ...agentLibraryHandlers, ...agentSetupHandlers, ...agentGithubHandlers, ...agentsHandlers, ...channelsHandlers, ...featuresHandlers, ...supportHandlers, ...routinesHandlers, ...workflowRunsHandlers, ...workflowsInboxHandlers, ...workflowsHooksHandlers, ...workflowsHandlers, ...creditsHandlers, ...integrationsHandlers, ...profileHandlers, ...opsHandlers, ...adminHandlers, ...coreHandlers,
+  ...githubConnectHandlers, ...chatHandlers, ...serverSkillsHandlers, ...agentLibraryHandlers, ...agentSetupHandlers, ...agentGithubHandlers, ...agentsHandlers, ...channelsHandlers, ...featuresHandlers, ...supportHandlers, ...routinesHandlers, ...workflowRunsHandlers, ...workflowsInboxHandlers, ...workflowsHooksHandlers, ...workflowsHandlers, ...creditsHandlers, ...integrationsHandlers, ...profileHandlers, ...opsHandlers, ...adminHandlers, ...coreHandlers,
 )

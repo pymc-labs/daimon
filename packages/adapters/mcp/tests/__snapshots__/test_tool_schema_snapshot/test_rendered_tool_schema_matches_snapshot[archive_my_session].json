@@ -1,0 +1,24 @@
+{
+  "description": [
+    "Archive a session when its conversation is finished.",
+    "",
+    "An archived session is no longer live and stops being re-read by",
+    "usage collection. This is NOT a cancel — to stop a running turn, use",
+    "the cancel tool instead. Returns ``{\"handle\": \"<session_id>\",",
+    "\"archived\": \"true\"}``.",
+    "Use a handle opened through agent chat. Platform conversations and",
+    "older sessions without headless creation provenance cannot be driven here."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "handle": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "handle"
+    ],
+    "type": "object"
+  }
+}

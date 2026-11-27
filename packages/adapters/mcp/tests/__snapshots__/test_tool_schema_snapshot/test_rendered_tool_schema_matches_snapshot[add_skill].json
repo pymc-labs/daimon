@@ -1,0 +1,138 @@
+{
+  "description": [
+    "Add a skill to one agent from a pasted SKILL.md, a .md or .zip attached in",
+    "this chat, one folder of a GitHub repository, or a skill one of the agent's MCP",
+    "servers serves (``mcp_server`` with ``mcp_skill``). Pass exactly one source.",
+    "",
+    "The first call only previews: name, description, files and the files the",
+    "agent could run. Show that to the person; only when they confirm, call again",
+    "with the same arguments plus the preview's ``content_hash``, and the person",
+    "approves the upload on a confirmation card. Where this deployment turned cards",
+    "off, the person confirms by replying just ``yes`` in this thread instead: call",
+    "again only in the turn their reply starts, with that turn's",
+    "``origin_context_id``; Daimon checks the reply itself. Where",
+    "neither can happen, the preview's summary says why and points to the Add skill option in",
+    "the agents setup panel (the setup command, see ``words.setup`` in",
+    "``<turn_controls>``). The skill belongs to this agent alone; ``sync_skills``",
+    "fills the shared library instead, and ``remove_skill`` detaches it. A built-in",
+    "agent is refused.",
+    "Changing skills takes an admin. Pass this turn's",
+    "``origin_context_id`` so its",
+    "channel counts."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_name": {
+        "type": "string"
+      },
+      "attachment_url": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "A .md or .zip the person attached in this chat, by its link."
+      },
+      "branch": {
+        "default": "main",
+        "type": "string"
+      },
+      "content_hash": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "The preview's content_hash, once the person has confirmed it."
+      },
+      "expected_ma_agent_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "mcp_server": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "One of the agent's MCP servers, by name, that serves the skill."
+      },
+      "mcp_skill": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "The skill's name or skill:// URI on mcp_server."
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "path": {
+        "default": "",
+        "description": "The skill's folder in repo_url; empty for its only skill.",
+        "type": "string"
+      },
+      "repo_url": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "A GitHub repository holding the skill."
+      },
+      "skill_md": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "The full SKILL.md text, frontmatter included."
+      }
+    },
+    "required": [
+      "agent_name"
+    ],
+    "type": "object"
+  }
+}

@@ -1,0 +1,232 @@
+{
+  "description": [
+    "Patch-update an environment. Omitted (None) fields are preserved.",
+    "",
+    "Opening the network of an environment a sealed channel runs in needs the",
+    "caller's confirmation: pass ``confirm_open_network=true`` only after they",
+    "confirm it."
+  ],
+  "parameters": {
+    "$defs": {
+      "BetaCloudConfigParams": {
+        "description": "Request params for `cloud` environment configuration.\n\nFields default to null; on update, omitted fields preserve the\nexisting value.",
+        "properties": {
+          "networking": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BetaUnrestrictedNetworkParam"
+              },
+              {
+                "$ref": "#/$defs/BetaLimitedNetworkParams"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "packages": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BetaPackagesParams"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "type": {
+            "const": "cloud",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "BetaLimitedNetworkParams": {
+        "description": "Limited network request params.\n\nFields default to null; on update, omitted fields preserve the\nexisting value.",
+        "properties": {
+          "allow_mcp_servers": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "allow_package_managers": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "allowed_hosts": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "type": {
+            "const": "limited",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "BetaPackagesParams": {
+        "description": "Specify packages (and optionally their versions) available in this environment.\n\nWhen versioning, use the version semantics relevant for the package manager, e.g. for `pip` use `package==1.0.0`. You are responsible for validating the package and version exist. Unversioned installs the latest.",
+        "properties": {
+          "apt": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cargo": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "gem": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "go": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "npm": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pip": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "type": {
+            "const": "packages",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "BetaUnrestrictedNetworkParam": {
+        "description": "Unrestricted network access.",
+        "properties": {
+          "type": {
+            "const": "unrestricted",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "config": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/BetaCloudConfigParams"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "confirm_open_network": {
+        "default": false,
+        "type": "boolean"
+      },
+      "description": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "name": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "name"
+    ],
+    "type": "object"
+  }
+}

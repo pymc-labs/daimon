@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -17,24 +18,31 @@ from daimon.adapters.mcp.middleware.capability_gate import CapabilityGateMiddlew
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.adapters.mcp.tools._web_url import tenant_links
+from daimon.core.agent_chat_requester import UNREAD, record_driver
 from daimon.core.capability_tools import CAPABILITY_TOOLS
 from daimon.core.config import (
     ComputeSettings,
     NotebookSettings,
     ReportHostSettings,
+    SelfKnowledgeSettings,
     Settings,
     WebSettings,
 )
 from daimon.core.features.registry import FEATURES
-from daimon.core.features.tool_gate import STOP_TOOLS, server_gate_key
+from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.features.tool_gate import SELF_KNOWLEDGE_TOOLS, STOP_TOOLS, server_gate_key
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import FeatureTarget, Role
 from daimon.core.stores.feature_values import set_feature_value
+from daimon.core.stores.session_settle_state import (
+    SessionProvenance,
+    erase_agent_chat_provenance_for_account,
+)
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.tool_safety import RENAMED_DAIMON_TOOLS
-from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.factories import make_account, make_routine, make_tenant
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import FastMCPTransport
 from fastmcp.exceptions import ToolError
@@ -456,3 +464,352 @@ async def test_a_session_with_two_turns_in_one_place_reads_that_place(
         sessionmaker, tenant_id, "routines", "off", FeatureTarget("channel", channel_id="chan-a")
     )
     assert OFF in await _gate(sessionmaker, auth, "list_routines"), "that place's Off holds"
+
+
+async def test_self_knowledge_tools_follow_the_feature_for_every_caller(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Off: hidden and refused, the `call_tool` proxy too; On (the default), they read this
+    release's docs, web pages left out where the web app is Off. A chat credential's list,
+    the catalogue a pinned provider install keeps exactly, never changes with it."""
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs/slack.md").write_text("# Slack\n\nInstall the app.\n")
+    (tmp_path / "docs/web.md").write_text("---\nknowledge: web\n---\n# Web\n")
+    roots = SelfKnowledgeSettings(docs_root=tmp_path / "docs", source_root=tmp_path)
+    mcp = await _app(sessionmaker, _set_up().model_copy(update={"self_knowledge": roots}))
+    tenant_id = await _tenant(sessionmaker)
+    page, search = {"page": "slack.md"}, {"query": "Daimon's own documentation"}
+    await _set(sessionmaker, tenant_id, "self_knowledge", "off")
+    _as(monkeypatch, tenant_id, platform="discord", chat_agent_id=str(uuid.uuid4()))
+    async with Client(mcp) as client:
+        chat_before = {t.name for t in await client.list_tools()}
+        chat_found_off = str(await client.call_tool("search_tools", search))
+    _as(monkeypatch, tenant_id, platform="cli")
+    async with Client(mcp) as client:
+        hidden = str(await client.call_tool("search_tools", search))
+        refused = await _error(client, "read_daimon_docs", page)
+        proxied = await _error(client, "call_tool", {"name": "read_daimon_docs", "arguments": page})
+        await _set(sessionmaker, tenant_id, "self_knowledge", "on")
+        shown = str(await client.call_tool("search_tools", search))
+        read = await client.call_tool("call_tool", {"name": "read_daimon_docs", "arguments": page})
+        web_on = await _error(client, "read_daimon_docs", {"page": "web.md"})
+        await _set(sessionmaker, tenant_id, "web_awareness", "off")
+        web_off = await _error(client, "read_daimon_docs", {"page": "web.md"})
+    _as(monkeypatch, tenant_id, platform="discord", chat_agent_id=str(uuid.uuid4()))
+    async with Client(mcp) as client:
+        chat_after = {t.name for t in await client.list_tools()}
+        chat_found_on = str(await client.call_tool("search_tools", search))
+    assert "read_daimon_docs" not in hidden, "Off: search does not find it"
+    assert OFF in refused and OFF in proxied, f"Off refuses, the proxy too: {proxied!r}"
+    assert "read_daimon_docs" in shown, "On, search finds it"
+    assert "Install the app." in str(read.content), f"On reads the page: {read.content!r}"
+    assert not web_on, f"a web page reads where the web app is On: {web_on!r}"
+    assert "no page" in web_off, f"a web page is hidden where the web app is Off: {web_off!r}"
+    assert chat_before == chat_after, "a chat credential's list is left whole"
+    assert "read_daimon_docs" not in chat_found_off, "Off: a chat credential's search skips it"
+    assert "read_daimon_docs" in chat_found_on, "On: and finds it"
+    assert not chat_after & SELF_KNOWLEDGE_TOOLS, "behind search: a pinned catalogue keeps"
+
+
+_UNREADABLE = "Couldn't check whether this tool is turned on here. Nothing was done. Try again."
+#: The grant an agent-chat session's Daimon credential signs (`chat_session_id`).
+_GRANT = "agent-chat-grant"
+
+
+def _runtime(
+    sessionmaker: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, *agents: str
+) -> McpRuntime:
+    """A runtime that already knows `agents` by their derived uuids, as after a first lookup."""
+    runtime = McpRuntime(
+        session_factory=sessionmaker,
+        client=MagicMock(spec=AsyncAnthropic),  # type: ignore[arg-type]
+        settings=_set_up(),
+        deployment_default=DeploymentDefault(),
+    )
+    for agent in agents:
+        derived = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent)
+        runtime.resolver_cache.derived_agent_ids[(tenant_id, derived)] = agent
+    return runtime
+
+
+async def _sent(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    account_id: uuid.UUID | None,
+    *,
+    grant: str | None = _GRANT,
+    channel: str | None = None,
+    session_id: str = "sesn_chat",
+    resumed_by_person: bool = False,
+) -> None:
+    """A send on an agent-chat session, or a signed-in person's resume of it, recorded as
+    the send paths record it."""
+    await record_driver(
+        sessionmaker,
+        managed_session_id=session_id,
+        signed_in_person=resumed_by_person,
+        session_status="idle",
+        earlier=UNREAD,
+        provenance=SessionProvenance(grant=grant, channel_id=channel, account_id=account_id),
+        resuming=resumed_by_person,
+    )
+
+
+def _agent_chat(
+    account_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    agent: str,
+    *,
+    grant: str = _GRANT,
+    **fields: object,
+) -> AuthIdentity:
+    """The credential of an agent-chat session's own agent: a chat execution with no turn
+    origin, no routine and no agent key, signing the session's grant."""
+    return auth_identity(
+        account_id,
+        tenant_id,
+        role=Role.USER,
+        platform="discord",
+        is_chat_execution=True,
+        chat_agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=agent),
+        chat_session_id=grant,
+        **fields,
+    )
+
+
+async def _tenant_and_account(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> tuple[uuid.UUID, uuid.UUID]:
+    async with sessionmaker() as session, session.begin():
+        tenant = await make_tenant(session)
+        return tenant.id, (await make_account(session, tenant=tenant)).id
+
+
+async def test_an_agent_chat_session_reads_its_own_agents_tier(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """Its session's tools were chosen with its agent (`agent_chat.py`), so the gate reads that
+    agent's tier too. Cloud computers is a capability: an Off set above is a ceiling; below
+    the default or an On, the agent's own value decides."""
+    tenant_id, account_id = await _tenant_and_account(sessionmaker)
+    await _sent(sessionmaker, account_id)
+    runtime = _runtime(sessionmaker, tenant_id, "agent_chat")
+    auth = _agent_chat(account_id, tenant_id, "agent_chat")
+    agent = FeatureTarget("agent", "agent_chat")
+    await _set(sessionmaker, tenant_id, "compute", "on", agent)
+    agent_on = await _gate(sessionmaker, auth, "compute_launch_session", runtime)
+    await _set(sessionmaker, tenant_id, "compute", "off")
+    workspace_off = await _gate(sessionmaker, auth, "compute_launch_session", runtime)
+    await _set(sessionmaker, tenant_id, "compute", "on")
+    await _set(sessionmaker, tenant_id, "compute", "off", agent)
+    agent_off = await _gate(sessionmaker, auth, "compute_launch_session", runtime)
+    assert agent_on == "ran", f"On for the agent, default for the workspace: {agent_on!r}"
+    assert OFF in workspace_off, (
+        f"an Off above is a ceiling the agent can't lift: {workspace_off!r}"
+    )
+    assert OFF in agent_off, f"Off for the agent, On for the workspace, yet it ran: {agent_off!r}"
+
+
+async def test_an_agent_chat_session_keeps_the_channel_its_tools_were_chosen_for(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A session a channel-bound key started was given that channel's tools. A channel Off set
+    after the session was made still refuses, though its agent has the feature On."""
+    tenant_id, account_id = await _tenant_and_account(sessionmaker)
+    await _sent(sessionmaker, account_id, channel="chan-k")
+    runtime = _runtime(sessionmaker, tenant_id, "agent_chat")
+    auth = _agent_chat(account_id, tenant_id, "agent_chat")
+    await _set(sessionmaker, tenant_id, "compute", "on", FeatureTarget("agent", "agent_chat"))
+    before = await _gate(sessionmaker, auth, "compute_launch_session", runtime)
+    await _set(
+        sessionmaker, tenant_id, "compute", "off", FeatureTarget("channel", channel_id="chan-k")
+    )
+    after = await _gate(sessionmaker, auth, "compute_launch_session", runtime)
+    assert before == "ran", f"On for the agent, nothing set for the channel: {before!r}"
+    assert OFF in after, f"Off for the session's channel, yet it ran: {after!r}"
+
+
+async def test_a_chat_thread_after_its_turn_ended_keeps_the_workspace(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A chat thread's credential outlives its turn's origin. With no agent-chat session
+    recorded for its grant, it reads the workspace as before: an agent On lets nothing
+    through that the workspace's default Off refuses."""
+    tenant_id, account_id = await _tenant_and_account(sessionmaker)
+    runtime = _runtime(sessionmaker, tenant_id, "agent_turn")
+    ended = _agent_chat(account_id, tenant_id, "agent_turn", grant="turn-session")
+    await _set(sessionmaker, tenant_id, "compute", "on", FeatureTarget("agent", "agent_turn"))
+    refused = await _gate(sessionmaker, ended, "compute_launch_session", runtime)
+    assert await caller_places(runtime, ended, None) == [FeaturePlace(tenant_id, "discord")]
+    assert OFF in refused, f"the ended turn's credential gained its agent's On: {refused!r}"
+
+
+async def test_an_agent_chat_session_whose_agent_cant_be_found_is_refused(
+    sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Leaving the agent out would drop an agent-tier Off without a word, so the call is refused,
+    as any place the gate can't read is."""
+    tenant_id, account_id = await _tenant_and_account(sessionmaker)
+    await _sent(sessionmaker, account_id)
+    await _set(sessionmaker, tenant_id, "compute", "on")
+    # Self-hosted: the agent is looked up in the records, where it has none.
+    missing = _agent_chat(account_id, tenant_id, "agent_gone", anthropic_disabled=True)
+    gone = await _gate(sessionmaker, missing, "compute_launch_session")
+
+    async def unreachable(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("the provider can't be reached")
+
+    monkeypatch.setattr(
+        "daimon.adapters.mcp.middleware.capability_gate.find_agent_by_derived_uuid_cached",
+        unreachable,
+    )
+    failed = await _gate(
+        sessionmaker, _agent_chat(account_id, tenant_id, "agent_x"), "list_routines"
+    )
+    assert gone == _UNREADABLE, f"an agent that isn't found must refuse: {gone!r}"
+    assert failed == _UNREADABLE, f"a lookup that fails must refuse: {failed!r}"
+
+
+_CALLERS = (
+    "plain client",
+    "agent key",
+    "agent key not found",
+    "hub",
+    "chat turn",
+    "chat turn naming its origin",
+    "chat thread after its turn ended",
+    "routine",
+    "routine not found",
+    "agent chat",
+    "agent chat resumed by a signed-in person",
+    "agent chat without a platform",
+    "agent chat with no send recorded",
+    "agent chat recorded before its grant was",
+    "agent chat of another account",
+    "agent chat whose account was erased",
+)
+
+
+@pytest.mark.parametrize("caller", _CALLERS)
+async def test_each_caller_kind_reads_the_places_it_is_known_by(
+    sessionmaker: async_sessionmaker[AsyncSession], caller: str
+) -> None:
+    """Only a recorded agent-chat session gains its channel and agent; every other kind keeps
+    the places it had, a session no send of this release recorded too."""
+    now = datetime.now(UTC)
+    async with sessionmaker() as session, session.begin():
+        tenant = await make_tenant(session)
+        account = await make_account(session, tenant=tenant)
+        other = await make_account(session, tenant=tenant)
+        routine = await make_routine(
+            session, tenant=tenant, agent_id="agent_routine", channel_id="chan-r"
+        )
+        origins = {}
+        for grant, expires in (("turn-session", 5), ("ended-session", -5)):
+            origins[grant] = await create_origin(
+                session,
+                tenant_id=tenant.id,
+                account_id=account.id,
+                platform="discord",
+                parent_channel_id="chan-t",
+                thread_id="thread-t",
+                responder_ma_agent_id="agent_turn",
+                responder_name="daimon",
+                configuration_target_ma_agent_id=None,
+                configuration_target_name=None,
+                role=Role.USER,
+                expires_at=now + timedelta(minutes=expires),
+                now=now,
+                sender_foreign=False,
+                shared_channel=False,
+                chat_session_id=grant,
+            )
+    t = tenant.id
+    recorded = {
+        "agent chat": (account.id, _GRANT),
+        "agent chat resumed by a signed-in person": (account.id, _GRANT),
+        "agent chat without a platform": (account.id, _GRANT),
+        "agent chat recorded before its grant was": (account.id, None),
+        "agent chat of another account": (other.id, _GRANT),
+        "agent chat whose account was erased": (account.id, _GRANT),
+    }
+    if caller in recorded:
+        owner, grant = recorded[caller]
+        resumed = caller == "agent chat resumed by a signed-in person"
+        await _sent(sessionmaker, owner, grant=grant, channel="chan-k", resumed_by_person=resumed)
+    if caller == "agent chat whose account was erased":
+        # What the account's erasure runs (`erasure.ERASABLE`).
+        async with sessionmaker.begin() as db:
+            await erase_agent_chat_provenance_for_account(db, account_id=account.id)
+    agents = ("agent_key", "agent_hub", "agent_turn", "agent_routine", "agent_chat")
+    runtime = _runtime(sessionmaker, t, *agents)
+
+    def derived(agent: str) -> uuid.UUID:
+        return derive_agent_uuid(tenant_id=t, ma_agent_id=agent)
+
+    def who(**fields: object) -> AuthIdentity:
+        return auth_identity(account.id, t, role=Role.USER, is_admin=False, **fields)
+
+    def turn(agent: str, **fields: object) -> AuthIdentity:
+        return who(
+            platform="discord", is_chat_execution=True, chat_agent_id=derived(agent), **fields
+        )
+
+    in_turn = turn("agent_turn", chat_session_id="turn-session")
+    turn_place = FeaturePlace(t, "discord", "chan-t", "thread-t", agent_id="agent_turn")
+    workspace = FeaturePlace(t, "discord")
+    chat = turn("agent_chat", chat_session_id=_GRANT)
+    chat_place = FeaturePlace(t, "discord", "chan-k", agent_id="agent_chat")
+    known: dict[str, tuple[AuthIdentity, str | None, FeaturePlace]] = {
+        "plain client": (who(platform="cli"), None, FeaturePlace(t, "cli")),
+        "agent key": (
+            who(platform="discord", agent_id=derived("agent_key"), bound_channel_id="chan-k"),
+            None,
+            FeaturePlace(t, "discord", "chan-k", agent_id="agent_key"),
+        ),
+        # The key's tier is extra: a failed or empty lookup leaves it out, never refusing.
+        "agent key not found": (
+            who(platform="discord", agent_id=uuid.uuid4(), anthropic_disabled=True),
+            None,
+            workspace,
+        ),
+        # As `hub._auth_for` builds it: the signed-in person with the agent they named.
+        "hub": (
+            who(platform="discord", agent_id=derived("agent_hub"), platform_user_id="u-1"),
+            None,
+            FeaturePlace(t, "discord", agent_id="agent_hub"),
+        ),
+        "chat turn": (in_turn, None, turn_place),
+        "chat turn naming its origin": (in_turn, str(origins["turn-session"].id), turn_place),
+        "chat thread after its turn ended": (
+            turn("agent_turn", chat_session_id="ended-session"),
+            str(origins["ended-session"].id),
+            workspace,
+        ),
+        "routine": (
+            turn("agent_routine", routine_id=routine.id, execution_id=uuid.uuid4()),
+            None,
+            FeaturePlace(t, "discord", "chan-r", agent_id="agent_routine"),
+        ),
+        "routine not found": (turn("agent_routine", routine_id=uuid.uuid4()), None, workspace),
+        "agent chat": (chat, None, chat_place),
+        # A session made before this release is found once a person resumes it, too.
+        "agent chat resumed by a signed-in person": (chat, None, chat_place),
+        # As its session's tools were chosen (`agent_chat.py`: `auth.platform or "mcp"`).
+        "agent chat without a platform": (
+            who(
+                is_chat_execution=True, chat_agent_id=derived("agent_chat"), chat_session_id=_GRANT
+            ),
+            None,
+            FeaturePlace(t, "mcp", "chan-k", agent_id="agent_chat"),
+        ),
+        # Until its next send records it, a session made before this release reads as before.
+        "agent chat with no send recorded": (chat, None, workspace),
+        "agent chat recorded before its grant was": (chat, None, workspace),
+        "agent chat of another account": (chat, None, workspace),
+        "agent chat whose account was erased": (chat, None, workspace),
+    }
+    assert set(known) == set(_CALLERS)
+    auth, named, place = known[caller]
+    assert await caller_places(runtime, auth, named) == [place]

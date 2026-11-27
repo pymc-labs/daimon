@@ -296,6 +296,12 @@ async def bound_step(
         else {}
     )
     subject = workflow_subject(
-        flow, spec, node, run_id=run.id, owner=ids.get(owner) if owner else None, agent_id=agent_id
+        flow,
+        spec,
+        node,
+        run_id=run.id,
+        owner=ids.get(owner) if owner else None,
+        agent_id=agent_id,
+        revision=version.published_at.isoformat(),
     )
     return BoundStep(flow, subject)

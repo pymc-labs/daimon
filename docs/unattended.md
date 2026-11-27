@@ -92,10 +92,11 @@ daimon routines sandbox-tools --tenant TENANT_UUID ROUTINE_ID --inherit
 `--off` keeps built-ins off for the routine even when its agent is opted in.
 `--inherit` clears the routine's own setting, so its agent's applies.
 
-The opt-in records the agent version and environment the routine runs with.
-A run gets built-ins only while both still match. After anyone edits the agent
-or its environment, the next run goes without them and the opt-in is cleared
-until the operator runs the command again.
+The opt-in records the provider, agent version and environment the routine
+runs with. A run gets built-ins only while all three still match. After anyone
+edits the agent or its environment, or moves it to another provider, the next
+run goes without them and the opt-in is cleared until the operator runs the
+command again.
 
 Editing the routine's agent, trigger message, destination or budget channel
 also clears it. Changing the schedule, pausing or resuming does not. DM
@@ -131,8 +132,12 @@ The record does not cover what Daimon attaches to a run, such as the agent's
 keys, repository or channel skills. Review an opted-in routine after changing
 those. The setting is `routine_sandbox_tools` in the [features](features.md)
 table, and each change shows in the settings history with what it covers.
-`get_routine`, `list_routines`, the web Routines page and the Discord
+`get_routine`, `list_routines` and the Discord
 `/routines` panel show whether a routine is opted in.
+
+<!-- knowledge: web -->
+The web app's Routines page shows it too.
+<!-- /knowledge -->
 
 The `set_routine_sandbox_tools` MCP tool accepts only a live Discord server
 admin's own token, which no Daimon surface issues yet.
@@ -143,11 +148,17 @@ Agent chat and the hub drive only sessions that agent chat created. They
 cannot continue, cancel or archive a platform conversation, even for the same
 account and agent.
 
-Reading a session never answers a tool call. If the service restarts while an
-agent-chat turn waits on one, `get_session` reports `paused` with the hint
-"paused: call continue_turn to resume". Only the session's own account can
-resume it. The waiting calls are then decided by the policy in force at that
-moment.
+To wait for a turn, call `await_turn`. It returns when the agent says something,
+when the turn ends, or after about four minutes, so the caller polls nothing.
+One call per return carries a long job to its end.
+
+Reading a session with `get_session` or `list_events` never answers a tool
+call. If the service restarts while an agent-chat turn waits on one,
+`get_session` reports `paused` with the hint "paused: call continue_turn to
+resume". `await_turn` and `continue_turn` resume it, for the session's own
+account only. The waiting calls are then decided by the policy in force at that
+moment. A turn that reaches the [unattended run time limit](features.md) pauses
+the same way, and resumes the same way.
 
 A chat turn waiting on someone's card reads as "paused: waiting for approval
 where it was asked", and `continue_turn` refuses it. The list tools report the
@@ -158,14 +169,59 @@ provider's own status, so a paused turn lists as `idle`.
 A turn on a backend other than Managed Agents has no session to check, so it
 refuses every tool call that pauses. With the `host_call_gate` deployment
 feature on, an OpenAI or Gemini turn nobody watches keeps its Daimon tools:
-each call gets the unattended verdict above. Automatic custom tools are always
+each call gets the unattended verdict above. DM routines and DM timers run
+there too, as their owner's private turn, and channel timers as unattended
+replies. Before each send Daimon rechecks the source's seal and the owner's
+roles. Watch reports run only on Anthropic. Automatic custom tools are always
 refused before the first message.
 
 OpenAI's persistent workspace always has a shell, so its unattended turns run
-only where sandbox tools are allowed, such as a long job. With the feature off,
+only where sandbox tools are allowed, such as a long job. A timer has no
+sandbox opt-in, so an OpenAI timer is refused. With the feature off,
 native turns that need MCP, sandbox, bash or custom tools are refused before
 the first message. A self-hosted harness inspects every tool at the host, so
 allowed reads continue while sandbox calls and unapproved writes are refused.
+
+## Reads from a signed server
+
+A [signed server](mcp-servers.md#let-a-server-verify-who-is-calling) decides what
+each call may read from the claims Daimon signs. Server settings say which turns
+with no new message it can recognise:
+
+| Turn | Signed as | Setting |
+| --- | --- | --- |
+| A routine that posts to a channel or thread | that routine and room | `routine_claims` |
+| A Managed Agents routine that posts to its owner's DM, while its run is live | that routine, the owner and their DM, room `dm` | `routine_claims` and `dm_routine_claims` |
+| A timer, watch report, finished long job, hand-off or resumed form that runs in its own thread | its reason, read as a routine posting there | `wake_claims` |
+| A person's turn, on each call while it runs | `wake: turn`, beside the person and message | `wake_claims` |
+
+Other turns sign none of these claims, so the settings do not change what they read.
+These include a routine with no destination or on OpenAI or Gemini, a timer in a DM or
+channel, and a watch report to a DM or a new thread. Watch polls, helpers, agent chat, `daimon run` and checkpoints
+are the same.
+
+### A routine in its owner's DM
+
+A routine that posts to its owner's DM signs `routine`, the owner as `sub`, the owner's
+DM as `channel` and `room: dm`, with no `msg`. Daimon opens that DM before the run,
+sending nothing. It signs only while the call comes from that routine's live run, and the
+routine is enabled, unedited, still posting to that owner's DM and running this agent.
+A pause or an edit removes these claims from the next call, which is then signed as
+without the setting. An agent that does not mount `daimon-mcp` never signs them.
+
+Switching `dm_routine_claims` on lets a stored prompt read for its owner with nobody
+watching, as a fresh DM from the owner would, without writes. The model or an admin may
+have written that prompt; the answer still goes only to the owner's DM.
+
+| `routine_claims` | `dm_routine_claims` | Routine runs the server can tell apart |
+| --- | --- | --- |
+| off | off | none |
+| on | off | runs posting to a channel or thread |
+| on | on | those, and runs posting to the owner's DM |
+| off | on | refused in configuration |
+
+Update the server first, then all Daimon processes, then turn `dm_routine_claims` on.
+Turn it off before rolling either back, and let running DM routines finish first.
 
 ## Origins
 

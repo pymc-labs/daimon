@@ -26,12 +26,10 @@ from typing import Any
 #: Files outside the code that tests read or lint regenerates and compares.
 FILES: dict[str, str] = {
     ".env.example": "generated",
-    "docs/configuration.md": "generated",
-    "docs/mcp-tools.md": "mcp-catalogue",
     "docs/slack-app-manifest.yaml": "slack-manifest",
     "docs/teams-app-manifest.yaml": "teams-manifest",
     "docker-compose.yml": "docs",
-    "LICENSE": "docs",
+    "LICENSE": "prose",
     # Ruff and the wheel builds lint runs honour it.
     ".gitignore": "tooling",
     ".pre-commit-config.yaml": "tooling",
@@ -51,8 +49,9 @@ FILES: dict[str, str] = {
     "docs/workflows-advanced.md": "workflow-docs",
     "web/src/modules/workflows/fixtures/validation.json": "workflow-validation",
 }
-#: Prose no test or image reads; code trees keep their own (skills, fixtures).
-_PROSE = re.compile(r"^(?!defaults/|packages/|tests/|qa/)\S*\.md$")
+#: Root and tooling prose no test or image reads (`docs/` is read: area `docs`); code trees
+#: keep their own (skills, fixtures).
+_PROSE = re.compile(r"^(?!defaults/|docs/|packages/|tests/|qa/)\S*\.md$")
 #: Prose the lint job checks (scripts/lint_designators.sh runs on every change in the changes job).
 _LINTED_PROSE = re.compile(r"^(?:apps|scripts|\.github)/\S*\.md$")
 #: First match wins, so narrower prefixes come first.
@@ -115,13 +114,14 @@ _HOSTS = (*DAIMON, "image-daimon")
 #: Suites (matrix `suite` values, or the job's own key) each area needs.
 #: tests/test_ci_plan.py checks the leaf areas against what the tests import.
 SUITES: dict[str, tuple[str, ...]] = {
-    "docs": (),
-    "generated": ("lint",),
+    # tests/test_docs_knowledge.py reads docs/, docker-compose.yml and .env.example.
+    "docs": ("core",),
+    "prose": (),
+    "generated": ("lint", "core"),
     "tooling": ("lint",),
     "repo": ("core", "lint", "shard-check"),
     "deploy-workflow": ("core", "lint", "shard-check"),
     "lanes": ("core", "lint", "shard-check"),
-    "mcp-catalogue": ("lint", "core", "mux"),
     "slack-manifest": ("slack", "parity"),
     "teams-manifest": ("teams", "parity"),
     # A script, so ruff and the public-repo scan run on it as well.
@@ -263,7 +263,7 @@ def area(path: str) -> str:
     if _LINTED_PROSE.match(path):
         return "tooling"
     if _PROSE.match(path):
-        return "docs"
+        return "prose"
     return next((name for prefix, name in RULES if path.startswith(prefix)), "all")
 
 

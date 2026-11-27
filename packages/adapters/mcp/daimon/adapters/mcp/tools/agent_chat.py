@@ -20,8 +20,11 @@ Headless loop (primitives plus the bounded ``ask`` convenience tool):
 - ``continue_turn`` sends a follow-up ``user.message``. Admission-gated,
   same as ``start_turn``. On a paused session it first resumes the paused
   turn (see below); the message is then optional.
-- ``get_session`` returns status/metadata (poll until idle). Read-only, not
-  gated.
+- ``await_turn`` waits on the session's event stream and returns when the turn
+  has news: the agent said something, the turn ended, or it stopped. A paused
+  turn is resumed first, as ``continue_turn`` does, so a long turn runs to its
+  end while its caller waits. Not gated; the resume is.
+- ``get_session`` returns status/metadata. Read-only, not gated.
 - ``list_events`` returns the transcript; the caller reads the reply from the
   ``agent.message`` events. Read-only, not gated.
 
@@ -29,8 +32,8 @@ Nobody watches these turns, so they run under the unattended tool policy;
 ``_agent_chat_safety`` says how their pauses are answered.
 - ``list_sessions`` enumerates this agent's sessions for resume. Read-only,
   not gated.
-- ``ask`` starts a turn, polls until idle for at most two minutes, and returns
-  the final text plus bounded chart images and optional presigned links.
+- ``ask`` starts a turn, waits on the event stream for at most two minutes, and
+  returns the final text plus bounded chart images and optional presigned links.
   Admission-gated, same as ``start_turn``.
 - ``deliver_turn_charts`` finds the newest completed reply and delivers charts
   from that turn. It performs a bounded artifact-store write when optional
@@ -50,12 +53,15 @@ Nobody watches these turns, so they run under the unattended tool policy;
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
+from dataclasses import dataclass
 from decimal import Decimal
+from functools import partial
 from time import monotonic
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import anthropic
 import structlog
@@ -80,14 +86,24 @@ from daimon.adapters.mcp.resource_ports import (
 )
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._agent_chat_safety import (
+    PAUSED_HINT,
+    RECHECK_S,
+    TURN_STOPPED,
+    TurnFeed,
+    Woke,
+    caught_up,
+    earlier_turn_open,
     gate,
+    local_worker,
     record_turn,
+    recorded_turn_id,
     require_session_driver,
     resume_paused,
     rules_channel,
     single_attempt,
     turn_status,
     watch_turn,
+    why_stopped,
 )
 from daimon.adapters.mcp.tools._channel_policy import load_channel_policy
 from daimon.adapters.mcp.tools._ctx import (
@@ -107,6 +123,7 @@ from daimon.adapters.mcp.tools._session_access import (
 from daimon.adapters.mcp.tools._turn_observation import observed_agent_turn
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core import bundle_handle
+from daimon.core.agent_chat_requester import UNREAD, record_driver, session_provenance
 from daimon.core.agent_mcp_credentials import sync_agent_mcp_credentials
 from daimon.core.agent_pins import agent_pin_names as core_agent_pin_names
 from daimon.core.billing import BillingConfig
@@ -127,7 +144,11 @@ from daimon.core.github_app_session import close_headless_app_session
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import find_agent_by_derived_uuid_cached
 from daimon.core.mcp_identity import identity_relay_urls
-from daimon.core.mcp_vault import archive_relay_vaults, refresh_mounted_mcp_vaults
+from daimon.core.mcp_vault import (
+    archive_relay_vaults,
+    refresh_mounted_mcp_vaults,
+    refresh_relay_vault,
+)
 from daimon.core.monitoring import KeptQuestion, capture_question, monitored_notice
 from daimon.core.mux_compat import retrieve_agent, retrieve_agent_version
 from daimon.core.permissions import agent_permissions, channel_permissions, memory_writable
@@ -453,6 +474,28 @@ _MESSAGE_REQUIRED_MSG = (
     "a message is required: only a conversation paused on tool confirmations "
     "can be resumed without one."
 )
+
+# The longest one `await_turn` call holds its request open: under the five minutes
+# after which common hosts cut a request (Cloud Run's default).
+AWAIT_TURN_MAX_S = 240.0
+# What one call may take over its wait for the reads and the resume around it. A
+# call that outlives both returns "running", inside the five minutes a host allows.
+_AWAIT_GRACE_S = 30.0
+# After a stream event says a turn ended, how often and how many times `ask` reads a
+# session status that still says running before it goes back to waiting.
+_SETTLE_TRIES = 10
+_SETTLE_GAP_S = 0.3
+# What ends an `await_turn` wait: the agent said something, or the turn stopped.
+_TURN_NEWS: frozenset[str] = TURN_STOPPED | {"agent.message"}
+
+_STILL_RUNNING_HINT = "Daimon is still working. Call await_turn again to keep waiting."
+_PAUSED_UNREAD_HINT = "Daimon stopped. Call await_turn without wait_seconds=0 to let it go on."
+_NEW_MESSAGES_HINT = "Daimon is still working. Call await_turn again with this cursor as `after`."
+_ENDED_SILENT_HINT = "The reply ended without a message."
+_TERMINATED_HINT = (
+    "This conversation has ended and takes no more messages. Start a new one with start_turn."
+)
+_DECLINED_MSG = "Daimon's AI declined this request; rephrase it and ask again with handle {handle}"
 
 _SEAL_CHANGED_DURING_START_MSG = (
     "this conversation's channel rule changed while it was starting. Call start_turn again."
@@ -794,6 +837,47 @@ async def _mirror_shared_mcp_tokens(
     )
 
 
+def _agent_chat_binding(runtime: McpRuntime, handle: str) -> str | None:
+    """The agent-chat session a relay vault is bound to, only while a server may be
+    sent its driver: off, the relay credential stays exactly as it was."""
+    return handle if runtime.settings.mcp_identity.names_agent_chat_requester else None
+
+
+async def _bind_relay_vault(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    session: BetaManagedAgentsSession,
+    *,
+    now: Callable[[], dt.datetime],
+) -> None:
+    """Bind a new session's relay vault to it (`refresh_relay_vault`), before its
+    first send. A continue binds it with its own refresh, older sessions included."""
+    mcp = runtime.settings.mcp
+    agent_chat = _agent_chat_binding(runtime, session.id)
+    if agent_chat is None or mcp.public_url is None or mcp.jwt_secret is None:
+        return
+    assert auth.agent_id is not None  # _resolve_ma_agent requires it
+    public_url = str(mcp.public_url)
+    relay_urls = identity_relay_urls(
+        (server.url for server in session.agent.mcp_servers), public_url=public_url
+    )
+    if not relay_urls:
+        return
+    for vault_id in dict.fromkeys(session.vault_ids):
+        await refresh_relay_vault(
+            runtime.client,
+            vault_id=vault_id,
+            account_id=auth.account_id,
+            agent_id=auth.agent_id,
+            jwt_secret=mcp.jwt_secret.get_secret_value().encode(),
+            relay_urls=relay_urls,
+            now=now(),
+            session_factory=runtime.session_factory,
+            scope=mcp_scope(auth),
+            agent_chat=agent_chat,
+        )
+
+
 @observed_agent_turn
 async def _start_turn_impl(
     runtime: McpRuntime,
@@ -1000,16 +1084,31 @@ async def _start_turn_impl(
     if (observation := current_outcome.get()) is not None:
         observation.session_id = session.id
         observation.agent_id = str(ma_agent.id)
-    if recheck is not None:
-        await recheck()
-    await gate(runtime, auth, session)
-    turn_started_at = now()
-    turn_event_id = await _send_billed(runtime, session, message, scope=mcp_scope(auth))
-    kept = await _keep_question(
-        runtime, auth, session, turn_event_id=turn_event_id, message=message
-    )
-    channel = rules_channel(auth, session)
-    await record_turn(runtime, session.id, turn_event_id=turn_event_id, rules_channel_id=channel)
+    # Fenced as a continue is: a send on this session by another caller, once its
+    # handle is listed, cannot fall between this driver record and this send.
+    async with session_mutation_fence(runtime.session_factory, session.id):
+        if recheck is not None:
+            await recheck()
+        await gate(runtime, auth, session)
+        await _bind_relay_vault(runtime, auth, session, now=now)
+        send = await record_driver(
+            runtime.session_factory,
+            managed_session_id=session.id,
+            signed_in_person=auth.signed_in_person,
+            session_status=None,
+            earlier=await earlier_turn_open(runtime, auth, session.id, new_session=True),
+            provenance=session_provenance(session.metadata),
+            new_session=True,
+        )
+        turn_started_at = now()
+        turn_event_id = await _send_billed(runtime, session, message, scope=mcp_scope(auth))
+        kept = await _keep_question(
+            runtime, auth, session, turn_event_id=turn_event_id, message=message
+        )
+        channel = rules_channel(auth, session)
+        await record_turn(
+            runtime, session.id, turn_event_id=turn_event_id, rules_channel_id=channel, send=send
+        )
     watch_turn(runtime, auth, session.id, turn_event_id=turn_event_id, rules_channel_id=channel)
 
     return _turn_handle(session.id, turn_event_id, turn_started_at, kept)
@@ -1114,6 +1213,7 @@ async def _continue_turn_impl(
                 relay_urls=identity_relay_urls(
                     (server.url for server in current.agent.mcp_servers), public_url=public_url
                 ),
+                agent_chat=_agent_chat_binding(runtime, handle),
             )
         await gate(runtime, auth, current)
         return current
@@ -1121,6 +1221,15 @@ async def _continue_turn_impl(
     async with session_mutation_fence(runtime.session_factory, handle):
         # The fence may have waited behind a transfer or another send.
         current = await ready()
+        await record_driver(
+            runtime.session_factory,
+            managed_session_id=handle,
+            signed_in_person=auth.signed_in_person,
+            session_status=current.status,
+            earlier=UNREAD,
+            provenance=session_provenance(current.metadata),
+            resuming=True,
+        )
         resumed = await resume_paused(runtime, auth, current)
         if resumed is not None:
             if message is None:
@@ -1140,6 +1249,14 @@ async def _continue_turn_impl(
             current = await ready()
         elif message is None:
             raise ToolError(_MESSAGE_REQUIRED_MSG)
+        send = await record_driver(
+            runtime.session_factory,
+            managed_session_id=handle,
+            signed_in_person=auth.signed_in_person,
+            session_status=current.status,
+            earlier=await earlier_turn_open(runtime, auth, handle, new_session=False),
+            provenance=session_provenance(current.metadata),
+        )
         turn_started_at = now()
         # Inside the fence, so settle requests follow the order of the sends.
         turn_event_id = await _send_billed(runtime, current, message, scope=mcp_scope(auth))
@@ -1147,7 +1264,9 @@ async def _continue_turn_impl(
             runtime, auth, current, turn_event_id=turn_event_id, message=message
         )
         channel = rules_channel(auth, current)
-        await record_turn(runtime, handle, turn_event_id=turn_event_id, rules_channel_id=channel)
+        await record_turn(
+            runtime, handle, turn_event_id=turn_event_id, rules_channel_id=channel, send=send
+        )
         watch_turn(runtime, auth, handle, turn_event_id=turn_event_id, rules_channel_id=channel)
     return _turn_handle(handle, turn_event_id, turn_started_at, kept)
 
@@ -1473,12 +1592,208 @@ async def _deliver_turn_charts_impl(
     if turn_started_at is None:
         raise ToolError(f"no start of the finished reply found for conversation {handle}")
 
+    result = await _delivered_reply(
+        runtime, auth, handle, turn_started_at=turn_started_at, final_text=final_text
+    )
+    await _require_live_result_access(runtime, auth)
+    return result
+
+
+OnTick = Callable[[], Awaitable[None]]
+"""Called about every `RECHECK_S` while a call waits, to tell its client it is alive."""
+
+
+async def _wait_for_news(
+    feed: TurnFeed,
+    kinds: Collection[str],
+    *,
+    worker: asyncio.Task[bool] | None,
+    seconds: float,
+) -> Woke | None:
+    """Sleep until the session has news, and at most `seconds` or `RECHECK_S`.
+
+    News is an event in `kinds`, which is returned, a stream that went quiet or
+    closed, or the end of this process's confirmation `worker` (a worker that gives
+    up leaves the turn paused without any event). The caller reads the session's
+    state after every return, news or none: a wait never trusts the stream alone,
+    so an event it missed costs at most `RECHECK_S`.
+    """
+    return await feed.next(kinds, within=min(seconds, RECHECK_S), or_done=worker)
+
+
+class TurnNews(BaseModel):
+    """What ``await_turn`` saw: where the turn stands and what the agent said."""
+
+    model_config = {"frozen": True}
+
+    handle: str
+    # "running", "idle" (the turn ended), "paused" or "terminated". Plain str: the
+    # provider may report a status this release does not know; it counts as running.
+    status: str
+    # What the agent said since `after`, oldest first. With status "idle" the last
+    # one is the final answer, also when an earlier call already returned it.
+    messages: tuple[str, ...] = ()
+    # Pass back as `after` on the next call.
+    cursor: str | None = None
+    # What to do next, in words for the person.
+    hint: str | None = None
+    # The tool call running now and for how long, when one is.
+    activity: str | None = None
+    chart_urls: tuple[ChartUrl, ...] = ()
+    image_blocks: SkipJsonSchema[tuple[ImageContent, ...]] = Field(
+        default=(), exclude=True, repr=False
+    )
+
+
+def _turn_news_result(news: TurnNews) -> ToolResult:
+    """Prose for the model first (messages, then the hint), the typed payload beside it."""
+    lines = [*news.messages, *([news.hint] if news.hint else [])]
+    return ToolResult(
+        content=[
+            *(TextContent(type="text", text=line) for line in lines),
+            *news.image_blocks,
+        ],
+        structured_content=news.model_dump(mode="json"),
+    )
+
+
+@dataclass(frozen=True)
+class _NewestTurn:
+    """The newest turn of a session, read from its event list."""
+
+    boundary_id: str | None
+    # When the agent took the message up; None while it is still queued.
+    started_at: dt.datetime | None
+    # (event id, text) of each agent message, oldest first.
+    said: tuple[tuple[str, str], ...]
+    # An idle that is not a pause was processed after the message was taken up.
+    ended: bool
+    refused: bool
+
+    def said_after(self, cursor: str | None) -> tuple[tuple[str, str], ...]:
+        """The messages after `cursor`; all of them when it names none of this turn's."""
+        ids = [event_id for event_id, _ in self.said]
+        return self.said[ids.index(cursor) + 1 :] if cursor in ids else self.said
+
+
+_NOT_LISTED = _NewestTurn(None, None, (), ended=False, refused=False)
+
+
+async def _newest_turn(
+    runtime: McpRuntime, auth: AuthIdentity, handle: str, *, expected: str | None
+) -> _NewestTurn:
+    """Read the session's newest turn back to its ``user.message`` boundary.
+
+    `expected` is the boundary agent chat recorded for its latest send. While the
+    list still ends at an older boundary, that send is not listed yet and nothing
+    of the older turn is returned: its idle and its reply belong to the turn before.
+    A message queued behind a running turn is listed before that turn's last events,
+    so list order alone does not show whose they are. Only an agent message or an
+    idle processed after this turn's own message was counts as this turn's.
+    """
+    said: list[tuple[dt.datetime | None, str, str]] = []
+    idle: SessionEventOut | None = None
+    page: str | None = None
+    for _ in range(_MAX_EVENT_PAGES):
+        events = await _list_events_impl(
+            runtime,
+            auth,
+            handle,
+            page,
+            100,
+            "desc",
+            types=["user.message", "agent.message", "session.status_idle"],
+        )
+        for event in events.items:
+            if event.type == "user.message":
+                if expected is not None and event.id != expected:
+                    return _NOT_LISTED
+                started_at = _event_timestamp(event)
+                if started_at is None:
+                    # Still queued: whatever is listed after it is the turn before.
+                    return _NewestTurn(event.id, None, (), ended=False, refused=False)
+                extra: dict[str, Any] = (idle.model_extra or {}) if idle is not None else {}
+                stopped_at = _event_timestamp(idle) if idle is not None else None
+                stop: object = extra.get("stop_reason")
+                paused = not isinstance(stop, dict) or (
+                    cast("dict[str, object]", stop).get("type") == "requires_action"
+                )
+                ended = not paused and stopped_at is not None and stopped_at > started_at
+                return _NewestTurn(
+                    boundary_id=event.id,
+                    started_at=started_at,
+                    # A message queued behind a running turn is listed before that
+                    # turn's last words: only what was processed after it is this turn's.
+                    said=tuple(
+                        (event_id, text)
+                        for at, event_id, text in reversed(said)
+                        if at is not None and at > started_at
+                    ),
+                    ended=ended,
+                    refused=ended and refusal_error(extra.get("stop_details")) is not None,
+                )
+            if event.type == "session.status_idle":
+                # Newest first: only the newest idle says how the turn stands.
+                idle = idle or event
+            elif (text := _agent_message_text(event)) is not None:
+                said.append((_event_timestamp(event), event.id, text))
+        if events.next_page is None:
+            break
+        page = events.next_page
+    return _NOT_LISTED
+
+
+_TOOL_USES = frozenset({"agent.tool_use", "agent.mcp_tool_use", "agent.custom_tool_use"})
+
+
+async def _activity(runtime: McpRuntime, auth: AuthIdentity, handle: str) -> str | None:
+    """The tool call running now and for how long, from the newest few events.
+
+    Best effort, for a caller that wants to say what a long turn is doing: any
+    failure reads as nothing to say. The caller's access was checked by the gated
+    transcript read this follows.
+    """
+    try:
+        newest = await list_events_page(
+            runtime.client, handle, query={"order": "desc", "limit": 10}, scope=mcp_scope(auth)
+        )
+        finished: set[str] = set()
+        for event in newest.data:
+            raw = event.model_dump(mode="json")
+            for key in ("tool_use_id", "mcp_tool_use_id", "custom_tool_use_id"):
+                if isinstance(raw.get(key), str):
+                    finished.add(raw[key])
+            if event.type not in _TOOL_USES:
+                continue
+            if event.id in finished:
+                return None
+            started_at = _event_timestamp(SessionEventOut.from_event(event))
+            name = " ".join(part for part in (raw.get("mcp_server_name"), raw.get("name")) if part)
+            if not name:
+                return None
+            if started_at is None:
+                return name
+            seconds = max(0, int((dt.datetime.now(dt.UTC) - started_at).total_seconds()))
+            return f"{name}, running for {seconds} seconds"
+    except Exception:
+        # Named boundary: what the turn is doing is a courtesy; the wait's answer stands.
+        log.info("mcp.agent_chat.activity_unread", session_id=handle)
+    return None
+
+
+async def _delivered_reply(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    handle: str,
+    *,
+    turn_started_at: dt.datetime,
+    final_text: str,
+) -> AskResult:
+    """A finished turn's reply with its charts, delivered once per turn boundary."""
     cache_key = (handle, turn_started_at.isoformat())
     cached = _delivery_cache.get(cache_key)
     if cached is not None:
-        await _require_live_result_access(runtime, auth)
         return cached
-
     delivery = await deliver_hosted_charts(
         runtime.client,
         settings=runtime.settings.artifacts,
@@ -1501,8 +1816,170 @@ async def _deliver_turn_charts_impl(
         earliest = min(chart.expires_at for chart in result.chart_urls)
         ttl = min(ttl, (earliest - dt.datetime.now(dt.UTC)).total_seconds())
     _delivery_cache.put(cache_key, result, ttl_seconds=ttl)
-    await _require_live_result_access(runtime, auth)
     return result
+
+
+def _news(
+    handle: str,
+    new: tuple[tuple[str, str], ...],
+    after: str | None,
+    status: str,
+    hint: str | None = None,
+    *,
+    activity: str | None = None,
+) -> TurnNews:
+    """A result that carries the unseen messages and moves the cursor past them."""
+    return TurnNews(
+        handle=handle,
+        status=status,
+        messages=tuple(text for _, text in new),
+        cursor=new[-1][0] if new else after,
+        hint=hint,
+        activity=activity,
+    )
+
+
+async def _await_turn_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    handle: str,
+    *,
+    after: str | None = None,
+    wait_seconds: float = AWAIT_TURN_MAX_S,
+    resume: Callable[[], Awaitable[object]] | None = None,
+    on_read: OnRead | None = None,
+    on_tick: OnTick | None = None,
+    feed: TurnFeed | None = None,
+    clock: Callable[[], float] = monotonic,
+) -> TurnNews:
+    """Wait on the session's event stream until its newest turn has news.
+
+    Returns at the first of: the agent said something since `after`; the turn
+    ended; it is paused and cannot go on; the session is terminated; or
+    `wait_seconds` passed (at most `AWAIT_TURN_MAX_S`). The session is read once,
+    then again when the stream brings an event, and at least every `RECHECK_S`.
+
+    A turn agent chat started that is paused with no worker answering it (the
+    service restarted, or the worker reached the unattended run limit) is resumed
+    once through `resume`, the owner's admitted ``continue_turn`` without a message,
+    which also starts this process's worker. So the caller that waits keeps the turn
+    going, in a request that holds CPU for as long as it waits. If the resume is
+    refused, or the resumed turn stops again, the result is ``paused`` and says why.
+
+    With `wait_seconds` 0 this is a read: it opens no stream, resumes nothing and
+    answers no tool call. The whole call, reads and resume included, is bounded a
+    little past its wait (`_AWAIT_GRACE_S`); past that it returns ``running``.
+    """
+    bound = max(0.0, min(wait_seconds, AWAIT_TURN_MAX_S))
+    feed = feed or TurnFeed(runtime, auth, handle)
+    try:
+        async with asyncio.timeout(bound + _AWAIT_GRACE_S):
+            return await _await_turn(
+                runtime,
+                auth,
+                handle,
+                after=after,
+                bound=bound,
+                resume=resume if bound > 0 else None,
+                on_read=on_read,
+                on_tick=on_tick,
+                feed=feed,
+                clock=clock,
+            )
+    except TimeoutError:
+        return TurnNews(handle=handle, status="running", cursor=after, hint=_STILL_RUNNING_HINT)
+    finally:
+        await feed.close()
+
+
+async def _await_turn(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    handle: str,
+    *,
+    after: str | None,
+    bound: float,
+    resume: Callable[[], Awaitable[object]] | None,
+    on_read: OnRead | None,
+    on_tick: OnTick | None,
+    feed: TurnFeed,
+    clock: Callable[[], float],
+) -> TurnNews:
+    """`_await_turn_impl`'s loop: read the turn, return on news, else sleep on `feed`."""
+    deadline = clock() + bound
+    resumed = False
+    woke: Woke | None = None
+    while True:
+        if bound > 0:
+            # Subscribed before the state is read, so no event falls between them.
+            await feed.open()
+        # The state is read from the event list, once it shows the event that woke us.
+        await caught_up(runtime, auth, handle, woke)
+        current = await _get_session_impl(runtime, auth, handle, on_read=on_read)
+        turn = await _newest_turn(
+            runtime, auth, handle, expected=await recorded_turn_id(runtime, handle)
+        )
+        new = turn.said_after(after)
+        news = partial(_news, handle, new, after)
+
+        # The turn is read after the status, so it is the later word: a turn the
+        # worker finished between the two reads has ended, whatever the status said.
+        if turn.ended:
+            if turn.refused:
+                raise ToolError(_DECLINED_MSG.format(handle=handle))
+            if not turn.said or turn.started_at is None:
+                return news("idle", _ENDED_SILENT_HINT)
+            final_id, final_text = turn.said[-1]
+            reply = await _delivered_reply(
+                runtime, auth, handle, turn_started_at=turn.started_at, final_text=final_text
+            )
+            earlier = tuple(text for event_id, text in new if event_id != final_id)
+            return TurnNews(
+                handle=handle,
+                status="idle",
+                messages=(*earlier, reply.message),
+                cursor=final_id,
+                chart_urls=reply.chart_urls,
+                image_blocks=reply.image_blocks,
+            )
+        if current.status == "terminated":
+            return news("terminated", _TERMINATED_HINT)
+        if current.status == "paused":
+            if current.hint != PAUSED_HINT:
+                return news("paused", current.hint)
+            if bound == 0:
+                return news("paused", _PAUSED_UNREAD_HINT)
+            if resume is not None and not resumed:
+                resumed = True
+                try:
+                    await resume()
+                except ToolError as err:
+                    # Answered meanwhile by a worker elsewhere: nothing left to resume.
+                    if (await _get_session_impl(runtime, auth, handle)).status != "paused":
+                        continue
+                    return news("paused", f"Daimon stopped and could not go on: {err}")
+                continue
+            why = why_stopped(runtime, handle)
+            return news(
+                "paused",
+                f"Daimon stopped: {why}. Call await_turn again to let it go on."
+                if why is not None
+                else "Daimon stopped. Call await_turn again to let it go on.",
+            )
+        if new:
+            return news(
+                "running", _NEW_MESSAGES_HINT, activity=await _activity(runtime, auth, handle)
+            )
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return news(
+                "running", _STILL_RUNNING_HINT, activity=await _activity(runtime, auth, handle)
+            )
+        woke = await _wait_for_news(
+            feed, _TURN_NEWS, worker=local_worker(runtime, handle), seconds=remaining
+        )
+        if woke is None and on_tick is not None:
+            await on_tick()
 
 
 @observed_agent_turn
@@ -1513,9 +1990,8 @@ async def _ask_impl(
     *,
     handle: str | None = None,
     timeout_seconds: float = 120.0,
-    poll_interval_seconds: float = 1.0,
     clock: Callable[[], float] = monotonic,
-    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    feed: TurnFeed | None = None,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
     recheck: Callable[[], Awaitable[None]] | None = None,
     personal_memory: bool = False,
@@ -1523,6 +1999,11 @@ async def _ask_impl(
 ) -> AskResult:
     """Start a turn (or continue one given ``handle``), wait boundedly for idle, and
     return its final reply.
+
+    The wait is on the session's event stream (``TurnFeed``), not a poll every
+    second: the session is read after the send, then again when the stream says the
+    turn stopped, and at least every ``RECHECK_S``. The stream is opened before that
+    first read, so a turn that ends in between is not missed.
 
     The reply is read from THIS turn's side of the boundary the send
     returned. That matters most on the resume path: a resumable session is
@@ -1544,93 +2025,128 @@ async def _ask_impl(
     turn_event_id = started["turn_event_id"]
     turn_started_at = dt.datetime.fromisoformat(started["turn_started_at"])
     deadline = clock() + timeout_seconds
-
-    while True:
-        current = await _get_session_impl(runtime, auth, handle, on_read=on_read)
-        # Only terminated is treated as terminal: the status value set is
-        # upstream-controlled (see SessionInfo.status), so an unmodeled
-        # transient status keeps polling until the deadline instead of
-        # failing a turn that admission already billed.
-        if current.status == "paused":
-            raise ToolError(f"Daimon turn on handle {handle} is {current.hint}")
-        if current.status == "terminated":
-            if (observation := current_outcome.get()) is not None:
-                observation.finish(reason=TerminationReason.SESSION_TERMINATED)
-            raise ToolError(
-                f"The reply reached final status {current.status!r}; "
-                f"resume or inspect events with handle {handle}"
-            )
-        if current.status == "idle":
-            page: str | None = None
-            final_text: str | None = None
-            # The newest idle decides: a refusal ends the turn whatever text came before it.
-            refused: bool | None = None
-            for _ in range(_MAX_EVENT_PAGES):
-                events = await _list_events_impl(
-                    runtime,
-                    auth,
-                    handle,
-                    page,
-                    100,
-                    "desc",
-                    created_at_gte=turn_started_at.isoformat(),
-                    types=["agent.message", "session.status_idle"],
-                )
-                for event in events.items:
-                    if event.id == turn_event_id:
-                        continue
-                    if event.type == "session.status_idle":
-                        if refused is None:
-                            details = (event.model_extra or {}).get("stop_details")
-                            refused = refusal_error(details) is not None
-                        continue
-                    final_text = _agent_message_text(event)
-                    if final_text is not None:
+    feed = feed or TurnFeed(runtime, auth, handle)
+    woke: Woke | None = None
+    try:
+        while True:
+            await feed.open()
+            await caught_up(runtime, auth, handle, woke)
+            current = await _get_session_impl(runtime, auth, handle, on_read=on_read)
+            if woke is not None and woke.stop not in (None, "requires_action"):
+                # The stream says the turn ended; the status read can trail it a moment.
+                for _ in range(_SETTLE_TRIES):
+                    if current.status != "running":
                         break
-                if final_text is not None or events.next_page is None:
-                    break
-                page = events.next_page
-
-            if refused:
-                if (observation := current_outcome.get()) is not None:
-                    observation.finish(reason=TerminationReason.REFUSED)
+                    await asyncio.sleep(_SETTLE_GAP_S)
+                    current = await _get_session_impl(runtime, auth, handle, on_read=on_read)
+            # Only terminated is treated as terminal: the status value set is
+            # upstream-controlled (see SessionInfo.status), so an unmodeled
+            # transient status keeps waiting until the deadline instead of
+            # failing a turn that admission already billed.
+            if current.status == "paused":
                 raise ToolError(
-                    "Daimon's AI declined this request; rephrase it and ask again "
-                    f"with handle {handle}"
+                    f"Daimon turn on handle {handle} is {current.hint}"
+                    + (" or wait with await_turn" if current.hint == PAUSED_HINT else "")
                 )
-            if final_text is not None:
-                delivery = await deliver_hosted_charts(
-                    runtime.client,
-                    settings=runtime.settings.artifacts,
-                    tenant_id=str(auth.tenant_id),
-                    account_id=str(auth.account_id),
-                    session_id=handle,
-                    turn_started_at=turn_started_at,
-                    message=final_text,
-                    store=runtime.artifact_store,
-                )
+            if current.status == "terminated":
                 if (observation := current_outcome.get()) is not None:
-                    observation.finish(reason=TerminationReason.COMPLETED)
-                await _require_live_result_access(runtime, auth)
-                return AskResult(
-                    handle=handle,
-                    message=delivery.message,
-                    chart_urls=delivery.chart_urls,
-                    image_blocks=delivery.image_blocks,
-                    monitoring=started.get("monitoring"),
+                    observation.finish(reason=TerminationReason.SESSION_TERMINATED)
+                raise ToolError(
+                    f"The reply reached final status {current.status!r}; "
+                    f"resume or inspect events with handle {handle}"
                 )
+            if current.status == "idle":
+                page: str | None = None
+                final_text: str | None = None
+                # The newest idle decides: a refusal ends the turn whatever text came before it.
+                refused: bool | None = None
+                for _ in range(_MAX_EVENT_PAGES):
+                    events = await _list_events_impl(
+                        runtime,
+                        auth,
+                        handle,
+                        page,
+                        100,
+                        "desc",
+                        created_at_gte=turn_started_at.isoformat(),
+                        types=["agent.message", "session.status_idle"],
+                    )
+                    for event in events.items:
+                        if event.id == turn_event_id:
+                            continue
+                        if event.type == "session.status_idle":
+                            if refused is None:
+                                details = (event.model_extra or {}).get("stop_details")
+                                refused = refusal_error(details) is not None
+                            continue
+                        final_text = _agent_message_text(event)
+                        if final_text is not None:
+                            break
+                    if final_text is not None or events.next_page is None:
+                        break
+                    page = events.next_page
 
-        remaining = deadline - clock()
-        if remaining <= 0:
-            if (observation := current_outcome.get()) is not None:
-                observation.finish(reason=TerminationReason.CEILING)
-            notice = started.get("monitoring")
-            raise ToolError(
-                f"Daimon did not finish a reply within "
-                f"{timeout_seconds:g} seconds; resume with handle {handle}"
-                + (f"\n{notice}" if notice else "")
+                if refused:
+                    if (observation := current_outcome.get()) is not None:
+                        observation.finish(reason=TerminationReason.REFUSED)
+                    raise ToolError(_DECLINED_MSG.format(handle=handle))
+                if final_text is not None:
+                    delivery = await deliver_hosted_charts(
+                        runtime.client,
+                        settings=runtime.settings.artifacts,
+                        tenant_id=str(auth.tenant_id),
+                        account_id=str(auth.account_id),
+                        session_id=handle,
+                        turn_started_at=turn_started_at,
+                        message=final_text,
+                        store=runtime.artifact_store,
+                    )
+                    if (observation := current_outcome.get()) is not None:
+                        observation.finish(reason=TerminationReason.COMPLETED)
+                    await _require_live_result_access(runtime, auth)
+                    return AskResult(
+                        handle=handle,
+                        message=delivery.message,
+                        chart_urls=delivery.chart_urls,
+                        image_blocks=delivery.image_blocks,
+                        monitoring=started.get("monitoring"),
+                    )
+
+            remaining = deadline - clock()
+            if remaining <= 0:
+                if (observation := current_outcome.get()) is not None:
+                    observation.finish(reason=TerminationReason.CEILING)
+                notice = started.get("monitoring")
+                raise ToolError(
+                    f"Daimon did not finish a reply within "
+                    f"{timeout_seconds:g} seconds and is still working; wait for it with "
+                    f"await_turn and handle {handle}" + (f"\n{notice}" if notice else "")
+                )
+            woke = await _wait_for_news(
+                feed, TURN_STOPPED, worker=local_worker(runtime, handle), seconds=remaining
             )
-        await sleep(min(poll_interval_seconds, remaining))
+    finally:
+        await feed.close()
+
+
+def still_waiting(ctx: Context) -> OnTick:
+    """Tell a waiting call's client it is alive, with an MCP progress notification.
+
+    A client that asked for progress shows it, and the bytes keep a proxy from
+    cutting a connection it takes for idle. Without a progress token this sends
+    nothing.
+    """
+    started = monotonic()
+
+    async def on_tick() -> None:
+        with contextlib.suppress(Exception):
+            await ctx.report_progress(
+                progress=monotonic() - started,
+                total=AWAIT_TURN_MAX_S,
+                message="Daimon is still working",
+            )
+
+    return on_tick
 
 
 def register_agent_chat_tools(
@@ -1715,11 +2231,13 @@ def register_agent_chat_tools(
         Creates a persistent MA session with vault/repo/env parity and sends
         the first user message. Returns ``{"handle": "<session_id>",
         "turn_event_id": "<event_id>", "turn_started_at": "<iso8601>"}``.
-        ``handle`` is passed to ``get_session``, ``list_events``, and
-        ``continue_turn``. ``turn_event_id`` and ``turn_started_at`` identify
-        this turn's first event: poll ``list_events`` with
-        ``created_at_gte=turn_started_at`` and discard everything up to and
-        including ``turn_event_id`` to read only this turn's transcript.
+        ``handle`` is passed to ``await_turn``, ``get_session``,
+        ``list_events``, and ``continue_turn``. Wait for the reply with
+        ``await_turn``: it returns when the agent says something or the turn
+        ends, so there is nothing to poll. ``turn_event_id`` and
+        ``turn_started_at`` identify this turn's first event, for a caller that
+        reads ``list_events`` itself: pass ``created_at_gte=turn_started_at``
+        and discard everything up to and including ``turn_event_id``.
         ``monitoring``, when present, is a notice to show the person.
 
         ``bundle`` is an opaque handle returned by the bundle upload route.
@@ -1751,8 +2269,10 @@ def register_agent_chat_tools(
         ctx: Context, message: str, handle: str | None = None
     ) -> AskResult:
         """Ask one question and wait for the final answer and any chart images. Starts a
-        persistent turn, waits up to about 120 seconds for idle, and
-        returns the final text plus a resumable handle. Callers need current
+        persistent turn, waits up to about 120 seconds for it to end, and
+        returns the final text plus a resumable handle. A reply that takes longer
+        ends this call with an error naming the handle while the agent keeps
+        working: wait for it with ``await_turn``. Callers need current
         membership and invoker-policy access before reply delivery where required. Chart
         images are embedded by default; short-lived download links are added when private
         artifact storage is configured. Pass ``handle`` from a previous result to
@@ -1791,22 +2311,20 @@ def register_agent_chat_tools(
         ``{"handle": "<session_id>", "turn_event_id": "<event_id>",
         "turn_started_at": "<iso8601>"}`` — the same three-key shape as
         ``start_turn``, with the boundary taken from THIS message's send, not
-        the session's earlier turns. Poll ``list_events`` with
-        ``created_at_gte=turn_started_at`` and discard events up to and
-        including ``turn_event_id`` to read only this turn's transcript.
+        the session's earlier turns. Wait for the reply with ``await_turn``.
         ``monitoring``, when present, is a notice to show the person.
 
         When ``get_my_session`` reports ``status`` ``paused`` with the hint
         to call ``continue_turn``, a turn this tool started is waiting on tool
         confirmations nobody is answering (the service restarted). This call
-        resumes it: the waiting calls are decided by the current tool policy
-        (reads run; writes are refused unless the operator allowed them in
-        unattended runs). ``message`` is then optional: without one, the
-        paused turn's boundary is returned; with one, it is sent once the
-        resumed turn ends, or the call is refused if that takes more than
-        about 90 seconds. A turn waiting on someone's approval card in chat
-        is refused: only that card answers it. Any other session needs a
-        ``message``.
+        resumes it, as waiting with ``await_turn`` also does: the waiting calls
+        are decided by the current tool policy (reads run; writes are refused
+        unless the operator allowed them in unattended runs). ``message`` is
+        then optional: without one, the paused turn's boundary is returned;
+        with one, it is sent once the resumed turn ends, or the call is refused
+        if that takes more than about 90 seconds. A turn waiting on someone's
+        approval card in chat is refused: only that card answers it. Any other
+        session needs a ``message``.
         Use a handle opened through agent chat. Platform conversations and
         older sessions without headless creation provenance cannot be driven here.
         If the agent's model, prompt, skills, MCP servers or tools changed since
@@ -1825,13 +2343,74 @@ def register_agent_chat_tools(
             runtime, auth, handle, message, recheck=recheck_for(auth, "continue_turn")
         )
 
+    @mcp.tool(tags={"agent-chat"})  # pyright: ignore[reportArgumentType]
+    async def await_turn(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context,
+        handle: str,
+        after: str | None = None,
+        wait_seconds: float = AWAIT_TURN_MAX_S,
+    ) -> TurnNews:
+        """Wait for news from the turn running on ``handle``, without polling.
+
+        Call this after ``start_turn`` or ``continue_turn``, and again each time
+        it returns ``running``. It returns as soon as one of these happens:
+
+        - the agent said something: ``status`` ``running``, the new text in
+          ``messages``. Pass ``cursor`` back as ``after`` on the next call;
+        - the turn ended: ``status`` ``idle``. The last of ``messages`` is the
+          final answer, with any chart images and links;
+        - the turn stopped and cannot go on: ``status`` ``paused``, and ``hint``
+          says why and what to do;
+        - the conversation is over: ``status`` ``terminated``;
+        - ``wait_seconds`` passed (at most about four minutes): ``status``
+          ``running`` with no new messages. Call it again.
+
+        A turn paused on tool confirmations nobody is answering is resumed by
+        this call, as ``continue_turn`` does: the waiting calls are decided by
+        the current tool policy. So a long turn runs to its end while you wait,
+        with no ``get_my_session`` loop and no ``continue_turn``. ``activity``,
+        when set, names the tool call running now and for how long.
+        ``wait_seconds=0`` only reads where the turn stands: it waits for
+        nothing and resumes nothing.
+        Use a handle opened through agent chat.
+        """
+        auth = await _auth(ctx)
+
+        async def resume() -> None:
+            admitted = await _check_admission(
+                ctx,
+                sessionmaker=runtime.session_factory,
+                membership_resolver=runtime.membership_resolver,
+                billing_config=billing_config,
+                markup=runtime.settings.billing.markup,
+                tool_name="continue_turn",
+                agent_names=pin_names,
+            )
+            await _continue_turn_impl(
+                runtime, admitted, handle, None, recheck=recheck_for(admitted, "continue_turn")
+            )
+
+        return _turn_news_result(  # type: ignore[return-value]
+            await _await_turn_impl(
+                runtime,
+                auth,
+                handle,
+                after=after,
+                wait_seconds=wait_seconds,
+                resume=resume,
+                on_read=_settle_when_finished(runtime),
+                on_tick=still_waiting(ctx),
+            )
+        )
+
     @mcp.tool(tags={"agent-chat"}, name="get_my_session")  # pyright: ignore[reportArgumentType]
     async def get_my_session(ctx: Context, handle: str) -> SessionInfo:  # pyright: ignore[reportUnusedFunction]
         """Get one session's status and metadata (no reply text, read-only).
 
-        Use this to check whether a turn has finished (``status`` becomes
-        ``idle``/``terminated``) before reading the transcript with
-        ``list_events``. ``status`` ``paused`` means the turn waits on tool
+        A one-time status read. To wait for a turn, use ``await_turn`` instead
+        of calling this again and again. ``status`` becomes
+        ``idle``/``terminated`` when a turn has finished and the transcript can
+        be read with ``list_events``. ``status`` ``paused`` means the turn waits on tool
         confirmations; ``hint`` says whether ``continue_turn`` resumes it or
         it waits for an approval in the chat where it was asked. Reading
         never answers them.
@@ -1860,8 +2439,8 @@ def register_agent_chat_tools(
         Sends an interrupt regardless of the session's current status —
         sending one to an already-idle session is harmless. Returns
         ``{"handle": "<session_id>", "status": "<observed_status>"}``
-        immediately; it does not wait for the interrupt to take effect, so
-        poll ``get_my_session`` to see the session reach ``idle`` or
+        immediately; it does not wait for the interrupt to take effect:
+        ``await_turn`` returns once the session reaches ``idle`` or
         ``terminated``. An interrupted turn is still billed for what it
         already consumed before the interrupt landed: the model work already
         done is real work and is not refunded.

@@ -7,6 +7,121 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- **A long job asked through agent chat runs to its end with one tool: `await_turn`.**
+  Call it after `start_turn`. It returns when the agent says something, when the turn
+  ends, or after about four minutes, and reports the tool call running now. Nothing is
+  polled: `ask`, `await_turn` and Daimon's own handling of tool confirmations wait on the
+  session's event stream. A turn that paused because the service restarted, or because it
+  reached the unattended run time limit, is resumed by the call that waits for it, so the
+  caller no longer needs `get_session` and `continue_turn`
+  ([Agent chat sessions](docs/unattended.md#agent-chat-sessions)).
+
+- **A turn asked through agent chat no longer stops when Discord is slow to answer.**
+  Daimon checks membership again before each tool call it lets through. A check Discord
+  did not answer used to count as a refusal and left the turn paused. It is now tried
+  again, and a call refused for that reason says "Discord didn't answer" instead of "You
+  aren't on this server's list of people".
+
+- **A signed-identity MCP server can learn which routine is calling, and for which room.**
+  With `"routine_claims": true` on the server, a routine run that posts to a Discord room
+  signs its routine, that room and the room's kind. It is off by default
+  ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).
+
+- **A signed-identity MCP server learns what kind of Discord place the answer goes to.**
+  The token's new `room` claim says `dm`, `team`, `narrow` or `contained`, so the server can
+  limit what it returns to what that place may read
+  ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).
+
+- **Each request to a signed-identity MCP server carries a new token with its own `jti`.**
+  A server can accept each token once, so a copied token cannot be replayed
+  ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).
+
+- **The agent no longer tells a person to expect an approval card for a cloud computer.**
+  Daimon shows the card itself when one is needed. The agent also sizes parallel work from
+  the machine's own CPUs, not from what `nproc` reports.
+
+- **A Gemini reply that thinks quietly for minutes is no longer reconnected every two
+  minutes.** Google says pauses between chunks are normal, that the connection should stay
+  open, and to allow 15 to 20 minutes between chunks
+  ([long decode](https://aistudio.google.com/docs/long-decode)). Daimon now keeps a silent
+  Gemini stream open for up to 15 minutes instead of 2. Every minute while the stream is
+  silent it checks the reply's status, so a reply that has ended is still answered within
+  about a minute. The turn's time limit is unchanged. Claude turns are unchanged.
+
+- **A server admin can let an agent used through agent chat use cloud computers for the
+  person.** Turn on [Cloud computers from agent chat](docs/compute.md#use-it-from-agent-chat)
+  for the workspace or one agent; it is off by default. The agent then starts a machine with no
+  card, runs commands and reads and writes files on it, and lists and stops the person's
+  machines. Each machine stops after its idle time; commands and file writes renew it. A
+  command there gets no message when it ends: the agent checks it again later. Any key of that
+  person that drives the session can do the same.
+
+- **A feature set for one agent or channel now also applies when that agent is used through
+  agent chat.** Before, the server checked those calls against the workspace setting only, so
+  an agent's own Off was missed and its own On was refused. A session started before this
+  release reads its agent and channel from its next message on. If Daimon can't find the
+  agent, the call is refused ([Features](docs/features.md)).
+
+- **A Gemini conversation no longer gets stuck when Gemini can't read its last reply.** Each
+  new message first reads the previous reply. When Gemini kept answering that read with a
+  server error, every later message in the conversation waited over six minutes and then
+  failed. Daimon now waits at most 90 seconds, then starts a fresh Gemini session that carries
+  the conversation so far. The new session doesn't have the unreadable reply, or Gemini's own
+  memory of tool results and workspace files from before (the same as any other session
+  replacement). Gemini being busy, a network failure, or a refusal of the read still fails
+  only that message and keeps the session.
+
+- **Switching a conversation or an agent to OpenAI or Gemini now behaves like changing models
+  within one provider.** A provider is on for a workspace as soon as the operator has set its
+  key, with no per-workspace step, and choosing a model for one conversation is on by default,
+  as is the connector relay (a provider receives what a connector returns). The "Working on
+  it" card names the model the reply actually runs on (an agent copied onto
+  Gemini no longer shows its Claude model), and effort per conversation now works on OpenAI
+  (low, medium, high). Refusing to switch the server's default agent also offers switching
+  just that conversation. A copy made to switch continues from a summary, and says so.
+  Word, PowerPoint, Excel and PDF skills, which run only on Anthropic, come as short open
+  equivalents on the other providers ([Providers](docs/providers.md)).
+
+- **Agents with tool rules, and channels that switch a built-in tool off, now answer on GPT
+  and Gemini instead of refusing the reply.** An `ask` rule, or one scoped to a channel, posts
+  Daimon's Approve card there as on Claude: only the asker answers, an approved call runs once,
+  and an unattended reply runs only what its rules allow. A built-in a channel or thread
+  switches off leaves that reply; one of the six file and shell tools off removes all six,
+  since the provider has one execution tool. A channel's own fixed deployment is still refused
+  there ([Providers](docs/providers.md#what-is-not-supported-yet)).
+
+- **Routines run on Gemini and OpenAI when their agent, channel or thread uses it.** A fire
+  runs as an unattended reply on that provider, under the same rules, spend gates and
+  metering as a chat reply, and posts like any routine, quiet runs included. As on Anthropic,
+  built-in tools stay off unless an operator turns on sandbox tools, whose opt-in now also
+  records the provider. OpenAI always runs its agents with a shell, so an OpenAI routine needs
+  sandbox tools. A routine that DMs its owner runs there too, as their private turn, and a
+  routine into a thread runs on the provider that thread kept. Its generated files are
+  delivered as on Anthropic, up to 24 MB each. Timers run on Gemini the same way; watch
+  reports still need Anthropic ([Routines](docs/routines.md)).
+
+- **An agent's connectors keep working after it switches to OpenAI or Gemini.** Daimon now
+  keeps and refreshes every connector sign-in itself, and gives an agent on Claude a fresh
+  short-lived copy for each reply, so a switch no longer needs a Reconnect. A connector added
+  with a pasted token now works on OpenAI and Gemini too. A sign-in made before this release
+  for an agent on Claude needs one last Reconnect before it works off Claude. An agent
+  with GitHub repositories can switch too: its `github` connector reaches them with
+  App tokens that end with the reply. The repository checkout and `gh` in the sandbox
+  still stay on Claude
+  ([Providers](docs/providers.md#what-daimon-adds-on-openai-and-gemini)).
+
+- **An agent's keys go with it to OpenAI and Gemini.** Its saved keys are a `.env` file
+  at `/workspace/.daimon/.env` in that provider's sandbox, so that provider receives them,
+  and the agent's guidance and default skills name that path and `/workspace/outputs`, where
+  that provider collects reply files. An admin can keep them on Claude with the `provider_keys_file` feature
+  ([Providers](docs/providers.md#what-daimon-adds-on-openai-and-gemini)).
+
+- **A long Gemini reply no longer fails when Gemini refuses to reconnect to it.** After two
+  minutes with no news, Daimon reconnects to the reply. Gemini can refuse that while the reply
+  is still running; Daimon now keeps checking the reply until it ends and answers from it,
+  within the usual time limit. A refusal on a reply's first connection still ends it, also
+  after Daimon restarts mid-reply, and the logs now say why Gemini refused.
+
 - **A finished command no longer sends a second message when the conversation already has its
   result, or when its machine was stopped from the conversation.** Reading the result there,
   or stopping the machine from the conversation it started in, withdraws a message nobody has
@@ -25,6 +140,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   set keeps it, so an agent its owner turned on stays on and one turned off stays off. Only a
   server admin can change any of them now. Turning it off leaves a running machine to be
   stopped or to end at its idle time ([Compute sessions](docs/compute.md#turn-it-on)).
+
+- **A remote MCP server reached through the identity relay can name the person behind an
+  agent-chat turn.** Set `agent_chat_requester` on a `requester_meta` server: a turn a person
+  started from an MCP client signed in to the hub then carries their user id with
+  `requester_kind` `"agent_chat"`, with no place and no wake link. Turns started with an agent,
+  coding or CLI key name nobody. It is off by default, and a conversation started earlier gains
+  it from its second message ([MCP servers](docs/mcp-servers.md#servers-that-attribute-writes-to-the-requester)).
 
 - **Routines start on time when many sessions are live.** The scheduler's check for due routines
   shared one loop with the GitHub token refresh, which takes about a second for each live
@@ -250,6 +372,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `daimon features set routine_result_header off --routine <id>`; its value
   beats its agent's.
 
+- **GitHub repo connect runs in the web app when it is on.** Every Connect
+  GitHub link, from chat, the web panel, the CLI and pending requests, opens
+  the web app's pages, and the MCP host sends old links on to them. A link
+  started in the web app returns to the agent's GitHub tab. Every service, the
+  MCP server included, needs `DAIMON_WEB__PUBLIC_URL`, and the web app needs the
+  GitHub App settings and crypto keys; a service without the web URL builds links
+  on the MCP host, which splits flows across hosts. Before upgrading, add
+  `<web>/oauth/github/callback` to the GitHub App's callback URLs and keep the MCP
+  one for personal account links. Once that holds, move the setup URL to
+  `<web>/oauth/github/setup`.
+
 - **Discord answers read the same in DMs and threads, and agents can have a
   display name.** DM turns now get the working, done and model reactions, 👍/👎
   feedback, voice messages and the card's model footer. Pings are joined with a
@@ -341,28 +474,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Daimon now reads the server's own URL with its bearer key, so a tool it marks
   `readOnlyHint` runs without a card. The chat worker needs that server's key in
   `DAIMON_MCP_IDENTITY__BEARERS`; a signed server is read without one.
-
-- **Workflows.** A workflow is a graph of steps that runs on its
-  own: agents, conditions, code, tool calls, questions to people and waits. Build
-  one on a canvas in the web app, from a starter or with Ask Daimon, then test
-  and publish it. Runs start by hand, on a schedule, from a signed webhook or
-  after another workflow. Approval steps ask people in chat by direct message or
-  in a thread, or in the web app's inbox. `/workflows` on Discord, Slack and
-  Teams lists them, and chat cards publish, run and follow runs. Admins can move
-  routines to workflows and back, and `daimon workflows` lists, exports, imports
-  and controls them. Steps can post to chat in titled threads, and runs can start
-  from a chat mention or from new rows a tool returns. A workflow can save state
-  for later runs, run every few weeks or once at a set time, wait in business
-  days, and show its runs on a board or calendar. A step can make a write with
-  nobody watching when its arguments fit a stated scope. Workflows, their pages,
-  mentions (`workflow_mentions`) and polls (`workflow_polls`) are on; webhooks, code
-  steps and scoped writes (`workflow_scoped_writes`) stay off until an admin turns
-  them on. The routine result header and routine sandbox tools have a Workflow level, for a
-  workflow's routine steps. Routines still work but are marked Legacy, and every routines list
-  offers an admin "Move to a workflow". A moved routine becomes the workflow, with its
-  pending post, owner notice, settings and intake binding; `daimon routines translate
-  --dry-run` checks every routine. See [Workflows](docs/workflows.md) and
-  [Advanced workflows](docs/workflows-advanced.md).
 
 - **A setting for rooms with outside people.** Server admins on Discord can set
   "Rooms with outside people" to Off or Report only. It is off by default and

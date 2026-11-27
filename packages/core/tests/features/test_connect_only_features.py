@@ -31,7 +31,7 @@ _ROOT = Path(__file__).resolve().parents[4]
 
 #: Every file that calls `set_agent_feature`, which takes the admin's word for it. Each has
 #: proved the person itself before the call.
-_MAY_SET_AGENT_FEATURE = {"adapters/mcp/daimon/adapters/mcp/oauth_github.py"}
+_MAY_SET_AGENT_FEATURE = {"core/daimon/core/github_connect_flow.py"}
 
 
 def _actor(tenant_id: uuid.UUID, surface: ChangeSurface, *, operator: bool = False) -> FeatureActor:

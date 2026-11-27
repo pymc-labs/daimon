@@ -280,6 +280,7 @@ async def run_turn(
     session_id: str | None = None,
     step: StepTurn | None = None,
     routine_step_run_id: uuid.UUID | None = None,
+    routine_destination: str | None = None,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -323,6 +324,7 @@ async def run_turn(
             session_id=session_id,
             step=step,
             routine_step_run_id=routine_step_run_id,
+            routine_destination=routine_destination,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -366,6 +368,7 @@ async def run_turn(
                 session_id=session_id,
                 step=step,
                 routine_step_run_id=routine_step_run_id,
+                routine_destination=routine_destination,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -437,6 +440,7 @@ async def run_turn_impl(
     session_id: str | None = None,
     step: StepTurn | None = None,
     routine_step_run_id: uuid.UUID | None = None,
+    routine_destination: str | None = None,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its complete final reply.
 
@@ -592,11 +596,24 @@ async def run_turn_impl(
     fragments = True  # `origin_fragments` where the session is placed
     memory_on = False  # `repo_memory` where the session is placed
 
-    # Older MCP images reject the claim keys, so only a deployment that opted in sends them.
+    # Older MCP images reject the claim keys, so only a deployment that opted in sends them:
+    # the routine and owner for a requester or routine-claims server, its destination only
+    # for a routine-claims one.
     relay_routine = (
         origin == "routine"
         and feature_settings is not None
-        and feature_settings.mcp_identity.names_requester
+        and (
+            feature_settings.mcp_identity.names_requester
+            or feature_settings.mcp_identity.names_routine
+        )
+    )
+    relay_destination = (
+        routine_destination
+        if relay_routine
+        and (routine_id is not None or routine_step_run_id is not None)
+        and feature_settings is not None
+        and feature_settings.mcp_identity.names_routine
+        else None
     )
 
     async def _assemble_session() -> BetaManagedAgentsSession:
@@ -718,6 +735,7 @@ async def run_turn_impl(
             relay_owner=(
                 runs_as_user if relay_routine and (routine_id or routine_step_run_id) else None
             ),
+            relay_destination=relay_destination,
             identity=identity,
             workflow_run_id=step.workflow_run_id if step is not None else None,
             workflow_step_id=step.workflow_step_id if step is not None else None,

@@ -177,6 +177,8 @@ def make_slack_workflow_poster(runtime: SlackRuntime) -> WorkflowPoster:
             post=build_output_poster(client, channel_id=channel, thread_ts=thread),
             notice=notice,
             may_post=may_post,
+            sessions=runtime.sessionmaker,
+            tenant_id=row.tenant_id,
         )
         return done
 

@@ -174,6 +174,9 @@ EXEMPT: dict[str, str] = {
     "POST /auth/{provider_id}/connect": ("links the caller's own sign-in"),
     "DELETE /api/me/accounts/{key}": ("a person's own data, not a channel or an agent's settings"),
     "POST /api/workspaces/switch": ("switches the caller's own workspace"),
+    "POST /api/github/connect/{step}": (
+        "redeems a connect invitation, minted only by swept or in-channel paths"
+    ),
     "POST /api/profile/memory/{agent_id}/forget": (
         "the caller forgets their own memory of an agent; a person's own data, not a channel or an agent's settings"
     ),

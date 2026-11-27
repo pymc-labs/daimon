@@ -1,0 +1,22 @@
+{
+  "description": [
+    "Stop or resume Daimon tagging the person who is asking, only for themselves.",
+    "",
+    "Call it when the person asks never to be tagged, pinged or @-mentioned",
+    "(``never_tag`` true), or asks to be tagged again (false). It always acts",
+    "for whoever sent this request and takes no one else's name; if someone asks",
+    "for it on another person's behalf, decline and tell them that person",
+    "can ask for themselves. It holds across every platform the person uses",
+    "Daimon on. Read the returned ``note`` back to the user."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "never_tag": {
+        "default": true,
+        "type": "boolean"
+      }
+    },
+    "type": "object"
+  }
+}

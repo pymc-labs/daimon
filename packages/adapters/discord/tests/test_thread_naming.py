@@ -534,3 +534,38 @@ async def test_selfhosted_opening_uses_text_title_without_touching_anthropic(
     for key in ("thread_title_style", "thread_auto_archive"):
         assert places[key].agent_id == "sh_agent_test", "read for the agent opening the thread"
     bind.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "typing_fails", [False, True], ids=["typing_shown", "typing_error_swallowed"]
+)
+async def test_a_mention_shows_typing_once_when_admission_waits_for_room_facts(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    typing_fails: bool,
+) -> None:
+    tenant = await make_tenant(db_session)
+    bot = _bot(
+        _runtime(db_session_factory, router=MARouter(), thread_naming=ThreadNamingSettings())
+    )
+    message = _channel_message(guild_id=12345, content="<@999> hello")
+    typing = MagicMock()
+    typing.__aenter__ = AsyncMock(side_effect=RuntimeError("down") if typing_fails else None)
+    typing.__aexit__ = AsyncMock(return_value=None)
+    message.channel.typing = MagicMock(return_value=typing)
+
+    class Stop(Exception):
+        pass
+
+    async def waiting_admit(*_args: object, **kwargs: Any) -> None:
+        await kwargs["on_facts_wait"]()
+        raise Stop
+
+    with (
+        patch("daimon.adapters.discord.bot.admit", AsyncMock(side_effect=waiting_admit)),
+        patch.object(bot, "_wait_for_orphan_recovery", AsyncMock()),
+        pytest.raises(Stop),
+    ):
+        await bot._orchestrate_observed(message, "12345", tenant.id)  # pyright: ignore[reportPrivateUsage]
+
+    message.channel.typing.assert_called_once_with()

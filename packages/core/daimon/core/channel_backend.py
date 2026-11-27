@@ -171,15 +171,70 @@ async def effective_thread_backend(
     channel_id: str,
     thread_id: str | None,
     caller_id: str | None,
+    agent_id: uuid.UUID | None = None,
 ) -> Provider:
     """Honor the retained shared/caller binding before the current channel selection.
 
     Slot order and legacy-session fallback match admission. Only local facts
     are read, so deciding whether provider access is allowed cannot itself
-    send conversation content to a provider.
+    send conversation content to a provider. With `agent_id`, a revision kept for
+    another agent is passed over, as admission passes it (`resolve_preference`).
     """
     channel = channel_ref(tenant_id, platform, channel_id)
     latest, ever_shared = await current_backend_and_sharing(session, channel)
+    kept = await _kept_backend(
+        session,
+        channel,
+        latest,
+        ever_shared,
+        thread_id=thread_id,
+        caller_id=caller_id,
+        agent_id=agent_id,
+    )
+    if kept is not None:
+        return kept
+    return latest.backend if latest is not None else DEFAULT_BACKEND
+
+
+async def kept_thread_backend(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    thread_id: str,
+    caller_id: str | None,
+    agent_id: uuid.UUID | None = None,
+) -> Provider | None:
+    """The provider the thread itself keeps (`effective_thread_backend`), else None."""
+    channel = channel_ref(tenant_id, platform, channel_id)
+    latest, ever_shared = await current_backend_and_sharing(session, channel)
+    return await _kept_backend(
+        session,
+        channel,
+        latest,
+        ever_shared,
+        thread_id=thread_id,
+        caller_id=caller_id,
+        agent_id=agent_id,
+    )
+
+
+async def _kept_backend(
+    session: AsyncSession,
+    channel: ChannelRef,
+    latest: ConfigRevision | None,
+    ever_shared: bool,
+    *,
+    thread_id: str | None,
+    caller_id: str | None,
+    agent_id: uuid.UUID | None,
+) -> Provider | None:
+    tenant_id, platform, channel_id = (
+        uuid.UUID(channel.tenant_id),
+        channel.platform,
+        channel.channel_id,
+    )
     if thread_id is not None:
         principal = (
             await find_platform_principal(
@@ -192,7 +247,7 @@ async def effective_thread_backend(
 
         thread = ThreadRef(channel=channel, thread_id=thread_id)
         slots = [Slot(thread=thread)] if ever_shared else []
-        released = False
+        released = passed_own = False
         if principal is not None:
             slots.append(Slot(thread=thread, account_id=str(principal.account_id)))
             # A confirmed switch from this thread: its next turn selects afresh.
@@ -218,8 +273,21 @@ async def effective_thread_backend(
                 or retained.profile != binding.profile
             ):
                 raise BackendUnsupported("retained_binding_mismatch")
-            return retained.backend
-        if principal is not None and not released:
+            # A channel's own pin keeps every thread's revision, as in admission.
+            pinned = latest is not None and (
+                await mux_state.config_origin(session, channel, latest.local) != "channel_clear"
+            )
+            owner = (
+                await mux_state.config_agent_id(session, channel, binding.config_revision)
+                if agent_id is not None and not pinned
+                else None
+            )
+            if owner is None or owner == agent_id:
+                return retained.backend
+            # Kept for another agent: the shared slot gives way to the caller's own,
+            # and the caller's own to a fresh selection.
+            passed_own = slot.account_id is not None
+        if principal is not None and not released and not passed_own:
             previous = await get_thread_session_at(
                 session,
                 tenant_id=tenant_id,
@@ -234,7 +302,7 @@ async def effective_thread_backend(
                         previous.ma_session_id, "session history differs from authorized channel"
                     )
                 return MANAGED_AGENTS.provider
-    return latest.backend if latest is not None else DEFAULT_BACKEND
+    return None
 
 
 async def current_backend_and_sharing(
@@ -635,7 +703,6 @@ _RAISED_CAPABILITIES: frozenset[str] = frozenset(
         "credential_mcp_requires_https",
         "credentialed_mcp_requires_scoped_tools_resolver",
         "custom_tools_or_tool_permissions",
-        "daimon_tool_rules",
         "duplicate_mcp_server",
         "environment_archive",
         "environment_conditional_update",

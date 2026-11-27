@@ -73,6 +73,9 @@ class Subject:
     source_channel_id: str | None = None
     source_thread_id: str | None = None
     workflow_run_id: uuid.UUID | None = None
+    #: What a DM fire's relay checks is unedited (ISO 8601): a routine's `updated_at`, a
+    #: workflow's live version's `published_at`.
+    revision: str | None = None
     #: A workflow's routine step: `id` is the workflow's (a result carried by a move has no run).
     workflow: bool = False
 
@@ -92,6 +95,7 @@ def workflow_subject(
     run_id: uuid.UUID | None,
     owner: str | None,
     agent_id: str,
+    revision: str | None = None,
 ) -> Subject:
     """The fire input for a run's routine step: `owner` is the owner's platform id, the budget
     channel the workflow's home and the schedule its first schedule trigger's."""
@@ -116,6 +120,7 @@ def workflow_subject(
         source_channel_id=made_in["channel_id"] if made_in else None,
         source_thread_id=made_in["thread_id"] if made_in else None,
         workflow_run_id=run_id,
+        revision=revision,
         workflow=True,
     )
 
@@ -138,4 +143,5 @@ def routine_subject(row: RoutineRow) -> Subject:
         source_provenance_known=row.source_provenance_known,
         source_channel_id=row.source_channel_id,
         source_thread_id=row.source_thread_id,
+        revision=row.updated_at.isoformat(),
     )

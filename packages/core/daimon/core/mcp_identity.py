@@ -23,32 +23,36 @@ import binascii
 import json
 import re
 import uuid
-from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Final, Literal, cast
+from typing import TYPE_CHECKING, Final, Literal, cast, get_args
 
 import jwt as pyjwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_server_url import ascii_mcp_url, canonical_mcp_url, same_ascii_mcp_url
-from daimon.core.stores.domain import TurnOriginRow
+from daimon.core.stores.domain import ContinuationReason, TurnOriginRow
 from daimon.core.turn_origin import origin_place
 
 if TYPE_CHECKING:
     from daimon.core.fire.subject import RoutineFacts
+    from daimon.core.signed_room import SignedRoom
     from daimon.core.stores.domain import WatchRow
 
 #: Relay path under the app root; the server's configured name follows it.
 RELAY_PATH: Final = "/mcp-identity"
 #: Signed chat-credential claim binding a relay credential to one session.
 RELAY_CLAIM: Final = "daimon_relay"
+#: The longest `routine` claim a server accepts.
+ROUTINE_CLAIM_MAX: Final = 80
+#: Why a call runs without a fresh message, as the `wake` claim says: `turn`, a person's
+#: turn still running, or the reason a queued continuation woke (`ContinuationReason`).
+WakeReason = Literal["turn"] | ContinuationReason
+WAKE_REASONS: Final[frozenset[str]] = frozenset({"turn", *get_args(ContinuationReason)})
 #: Servers accept at most 300 s between iat and exp; 120 s leaves room for skew.
 TOKEN_TTL: Final = timedelta(seconds=120)
-#: A cached token is re-signed once it has less than this left.
-RESIGN_MARGIN: Final = timedelta(seconds=30)
 _SEED_BYTES: Final = 32
 
 SigningKey = Ed25519PrivateKey
@@ -158,19 +162,36 @@ class RelayBinding:
 
     agent_name: str
     session_key: uuid.UUID | None = None
-    #: The routine a scheduled run belongs to; never set together with `session_key`.
+    #: The routine a scheduled run belongs to; with `session_key` only for a routine
+    #: posting to its owner's DM, with every `dm_channel` field below.
     routine_id: uuid.UUID | None = None
     #: The routine's or watch's owner at minting; the relay stamps the run only
     #: while the row still names this user, so a later ownership change credits nobody.
     owner: str | None = None
     #: The watch a poll reads for; at most one of `session_key`, `routine_id` and this.
     watch_id: uuid.UUID | None = None
-    #: The workflow run a routine step belongs to, bound as `routine_id` is; never beside it.
-    workflow_run_id: uuid.UUID | None = None
     #: The session's execution grant (`chat_session_id`), only with `session_key`. The
     #: turn holding it (`bind_origin_session`) is the one making the call, so the relay
     #: names that turn even beside a queued one or after the session row was replaced.
     grant: str | None = None
+    #: The workflow run a routine step belongs to, bound as `routine_id` is; never beside it.
+    workflow_run_id: uuid.UUID | None = None
+    #: The agent-chat session (its Managed Agents id) this credential is mounted in; set
+    #: alone. The relay names a person only while that session's driver is one signed in
+    #: to the hub (`daimon.core.agent_chat_requester`).
+    agent_chat: str | None = None
+    #: Where a routine's run posts, as `routine_destination_key` named it when the run
+    #: started; only with `routine_id`. The relay signs routine claims only while the
+    #: routine still posts there.
+    destination: str | None = None
+    #: A routine posting to its owner's DM, in the owner's DM turn (`session_key`,
+    #: `grant`, `routine_id`, `owner`, destination `dm::`): the fire's execution
+    #: (`routine_execution`), the routine's `updated_at` when it began, as ISO 8601, and
+    #: the owner's DM channel. All three or none; the relay signs only while that fire is
+    #: live and the routine enabled and unedited (`identity_relay._dm_routine_run`).
+    execution: uuid.UUID | None = None
+    revision: str | None = None
+    dm_channel: str | None = None
 
     def claim(self) -> dict[str, str]:
         value = {"agent_name": self.agent_name}
@@ -186,7 +207,47 @@ class RelayBinding:
             value["workflow_run"] = str(self.workflow_run_id)
         if self.owner is not None:
             value["owner"] = self.owner
+        if self.agent_chat is not None:
+            value["agent_chat"] = self.agent_chat
+        if self.destination is not None:
+            value["destination"] = self.destination
+        if self.execution is not None:
+            value["execution"] = str(self.execution)
+        if self.revision is not None:
+            value["revision"] = self.revision
+        if self.dm_channel is not None:
+            value["dm_channel"] = self.dm_channel
         return value
+
+
+@dataclass(frozen=True)
+class DmRoutineRelay:
+    """What a fire of a routine posting to its owner's DM binds into its turn's relay
+    credential (`RelayBinding`): the routine, its owner, the fire's execution, the
+    routine's `updated_at` when the fire began (ISO 8601) and, once opened, the DM. A
+    workflow's routine step names its run instead of a routine, and its workflow's revision."""
+
+    routine_id: uuid.UUID | None
+    owner: str
+    execution: uuid.UUID
+    revision: str
+    channel: str | None = None
+    workflow_run_id: uuid.UUID | None = None
+
+    def binding(self, agent_name: str, *, session_key: uuid.UUID, grant: str) -> RelayBinding:
+        assert self.channel is not None
+        return RelayBinding(
+            agent_name=agent_name,
+            session_key=session_key,
+            grant=grant,
+            routine_id=self.routine_id,
+            workflow_run_id=self.workflow_run_id,
+            owner=self.owner,
+            destination=DM_ROUTINE_DESTINATION,
+            execution=self.execution,
+            revision=self.revision,
+            dm_channel=self.channel,
+        )
 
 
 def parse_relay_claim(raw: object) -> RelayBinding:
@@ -196,11 +257,38 @@ def parse_relay_claim(raw: object) -> RelayBinding:
     claim = cast("Mapping[str, object]", raw)
     name, key, routine = claim.get("agent_name"), claim.get("session"), claim.get("routine")
     owner, watch, grant = claim.get("owner"), claim.get("watch"), claim.get("grant")
+    agent_chat, destination = claim.get("agent_chat"), claim.get("destination")
+    execution, revision, dm_channel = (
+        claim.get("execution"),
+        claim.get("revision"),
+        claim.get("dm_channel"),
+    )
     run = claim.get("workflow_run")
     unattended = routine is not None or watch is not None or run is not None
+    # A routine in its owner's DM turn: the session, its grant and the routine together,
+    # with every field the relay checks it by; any of them alone is a wrong shape.
+    dm = execution is not None or revision is not None or dm_channel is not None
     if (
         not set(claim)
-        <= {"agent_name", "session", "routine", "watch", "owner", "grant", "workflow_run"}
+        <= {
+            "agent_name",
+            "session",
+            "routine",
+            "watch",
+            "owner",
+            "grant",
+            "agent_chat",
+            "destination",
+            "execution",
+            "revision",
+            "dm_channel",
+            "workflow_run",
+        }
+        or (dm and not _dm_routine_shape(claim))
+        or not (
+            destination is None
+            or (isinstance(destination, str) and (routine is not None or run is not None))
+        )
         or not (owner is None or (isinstance(owner, str) and owner and unattended))
         or not (grant is None or (isinstance(grant, str) and grant and key is not None))
         or not isinstance(name, str)
@@ -209,7 +297,15 @@ def parse_relay_claim(raw: object) -> RelayBinding:
         or not (routine is None or isinstance(routine, str))
         or not (watch is None or isinstance(watch, str))
         or not (run is None or isinstance(run, str))
-        or sum(value is not None for value in (key, routine, watch, run)) > 1
+        or (sum(value is not None for value in (key, routine, watch, run)) > 1 and not dm)
+        or not (
+            agent_chat is None
+            or (
+                isinstance(agent_chat, str)
+                and agent_chat
+                and set(claim) == {"agent_name", "agent_chat"}
+            )
+        )
     ):
         raise ValueError("relay claim has the wrong shape")
     return RelayBinding(
@@ -219,8 +315,36 @@ def parse_relay_claim(raw: object) -> RelayBinding:
         owner=owner,
         watch_id=None if watch is None else uuid.UUID(watch),
         grant=grant,
+        agent_chat=agent_chat,
+        destination=destination,
+        execution=None if execution is None else uuid.UUID(cast("str", execution)),
+        revision=cast("str | None", revision),
+        dm_channel=cast("str | None", dm_channel),
         workflow_run_id=None if run is None else uuid.UUID(run),
     )
+
+
+def _dm_routine_shape(claim: Mapping[str, object]) -> bool:
+    """Whether a relay claim is whole as a DM routine's: session, grant, routine (or a
+    workflow run, never both), owner, the unopened-DM destination, execution, a
+    timezone-aware revision and a channel id."""
+    values = [claim.get(k) for k in ("session", "grant", "owner", "execution")]
+    revision, channel = claim.get("revision"), claim.get("dm_channel")
+    if not all(isinstance(v, str) and v for v in values) or "watch" in claim:
+        return False
+    holders = [claim[k] for k in ("routine", "workflow_run") if k in claim]
+    if len(holders) != 1 or not (isinstance(holders[0], str) and holders[0]):
+        return False
+    if claim.get("destination") != DM_ROUTINE_DESTINATION or "agent_chat" in claim:
+        return False
+    if not (isinstance(channel, str) and channel.isascii() and channel.isdecimal()):
+        return False
+    try:
+        uuid.UUID(cast("str", claim["execution"]))
+        at = datetime.fromisoformat(cast("str", revision))
+    except (TypeError, ValueError):
+        return False
+    return at.tzinfo is not None
 
 
 @dataclass(frozen=True)
@@ -236,7 +360,7 @@ class TurnPlace:
 
 @dataclass(frozen=True)
 class IdentityClaims:
-    """Every claim but `iat` and `exp`; a value of None is left out of the token."""
+    """Every claim but `iat`, `exp` and `jti`; a value of None is left out of the token."""
 
     iss: str
     aud: str
@@ -246,6 +370,13 @@ class IdentityClaims:
     ws: str | None = None
     channel: str | None = None
     msg: str | None = None
+    #: What kind of place the answer goes to (`daimon.core.signed_room`); only with `channel`.
+    room: str | None = None
+    #: The routine a run posts for, with its `channel` and `room` and never a `sub` or `msg`.
+    routine: str | None = None
+    #: Why the call runs (`WakeReason`): `turn` with `sub` and `msg`, any other reason with
+    #: `channel` and `room` and no `sub` or `msg`. Never with `routine`.
+    wake: str | None = None
 
     def payload(self, *, now: datetime, ttl: timedelta = TOKEN_TTL) -> dict[str, str | int]:
         issued = int(now.timestamp())
@@ -262,6 +393,9 @@ class IdentityClaims:
             ("ws", self.ws),
             ("channel", self.channel),
             ("msg", self.msg),
+            ("room", self.room),
+            ("routine", self.routine),
+            ("wake", self.wake),
         ):
             if value:
                 claims[name] = value
@@ -278,6 +412,9 @@ def caller_claims(
     platform_user_id: str | None,
     agent_name: str,
     place: TurnPlace | None,
+    room: SignedRoom | None = None,
+    routine: str | None = None,
+    wake: WakeReason | None = None,
 ) -> IdentityClaims:
     """Claims for one relayed request.
 
@@ -285,9 +422,45 @@ def caller_claims(
     routine or other headless session, a session no longer the thread's live
     one, two turns at once in that session, or a sender from another
     organisation. The token then names no person and no message rather than
-    guess; it still names the agent.
+    guess; it still names the agent. `room` is the kind of place the turn's answer
+    goes to (`daimon.core.signed_room.turn_room`), sent only with the place's channel.
+
+    `routine` names the routine a run posts for; `place` is then the room it posts to
+    (`daimon.core.signed_room.routine_room`) and `room` its kind. Such a token names no
+    person and no message, and is never signed without the room and its kind. A routine
+    posting to its owner's DM (room `dm`) names the owner as the person, with the DM
+    and no message.
+
+    `wake` says why a call with no fresh message runs: `turn` is the person's live turn
+    and keeps its `sub` and `msg`; any other reason is a continuation posting to `place`,
+    signed like a routine with that room's kind and no person or message.
     """
-    person = place is not None and bool(platform_user_id)
+    owned = routine is not None and room == "dm"
+    if routine is not None and not (
+        0 < len(routine) <= ROUTINE_CLAIM_MAX
+        and place is not None
+        and place.channel_id
+        and room is not None
+        and (room != "dm" or (not place.message_id and bool(platform_user_id)))
+    ):
+        raise ValueError("a routine claim needs the room the routine posts to, and its kind")
+    if wake is not None:
+        if wake not in WAKE_REASONS or routine is not None:
+            raise ValueError("a wake claim is one known reason and never with a routine")
+        if wake == "turn" and not (place is not None and place.message_id and platform_user_id):
+            raise ValueError("a turn wake needs the person and their message")
+        if wake != "turn" and not (
+            place is not None
+            and place.channel_id
+            and not place.message_id
+            and room is not None
+            and room != "dm"
+        ):
+            raise ValueError("a continuation wake needs its room and its kind, and no message")
+    person = owned or (
+        routine is None and wake in (None, "turn") and place is not None and bool(platform_user_id)
+    )
+    channel = place.channel_id if place is not None else None
     return IdentityClaims(
         iss=issuer,
         aud=audience,
@@ -295,8 +468,11 @@ def caller_claims(
         agent_name=agent_name,
         sub=f"{platform}:{platform_user_id}" if person else None,
         ws=f"{platform}:{workspace_id}" if workspace_id else None,
-        channel=place.channel_id if place is not None else None,
+        channel=channel,
         msg=place.message_id if person and place is not None else None,
+        room=room if channel else None,
+        routine=routine,
+        wake=wake,
     )
 
 
@@ -306,48 +482,28 @@ def sign_identity(
     key: Ed25519PrivateKey,
     now: datetime,
     ttl: timedelta = TOKEN_TTL,
+    jti: str | None = None,
 ) -> str:
-    """Compact JWS, header `{"alg":"EdDSA","typ":"JWT"}`."""
-    return pyjwt.encode(
-        claims.payload(now=now, ttl=ttl), key, algorithm="EdDSA", headers={"typ": "JWT"}
-    )
+    """Compact JWS, header `{"alg":"EdDSA","typ":"JWT"}`, with a fresh `jti` unless one is given.
+
+    A server may accept each `jti` once, so every relayed request gets its own token: a
+    replayed one is refused there. That stops a replay, not a stale claim."""
+    payload: dict[str, str | int] = {
+        **claims.payload(now=now, ttl=ttl),
+        "jti": jti or uuid.uuid4().hex,
+    }
+    return pyjwt.encode(payload, key, algorithm="EdDSA", headers={"typ": "JWT"})
 
 
-class IdentityTokenCache:
-    """Reuse a token for the same claims until it is within `margin` of expiry.
+class IdentitySigner:
+    """Signs one token per relayed request (`sign_identity`); nothing is cached or reused."""
 
-    The claims carry the turn's message, so in practice one token serves one
-    turn. Bounded: the oldest entry goes first.
-    """
-
-    def __init__(
-        self,
-        key: Ed25519PrivateKey,
-        *,
-        ttl: timedelta = TOKEN_TTL,
-        margin: timedelta = RESIGN_MARGIN,
-        max_entries: int = 1024,
-    ) -> None:
-        if not timedelta(0) <= margin < ttl:
-            raise ValueError("re-sign margin must be shorter than the token lifetime")
+    def __init__(self, key: Ed25519PrivateKey, *, ttl: timedelta = TOKEN_TTL) -> None:
         self._key = key
         self._ttl = ttl
-        self._margin = margin
-        self._max_entries = max_entries
-        self._tokens: OrderedDict[IdentityClaims, tuple[str, datetime]] = OrderedDict()
 
     def token(self, claims: IdentityClaims, *, now: datetime) -> str:
-        cached = self._tokens.get(claims)
-        if cached is not None and cached[1] - now > self._margin:
-            self._tokens.move_to_end(claims)
-            return cached[0]
-        token = sign_identity(claims, key=self._key, now=now, ttl=self._ttl)
-        expires_at = datetime.fromtimestamp(int(now.timestamp()), tz=now.tzinfo) + self._ttl
-        self._tokens[claims] = (token, expires_at)
-        self._tokens.move_to_end(claims)
-        while len(self._tokens) > self._max_entries:
-            self._tokens.popitem(last=False)
-        return token
+        return sign_identity(claims, key=self._key, now=now, ttl=self._ttl)
 
 
 def matching_turn(
@@ -379,8 +535,9 @@ CONVERSATION_META_KEY: Final = "requester_conversation"
 KIND_META_KEY: Final = "requester_kind"
 #: A one-time callback watch link for a `wake_tools` call; only the relay writes it.
 WAKE_META_KEY: Final = "wake_url"
-#: Who a stamped call is for: a person's live turn, or a routine run on its owner's behalf.
-RequesterKind = Literal["person", "routine"]
+#: Who a stamped call is for: a person's live turn, a routine run on its owner's behalf,
+#: or an agent-chat turn a person signed in to the hub started (it has no place).
+RequesterKind = Literal["person", "routine", "agent_chat"]
 #: Platforms whose user and channel ids the requester fields may carry.
 REQUESTER_PLATFORMS: Final = frozenset({"discord"})
 
@@ -454,6 +611,21 @@ def routine_conversation(row: RoutineFacts) -> dict[str, str | None] | None:
     return None
 
 
+#: `routine_destination_key` of every routine posting to its owner's DM (not yet opened).
+DM_ROUTINE_DESTINATION: Final = "dm::"
+
+
+def routine_destination_key(row: RoutineFacts) -> str:
+    """Where a routine posts, as one string a run's credential keeps (`RelayBinding`):
+    `routine_conversation`'s place type, channel and parent, or `none`."""
+    conversation = routine_conversation(row)
+    if conversation is None:
+        return "none"
+    return ":".join(
+        conversation.get(key) or "" for key in ("place_type", "channel_id", "parent_channel_id")
+    )
+
+
 def watch_conversation(row: WatchRow) -> dict[str, str | None]:
     """Where a watch reports, as `requester_conversation`: its thread, the channel a
     new thread per report opens in, or the owner's DM (opened at delivery)."""
@@ -518,15 +690,16 @@ def _stamp_message(
     meta.pop(KIND_META_KEY, None)
     meta.pop(WAKE_META_KEY, None)
     # Only a tool call is stamped; any other method just loses what a caller put there.
-    # A live turn is named only with its place; a routine's place may be unrecorded.
+    # A live turn is named only with its place; a routine's place may be unrecorded; an
+    # agent-chat turn never has one, so none is sent that could pass it off as a DM.
     if (
         is_call
         and person is not None
-        and (kind == "routine" or (kind == "person" and conversation))
+        and (kind in ("routine", "agent_chat") or (kind == "person" and conversation))
     ):
         meta[REQUESTER_META_KEY] = person
         meta[KIND_META_KEY] = kind
-        if conversation:
+        if conversation and kind != "agent_chat":
             meta[CONVERSATION_META_KEY] = dict(conversation)
     if is_call and wake_url is not None:
         meta[WAKE_META_KEY] = wake_url
@@ -577,7 +750,8 @@ def stamp_parsed(
     Whatever the caller put under `params._meta` for any requester key is
     removed first, so a value present was set here. `kind` is `person` for a live
     turn and `routine` for a routine run, whose `person` is the routine's owner and
-    whose `conversation` is its delivery place (left out when it has none). With no
+    whose `conversation` is its delivery place (left out when it has none). `agent_chat`
+    names the hub-signed-in person driving an agent-chat session, never with a place. With no
     `person` or `kind` (a foreign sender, two live turns) the keys are only removed.
     Requester keys are removed under `params._meta` of every method, not only tool calls.
     `wake_url` is set on each tool call when given; a caller's own one is always removed.

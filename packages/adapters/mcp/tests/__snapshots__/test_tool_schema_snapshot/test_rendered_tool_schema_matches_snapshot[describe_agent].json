@@ -1,0 +1,15 @@
+{
+  "description": [
+    "Describe the agent associated with this MCP token.",
+    "",
+    "Returns the agent's name, system-prompt summary, skill identifiers,",
+    "and configured environment. No parameters — agent identity is read",
+    "from the token claim (confused-deputy mitigation). ``monitoring``, when",
+    "set, is a notice to show the person before they ask anything."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

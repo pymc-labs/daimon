@@ -15,8 +15,8 @@ from daimon.core.compute_models import (
 )
 from daimon.core.compute_tasks import wake_key, wake_text
 from daimon.core.errors import StoreError
-from daimon.core.features.snapshot import FeaturePlace, feature_in_or_none
-from daimon.core.stores.compute_sessions import scope
+from daimon.core.features.snapshot import feature_in_or_none
+from daimon.core.stores.compute_sessions import feature_place, notices_reach, scope
 from daimon.core.stores.domain import TurnOriginRow
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -144,6 +144,7 @@ async def finish(
     themselves in that conversation, so they are not told twice. Its text offers the
     next command only when the wake turn may run one: fewer than ``run_limit`` wake
     turns acted since the owner last did (`ComputeSession.wake_turns`, `turn_may_act`).
+    No wake is queued where none can reach (`notices_reach`): the end is still saved.
     """
     if state in ACTIVE_TASK_STATES:
         raise ValueError("Finish requires a terminal state")
@@ -158,7 +159,7 @@ async def finish(
         output_bytes=task.output_bytes if output_bytes is None else output_bytes,
         output_tail=task.output_tail if output_tail is None else output_tail,
     )
-    if done is None or not wake:
+    if done is None or not wake or not notices_reach(session):
         return done
     from daimon.core.stores.task_continuations import record_continuation
 
@@ -194,9 +195,12 @@ def wake_reads_in(session: ComputeSession) -> bool:
     through the scope timer runners (`direct_messages.run_dm_timer`,
     `run_channel_timer`), which start the turn in a fresh scope. That is not the
     session's conversation, so every read is refused there
-    (`packages/core/tests/test_compute_wake_scope_gap.py`).
+    (`packages/core/tests/test_compute_wake_scope_gap.py`). An agent-chat session's
+    machine gets no wake at all (`notices_reach`).
     """
-    return not session.thread_id.startswith((DM_SCOPE_PREFIX, CHANNEL_SCOPE_PREFIX))
+    return notices_reach(session) and not session.thread_id.startswith(
+        (DM_SCOPE_PREFIX, CHANNEL_SCOPE_PREFIX)
+    )
 
 
 async def wake_turn_of(
@@ -208,8 +212,11 @@ async def wake_turn_of(
     then starts takes that owner as its origin id (`daimon.core.turn_origin.wake_turn`).
     So the row names its exact turn, for as long as it is claimed, started and inside
     its lease, and it names its command by ``wake_key``. Any other turn, whatever
-    started it and whenever, has another origin id and reads nothing.
+    started it and whenever, has another origin id and reads nothing. An agent-chat
+    session's machine has no wake (`notices_reach`), so its scope is never looked up.
     """
+    if not notices_reach(session):
+        return False
     await scope(db, session.tenant_id)
     wake = await db.scalar(
         select(TaskContinuation).where(
@@ -249,12 +256,8 @@ async def wake_runs_on(db: AsyncSession, session: ComputeSession) -> bool:
     `feature_in_or_none` does not check `depends_on`, and this needs `compute` on too.
     It is: the session exists, and `ComputeSessions._allowed` checked it at launch.
     """
-    place = FeaturePlace.of(
-        session.tenant_id,
-        session.platform,
-        session.parent_channel_id,
-        session.thread_id,
-        agent_id=session.agent_id,
-    )
+    place = await feature_place(db, session)
+    if place is None:
+        return False
     found = await feature_in_or_none(db, None, place, "compute_wake_runs")
     return found is not None and found.on

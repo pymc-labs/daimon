@@ -112,6 +112,7 @@ from daimon.core.ma_resolver import (
     retrieve_agent_cached,
     retrieve_environment_cached,
 )
+from daimon.core.mcp_identity import DmRoutineRelay
 from daimon.core.membership_subject import resolve_subject, resolve_subject_authority
 from daimon.core.permissions import (
     agent_permissions,
@@ -142,6 +143,7 @@ from daimon.core.spend_gate import (
 from daimon.core.stores import agent_backends, mux_state
 from daimon.core.stores.access_policy import PolicyBusyError, load_access_policy
 from daimon.core.stores.accounts import set_role
+from daimon.core.stores.audience_facts import FACTS_WAIT_S, wait_for_usable_facts
 from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, Role
 from daimon.core.stores.identity import (
@@ -155,8 +157,13 @@ from daimon.core.stores.scoped_config_write import clear_agent_references
 from daimon.core.stores.shared_channels import mark_channel_shared
 from daimon.core.stores.thread_sessions import get_thread_session_at
 from daimon.core.thread_models import apply_thread_model, conversation_key, thread_backend
-from daimon.core.thread_release import apply_thread_release, release_due, release_now
-from daimon.core.turn.approvals import daimon_rule_set_for
+from daimon.core.thread_release import (
+    apply_thread_release,
+    release_due,
+    release_now,
+    release_pending,
+)
+from daimon.core.turn.approvals import daimon_rule_tools_for
 from daimon.core.turn.ceiling import limit_ceiling_s
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import (
@@ -180,7 +187,7 @@ from mux.contracts.config import BackendConfig, ConfigRevision, ResolvedBackend,
 from mux.contracts.ids import ChannelRef, Provider, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.errors import ScopeViolation
-from mux.profiles import MANAGED_AGENTS
+from mux.profiles import INLINE_REUSE, MANAGED_AGENTS, PERSISTENT_WORKSPACE
 from mux.profiles.selfhosted import LOOP
 from mux.state.lease import Slot
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -417,6 +424,13 @@ class AdmitRequest:
     relay_scoped: bool = False
 
 
+@dataclass
+class FactsWaitBudget:
+    """Seconds one turn has waited for room facts, all waits together."""
+
+    waited_s: float = 0.0
+
+
 @dataclass(frozen=True)
 class Admission:
     """Everything `run_prepared_turn` needs to start a turn, resolved once."""
@@ -437,10 +451,6 @@ class Admission:
     # admitted (empty while rules are off): their session tools wait for the
     # driver's decision, so the set is part of the tools the session is bound to.
     daimon_rule_tools: frozenset[str] = frozenset()
-    # Some of those rules only the turn driver applies (any `ask`, a channel
-    # `deny`); an agent-wide `deny` is also enforced by the MCP server, which
-    # backends without an approval pause rely on.
-    daimon_rules_need_driver: bool = False
     # The channel or thread itself is sealed (DM memory policy aside). Callers
     # that copy content out of the channel, such as /dm-me, must refuse.
     source_sealed: bool = False
@@ -456,6 +466,9 @@ class Admission:
     # The origin channel is shared with another organisation (stamped on the turn origin).
     shared_channel: bool = False
     private_dm_id: str | None = None
+    # A routine posting to its owner's DM, with that DM opened: bound into the turn's
+    # relay credential (`daimon.core.mcp_identity.DmRoutineRelay`). None otherwise.
+    dm_routine_relay: DmRoutineRelay | None = None
     # A relay agent's turn (`daimon.core.relay_scope`): held, sealed, no memory, a fresh session.
     relay_scoped: bool = False
     # The channel and thread the turn runs in, and every sealed id that seals
@@ -465,6 +478,9 @@ class Admission:
     origin_channel_id: str | None = None
     origin_thread_id: str | None = None
     origin_seal_ids: frozenset[str] = frozenset()
+    # The turn's one wait budget for room facts, shared by reference with every copy
+    # (`replace`): admission and every `reauthorize` spend it in place.
+    facts_wait: FactsWaitBudget = field(default_factory=FactsWaitBudget, compare=False, repr=False)
     # Parent channel the turn's spend is attributed to; in a DM, the channel it
     # was moved from, or None. Apart from `origin_channel_id`, which drives the
     # seal: a DM is budgeted to its source channel but never runs there.
@@ -525,6 +541,8 @@ class Admission:
     # The turn-bound, session-tool and session-identity features at this place; None only
     # for hand-built admissions, which render every turn control and keep every tool.
     features: FeatureSnapshot | None = field(default=None, compare=False, repr=False)
+    # A routine fire whose admin opt-in matched this run keeps its built-in tools.
+    routine_sandbox_tools: bool = field(default=False, compare=False, repr=False)
 
     @property
     def toolset(self) -> SessionToolset:
@@ -721,6 +739,8 @@ async def admit(
     is_dm: bool = False,
     dm_source_channel_id: str | None = None,
     dm_agent_name: str | None = None,
+    routine_agent_name: str | None = None,
+    routine_thread_id: str | None = None,
     dm_no_source: bool = False,
     cold_dm: bool = False,
     category_id: str | None = None,
@@ -737,8 +757,11 @@ async def admit(
     principal_platform: str | None = None,
     helper: HelperCall | None = None,
     public_thread: bool = False,
+    on_facts_wait: Callable[[], Awaitable[None]] | None = None,
 ) -> Admission:
     """Admit a turn, or raise the typed reason it is refused.
+
+    `on_facts_wait` is awaited once, only when admission starts to wait for room facts.
 
     `requester_org` is the platform's word on which organisation the requester
     belongs to; every caller states it. `requester_home_id` names the home
@@ -749,7 +772,9 @@ async def admit(
     `surface` overrides the DM-or-channel surface (the web chat), and
     `principal_platform` names the platform `external_user_id` belongs to when it
     is not the one the turn runs on (a web person linked to a platform account).
-    `helper` admits a helper's turn as its agent (`admit_helper`).
+    `helper` admits a helper's turn as its agent (`admit_helper`), and
+    `routine_agent_name` a routine's fire as the routine's own agent, and
+    `routine_thread_id` the thread it posts to, whose kept provider it runs on.
     """
     observation = current_outcome.get() or TurnObservation(
         deps.sessionmaker, tenant_id, platform, channel_id, thread_id
@@ -772,6 +797,8 @@ async def admit(
                 is_dm=is_dm,
                 dm_source_channel_id=dm_source_channel_id,
                 dm_agent_name=dm_agent_name,
+                routine_agent_name=routine_agent_name,
+                routine_thread_id=routine_thread_id,
                 dm_no_source=dm_no_source,
                 cold_dm=cold_dm,
                 category_id=category_id,
@@ -787,6 +814,7 @@ async def admit(
                 principal_platform=principal_platform,
                 helper=helper,
                 public_thread=public_thread,
+                on_facts_wait=on_facts_wait,
             )
     except BaseException as exc:
         observation.finish(error=exc)
@@ -909,6 +937,8 @@ async def admit_impl(
     is_dm: bool = False,
     dm_source_channel_id: str | None = None,
     dm_agent_name: str | None = None,
+    routine_agent_name: str | None = None,
+    routine_thread_id: str | None = None,
     dm_no_source: bool = False,
     cold_dm: bool = False,
     category_id: str | None = None,
@@ -924,6 +954,7 @@ async def admit_impl(
     principal_platform: str | None = None,
     helper: HelperCall | None = None,
     public_thread: bool = False,
+    on_facts_wait: Callable[[], Awaitable[None]] | None = None,
 ) -> Admission:
     """Run the full pre-turn gate sequence; raise instead of returning bool.
 
@@ -948,6 +979,8 @@ async def admit_impl(
         is_dm=is_dm,
         dm_source_channel_id=dm_source_channel_id,
         dm_agent_name=dm_agent_name,
+        routine_agent_name=routine_agent_name,
+        routine_thread_id=routine_thread_id,
         dm_no_source=dm_no_source,
         cold_dm=cold_dm,
         category_id=category_id,
@@ -963,6 +996,7 @@ async def admit_impl(
         principal_platform=principal_platform,
         helper=helper,
         public_thread=public_thread,
+        on_facts_wait=on_facts_wait,
     )
     followed: list[Slot] = []
     try:
@@ -989,6 +1023,8 @@ async def _admit_gates(
     is_dm: bool = False,
     dm_source_channel_id: str | None = None,
     dm_agent_name: str | None = None,
+    routine_agent_name: str | None = None,
+    routine_thread_id: str | None = None,
     dm_no_source: bool = False,
     cold_dm: bool = False,
     category_id: str | None = None,
@@ -1004,6 +1040,7 @@ async def _admit_gates(
     principal_platform: str | None = None,
     helper: HelperCall | None = None,
     public_thread: bool = False,
+    on_facts_wait: Callable[[], Awaitable[None]] | None = None,
     followed: list[Slot] | None = None,
     follow_switch: bool = True,
 ) -> Admission:
@@ -1062,6 +1099,18 @@ async def _admit_gates(
         # A DM has no channel of its own to share; /dm-me asks about the channel
         # it copies history from.
         shared_place = dm_source_channel_id if is_dm else channel_id
+        facts_waited = 0.0
+        facts_budget = FactsWaitBudget()
+        if mode == "on" and platform == "discord" and shared_place is not None:
+            # Facts retired moments ago come back soon: wait (no transaction held) before judging.
+            mark("identity")
+            facts_waited = (
+                await wait_for_usable_facts(session, tenant_id=tenant_id, on_wait=on_facts_wait)
+                or 0.0
+            )
+            facts_budget.waited_s = facts_waited
+            if facts_waited:
+                mark("facts_wait")
         if shared_place is not None:
             audience = await _record_shared_channel(
                 session,
@@ -1185,6 +1234,13 @@ async def _admit_gates(
             config = config.model_copy(
                 update={"agent_name": dm_agent_name, "responder_ma_agent_id": None}
             )
+        if routine_agent_name is not None:
+            # A routine runs its own agent, not the channel's, in a fresh scope.
+            if thread_id is not None:
+                raise ValueError("A routine's agent override requires a fresh scope")
+            config = config.model_copy(
+                update={"agent_name": routine_agent_name, "responder_ma_agent_id": None}
+            )
         # Feature-disabled turns retain the existing channel read and skip all
         # agent preference, materialization and thread-pinning work.
         channel = channel_ref(tenant_id, platform, channel_id) if deps.channel_backends else None
@@ -1235,15 +1291,15 @@ async def _admit_gates(
             """
             nonlocal retained_revision, retained_binding, retained_shared
             nonlocal backend_revision, backend_revision_origin, backend_footer_profile
-            assert channel is not None and slot_thread_id is not None
-            thread = ThreadRef(channel=channel, thread_id=slot_thread_id)
+            assert channel is not None and provider_thread_id is not None
+            thread = ThreadRef(channel=channel, thread_id=provider_thread_id)
             slots = [Slot(thread=thread, account_id=str(principal.account_id))]
             if backend_ever_shared:
                 slots.insert(0, Slot(thread=thread))
             for slot in slots:
                 if slot.account_id is None and not shared_ok:
                     continue
-                if released and slot.account_id is not None:
+                if own_released and slot.account_id is not None:
                     continue  # A due release: this caller's slot selects afresh.
                 binding = (
                     await deps.state_store.get_binding(slot)
@@ -1285,14 +1341,14 @@ async def _admit_gates(
                 backend_revision_origin = source if source != "default" else None
                 backend_footer_profile = retained.profile
                 break
-            if retained_revision is None and not released:
+            if retained_revision is None and not own_released:
                 # A caller's older session remains on its original default
                 # backend even if neutral thread bindings did not yet exist.
                 previous = await get_thread_session_at(
                     db,
                     tenant_id=tenant_id,
                     platform=platform,
-                    thread_id=slot_thread_id,
+                    thread_id=provider_thread_id,
                     account_id=principal.account_id,
                     at=now,
                 )
@@ -1306,10 +1362,22 @@ async def _admit_gates(
                     backend_revision = None
                     backend_revision_origin = None
 
+        # A routine binds its own fresh scope but runs on the provider its thread kept,
+        # read as `routine_provider` routes it (`effective_thread_backend`).
+        provider_thread_id = slot_thread_id if routine_thread_id is None else routine_thread_id
+        own_released = released
+        if routine_thread_id is not None and channel is not None:
+            own_released = await release_pending(
+                session,
+                Slot(
+                    thread=ThreadRef(channel=channel, thread_id=routine_thread_id),
+                    account_id=str(principal.account_id),
+                ),
+            )
         if (
             selection_enabled
             and channel is not None
-            and slot_thread_id is not None
+            and provider_thread_id is not None
             and not is_dm
             and config.thread_binding_kind != "setup"
         ):
@@ -1680,7 +1748,7 @@ async def _admit_gates(
 
     # The agent's rules on daimon's own tools, read once per turn (no query
     # unless tool safety and agent rules are both on).
-    daimon_rules = await daimon_rule_set_for(
+    daimon_rule_tools = await daimon_rule_tools_for(
         deps.sessionmaker, deps.tool_safety, tenant_id=tenant_id, agent_id=agent.id
     )
     mark("daimon_rule_tools")
@@ -1742,11 +1810,11 @@ async def _admit_gates(
             memory_read_only=memory_read_only,
             asks_before_publishing=_asks_before_publishing(policy, grant),
             approval_gate=_approval_gate_for(deps, policy, grant, agent.id),
-            daimon_rule_tools=daimon_rules.tools,
-            daimon_rules_need_driver=daimon_rules.needs_driver,
+            daimon_rule_tools=daimon_rule_tools,
             source_sealed=source_sealed,
             hold=hold,
             shared_channel=shared,
+            facts_wait=facts_budget,
             origin_channel_id=channel_id,
             origin_thread_id=thread_id,
             origin_seal_ids=seal_ids,
@@ -2111,12 +2179,12 @@ async def _admit_gates(
         memory_read_only=memory_read_only,
         asks_before_publishing=_asks_before_publishing(policy, grant),
         approval_gate=_approval_gate_for(deps, policy, grant, agent.id),
-        daimon_rule_tools=daimon_rules.tools,
-        daimon_rules_need_driver=daimon_rules.needs_driver,
+        daimon_rule_tools=daimon_rule_tools,
         source_sealed=source_sealed,
         source_shared=source_shared,
         hold=hold,
         shared_channel=shared,
+        facts_wait=facts_budget,
         relay_scoped=relay_agent,
         origin_channel_id=channel_id,
         origin_thread_id=thread_id,
@@ -2503,6 +2571,23 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
     if grant is None:
         return admission
     async with deps.sessionmaker() as session:
+        if (
+            grant.platform == "discord"
+            # Held and narrow already: both only tighten, so no fact can change this turn.
+            and not (grant.hold is not None and grant.narrow_room)
+            and (not grant.is_dm or grant.dm_source is not None)
+            and await audience_mode(
+                session, FeaturePlace(grant.tenant_id, "discord", grant.channel_id)
+            )
+            == "on"
+        ):
+            budget = admission.facts_wait
+            budget.waited_s += (
+                await wait_for_usable_facts(
+                    session, tenant_id=grant.tenant_id, budget_s=FACTS_WAIT_S - budget.waited_s
+                )
+                or 0.0
+            )
         policy = await load_access_policy(session, tenant_id=grant.tenant_id)
         if grant.public_thread:
             policy = with_public_thread_room(
@@ -2588,7 +2673,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
     )
     asks_before_publishing = _asks_before_publishing(policy, grant)
     approval_gate = _approval_gate_for(deps, policy, grant, admission.agent.id)
-    rules = await daimon_rule_set_for(
+    rule_tools = await daimon_rule_tools_for(
         deps.sessionmaker, deps.tool_safety, tenant_id=grant.tenant_id, agent_id=admission.agent.id
     )
     # A room that became contained since admission answers with no signed-identity
@@ -2604,8 +2689,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         and memory_read_only == admission.memory_read_only
         and asks_before_publishing == admission.asks_before_publishing
         and approval_gate == admission.approval_gate
-        and rules.tools == admission.daimon_rule_tools
-        and rules.needs_driver == admission.daimon_rules_need_driver
+        and rule_tools == admission.daimon_rule_tools
     ):
         return admission
     return replace(
@@ -2619,8 +2703,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         memory_read_only=memory_read_only,
         asks_before_publishing=asks_before_publishing,
         approval_gate=approval_gate,
-        daimon_rule_tools=rules.tools,
-        daimon_rules_need_driver=rules.needs_driver,
+        daimon_rule_tools=rule_tools,
     )
 
 
@@ -3023,7 +3106,7 @@ async def _capture_backend_source(
                 if context.channel_id is not None
                 else ()
             )
-            rule_set = await daimon_rule_set_for(
+            rule_tools = await daimon_rule_tools_for(
                 deps.sessionmaker,
                 deps.tool_safety,
                 tenant_id=context.tenant_id,
@@ -3040,8 +3123,7 @@ async def _capture_backend_source(
                 ),
                 asks_before_publishing=_asks_before_publishing(policy, grant),
                 approval_gate=_approval_gate_for(deps, policy, grant, actual.id),
-                daimon_rule_tools=rule_set.tools,
-                daimon_rules_need_driver=rule_set.needs_driver,
+                daimon_rule_tools=rule_tools,
                 source_sealed=bool(seals),
                 origin_channel_id=context.channel_id,
                 origin_thread_id=context.thread_id,
@@ -3176,22 +3258,27 @@ async def place_features(
 
 
 async def require_tool_limits_hold(deps: TurnDeps, admission: Admission) -> None:
-    """Refuse a native turn where a channel or thread switched a built-in tool off.
+    """Refuse a channel's own Gemini or OpenAI deployment where a channel or thread
+    switched a built-in tool off.
 
-    Gemini and OpenAI compile one revision per agent, so a switch below the agent never
-    reaches them; the same place on Claude would hide the tool. Running anyway would
-    quietly give the agent a tool the people there turned off.
+    An agent's own copy leaves such a tool out of the reply (`runtime_manifest`), as
+    Claude does. A channel's deployment is the operator's fixed agent: running it anyway
+    would quietly give the agent a tool the people there turned off.
     """
     native = admission.features
-    if native is None or native.place.backend in (None, MANAGED_AGENTS.provider):
+    if (
+        native is None
+        or native.place.backend not in (INLINE_REUSE.provider, PERSISTENT_WORKSPACE.provider)
+        or admission.backend_revision_origin == "agent"
+    ):
         return
-    claude = await place_features(
+    above = await place_features(
         deps,
-        replace(native.place, backend=MANAGED_AGENTS.provider),
+        replace(native.place, channel_id=None, thread_id=None),
         admission.agent,
         keys=TOOL_KEYS,
     )
-    if any(native.on(key) and not claude.on(key) for key in TOOL_KEYS):
+    if any(above.on(key) and not native.on(key) for key in TOOL_KEYS):
         raise AdmissionDenied(
             reason="backend_unsupported", cause="tool_limits", provider=native.place.backend
         )
@@ -3200,14 +3287,10 @@ async def require_tool_limits_hold(deps: TurnDeps, admission: Admission) -> None
 def running_on(admission: Admission) -> dict[str, str]:
     """The model provider and model this message actually runs on: what the card's
     footer and the metering say, never the agent's settings (M03)."""
-    from mux.profiles import get_profile
+    from daimon.core.turn.shown_model import shown_model
 
-    revision = admission.backend_revision
-    provider = (
-        get_profile(revision.profile).provider if revision is not None else MANAGED_AGENTS.provider
-    )
-    model = (revision.model if revision is not None else None) or admission.agent.model.id
-    return {"provider": provider, "model": model}
+    shown = shown_model(admission)
+    return {"provider": shown.provider, "model": shown.id}
 
 
 async def _web_links(
@@ -3230,6 +3313,7 @@ def backend_facts(admission: Admission) -> dict[str, Any]:
     return {
         "web": admission.web,
         "features": admission.features,
+        "daimon_tools": admission.toolset.daimon_tools,
         "running_on": running_on(admission),
         # A later hand-off summary (#1434) slots in here beside the move.
         "moved": None

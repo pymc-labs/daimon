@@ -455,6 +455,7 @@ def test_core_platform_scopes_are_limited_to_workspace_operations() -> None:
             ("mux_backend.py", "platform_scope"): 1,  # Shared constructor, not an operation.
             ("mcp_vault_janitor.py", "archive_orphan_mcp_vaults"): 1,
             ("mcp_vault_janitor.py", "archive_idle_relay_vaults"): 1,
+            ("tenant_retirement.py", "deleters"): 1,
             ("mcp_credential_sweep.py", "sweep_stale_admin_credentials"): 1,
             # Lists vaults to find one agent's copies of a detached server's token;
             # credential reads and deletes use the vault owner's tenant scope.

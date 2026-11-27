@@ -41,6 +41,19 @@ SANDBOX = {"sandbox", "installed_packages", "network_rules", "workspace_files"}
 LIMITED = NetworkPolicy(mode="limited", allowed_hosts=("a.test",))
 
 
+#: The default environment's pip list, in file order (`defaults/environments/default.yaml`).
+DEFAULT_PIP = (
+    "typst",
+    "duckdb",
+    "pyarrow",
+    "python-docx",
+    "python-pptx",
+    "pypdf",
+    "pdfplumber",
+    "reportlab",
+)
+
+
 def default_environment() -> dict:
     """The default agent's default environment, as Anthropic reads it back."""
     config = yaml.safe_load((ROOT / "defaults/environments/default.yaml").read_text())["config"]
@@ -223,7 +236,7 @@ async def test_default_environment_when_switched_to_openai_then_its_turn_install
     await openai_turn(request, 0)
     await openai_turn(request, 1)
     (spec,) = environments.specs
-    assert spec.packages == {"system": ("gh",), "python": ("typst", "duckdb", "pyarrow")}, (
+    assert spec.packages == {"system": ("gh",), "python": DEFAULT_PIP}, (
         "the default environment's packages are set up"
     )
     assert spec.network == NetworkPolicy(), "its network stays open"
@@ -338,7 +351,7 @@ async def test_source_environment_when_switched_to_gemini_then_its_turn_sets_it_
     if setup == "packages":
         assert {HOOKS_TARGET, SCRIPT_TARGET} <= set(inline), "the install hook is mounted"
         assert "apt-get install -y -qq gh" in inline[SCRIPT_TARGET], "system packages"
-        assert "pip install -q typst duckdb pyarrow" in inline[SCRIPT_TARGET], "python packages"
+        assert f"pip install -q {' '.join(DEFAULT_PIP)}" in inline[SCRIPT_TARGET], "python packages"
         assert "network" not in environment, "egress stays open"
     else:
         assert environment["network"] == {"allowlist": [{"domain": "a.test"}]}, "egress limited"

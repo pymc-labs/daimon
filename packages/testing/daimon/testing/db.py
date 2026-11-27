@@ -136,6 +136,11 @@ def _end_transactions_under_the_statement_mutex() -> None:
     connection, so only tests see this. Taking the statement mutex around both
     calls removes the interleaving; ``_guard_pooled_transactions`` still reports
     a connection that comes back mid-transaction for any other reason.
+
+    The dialect checks that a transaction is open before it takes the mutex, so
+    the check is repeated under it: a task cancelled while closing its session
+    leaves that close running in a shielded task (``AsyncSession.__aexit__``),
+    and the transaction it ends is gone by the time the next task gets the mutex.
     """
     connection_class = _DialectConnection
     if getattr(connection_class, "_daimon_serialised_transaction_end", False):
@@ -156,7 +161,8 @@ def _under_statement_mutex(
 ) -> Callable[[_DialectConnection], Awaitable[None]]:
     async def serialised(adapted_connection: _DialectConnection) -> None:
         async with adapted_connection._execute_mutex:  # pyright: ignore[reportPrivateUsage]
-            await end_transaction(adapted_connection)
+            if adapted_connection._started:  # pyright: ignore[reportPrivateUsage]
+                await end_transaction(adapted_connection)
 
     serialised.__name__ = end_transaction.__name__
     return serialised
@@ -1008,6 +1014,20 @@ async def db_clean(
         _raise_on_leaked_transactions(db_engine.pool, item.nodeid)
 
 
+_PACKAGE_DRAINS: list[Callable[[], Awaitable[object]]] = []
+
+
+def add_background_drain(drain: Callable[[], Awaitable[object]]) -> None:
+    """Have every database fixture await ``drain`` before it tears down.
+
+    For a package's own background tasks that read through the test's
+    connection: a test-scoped autouse fixture tears down after the database
+    fixtures, too late for a task still ending a transaction on it.
+    """
+    if drain not in _PACKAGE_DRAINS:
+        _PACKAGE_DRAINS.append(drain)
+
+
 async def _drain_background_tasks() -> None:
     """Finish a test's background database work before closing or wiping it.
 
@@ -1016,6 +1036,8 @@ async def _drain_background_tasks() -> None:
     the test's sessionmaker and must finish before its connection is returned.
     Forget cached names because the next wipe deletes them.
     """
+    for drain in _PACKAGE_DRAINS:
+        await drain()
     from daimon.core.agent_identity import cancel_and_wait_pending_agent_faces
     from daimon.core.channel_budget_notice import drain_budget_notices
     from daimon.core.ops_events import drain_ops_events

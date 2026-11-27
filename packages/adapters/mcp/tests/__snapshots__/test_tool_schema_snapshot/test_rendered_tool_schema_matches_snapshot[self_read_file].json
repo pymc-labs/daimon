@@ -1,0 +1,20 @@
+{
+  "description": [
+    "Check a per-agent file by `key`. Returns null if no file exists at that key.",
+    "",
+    "The value is always redacted: use it from the session `.env` without",
+    "echoing it. The result shows when it was last set."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "key": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "key"
+    ],
+    "type": "object"
+  }
+}

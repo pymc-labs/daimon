@@ -260,6 +260,8 @@ def make_discord_workflow_poster(
             post=upload,
             notice=notice,
             may_post=may_post,
+            sessions=sessionmaker,
+            tenant_id=row.tenant_id,
         )
         return done
 

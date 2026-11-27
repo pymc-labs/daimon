@@ -17,7 +17,7 @@ from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 import httpx
 import pytest
@@ -44,6 +44,7 @@ from daimon.core.stores.domain import SANDBOX_KEY, FeatureTarget, RoutineRow, Sa
 from daimon.core.stores.lead_intake import IntakeStore
 from daimon.core.stores.shared_channels import mark_channel_shared
 from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.state import ToolUseBlock, TurnState
 from daimon.core.workflows import convert, engine, runs, triggers
 from daimon.core.workflows.access import Who
@@ -127,7 +128,6 @@ SHAPES = {
     "autonomous": Shape(destination=None, posts_to="999"),
     "agent_posted": Shape(posts_to=CHANNEL),
     "failure": Shape(raises=True),
-    "other_backend": Shape(gemini=True, refusal="Routines run only on Anthropic"),
 }
 
 
@@ -486,6 +486,32 @@ async def test_an_ownerless_routine_moves_paused_and_never_fires(
     assert routine.seen.error and "no owner" in routine.seen.error, "the routine refuses"
     assert not ran and not flow.seen.turns, "the paused workflow does not run"
     assert routine.seen.turns == [] and routine.seen.jobs == [], "neither runs a turn or posts"
+
+
+async def test_on_another_provider_a_routine_runs_where_its_step_refuses(
+    committing: async_sessionmaker[AsyncSession],
+) -> None:
+    """Deliberate difference: a routine on Gemini runs as a chat-path turn (`_fire_native`);
+    workflows run only on Anthropic, so its step refuses before admission."""
+    admitted: list[str] = []
+
+    async def admit(_deps: object, subject: Subject, **_kw: object) -> NoReturn:
+        admitted.append(subject.agent_name)
+        raise AdmissionDenied(reason="backend_unsupported")
+
+    shape = Shape(gemini=True)
+    now = datetime.now(UTC)
+    settings, resolver, client = make_settings(), CachedMembershipResolver(_member), _client()
+    routine, flow = await _place(committing, shape, now), await _place(committing, shape, now)
+    async with committing.begin() as s:
+        await convert.move_routine(s, flow.row.tenant_id, flow.row.id, now)
+    deps = replace(_deps(routine, shape, client, settings, resolver), admit_provider_routine=admit)
+    await _as_routine(routine, deps, now)
+    ran = await _as_workflow(flow, _deps(flow, shape, client, settings, resolver), settings, now)
+    await client.close()
+    assert admitted == [routine.row.agent_name], "the routine is admitted on its provider"
+    assert ran and not flow.seen.turns and not admitted[1:], "the step runs no turn"
+    assert "Workflows run only on Anthropic" in (flow.seen.error or ""), flow.seen.error
 
 
 async def test_a_routine_never_fires_as_both_across_the_move_and_back(
