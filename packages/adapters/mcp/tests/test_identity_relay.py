@@ -7,6 +7,7 @@ import json
 import ssl
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 import jwt as pyjwt
@@ -29,6 +30,7 @@ from daimon.adapters.mcp.tools import _session_gate
 from daimon.core.agent_chat_requester import EarlierTurn, record_driver
 from daimon.core.config import SignedIdentityServer
 from daimon.core.continuity.continuation import ContinuationRequest
+from daimon.core.evals.world.dispatch import FakeWorld
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_chat_mcp_token
 from daimon.core.mcp_identity import (
@@ -46,6 +48,7 @@ from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import create_thread_session, mark_dead
 from daimon.core.stores.turn_origins import bind_origin_session, create_origin
 from daimon.core.turn_hold import TurnHold
+from daimon.testing.eval_world import eval_case, make_eval_principal, make_running_item
 from daimon.testing.factories import make_platform_principal, make_tenant
 from daimon.testing.ma_models import ma_agent
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
@@ -268,6 +271,7 @@ def _relay(
     server: SignedIdentityServer = SERVER,
     bearers: dict[str, SecretStr] | None = None,
     anthropic: AsyncAnthropic | None = None,
+    world: FakeWorld | None = None,
 ) -> httpx.AsyncClient:
     app = Starlette()
     app.add_route(
@@ -283,6 +287,7 @@ def _relay(
                 server.name: httpx.AsyncClient(transport=httpx.MockTransport(upstream.handle))
             },
             clock=lambda: dt.datetime.now(dt.UTC),
+            world=world,
         ),
         methods=RELAY_METHODS,
     )
@@ -1221,6 +1226,35 @@ async def test_an_allowlist_naming_the_builtin_when_its_name_changed_then_admits
         response = await _post(client, token, _tool_call())
     assert (response.status_code != 403) is relayed, "the rename keeps the seeded agent listed"
     assert bool(upstream.requests) is relayed, "a workspace's own namesake is never relayed"
+
+
+async def test_an_eval_caller_is_answered_by_its_world_and_nothing_goes_upstream(
+    db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    case = eval_case({"mcp_servers": [{"name": "tools", "kind": "relay", "tools": [
+        {"name": "lookup", "input_schema": {"type": "object"}}]}]})  # fmt: skip
+    async with db_session_factory() as db, db.begin():
+        principal = await make_eval_principal(db)
+        item_id = await make_running_item(db, principal.tenant_id, case)
+    person = _Person(principal.tenant_id, principal.account_id, uuid.uuid4())
+    async with db_session_factory() as db, db.begin():
+        bound, _, _ = await mint_chat_mcp_token(
+            db, account_id=person.account_id, agent_id=person.agent_id, secret=SECRET,
+            now=dt.datetime.now(dt.UTC), relay=RelayBinding("Agent A"), eval_item_id=item_id,
+        )  # fmt: skip
+    unbound = await _token(db_session_factory, person, RelayBinding("Agent A"))
+    upstream, world = _Upstream(), FakeWorld(db_session_factory, None, tmp_path)
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    async with _relay(db_session_factory, upstream, generate_signing_key(), world=world) as client:
+        answered, refused = [
+            await client.post(
+                "/mcp-identity/tools", content=body, headers={"authorization": f"Bearer {token}"}
+            )  # fmt: skip
+            for token in (bound, unbound)
+        ]
+    assert answered.json()["result"]["tools"][0]["name"] == "lookup", "the world answers"
+    assert refused.status_code == 403, "an eval caller bound to no item is refused"
+    assert upstream.requests == [], "nothing went upstream"
 
 
 @pytest.mark.parametrize(

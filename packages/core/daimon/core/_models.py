@@ -1618,6 +1618,8 @@ class McpToken(Base):
     # 'token' for a key shown once on screen). Display only; NULL for older keys and
     # for every other kind of credential.
     client: Mapped[str | None]
+    # The eval item the credential answers for: server-set at mint, read by the verifier.
+    eval_item_id: Mapped[uuid.UUID | None]
 
 
 class CodingKeyClaim(Base):
@@ -6269,6 +6271,12 @@ class EvalRunItem(Base):
     __table_args__ = (
         UniqueConstraint("run_id", "key", name="uq_eval_run_items_run_key"),
         Index("ix_eval_run_items_run_status", "run_id", "status"),
+        Index(
+            "uq_eval_run_items_world_token",
+            "world_token_sha256",
+            unique=True,
+            postgresql_where=text("world_token_sha256 IS NOT NULL"),
+        ),
     )
 
     id: Mapped[UuidPk]
@@ -6284,6 +6292,8 @@ class EvalRunItem(Base):
     claimed_at: Mapped[datetime | None]
     document: Mapped[dict[str, Any]]
     blob_shas: Mapped[list[str]] = mapped_column(server_default=text("'{}'"))
+    # sha256 of the bearer token its sandbox gateway reaches the world with (`evals.world`).
+    world_token_sha256: Mapped[str | None]
     created_at: Mapped[TsNow]
     updated_at: Mapped[TsNowOnUpdate]
 
@@ -6397,6 +6407,57 @@ class EvalScrubEntity(Base):
     kind: Mapped[str] = mapped_column(primary_key=True)
     key_hash: Mapped[str] = mapped_column(primary_key=True)
     fake: Mapped[str]
+    created_at: Mapped[TsNow]
+
+
+_EvalItemFK = Annotated[
+    uuid.UUID, mapped_column(ForeignKey("eval_run_items.id", ondelete="CASCADE"), primary_key=True)
+]
+
+
+class EvalWorldCall(Base):
+    """One request that reached an item's fake world and its answer (a `WorldCall` document)."""
+
+    __tablename__ = "eval_world_calls"
+
+    item_id: Mapped[_EvalItemFK]
+    seq: Mapped[int] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    surface: Mapped[str]
+    service: Mapped[str | None]
+    origin: Mapped[str]
+    reason: Mapped[str | None]
+    exchange_id: Mapped[str | None]
+    sim_key: Mapped[str | None]
+    model_calls: Mapped[int] = mapped_column(server_default=text("0"))
+    document: Mapped[dict[str, Any]]
+    created_at: Mapped[TsNow]
+
+
+class EvalWorldOverlay(Base):
+    """One resource an item's writes changed; `data` None means deleted."""
+
+    __tablename__ = "eval_world_overlay"
+
+    item_id: Mapped[_EvalItemFK]
+    service: Mapped[str] = mapped_column(primary_key=True)
+    resource_key: Mapped[str] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    version: Mapped[int]
+    data: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
+    created_at: Mapped[TsNow]
+
+
+class EvalSimCache(Base):
+    """A simulator answer for one case revision, shared by every arm and repeat."""
+
+    __tablename__ = "eval_sim_cache"
+
+    tenant_id: Mapped[TenantPk]
+    case_sha256: Mapped[str] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(primary_key=True)
+    model: Mapped[str]
+    document: Mapped[dict[str, Any]]
     created_at: Mapped[TsNow]
 
 

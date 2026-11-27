@@ -90,6 +90,8 @@ class AuthIdentity:
     token_kind: McpTokenKind | None = None
     token_label: str | None = None
     token_jti: uuid.UUID | None = None
+    # The eval item the token's row is bound to (`EVAL_ITEM_CLAIM`); None outside evals.
+    eval_item_id: uuid.UUID | None = None
     # What an operator token may call, read from its row on every request.
     scopes: frozenset[str] = frozenset()
     # The channel the agent key was minted in, from its mcp_tokens row; read

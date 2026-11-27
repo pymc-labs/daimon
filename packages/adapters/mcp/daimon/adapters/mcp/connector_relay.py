@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Final, cast
 import httpx
 import structlog
 from daimon.adapters.mcp.auth.verifier import CHAT_EXECUTION_CLAIM, TOKEN_JTI_CLAIM
+from daimon.adapters.mcp.eval_mcp import answer_relayed
 from daimon.adapters.mcp.identity_relay import read_capped_body
 from daimon.adapters.mcp.middleware.host_call_gate import schema_problem
 from daimon.core import host_calls
@@ -31,6 +32,8 @@ from daimon.core.connector_relay import (
     ToolsCache,
     relay_verdict,
 )
+from daimon.core.evals.eval_tenant import is_eval_tenant
+from daimon.core.evals.world.dispatch import FakeWorld
 from daimon.core.features.snapshot import deployment_on
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_hold import HOLD_CLAIM, held_connectors
@@ -194,12 +197,14 @@ class ConnectorRelay:
         tools: ToolsCache | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         monotonic: Callable[[], float] = time.monotonic,
+        world: FakeWorld | None = None,
     ) -> None:
         self._auth, self._settings, self._sessionmaker = auth, settings, sessionmaker
         self._public_url = public_url
         self._load, self._token_for, self._post_card = load_connectors, token_for, post_card
         self._open, self._clock, self._monotonic = open_session, clock, monotonic
         self._tools = tools or ToolsCache(clock=monotonic)
+        self._world = world
         self._connectors: dict[
             tuple[uuid.UUID, uuid.UUID, bool], tuple[float, Mapping[str, Connector]]
         ]
@@ -233,6 +238,9 @@ class ConnectorRelay:
         params = params if isinstance(params, dict) else {}
         if "id" not in message:
             return Response(status_code=202)  # A notification: nothing upstream needs it.
+        if is_eval_tenant(turn.tenant_id):
+            key = str(request.path_params["server_key"])
+            return await answer_relayed(self._world, access.claims, key, message)
         origin = await self._origin(turn)
         if origin is None:
             return Response(status_code=403)
@@ -691,4 +699,5 @@ def build_connector_relay(
         load_connectors=load_connectors,
         token_for=token_for,
         post_card=post_card,
+        world=runtime.eval_world,
     )

@@ -1,1 +1,3 @@
 packages/core/tests/evals/example_bundle/** -text
+packages/core/daimon/core/evals/world/services/github_rest.json linguist-generated
+packages/core/daimon/core/evals/world/services/github.graphql linguist-generated

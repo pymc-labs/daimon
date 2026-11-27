@@ -272,6 +272,8 @@ class HostCallGate:
                     "title": title,
                     # An admin's ask is pressed by a person who must still be one.
                     "admin": identity.is_admin,
+                    # The confirmed call's credential answers for the same eval item.
+                    "eval_item": str(identity.eval_item_id) if identity.eval_item_id else None,
                 },
                 expires_at=expires_at,
             )

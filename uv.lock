@@ -1396,6 +1396,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "sentry-sdk" },
     { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "starlette" },
     { name = "structlog" },
     { name = "tenacity" },
 ]
@@ -1403,6 +1404,7 @@ dependencies = [
 [package.optional-dependencies]
 evals = [
     { name = "faker" },
+    { name = "graphql-core" },
     { name = "pdfplumber" },
     { name = "phonenumbers" },
     { name = "presidio-analyzer" },
@@ -1423,6 +1425,7 @@ requires-dist = [
     { name = "daimon-mux", extras = ["anthropic"], editable = "packages/mux" },
     { name = "faker", marker = "extra == 'evals'", specifier = ">=30" },
     { name = "google-auth", specifier = ">=2,<3" },
+    { name = "graphql-core", marker = "extra == 'evals'", specifier = ">=3.2,<4" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "httpx-sse", specifier = ">=0.4" },
     { name = "jsonschema", specifier = ">=4.23" },
@@ -1438,6 +1441,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "sentry-sdk", specifier = ">=2.61" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
+    { name = "starlette", specifier = ">=0.40" },
     { name = "structlog", specifier = ">=24.1" },
     { name = "tenacity", specifier = ">=9.0" },
 ]
@@ -1966,6 +1970,15 @@ wheels = [
 [package.optional-dependencies]
 grpc = [
     { name = "grpcio" },
+]
+
+[[package]]
+name = "graphql-core"
+version = "3.3.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/0d/11/511b9487dd338a9cd98a8040a1f20feaa99b2f2e4921c049cb9cbbff2870/graphql_core-3.3.2.tar.gz", hash = "sha256:15d6eee7d4364fbc202833bc6bd0d504004d8ae7c0aaf620fa884d8e437622f2", size = 794346, upload-time = "2026-11-06T21:41:54.017Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9b/c0/dec5c3a96d9e47c7aaaa6a062e065e6c738d67d11a9cda15705592f45409/graphql_core-3.3.2-py3-none-any.whl", hash = "sha256:d83f49ee18d2db89fb575dab6ffefa8aa1bf5f60dff8a6781db6f63420041348", size = 366135, upload-time = "2026-11-06T21:41:52.327Z" },
 ]
 
 [[package]]

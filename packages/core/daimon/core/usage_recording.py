@@ -65,6 +65,7 @@ SPEND_LEDGER_REASONS: tuple[str, ...] = (
     "thread_naming_debit",
     "owner_notice_debit",
     "eval_draft_debit",
+    "eval_simulator_debit",
 )
 """Every debit reason this module writes: model spend, as opposed to clawbacks
 or promo expiries. Timed promo credit is drawn down by exactly these rows, so a
@@ -559,6 +560,7 @@ _AUXILIARY_PURPOSES = {
     "thread_naming": ("thread_naming_debit", "thread-naming"),
     "classifier": ("classifier_debit", "classifier"),
     "eval_draft": ("eval_draft_debit", "eval-draft"),
+    "eval_simulator": ("eval_simulator_debit", "eval-simulator"),
     "owner_notice": ("owner_notice_debit", "owner-notice"),
 }
 

@@ -10,6 +10,7 @@ also carries a callback watch link (`_wake_link`) the server posts to when the w
 
 from __future__ import annotations
 
+import json
 import ssl
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping
@@ -20,6 +21,7 @@ import httpx
 import structlog
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.verifier import FOREIGN_HOME_CLAIM, TOKEN_KIND_CLAIM
+from daimon.adapters.mcp.eval_mcp import answer_relayed
 from daimon.adapters.mcp.tools.watches import callback_watch_terms
 from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX, DM_SCOPE_PREFIX
 from daimon.core.agent_chat_requester import driver_signed_in
@@ -29,6 +31,8 @@ from daimon.core.config import SignedIdentityServer, load_watches_settings
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.defaults.builtin_agent import find_agent_or_builtin
 from daimon.core.defaults.metadata import BUILTIN_AGENT_NAMES, MA_METADATA_KEY_MANAGED
+from daimon.core.evals.eval_tenant import is_eval_tenant
+from daimon.core.evals.world.dispatch import FakeWorld
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
 from daimon.core.mcp_identity import (
@@ -76,7 +80,7 @@ from daimon.core.stores.thread_sessions import get_thread_session_by_id
 from daimon.core.stores.turn_origins import get_session_origin, list_active_origins
 from daimon.core.turn_origin import origin_place
 from fastmcp.server.auth.auth import TokenVerifier
-from pydantic import SecretStr
+from pydantic import JsonValue, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.background import BackgroundTask
 from starlette.requests import Request
@@ -585,10 +589,12 @@ def build_identity_relay_route(
     clock: Callable[[], datetime],
     bearers: Mapping[str, SecretStr] | None = None,
     anthropic: AsyncAnthropic | None = None,
+    world: FakeWorld | None = None,
     public_url: str | None = None,
 ) -> Callable[[Request], Awaitable[Response]]:
     """The relay route. `tokens` signs for servers whose auth is signed; `bearers` holds
-    the key of each server whose auth is bearer. A server with neither is refused (503)."""
+    the key of each server whose auth is bearer. A server with neither is refused (503).
+    An eval caller is answered by its item's fake world and never relayed."""
     keys = bearers or {}
 
     async def handler(request: Request) -> Response:
@@ -622,6 +628,15 @@ def build_identity_relay_route(
             return _refused(
                 403, "not_agent_token", server=server, tenant_id=tenant_id, sessions=sessionmaker
             )
+        if is_eval_tenant(tenant_id):
+            body = await read_capped_body(request) if request.method == "POST" else None
+            if body is None:
+                return Response(status_code=405 if request.method != "POST" else 413)
+            try:
+                relayed: JsonValue = json.loads(body)
+            except ValueError:
+                return Response(status_code=400)
+            return await answer_relayed(world, claims, server.name, relayed)
         platform = str(claims.get("platform") or "")
         if HOLD_CLAIM in claims and await _held_in_audience_mode_on(
             sessionmaker, claims[HOLD_CLAIM], tenant_id=tenant_id, platform=platform
