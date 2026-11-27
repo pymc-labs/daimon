@@ -1066,7 +1066,9 @@ def origin_of(url: str) -> str:
 
 
 WebProvider = Literal["discord", "slack", "microsoft"]
-WebModuleKey = Literal["chat", "agents", "channels", "routines", "credits", "integrations", "admin"]
+WebModuleKey = Literal[
+    "chat", "agents", "channels", "routines", "credits", "integrations", "admin", "evals"
+]
 _WEB_MODULES: tuple[WebModuleKey, ...] = (
     "chat",
     "agents",
@@ -1169,7 +1171,8 @@ class WebSettings(BaseModel):
         default=_WEB_MODULES,
         description=(
             "Sections of the web app that are on, comma-separated: "
-            "chat, agents, channels, routines, credits, integrations, admin."
+            "chat, agents, channels, routines, credits, integrations, admin. Add evals to "
+            "offer the evals pages."
         ),
     )
     nodes: WebNodesSettings = Field(
@@ -3094,6 +3097,30 @@ class ComputeSettings(BaseModel):
         return self
 
 
+class EvalsSettings(BaseModel):
+    signing_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Base64 Ed25519 private key (32 raw bytes) that signs exported eval bundles. "
+            "Unset: exports are unsigned."
+        ),
+    )
+    trusted_keys: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Base64 Ed25519 public keys trusted to sign eval bundles. Set: import takes only "
+            "bundles signed by one of them or by this deployment's signing key."
+        ),
+    )
+    source_label: str = Field(
+        default="daimon",
+        description="Label this deployment writes as the source of the bundles it exports.",
+    )
+    max_bundle_mb: int = Field(
+        default=128, gt=0, description="Largest eval bundle import or export handles, in MiB."
+    )
+
+
 class LongJobsSettings(BaseModel):
     max_deadline_minutes: int = Field(
         default=70,
@@ -3297,6 +3324,7 @@ class RetentionSettings(BaseModel):
 
 class Settings(BaseSettings):
     compute: ComputeSettings = Field(default_factory=ComputeSettings)
+    evals: EvalsSettings = Field(default_factory=EvalsSettings)
     long_jobs: LongJobsSettings = Field(default_factory=LongJobsSettings)
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
     ops_events: OpsEventsSettings = Field(default_factory=OpsEventsSettings)

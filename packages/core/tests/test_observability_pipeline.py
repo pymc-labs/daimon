@@ -584,3 +584,11 @@ def test_outbound_http_span_query_and_fragment_never_reach_the_transport(
     assert "connector.example" in rendered, "the outbound span was captured"
     for value in opaque:
         assert value not in rendered
+
+
+def test_bundle_passphrase_header_when_scrubbed_then_redacted() -> None:
+    from daimon.core.observability import _scrub_request  # pyright: ignore[reportPrivateUsage]
+
+    request: dict[str, object] = {"headers": {"X-Bundle-Passphrase": "correct horse"}}
+    _scrub_request(request)
+    assert request["headers"] == {"X-Bundle-Passphrase": "[redacted]"}, request

@@ -1,0 +1,79 @@
+{
+  "schema": "daimon.eval.bundle/1",
+  "format": "daimon-eval-bundle",
+  "format_version": "1.0",
+  "id": "example-bundle",
+  "title": "Example bundle",
+  "created_at": "2026-01-06T00:00:00Z",
+  "source": {
+    "kind": "converter",
+    "label": "example"
+  },
+  "contents": {
+    "suites": [
+      {
+        "id": "support-basics",
+        "version": 1,
+        "path": "suites/support-basics/suite.json",
+        "cases_path": "suites/support-basics/cases.jsonl",
+        "case_count": 1
+      }
+    ],
+    "runs": [
+      {
+        "id": "baseline-a-2026-01",
+        "path": "runs/baseline-a-2026-01/run.json",
+        "items_path": "runs/baseline-a-2026-01/items.jsonl",
+        "scores_path": "runs/baseline-a-2026-01/scores.jsonl",
+        "reviews_path": "runs/baseline-a-2026-01/reviews.jsonl",
+        "item_count": 1
+      }
+    ]
+  },
+  "files": [
+    {
+      "path": "runs/baseline-a-2026-01/items.jsonl",
+      "sha256": "a606e25b58ad4f149122ab65042175b6e54fa0a80d00c7a210626e8b45ee7bf3",
+      "size": 1146
+    },
+    {
+      "path": "runs/baseline-a-2026-01/reviews.jsonl",
+      "sha256": "c9313f1bc08f69a4622e9654f1d3fcfa5127124a7e482e674eef0dc609ee4ce0",
+      "size": 372
+    },
+    {
+      "path": "runs/baseline-a-2026-01/run.json",
+      "sha256": "017a8b0335252ce5541b9d07b0c671f9b3db9abdd247be3bf1c8fef53c8574a3",
+      "size": 397
+    },
+    {
+      "path": "runs/baseline-a-2026-01/scores.jsonl",
+      "sha256": "12765c553187279f850296bdcd990d7836d97a48ece4cf6b9f560249cb5db1f9",
+      "size": 223
+    },
+    {
+      "path": "suites/support-basics/cases.jsonl",
+      "sha256": "af85fdd9a6cc6bf17da7d352591d05b37f04fe3e939fb0d4fc5d3c8a2fa2f7cc",
+      "size": 2305
+    },
+    {
+      "path": "suites/support-basics/suite.json",
+      "sha256": "f308ae0347ef2a1ca3255d4a3288bd53c837ccbe395403605887c58a03b644a3",
+      "size": 490
+    }
+  ],
+  "blobs": [
+    {
+      "sha256": "1a791280e5a06ad54e29bfb0120ec16653040993fff03b586116c42c581363a9",
+      "size": 66,
+      "media_type": "text/plain",
+      "scrub": "rebuilt",
+      "needs_human_check": false
+    }
+  ],
+  "scrub": {
+    "status": "scrubbed",
+    "unchecked_blobs": 0
+  },
+  "includes_identities": false
+}

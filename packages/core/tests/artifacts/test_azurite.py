@@ -14,7 +14,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import httpx
 import pytest
 from azure.storage.blob import BlobServiceClient
-from daimon.adapters.mcp.artifacts import build_artifact_store
+from daimon.core.artifacts.s3 import build_artifact_store
 from daimon.core.config import ArtifactsSettings
 
 

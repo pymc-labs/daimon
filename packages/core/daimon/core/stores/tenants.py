@@ -37,9 +37,16 @@ from daimon.core.stores.domain import FundingMode, Platform, TenantDependentCoun
 from daimon.core.stores.security_audit import erase_tenant
 from daimon.core.stores.session_settle_state import erase_agent_chat_provenance_for_tenant
 from daimon.core.stores.slack_user_tokens import delete_workspace_tokens
-from sqlalchemy import CompoundSelect, delete, func, select, union, update
+from sqlalchemy import CompoundSelect, Select, delete, func, select, union, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+def background_tenant_ids() -> Select[tuple[uuid.UUID]]:
+    """Tenants background loops serve: live ones, never the hidden eval tenant."""
+    from daimon.core.evals.eval_tenant import EVAL_TENANT_ID  # it imports the stores
+
+    return select(Tenant.id).where(Tenant.archived_at.is_(None), Tenant.id != EVAL_TENANT_ID)
 
 
 async def get_tenant(session: AsyncSession, tenant_id: uuid.UUID) -> TenantRow | None:

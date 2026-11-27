@@ -1,0 +1,1236 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:daimon:eval-bundle:1.0",
+  "title": "Daimon eval bundle, format 1.0",
+  "description": "Every JSON document in a Daimon eval bundle. Each document names its type in `schema`. Validate a file against the whole schema, or one type with #/$defs/<Type>.",
+  "oneOf": [
+    {"$ref": "#/$defs/Manifest"},
+    {"$ref": "#/$defs/Suite"},
+    {"$ref": "#/$defs/Case"},
+    {"$ref": "#/$defs/Run"},
+    {"$ref": "#/$defs/RunItem"},
+    {"$ref": "#/$defs/Score"},
+    {"$ref": "#/$defs/ReviewRecord"}
+  ],
+  "$defs": {
+
+    "Id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "Timestamp": {"type": "string", "format": "date-time"},
+    "Sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "MediaType": {"type": "string", "pattern": "^[a-z0-9.+-]+/[A-Za-z0-9.+-]+$"},
+    "Ext": {
+      "description": "Free-form extension data. Keys are namespaced (`vendor.key`). Readers ignore what they do not know.",
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z0-9_-]+\\.[a-z0-9_.-]+$"}
+    },
+    "JsonPointer": {"type": "string", "pattern": "^(/[^/]*)*$"},
+    "Glob": {"type": "string", "minLength": 1, "description": "`*` matches any run of characters except `.` and `/`; `**` matches anything."},
+    "EffectVerb": {"type": "string", "pattern": "^[a-z0-9_]+(\\.[a-z0-9_]+)+$", "description": "Canonical effect: service.resource[.sub].verb, e.g. github.issue.comment.create."},
+
+    "BlobRef": {
+      "description": "A file in blobs/sha256/<sha256>. Content-addressed; the same bytes are stored once.",
+      "type": "object",
+      "required": ["sha256", "size", "media_type"],
+      "additionalProperties": false,
+      "properties": {
+        "sha256": {"$ref": "#/$defs/Sha256"},
+        "size": {"type": "integer", "minimum": 0},
+        "media_type": {"$ref": "#/$defs/MediaType"},
+        "name": {"type": "string"}
+      }
+    },
+    "Body": {
+      "description": "A payload: inline text, inline JSON, or a blob. Exactly one.",
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 2,
+      "additionalProperties": false,
+      "properties": {
+        "text": {"type": "string"},
+        "json": {},
+        "blob": {"$ref": "#/$defs/BlobRef"},
+        "media_type": {"$ref": "#/$defs/MediaType"}
+      },
+      "oneOf": [{"required": ["text"]}, {"required": ["json"]}, {"required": ["blob"]}]
+    },
+    "PrincipalRef": {
+      "description": "Who: a person, group or agent of the deployment, or an opaque label in exported data.",
+      "type": "object",
+      "required": ["kind", "id"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"enum": ["person", "group", "agent", "label"]},
+        "id": {"type": "string"},
+        "display_name": {"type": "string"}
+      }
+    },
+
+    "Manifest": {
+      "description": "bundle.json at the bundle root.",
+      "type": "object",
+      "required": ["schema", "format", "format_version", "id", "created_at", "source", "contents", "files", "blobs", "scrub"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "daimon.eval.bundle/1"},
+        "format": {"const": "daimon-eval-bundle"},
+        "format_version": {"type": "string", "pattern": "^1\\.[0-9]+$"},
+        "id": {"$ref": "#/$defs/Id"},
+        "title": {"type": "string"},
+        "created_at": {"$ref": "#/$defs/Timestamp"},
+        "created_by": {"$ref": "#/$defs/PrincipalRef"},
+        "source": {
+          "type": "object",
+          "required": ["kind"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {"enum": ["deployment", "converter"]},
+            "label": {"type": "string", "description": "Human label, e.g. staging. Never a hostname or tenant id."},
+            "instance": {"type": "string", "description": "Opaque stable hash of the exporting deployment."},
+            "daimon_version": {"type": "string"},
+            "converter": {"$ref": "#/$defs/Tool"}
+          }
+        },
+        "contents": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "suites": {"type": "array", "items": {
+              "type": "object", "required": ["id", "version", "path", "cases_path", "case_count"], "additionalProperties": false,
+              "properties": {
+                "id": {"$ref": "#/$defs/Id"}, "version": {"type": "integer", "minimum": 1},
+                "path": {"type": "string"}, "cases_path": {"type": "string"}, "case_count": {"type": "integer", "minimum": 0}
+              }}},
+            "runs": {"type": "array", "items": {
+              "type": "object", "required": ["id", "path", "items_path", "item_count"], "additionalProperties": false,
+              "properties": {
+                "id": {"$ref": "#/$defs/Id"}, "path": {"type": "string"}, "items_path": {"type": "string"},
+                "scores_path": {"type": "string"}, "reviews_path": {"type": "string"}, "item_count": {"type": "integer", "minimum": 0}
+              }}}
+          }
+        },
+        "files": {
+          "description": "Every non-blob file in the bundle except bundle.json, with its hash.",
+          "type": "array",
+          "items": {"type": "object", "required": ["path", "sha256", "size"], "additionalProperties": false,
+            "properties": {"path": {"type": "string"}, "sha256": {"$ref": "#/$defs/Sha256"}, "size": {"type": "integer", "minimum": 0}}}
+        },
+        "blobs": {"type": "array", "items": {"$ref": "#/$defs/BlobEntry"}},
+        "scrub": {
+          "type": "object",
+          "required": ["status"],
+          "additionalProperties": false,
+          "properties": {
+            "status": {"enum": ["scrubbed", "partial", "unscrubbed"]},
+            "policy": {"type": "string", "description": "Scrub policy name and version, e.g. default/1."},
+            "unchecked_blobs": {"type": "integer", "minimum": 0, "description": "Blobs still flagged for a human check."}
+          }
+        },
+        "includes_identities": {"type": "boolean", "default": false, "description": "True only when reviewer and owner identities were kept instead of labels."},
+        "signature": {
+          "type": "object",
+          "required": ["alg", "key_id", "value"],
+          "additionalProperties": false,
+          "properties": {
+            "alg": {"const": "ed25519"},
+            "key_id": {"type": "string"},
+            "value": {"type": "string", "description": "Base64 signature over the RFC 8785 canonical form of this manifest without `signature`."}
+          }
+        },
+        "ext": {"$ref": "#/$defs/Ext"}
+      }
+    },
+    "BlobEntry": {
+      "type": "object",
+      "required": ["sha256", "size", "media_type", "scrub"],
+      "additionalProperties": false,
+      "properties": {
+        "sha256": {"$ref": "#/$defs/Sha256"},
+        "size": {"type": "integer", "minimum": 0},
+        "media_type": {"$ref": "#/$defs/MediaType"},
+        "scrub": {"enum": ["rebuilt", "redacted", "clean", "generated", "unscrubbed"], "description": "rebuilt: text file rewritten with fakes; redacted: image or binary with regions masked; clean: checked, nothing to scrub; generated: produced in an enclosed run from fake data; unscrubbed: raw."},
+        "needs_human_check": {"type": "boolean", "default": false}
+      }
+    },
+    "Tool": {
+      "type": "object",
+      "required": ["name", "version"],
+      "additionalProperties": false,
+      "properties": {"name": {"type": "string"}, "version": {"type": "string"}}
+    },
+
+    "Suite": {
+      "description": "suites/<id>/suite.json. One immutable suite version.",
+      "type": "object",
+      "required": ["schema", "id", "version", "name", "cases"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "daimon.eval.suite/1"},
+        "id": {"$ref": "#/$defs/Id"},
+        "version": {"type": "integer", "minimum": 1},
+        "name": {"type": "string", "minLength": 1},
+        "description": {"type": "string"},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "owner": {"$ref": "#/$defs/PrincipalRef"},
+        "created_at": {"$ref": "#/$defs/Timestamp"},
+        "cases": {"type": "array", "items": {"$ref": "#/$defs/SuiteCaseRef"}},
+        "tool_aliases": {"type": "array", "items": {"$ref": "#/$defs/ToolAlias"}},
+        "defaults": {"$ref": "#/$defs/SuiteDefaults"},
+        "ext": {"$ref": "#/$defs/Ext"}
+      }
+    },
+    "SuiteCaseRef": {
+      "type": "object",
+      "required": ["id", "revision", "hash"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/Id"},
+        "revision": {"type": "integer", "minimum": 1},
+        "hash": {"$ref": "#/$defs/Sha256"},
+        "weight": {"type": "number", "exclusiveMinimum": 0, "default": 1},
+        "split": {"enum": ["dev", "test", "holdout"], "default": "test"}
+      }
+    },
+    "ToolAlias": {
+      "description": "Maps a tool name seen in recorded data to the name or effect used when matching. Lets baselines and live agents with different tool names share expectations.",
+      "type": "object",
+      "required": ["from"],
+      "additionalProperties": false,
+      "properties": {
+        "from": {"$ref": "#/$defs/CallPattern"},
+        "to_tool": {"type": "object", "required": ["tool"], "additionalProperties": false,
+          "properties": {"server": {"type": "string"}, "tool": {"type": "string"}}},
+        "to_effect": {"$ref": "#/$defs/EffectVerb"},
+        "args_map": {"type": "object", "additionalProperties": {"$ref": "#/$defs/JsonPointer"}, "description": "Target arg pointer -> source arg pointer."}
+      },
+      "anyOf": [{"required": ["to_tool"]}, {"required": ["to_effect"]}]
+    },
+    "SuiteDefaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repeats": {"type": "integer", "minimum": 1, "maximum": 20, "default": 1},
+        "judges": {"type": "array", "items": {"$ref": "#/$defs/JudgeConfig"}},
+        "simulator": {"$ref": "#/$defs/ModelChoice"},
+        "network": {"$ref": "#/$defs/NetworkPolicy"},
+        "clock": {"enum": ["case", "real"], "default": "case"},
+        "review": {"type": "object", "additionalProperties": false, "properties": {
+          "layout": {"enum": ["single", "side_by_side"], "default": "side_by_side"},
+          "blind": {"type": "boolean", "default": true},
+          "reviewers_per_item": {"type": "integer", "minimum": 1, "default": 1}}},
+        "stats": {"type": "object", "additionalProperties": false, "properties": {
+          "primary": {"enum": ["pass_rate", "rubric_score", "preference"], "default": "pass_rate"},
+          "non_inferiority_margin": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.05},
+          "cluster_by": {"enum": ["case", "source_thread"], "default": "source_thread"}}}
+      }
+    },
+    "ModelChoice": {
+      "type": "object",
+      "required": ["model"],
+      "additionalProperties": false,
+      "properties": {
+        "backend": {"enum": ["anthropic", "openai", "gemini"]},
+        "model": {"type": "string"},
+        "effort": {"enum": ["low", "medium", "high", "xhigh", "max"]}
+      }
+    },
+    "JudgeConfig": {
+      "type": "object",
+      "required": ["id", "kind", "models"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/Id"},
+        "kind": {"enum": ["rubric", "pairwise", "reference"]},
+        "models": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/ModelChoice"}},
+        "aggregate": {"enum": ["majority", "mean", "all"], "default": "majority"},
+        "swap_positions": {"type": "boolean", "default": true},
+        "sees": {"type": "array", "items": {"enum": ["reply", "chat", "files", "tool_calls", "world_calls", "reference", "history"]}, "default": ["reply", "chat", "files", "history"]},
+        "instructions": {"type": "string"}
+      }
+    },
+
+    "Case": {
+      "description": "One line of suites/<id>/cases.jsonl. A fixed conversation history plus the next turn, the recorded world it runs in, scripted actions and expectations.",
+      "type": "object",
+      "required": ["schema", "id", "revision", "title", "fidelity", "provenance", "surface", "clock", "history", "turn", "world", "expect"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "daimon.eval.case/1"},
+        "id": {"$ref": "#/$defs/Id"},
+        "revision": {"type": "integer", "minimum": 1},
+        "hash": {"$ref": "#/$defs/Sha256", "description": "sha256 of the RFC 8785 canonical form of this case without `hash`."},
+        "title": {"type": "string", "minLength": 1},
+        "tags": {"type": "array", "items": {"type": "string"}},
+        "source_thread": {"type": "string", "description": "Opaque key of the source conversation. Cases from one thread share it; stats cluster on it."},
+        "source_turn": {"type": "integer", "minimum": 0, "description": "Index of the tested turn within the source thread."},
+        "dedupe_group": {"type": "string", "description": "Cases judged near-duplicates share a group; thinning keeps a few per group."},
+        "fidelity": {"$ref": "#/$defs/Fidelity"},
+        "provenance": {"$ref": "#/$defs/Provenance"},
+        "surface": {"$ref": "#/$defs/Surface"},
+        "clock": {"$ref": "#/$defs/Clock"},
+        "history": {"type": "array", "items": {"$ref": "#/$defs/ChatMessage"}, "description": "Messages before the tested turn, oldest first, as the platform would show them."},
+        "turn": {"$ref": "#/$defs/Turn"},
+        "script": {"$ref": "#/$defs/Script"},
+        "world": {"$ref": "#/$defs/World"},
+        "agent_context": {"$ref": "#/$defs/AgentContext"},
+        "expect": {"$ref": "#/$defs/Expectations"},
+        "limits": {"$ref": "#/$defs/Limits"},
+        "review_flags": {"type": "array", "items": {"type": "object", "required": ["reason"], "additionalProperties": false, "properties": {
+          "reason": {"enum": ["needs_human_check", "scrub_uncertain", "image_redacted", "file_rebuilt", "expectations_unreviewed", "world_incomplete"]},
+          "detail": {"type": "string"}, "cleared_by": {"$ref": "#/$defs/PrincipalRef"}, "cleared_at": {"$ref": "#/$defs/Timestamp"}}}},
+        "notes": {"type": "string"},
+        "ext": {"$ref": "#/$defs/Ext"}
+      }
+    },
+    "Fidelity": {
+      "type": "object",
+      "required": ["level"],
+      "additionalProperties": false,
+      "properties": {
+        "level": {"enum": ["full", "tools", "text", "authored"], "description": "full: messages, tool calls and results; tools: calls without some results; text: messages only; authored: written, not recorded."},
+        "missing": {"type": "array", "uniqueItems": true, "items": {"enum": ["tool_args", "tool_results", "files", "images", "reactions", "cards", "history", "world_state", "memory", "timing", "usage", "platform_output"]}},
+        "note": {"type": "string"}
+      }
+    },
+    "Provenance": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"enum": ["recorded", "authored", "derived", "imported"]},
+        "source_system": {"type": "string", "description": "Generic label of the system the case came from, e.g. baseline-a."},
+        "source_ref": {"type": "string", "description": "Opaque, non-reversible reference (keyed hash) to the source record."},
+        "recorded_at": {"$ref": "#/$defs/Timestamp"},
+        "converter": {"$ref": "#/$defs/Tool"},
+        "derived_from": {"type": "array", "items": {"$ref": "#/$defs/Id"}},
+        "scrub": {"$ref": "#/$defs/ScrubRecord"},
+        "expectations_by": {"type": "array", "items": {"type": "object", "required": ["kind", "at"], "additionalProperties": false, "properties": {
+          "kind": {"enum": ["model", "person", "agent"]}, "who": {"$ref": "#/$defs/PrincipalRef"}, "model": {"type": "string"},
+          "at": {"$ref": "#/$defs/Timestamp"}, "action": {"enum": ["drafted", "checked", "edited"]}}}}
+      }
+    },
+    "ScrubRecord": {
+      "type": "object",
+      "required": ["status"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"enum": ["scrubbed", "partial", "unscrubbed"]},
+        "policy": {"type": "string"},
+        "at": {"$ref": "#/$defs/Timestamp"},
+        "entities": {"type": "integer", "minimum": 0, "description": "Count of distinct real entities replaced. The mapping itself is never in a bundle."},
+        "human_checked": {"type": "boolean", "default": false}
+      }
+    },
+    "Clock": {
+      "type": "object",
+      "required": ["now"],
+      "additionalProperties": false,
+      "properties": {
+        "now": {"$ref": "#/$defs/Timestamp", "description": "Time the tested turn was sent. The agent's clock starts here in case-clock mode."},
+        "timezone": {"type": "string", "description": "IANA name for the requester, e.g. Europe/Berlin."}
+      }
+    },
+
+    "Surface": {
+      "description": "Where the conversation happens and who is in it. All names are fakes after scrubbing.",
+      "type": "object",
+      "required": ["platform", "conversation", "participants", "bot"],
+      "additionalProperties": false,
+      "properties": {
+        "platform": {"enum": ["discord", "slack", "teams", "web"]},
+        "conversation": {"enum": ["dm", "group_dm", "channel", "thread"]},
+        "workspace": {"$ref": "#/$defs/Place"},
+        "channel": {"$ref": "#/$defs/Place"},
+        "thread": {"$ref": "#/$defs/Place"},
+        "participants": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/Participant"}},
+        "groups": {"type": "array", "items": {"$ref": "#/$defs/Group"}},
+        "bot": {"$ref": "#/$defs/Participant"}
+      }
+    },
+    "Place": {
+      "type": "object",
+      "required": ["id", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"},
+        "topic": {"type": "string"},
+        "private": {"type": "boolean"},
+        "parent_id": {"type": "string"}
+      }
+    },
+    "Participant": {
+      "type": "object",
+      "required": ["id", "display_name"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "description": "Platform-shaped fake id, stable across the suite for the same real person."},
+        "display_name": {"type": "string"},
+        "handle": {"type": "string"},
+        "email": {"type": "string"},
+        "role": {"enum": ["owner", "admin", "member", "visitor", "guest", "external"], "default": "member"},
+        "groups": {"type": "array", "items": {"type": "string"}, "description": "Group ids from surface.groups."},
+        "is_requester": {"type": "boolean", "default": false},
+        "is_bot": {"type": "boolean", "default": false},
+        "timezone": {"type": "string"}
+      }
+    },
+    "Group": {
+      "type": "object",
+      "required": ["id", "name", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"},
+        "kind": {"enum": ["discord_role", "slack_user_group", "teams_team", "web_group"]}
+      }
+    },
+    "ChatMessage": {
+      "type": "object",
+      "required": ["id", "author", "at"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"},
+        "author": {"type": "string", "description": "Participant id, or the bot's id."},
+        "at": {"$ref": "#/$defs/Timestamp"},
+        "text": {"type": "string"},
+        "format": {"enum": ["markdown", "plain"], "default": "markdown"},
+        "reply_to": {"type": "string"},
+        "thread_id": {"type": "string"},
+        "mentions": {"type": "array", "items": {"type": "string"}},
+        "attachments": {"type": "array", "items": {"$ref": "#/$defs/Attachment"}},
+        "reactions": {"type": "array", "items": {"type": "object", "required": ["emoji", "by"], "additionalProperties": false, "properties": {
+          "emoji": {"type": "string"}, "by": {"type": "array", "items": {"type": "string"}}}}},
+        "cards": {"type": "array", "items": {"$ref": "#/$defs/NeutralCard"}},
+        "edited_at": {"$ref": "#/$defs/Timestamp"},
+        "deleted": {"type": "boolean"},
+        "kind": {"enum": ["message", "system", "notice"], "default": "message"}
+      }
+    },
+    "Attachment": {
+      "type": "object",
+      "required": ["id", "name", "media_type"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"},
+        "media_type": {"$ref": "#/$defs/MediaType"},
+        "size": {"type": "integer", "minimum": 0},
+        "blob": {"$ref": "#/$defs/BlobRef"},
+        "state": {"enum": ["present", "rebuilt", "redacted", "missing"], "default": "present", "description": "missing: no bytes kept; the agent sees an unavailable file."},
+        "description": {"type": "string", "description": "What the file showed, for judges and the simulator when bytes are missing or redacted."}
+      }
+    },
+    "Turn": {
+      "description": "The tested turn: one or more requester messages sent together (debounced DMs send several).",
+      "type": "object",
+      "required": ["messages"],
+      "additionalProperties": false,
+      "properties": {
+        "messages": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/ChatMessage"}},
+        "trigger": {"enum": ["mention", "dm", "reply", "command", "auto"], "default": "mention"}
+      }
+    },
+
+    "Script": {
+      "description": "What the simulated people do while the agent works.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "steps": {"type": "array", "items": {"$ref": "#/$defs/ScriptStep"}},
+        "defaults": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "confirmation": {"enum": ["approve", "deny", "always", "ignore"], "default": "approve"},
+            "credential_request": {"enum": ["skip", "submit_fake", "ignore"], "default": "skip"},
+            "form": {"enum": ["skip", "ignore"], "default": "ignore"},
+            "question": {"enum": ["end", "simulate"], "default": "end", "description": "When the agent asks the requester something no step answers: end the item, or let the simulator reply as the requester."}
+          }
+        },
+        "max_follow_ups": {"type": "integer", "minimum": 0, "maximum": 10, "default": 0, "description": "Extra requester turns (reply steps or simulated answers) allowed in one item."}
+      }
+    },
+    "ScriptStep": {
+      "type": "object",
+      "required": ["id", "on", "do"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/Id"},
+        "on": {"$ref": "#/$defs/Trigger"},
+        "do": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/Action"}},
+        "once": {"type": "boolean", "default": true},
+        "delay_ms": {"type": "integer", "minimum": 0, "default": 0}
+      }
+    },
+    "Trigger": {
+      "type": "object",
+      "required": ["event"],
+      "additionalProperties": false,
+      "properties": {
+        "event": {"enum": ["card", "message", "reaction", "form", "credential_request", "tool_call", "turn_end", "start"]},
+        "card_kind": {"$ref": "#/$defs/CardKind"},
+        "button_action": {"$ref": "#/$defs/ButtonAction"},
+        "text_contains": {"type": "string"},
+        "text_regex": {"type": "string"},
+        "tool": {"$ref": "#/$defs/CallPattern"},
+        "nth": {"type": "integer", "minimum": 1, "default": 1}
+      }
+    },
+    "Action": {
+      "type": "object",
+      "required": ["action"],
+      "additionalProperties": false,
+      "properties": {
+        "action": {"enum": ["click", "react", "unreact", "submit_form", "reply", "edit", "delete", "stop", "wait"]},
+        "as": {"type": "string", "description": "Participant id; default the requester."},
+        "target": {"type": "string", "description": "`matched` (the trigger's message or card, default), `last_bot_message`, or a message id."},
+        "button": {"type": "object", "additionalProperties": false, "properties": {
+          "action": {"$ref": "#/$defs/ButtonAction"}, "label_regex": {"type": "string"}, "id": {"type": "string"}},
+          "minProperties": 1},
+        "emoji": {"type": "string"},
+        "fields": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Form field id -> value. Fake values only."},
+        "text": {"type": "string"},
+        "attachments": {"type": "array", "items": {"$ref": "#/$defs/Attachment"}},
+        "ms": {"type": "integer", "minimum": 0}
+      }
+    },
+
+    "World": {
+      "description": "Everything outside the agent that the run may touch, as recorded or authored. The fake world answers from this, then from the per-item overlay, then from the simulator.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "exchanges": {"type": "array", "items": {"$ref": "#/$defs/Exchange"}},
+        "resources": {"type": "array", "items": {"$ref": "#/$defs/Resource"}},
+        "files": {"type": "array", "items": {"$ref": "#/$defs/WorldFile"}},
+        "repos": {"type": "array", "items": {"$ref": "#/$defs/Repo"}},
+        "web": {"type": "array", "items": {"$ref": "#/$defs/WebPage"}},
+        "search": {"type": "array", "items": {"$ref": "#/$defs/SearchSet"}},
+        "mcp_servers": {"type": "array", "items": {"$ref": "#/$defs/McpServer"}},
+        "identities": {"type": "array", "items": {"$ref": "#/$defs/Identity"}},
+        "env": {"type": "object", "additionalProperties": false, "properties": {
+          "vars": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Non-secret variables set in the sandbox. Secrets come from identities."},
+          "workdir": {"type": "string"}}},
+        "network": {"$ref": "#/$defs/NetworkPolicy"},
+        "simulator": {"type": "object", "additionalProperties": false, "properties": {
+          "enabled": {"type": "boolean", "default": true},
+          "instructions": {"type": "string", "description": "Facts the simulator must hold to, beyond the recorded data."},
+          "max_calls": {"type": "integer", "minimum": 0, "default": 50}}},
+        "sim_cache": {"type": "array", "items": {"$ref": "#/$defs/SimEntry"}}
+      }
+    },
+    "Exchange": {
+      "description": "One recorded or derived request and its answer.",
+      "type": "object",
+      "required": ["id", "surface", "request", "response"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/Id"},
+        "surface": {"enum": ["mcp", "http", "cli", "provider_tool"], "description": "mcp: an MCP tool call; http: one HTTP request; cli: a command line and its output (evidence; compiled to http before runs); provider_tool: a provider-side tool such as web search."},
+        "service": {"type": "string", "description": "Canonical service, e.g. github, git, google.drive, web, daimon."},
+        "server": {"type": "string", "description": "MCP server name for mcp exchanges."},
+        "tool": {"type": "string", "description": "Tool name for mcp and provider_tool exchanges."},
+        "request": {"$ref": "#/$defs/ExchangeRequest"},
+        "response": {"$ref": "#/$defs/ExchangeResponse"},
+        "match": {"$ref": "#/$defs/Match"},
+        "effects": {"type": "array", "items": {"$ref": "#/$defs/Effect"}},
+        "kind": {"enum": ["read", "write"], "default": "read"},
+        "origin": {"enum": ["recorded", "derived", "authored"], "default": "recorded"},
+        "verified": {"type": "boolean", "description": "Derived exchanges: true when replaying the recorded command reproduced the recorded output."},
+        "derived_from": {"$ref": "#/$defs/Id", "description": "The cli exchange this http exchange was compiled from."},
+        "order": {"type": "integer", "minimum": 0, "description": "Position in the original recording."},
+        "repeatable": {"type": "boolean", "default": true, "description": "False: answers once; a second identical call falls through to the overlay or simulator."}
+      }
+    },
+    "ExchangeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "args": {"description": "mcp and provider_tool: the call's arguments."},
+        "http": {"type": "object", "required": ["method", "url"], "additionalProperties": false, "properties": {
+          "method": {"type": "string"}, "url": {"type": "string", "format": "uri"},
+          "headers": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Secrets removed."},
+          "body": {"$ref": "#/$defs/Body"}}},
+        "cli": {"type": "object", "required": ["argv"], "additionalProperties": false, "properties": {
+          "argv": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+          "shell": {"type": "string", "description": "The full shell line when argv was split from it."},
+          "stdin": {"$ref": "#/$defs/Body"}, "cwd": {"type": "string"}}}
+      },
+      "oneOf": [{"required": ["args"]}, {"required": ["http"]}, {"required": ["cli"]}]
+    },
+    "ExchangeResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "result": {"description": "mcp and provider_tool: structured content."},
+        "content": {"type": "array", "items": {"$ref": "#/$defs/ContentBlock"}, "description": "mcp: content blocks as returned."},
+        "is_error": {"type": "boolean", "default": false},
+        "http": {"type": "object", "required": ["status"], "additionalProperties": false, "properties": {
+          "status": {"type": "integer", "minimum": 100, "maximum": 599},
+          "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+          "body": {"$ref": "#/$defs/Body"}}},
+        "cli": {"type": "object", "required": ["exit_code"], "additionalProperties": false, "properties": {
+          "exit_code": {"type": "integer"}, "stdout": {"$ref": "#/$defs/Body"}, "stderr": {"$ref": "#/$defs/Body"}}},
+        "latency_ms": {"type": "integer", "minimum": 0}
+      }
+    },
+    "ContentBlock": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {"enum": ["text", "image", "resource", "file"]},
+        "text": {"type": "string"},
+        "blob": {"$ref": "#/$defs/BlobRef"},
+        "uri": {"type": "string"}
+      }
+    },
+    "Match": {
+      "description": "How a live request is matched to this exchange.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"enum": ["exact", "normalized", "keys", "semantic"], "default": "normalized", "description": "normalized: canonical JSON, query order, whitespace and default args ignored; keys: only `keys` compared; semantic: the simulator model decides equivalence."},
+        "keys": {"type": "array", "items": {"$ref": "#/$defs/JsonPointer"}},
+        "ignore": {"type": "array", "items": {"$ref": "#/$defs/JsonPointer"}}
+      }
+    },
+    "Effect": {
+      "type": "object",
+      "required": ["verb"],
+      "additionalProperties": false,
+      "properties": {
+        "verb": {"$ref": "#/$defs/EffectVerb"},
+        "target": {"type": "string", "description": "Resource key, e.g. github:org/repo#12."},
+        "args": {"type": "object"}
+      }
+    },
+    "Resource": {
+      "description": "Seed state of one service object (issue, doc, sheet, calendar event, page). Writes in a run change a per-item copy.",
+      "type": "object",
+      "required": ["service", "type", "key", "data"],
+      "additionalProperties": false,
+      "properties": {
+        "service": {"type": "string"},
+        "type": {"type": "string"},
+        "key": {"type": "string"},
+        "data": {"type": "object"},
+        "blob": {"$ref": "#/$defs/BlobRef", "description": "File content for documents, decks and sheets."}
+      }
+    },
+    "WorldFile": {
+      "type": "object",
+      "required": ["path", "blob"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {"type": "string", "description": "Absolute path in the sandbox at the start of the turn."},
+        "blob": {"$ref": "#/$defs/BlobRef"},
+        "mode": {"type": "string", "pattern": "^0?[0-7]{3}$"},
+        "state": {"enum": ["present", "rebuilt", "redacted"], "default": "present"}
+      }
+    },
+    "Repo": {
+      "type": "object",
+      "required": ["url", "default_branch", "bundle"],
+      "additionalProperties": false,
+      "properties": {
+        "url": {"type": "string", "format": "uri", "description": "Clone URL as the agent uses it (fake owner and name)."},
+        "default_branch": {"type": "string"},
+        "bundle": {"$ref": "#/$defs/BlobRef", "description": "A git bundle with the refs below. Pushes land in a per-item copy."},
+        "refs": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{40}$"}},
+        "private": {"type": "boolean", "default": true},
+        "writable": {"type": "boolean", "default": true},
+        "cloned_at": {"type": "string", "description": "Sandbox path where the repo is already checked out, if it was at turn start."}
+      }
+    },
+    "WebPage": {
+      "type": "object",
+      "required": ["url", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "url": {"type": "string", "format": "uri"},
+        "status": {"type": "integer"},
+        "title": {"type": "string"},
+        "body": {"$ref": "#/$defs/Body"},
+        "fetched_at": {"$ref": "#/$defs/Timestamp"}
+      }
+    },
+    "SearchSet": {
+      "type": "object",
+      "required": ["query", "results"],
+      "additionalProperties": false,
+      "properties": {
+        "query": {"type": "string"},
+        "match": {"enum": ["exact", "semantic"], "default": "semantic"},
+        "results": {"type": "array", "items": {"type": "object", "required": ["title", "url"], "additionalProperties": false, "properties": {
+          "title": {"type": "string"}, "url": {"type": "string", "format": "uri"}, "snippet": {"type": "string"}}}}
+      }
+    },
+    "McpServer": {
+      "description": "An MCP server the agent had. Daimon's own tools come from the deployment; third-party and relayed servers need their recorded catalogue here.",
+      "type": "object",
+      "required": ["name", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string"},
+        "kind": {"enum": ["daimon", "third_party", "relay"]},
+        "instructions": {"type": "string"},
+        "tools": {"type": "array", "items": {"type": "object", "required": ["name", "input_schema"], "additionalProperties": false, "properties": {
+          "name": {"type": "string"}, "description": {"type": "string"}, "input_schema": {"type": "object"},
+          "output_schema": {"type": "object"}, "annotations": {"type": "object"}}}}
+      }
+    },
+    "Identity": {
+      "description": "An account the agent acts as. Runs mint fresh fake tokens of the right shape; none are stored.",
+      "type": "object",
+      "required": ["service", "login"],
+      "additionalProperties": false,
+      "properties": {
+        "service": {"type": "string"},
+        "login": {"type": "string"},
+        "display_name": {"type": "string"},
+        "email": {"type": "string"},
+        "token_env": {"type": "string", "description": "Sandbox variable that carries the fake token, e.g. GH_TOKEN."},
+        "token_shape": {"type": "string", "description": "Token format to mint, e.g. github_pat, google_oauth."},
+        "scopes": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "NetworkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "package_registries": {"enum": ["passthrough", "deny"], "description": "Unset: the deployment's eval_package_registries setting."},
+        "passthrough": {"type": "array", "items": {"type": "string"}, "description": "Extra exact hosts reached for real, read-only. Needs an admin-allowed list."},
+        "deny": {"type": "array", "items": {"type": "string"}, "description": "Hosts refused outright instead of simulated."}
+      }
+    },
+    "SimEntry": {
+      "description": "A simulator answer kept so every arm and repeat gets the same one.",
+      "type": "object",
+      "required": ["key", "surface", "request", "response", "model", "created_at"],
+      "additionalProperties": false,
+      "properties": {
+        "key": {"$ref": "#/$defs/Sha256", "description": "sha256 of the normalized request plus the overlay state it saw."},
+        "surface": {"enum": ["mcp", "http", "provider_tool"]},
+        "request": {"$ref": "#/$defs/ExchangeRequest"},
+        "response": {"$ref": "#/$defs/ExchangeResponse"},
+        "effects": {"type": "array", "items": {"$ref": "#/$defs/Effect"}},
+        "model": {"type": "string"},
+        "created_at": {"$ref": "#/$defs/Timestamp"}
+      }
+    },
+    "AgentContext": {
+      "description": "What the deployment knew about the conversation at turn time, outside the chat history.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "memory": {"type": "array", "items": {"type": "object", "required": ["path", "content"], "additionalProperties": false, "properties": {
+          "path": {"type": "string"}, "content": {"type": "string"}, "scope": {"enum": ["agent", "person", "channel", "repo"]}}}},
+        "context": {"type": "array", "items": {"type": "object", "required": ["provider", "text"], "additionalProperties": false, "properties": {
+          "provider": {"type": "string"}, "text": {"type": "string"}}}, "description": "Context-provider output injected at turn start."},
+        "previous_session": {"type": "string", "description": "Hand-off summary from an earlier session, when the platform carried one over."}
+      }
+    },
+
+    "Expectations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tool_calls": {"type": "object", "required": ["mode", "calls"], "additionalProperties": false, "properties": {
+          "mode": {"enum": ["strict", "unordered", "subset", "superset"], "description": "strict: same calls, same order; unordered: same calls, any order; subset: these calls appear, others allowed; superset: no calls beyond these."},
+          "calls": {"type": "array", "items": {"$ref": "#/$defs/ExpectedCall"}}}},
+        "forbidden_calls": {"type": "array", "items": {"$ref": "#/$defs/CallPattern"}},
+        "effects": {"type": "object", "required": ["mode", "items"], "additionalProperties": false, "properties": {
+          "mode": {"enum": ["strict", "unordered", "subset", "superset"]},
+          "items": {"type": "array", "items": {"$ref": "#/$defs/ExpectedEffect"}}}},
+        "forbidden_effects": {"type": "array", "items": {"$ref": "#/$defs/EffectVerb"}},
+        "outputs": {"type": "array", "items": {"$ref": "#/$defs/ExpectedOutput"}},
+        "world": {"type": "array", "items": {"$ref": "#/$defs/WorldCheck"}},
+        "rubric": {"type": "array", "items": {"$ref": "#/$defs/RubricItem"}},
+        "reference": {"type": "object", "additionalProperties": false, "properties": {
+          "text": {"type": "string"}, "files": {"type": "array", "items": {"$ref": "#/$defs/BlobRef"}},
+          "note": {"type": "string", "description": "What a good answer must contain, when no single reference fits."}}},
+        "limits": {"type": "object", "additionalProperties": false, "properties": {
+          "max_tool_calls": {"type": "integer", "minimum": 0}, "max_duration_s": {"type": "number", "minimum": 0},
+          "max_cost_usd": {"type": "number", "minimum": 0}, "max_messages": {"type": "integer", "minimum": 0}}},
+        "pass_rule": {"type": "object", "additionalProperties": false, "properties": {
+          "checks": {"enum": ["all", "hard_only"], "default": "all"},
+          "rubric_min": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.7}}}
+      }
+    },
+    "CallPattern": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "effect": {"$ref": "#/$defs/Glob"},
+        "tool": {"$ref": "#/$defs/Glob"},
+        "server": {"type": "string"},
+        "service": {"type": "string"},
+        "surface": {"enum": ["mcp", "http", "cli", "builtin", "provider_tool"]}
+      }
+    },
+    "ExpectedCall": {
+      "type": "object",
+      "required": ["match"],
+      "additionalProperties": false,
+      "properties": {
+        "match": {"$ref": "#/$defs/CallPattern"},
+        "args": {"type": "object", "propertyNames": {"$ref": "#/$defs/JsonPointer"}, "additionalProperties": {"$ref": "#/$defs/Check"}},
+        "min": {"type": "integer", "minimum": 0, "default": 1},
+        "max": {"type": "integer", "minimum": 0},
+        "hard": {"type": "boolean", "default": true}
+      }
+    },
+    "ExpectedEffect": {
+      "type": "object",
+      "required": ["verb"],
+      "additionalProperties": false,
+      "properties": {
+        "verb": {"$ref": "#/$defs/EffectVerb"},
+        "target": {"type": "string"},
+        "args": {"type": "object", "propertyNames": {"$ref": "#/$defs/JsonPointer"}, "additionalProperties": {"$ref": "#/$defs/Check"}},
+        "min": {"type": "integer", "minimum": 0, "default": 1},
+        "max": {"type": "integer", "minimum": 0},
+        "hard": {"type": "boolean", "default": true}
+      }
+    },
+    "Check": {
+      "type": "object",
+      "required": ["op"],
+      "additionalProperties": false,
+      "properties": {
+        "op": {"enum": ["exact", "normalized", "regex", "contains", "not_contains", "one_of", "range", "schema", "exists", "llm"]},
+        "value": {},
+        "values": {"type": "array"},
+        "pattern": {"type": "string"},
+        "min": {"type": "number"},
+        "max": {"type": "number"},
+        "schema": {"type": "object"},
+        "criterion": {"type": "string", "description": "op llm: what a judge model checks, answered yes, no or unknown."}
+      }
+    },
+    "ExpectedOutput": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"enum": ["reply", "message", "file", "card", "reaction", "no_reply"]},
+        "where": {"enum": ["final", "any", "first"], "default": "any"},
+        "text": {"$ref": "#/$defs/Check"},
+        "media_type": {"type": "string"},
+        "name": {"$ref": "#/$defs/Check"},
+        "card_kind": {"$ref": "#/$defs/CardKind"},
+        "emoji": {"type": "string"},
+        "pages": {"type": "object", "additionalProperties": false, "properties": {"min": {"type": "integer"}, "max": {"type": "integer"}}},
+        "min": {"type": "integer", "minimum": 0, "default": 1},
+        "max": {"type": "integer", "minimum": 0},
+        "hard": {"type": "boolean", "default": true}
+      }
+    },
+    "WorldCheck": {
+      "description": "A check on the per-item world state after the run.",
+      "type": "object",
+      "required": ["service", "key", "path", "check"],
+      "additionalProperties": false,
+      "properties": {
+        "service": {"type": "string"},
+        "key": {"type": "string"},
+        "path": {"$ref": "#/$defs/JsonPointer"},
+        "check": {"$ref": "#/$defs/Check"},
+        "hard": {"type": "boolean", "default": true}
+      }
+    },
+    "RubricItem": {
+      "type": "object",
+      "required": ["id", "criterion"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/Id"},
+        "criterion": {"type": "string", "description": "One yes/no question, or a scale with anchors."},
+        "kind": {"enum": ["binary", "scale"], "default": "binary"},
+        "scale": {"type": "object", "required": ["min", "max"], "additionalProperties": false, "properties": {
+          "min": {"type": "integer"}, "max": {"type": "integer"},
+          "anchors": {"type": "object", "additionalProperties": {"type": "string"}}}},
+        "weight": {"type": "number", "exclusiveMinimum": 0, "default": 1},
+        "hard": {"type": "boolean", "default": false, "description": "A failed hard item fails the case whatever the score."},
+        "applies_to": {"type": "array", "items": {"enum": ["reply", "chat", "files", "tool_calls", "world"]}, "default": ["reply", "chat", "files"]},
+        "graders": {"type": "array", "items": {"enum": ["llm", "human", "agent"]}, "default": ["llm"]}
+      }
+    },
+    "Limits": {
+      "description": "Hard stops for one item.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "timeout_s": {"type": "integer", "minimum": 10, "default": 1800},
+        "max_world_calls": {"type": "integer", "minimum": 1, "default": 300},
+        "max_cost_usd": {"type": "number", "minimum": 0}
+      }
+    },
+
+    "Arm": {
+      "description": "One side of a comparison: a live Daimon agent configuration or a recorded baseline.",
+      "type": "object",
+      "required": ["id", "label", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/Id"},
+        "label": {"type": "string"},
+        "kind": {"enum": ["live", "baseline"]},
+        "live": {"type": "object", "required": ["backend", "model"], "additionalProperties": false, "properties": {
+          "agent": {"type": "string", "description": "Agent name on the deployment that ran it."},
+          "agent_snapshot": {"$ref": "#/$defs/BlobRef", "description": "Exported agent definition (no credentials) for reproduction elsewhere."},
+          "backend": {"enum": ["anthropic", "openai", "gemini", "harness"]},
+          "model": {"type": "string"},
+          "effort": {"type": "string"},
+          "overrides": {"type": "object", "description": "Settings changed for this arm only."}}},
+        "baseline": {"type": "object", "additionalProperties": false, "properties": {
+          "source_system": {"type": "string"}, "description": {"type": "string"},
+          "recorded_from": {"$ref": "#/$defs/Timestamp"}, "recorded_to": {"$ref": "#/$defs/Timestamp"}}},
+        "config_hash": {"$ref": "#/$defs/Sha256"}
+      },
+      "oneOf": [
+        {"properties": {"kind": {"const": "live"}}, "required": ["live"]},
+        {"properties": {"kind": {"const": "baseline"}}, "required": ["baseline"]}
+      ]
+    },
+    "Run": {
+      "description": "runs/<id>/run.json.",
+      "type": "object",
+      "required": ["schema", "id", "suite", "arms", "status", "origin"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "daimon.eval.run/1"},
+        "id": {"$ref": "#/$defs/Id"},
+        "name": {"type": "string"},
+        "suite": {"type": "object", "required": ["id", "version"], "additionalProperties": false, "properties": {
+          "id": {"$ref": "#/$defs/Id"}, "version": {"type": "integer", "minimum": 1}}},
+        "arms": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/Arm"}},
+        "case_ids": {"type": "array", "items": {"$ref": "#/$defs/Id"}, "description": "Subset run; absent means every case of the suite version."},
+        "repeats": {"type": "integer", "minimum": 1, "default": 1},
+        "judges": {"type": "array", "items": {"$ref": "#/$defs/JudgeConfig"}},
+        "status": {"enum": ["draft", "estimated", "approved", "running", "done", "partial", "cancelled", "failed"]},
+        "origin": {"type": "object", "required": ["kind"], "additionalProperties": false, "properties": {
+          "kind": {"enum": ["local", "imported", "recorded"]},
+          "deployment": {"type": "string"}, "daimon_version": {"type": "string"}}},
+        "estimate": {"$ref": "#/$defs/Estimate"},
+        "approval": {"type": "object", "required": ["by", "at", "cap_usd"], "additionalProperties": false, "properties": {
+          "by": {"$ref": "#/$defs/PrincipalRef"}, "at": {"$ref": "#/$defs/Timestamp"}, "cap_usd": {"type": "number", "minimum": 0}}},
+        "spend": {"$ref": "#/$defs/Spend"},
+        "started_at": {"$ref": "#/$defs/Timestamp"},
+        "finished_at": {"$ref": "#/$defs/Timestamp"},
+        "blind_labels": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Arm id -> neutral label shown in blind review."},
+        "ext": {"$ref": "#/$defs/Ext"}
+      }
+    },
+    "Estimate": {
+      "type": "object",
+      "required": ["low_usd", "expected_usd", "high_usd", "lines", "at"],
+      "additionalProperties": false,
+      "properties": {
+        "low_usd": {"type": "number", "minimum": 0},
+        "expected_usd": {"type": "number", "minimum": 0},
+        "high_usd": {"type": "number", "minimum": 0},
+        "at": {"$ref": "#/$defs/Timestamp"},
+        "lines": {"type": "array", "items": {"type": "object", "required": ["category", "expected_usd"], "additionalProperties": false, "properties": {
+          "category": {"enum": ["agent", "simulator", "judge", "compile", "sandbox"]},
+          "arm_id": {"$ref": "#/$defs/Id"}, "model": {"type": "string"},
+          "items": {"type": "integer", "minimum": 0},
+          "expected_usd": {"type": "number", "minimum": 0},
+          "basis": {"enum": ["prior_runs", "baseline_usage", "suite_median", "default"]}}}}
+      }
+    },
+    "Spend": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "total_usd": {"type": "number", "minimum": 0},
+        "by_category": {"type": "object", "additionalProperties": {"type": "number", "minimum": 0}}
+      }
+    },
+
+    "RunItem": {
+      "description": "One line of runs/<id>/items.jsonl: one case, one arm, one repeat.",
+      "type": "object",
+      "required": ["schema", "id", "run_id", "case", "arm_id", "repeat", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "daimon.eval.item/1"},
+        "id": {"$ref": "#/$defs/Id"},
+        "run_id": {"$ref": "#/$defs/Id"},
+        "case": {"type": "object", "required": ["id", "revision", "hash"], "additionalProperties": false, "properties": {
+          "id": {"$ref": "#/$defs/Id"}, "revision": {"type": "integer", "minimum": 1}, "hash": {"$ref": "#/$defs/Sha256"}}},
+        "arm_id": {"$ref": "#/$defs/Id"},
+        "repeat": {"type": "integer", "minimum": 0},
+        "status": {"enum": ["pending", "running", "done", "error", "skipped", "cancelled"]},
+        "error": {"type": "object", "required": ["kind"], "additionalProperties": false, "properties": {
+          "kind": {"enum": ["timeout", "cap", "provider", "sandbox", "world", "agent", "cancelled", "other"]}, "message": {"type": "string"}}},
+        "started_at": {"$ref": "#/$defs/Timestamp"},
+        "finished_at": {"$ref": "#/$defs/Timestamp"},
+        "transcript": {"$ref": "#/$defs/EventStream"},
+        "chat": {"type": "array", "items": {"$ref": "#/$defs/ChatEvent"}},
+        "outputs": {"type": "array", "items": {"$ref": "#/$defs/Output"}},
+        "world_calls": {"type": "array", "items": {"$ref": "#/$defs/WorldCall"}},
+        "usage": {"$ref": "#/$defs/Usage"},
+        "enclosure": {"$ref": "#/$defs/Enclosure"},
+        "ext": {"$ref": "#/$defs/Ext"}
+      }
+    },
+    "EventStream": {
+      "description": "Transcript events inline, or a blob of NDJSON TranscriptEvent lines when large.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "events": {"type": "array", "items": {"$ref": "#/$defs/TranscriptEvent"}},
+        "blob": {"$ref": "#/$defs/BlobRef"}
+      },
+      "oneOf": [{"required": ["events"]}, {"required": ["blob"]}]
+    },
+    "TranscriptEvent": {
+      "type": "object",
+      "required": ["seq", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "seq": {"type": "integer", "minimum": 0},
+        "t_ms": {"type": "integer", "minimum": 0, "description": "Milliseconds since the item started."},
+        "turn": {"type": "integer", "minimum": 0, "description": "0 for the tested turn; 1+ for scripted follow-ups."},
+        "kind": {"enum": ["user_message", "assistant_text", "thinking", "tool_call", "tool_result", "status", "error", "turn_start", "turn_end"]},
+        "text": {"type": "string"},
+        "redacted": {"type": "boolean", "description": "True for thinking or text the provider withheld."},
+        "call_id": {"type": "string"},
+        "tool": {"type": "object", "required": ["name"], "additionalProperties": false, "properties": {
+          "name": {"type": "string"}, "server": {"type": "string"},
+          "surface": {"enum": ["mcp", "builtin", "provider_tool", "custom"]}, "input": {}}},
+        "result": {"type": "object", "additionalProperties": false, "properties": {
+          "content": {"type": "array", "items": {"$ref": "#/$defs/ContentBlock"}},
+          "is_error": {"type": "boolean"},
+          "origin": {"$ref": "#/$defs/Origin"},
+          "world_call": {"type": "integer", "minimum": 0, "description": "seq of the matching WorldCall."}}},
+        "model": {"type": "string"},
+        "usage": {"$ref": "#/$defs/Usage"}
+      }
+    },
+    "Origin": {"enum": ["recorded", "overlay", "simulated", "denied", "passthrough", "sandbox", "live"], "description": "Where an answer came from. sandbox: computed inside the sandbox; live: a recorded baseline's real answer."},
+    "WorldCall": {
+      "description": "A request that reached the fake world in a run, with the answer given.",
+      "type": "object",
+      "required": ["seq", "surface", "origin"],
+      "additionalProperties": false,
+      "properties": {
+        "seq": {"type": "integer", "minimum": 0},
+        "t_ms": {"type": "integer", "minimum": 0},
+        "surface": {"enum": ["mcp", "http", "provider_tool", "git"]},
+        "service": {"type": "string"},
+        "server": {"type": "string"},
+        "tool": {"type": "string"},
+        "request": {"$ref": "#/$defs/ExchangeRequest"},
+        "response": {"$ref": "#/$defs/ExchangeResponse"},
+        "origin": {"$ref": "#/$defs/Origin"},
+        "exchange_id": {"$ref": "#/$defs/Id"},
+        "sim_key": {"$ref": "#/$defs/Sha256"},
+        "effects": {"type": "array", "items": {"$ref": "#/$defs/Effect"}},
+        "reason": {"type": "string", "description": "Why it was denied or simulated."}
+      }
+    },
+    "ChatEvent": {
+      "description": "What the simulated chat surface showed, in platform-neutral form.",
+      "type": "object",
+      "required": ["seq", "kind", "actor"],
+      "additionalProperties": false,
+      "properties": {
+        "seq": {"type": "integer", "minimum": 0},
+        "t_ms": {"type": "integer", "minimum": 0},
+        "kind": {"enum": ["message", "edit", "delete", "reaction_add", "reaction_remove", "card", "card_update", "typing", "status", "title", "notice", "file"]},
+        "actor": {"type": "string", "description": "`bot`, or a participant id."},
+        "message_id": {"type": "string"},
+        "text": {"type": "string"},
+        "format": {"enum": ["markdown", "plain"]},
+        "reply_to": {"type": "string"},
+        "emoji": {"type": "string"},
+        "card": {"$ref": "#/$defs/NeutralCard"},
+        "files": {"type": "array", "items": {"type": "string"}, "description": "Output ids."},
+        "scripted": {"type": "string", "description": "Script step id when a simulated person did this."},
+        "platform_payloads": {"type": "object", "additionalProperties": false, "properties": {
+          "discord": {"type": "object"}, "slack": {"type": "object"}, "teams": {"type": "object"}, "web": {"type": "object"}},
+          "description": "The native payload each platform would have received, for previews."}
+      }
+    },
+    "CardKind": {"enum": ["confirmation", "posted", "credential_request", "host_call", "provider_action", "refusal", "status", "panel", "form", "question"]},
+    "ButtonAction": {"enum": ["approve", "deny", "always", "details", "save", "skip", "submit", "stop", "open_url", "custom"]},
+    "NeutralCard": {
+      "type": "object",
+      "required": ["id", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"},
+        "kind": {"$ref": "#/$defs/CardKind"},
+        "headline": {"type": "string"},
+        "body": {"type": "string"},
+        "facts": {"type": "array", "items": {"type": "object", "required": ["label", "value"], "additionalProperties": false, "properties": {
+          "label": {"type": "string"}, "value": {"type": "string"}}}},
+        "fields": {"type": "array", "items": {"type": "object", "required": ["id", "label", "kind"], "additionalProperties": false, "properties": {
+          "id": {"type": "string"}, "label": {"type": "string"},
+          "kind": {"enum": ["text", "textarea", "select", "secret", "checkbox"]},
+          "required": {"type": "boolean"}, "options": {"type": "array", "items": {"type": "string"}}, "placeholder": {"type": "string"}}}},
+        "buttons": {"type": "array", "items": {"type": "object", "required": ["id", "label", "action"], "additionalProperties": false, "properties": {
+          "id": {"type": "string"}, "label": {"type": "string"},
+          "style": {"enum": ["primary", "secondary", "danger", "link"], "default": "secondary"},
+          "action": {"$ref": "#/$defs/ButtonAction"}, "url": {"type": "string"}}}},
+        "footer": {"type": "string"},
+        "state": {"enum": ["open", "answered", "expired", "cancelled"], "default": "open"},
+        "answer": {"type": "object", "additionalProperties": false, "properties": {
+          "by": {"type": "string"}, "button": {"type": "string"},
+          "fields": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Secret fields are stored as `***`."}}}
+      }
+    },
+    "Output": {
+      "description": "A file the agent produced or delivered.",
+      "type": "object",
+      "required": ["id", "name", "media_type", "blob"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"},
+        "media_type": {"$ref": "#/$defs/MediaType"},
+        "blob": {"$ref": "#/$defs/BlobRef"},
+        "source": {"enum": ["chat_upload", "sandbox", "artifact", "world"], "description": "chat_upload: sent into the chat; sandbox: left in the output folder; artifact: published link; world: written to a fake service such as a doc or deck."},
+        "path": {"type": "string"},
+        "renders": {"type": "array", "items": {"$ref": "#/$defs/BlobRef"}, "description": "Page or slide images (PNG), in order."},
+        "text": {"$ref": "#/$defs/BlobRef", "description": "Extracted text for search, diff and judges."}
+      }
+    },
+    "Usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "input_tokens": {"type": "integer", "minimum": 0},
+        "output_tokens": {"type": "integer", "minimum": 0},
+        "cache_read_tokens": {"type": "integer", "minimum": 0},
+        "cache_write_tokens": {"type": "integer", "minimum": 0},
+        "cost_usd": {"type": "number", "minimum": 0},
+        "duration_ms": {"type": "integer", "minimum": 0},
+        "tool_calls": {"type": "integer", "minimum": 0}
+      }
+    },
+    "Enclosure": {
+      "description": "How enclosed one item was, so results from different setups are not compared blindly.",
+      "type": "object",
+      "required": ["mode"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"enum": ["enclosed", "recorded"], "description": "recorded: a baseline item that ran against the real world."},
+        "backend": {"enum": ["anthropic", "openai", "gemini", "harness"]},
+        "sandbox": {"type": "object", "additionalProperties": false, "properties": {
+          "runtime": {"enum": ["docker", "kubernetes"]}, "image": {"type": "string", "description": "Image digest."},
+          "parity": {"enum": ["matched", "drift", "unchecked"]}}},
+        "network": {"type": "object", "additionalProperties": false, "properties": {
+          "intercept": {"const": "transparent"},
+          "control_plane": {"type": "array", "items": {"type": "string"}},
+          "package_registries": {"enum": ["passthrough", "deny"]},
+          "passthrough": {"type": "array", "items": {"type": "string"}}}},
+        "clock": {"type": "object", "additionalProperties": false, "properties": {
+          "mode": {"enum": ["case", "real"]}, "real_time_binaries": {"type": "array", "items": {"type": "string"}, "description": "Probed binaries that ignore the case clock."}}},
+        "substitutions": {"type": "array", "items": {"type": "object", "required": ["from", "to"], "additionalProperties": false, "properties": {
+          "from": {"type": "string"}, "to": {"type": "string"}}}, "description": "Provider tools swapped for enclosed ones, e.g. web_search -> eval web search."},
+        "probes": {"type": "object", "additionalProperties": {"enum": ["pass", "fail", "skipped"]}},
+        "simulated_calls": {"type": "integer", "minimum": 0},
+        "denied_calls": {"type": "integer", "minimum": 0},
+        "daimon_version": {"type": "string"}
+      }
+    },
+
+    "Score": {
+      "description": "One line of runs/<id>/scores.jsonl. Every grader (code, model, person, agent) writes this shape.",
+      "type": "object",
+      "required": ["schema", "id", "criterion", "grader", "value", "at"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "daimon.eval.score/1"},
+        "id": {"$ref": "#/$defs/Id"},
+        "item_id": {"$ref": "#/$defs/Id"},
+        "pair": {"type": "object", "required": ["a", "b"], "additionalProperties": false, "properties": {
+          "a": {"$ref": "#/$defs/Id"}, "b": {"$ref": "#/$defs/Id"}}, "description": "Pairwise scores name two items instead of one."},
+        "criterion": {"type": "string", "description": "Check path (e.g. tool_calls/0) or rubric item id, or `overall`."},
+        "grader": {"type": "object", "required": ["kind"], "additionalProperties": false, "properties": {
+          "kind": {"enum": ["code", "llm", "human", "agent"]},
+          "who": {"$ref": "#/$defs/PrincipalRef"}, "model": {"type": "string"},
+          "judge_id": {"$ref": "#/$defs/Id"}, "version": {"type": "string"}}},
+        "value": {"type": "object", "additionalProperties": false, "properties": {
+          "pass": {"type": "boolean"}, "score": {"type": "number"},
+          "preference": {"enum": ["a", "b", "tie"]}, "label": {"type": "string"},
+          "unknown": {"type": "boolean"}}, "minProperties": 1},
+        "rationale": {"type": "string"},
+        "anchors": {"type": "array", "items": {"$ref": "#/$defs/Anchor"}},
+        "blind": {"type": "boolean"},
+        "swapped": {"type": "boolean"},
+        "cost_usd": {"type": "number", "minimum": 0},
+        "at": {"$ref": "#/$defs/Timestamp"},
+        "supersedes": {"$ref": "#/$defs/Id"}
+      },
+      "anyOf": [{"required": ["item_id"]}, {"required": ["pair"]}]
+    },
+    "Anchor": {
+      "description": "Points at a part of an item: a message, tool call, file page, image region, table range, text span or card element.",
+      "type": "object",
+      "required": ["target", "item_id"],
+      "additionalProperties": false,
+      "properties": {
+        "target": {"enum": ["message", "tool_call", "world_call", "output", "page", "image_region", "table_range", "text_range", "card_element", "diff_hunk"]},
+        "item_id": {"$ref": "#/$defs/Id"},
+        "ref": {"type": "string", "description": "Message id, call_id, world call seq or output id."},
+        "page": {"type": "integer", "minimum": 1},
+        "region": {"type": "object", "required": ["x", "y", "w", "h"], "additionalProperties": false, "properties": {
+          "x": {"type": "number", "minimum": 0, "maximum": 1}, "y": {"type": "number", "minimum": 0, "maximum": 1},
+          "w": {"type": "number", "minimum": 0, "maximum": 1}, "h": {"type": "number", "minimum": 0, "maximum": 1}}},
+        "sheet": {"type": "string"},
+        "cells": {"type": "string", "pattern": "^[A-Z]+[0-9]+(:[A-Z]+[0-9]+)?$"},
+        "start": {"type": "integer", "minimum": 0},
+        "end": {"type": "integer", "minimum": 0},
+        "quote": {"type": "string", "description": "The anchored text, so the anchor survives small re-renders."},
+        "element": {"type": "string"}
+      }
+    },
+    "ReviewRecord": {
+      "description": "One line of runs/<id>/reviews.jsonl: a review queue or a comment. Verdicts are Scores.",
+      "oneOf": [{"$ref": "#/$defs/ReviewQueue"}, {"$ref": "#/$defs/Comment"}]
+    },
+    "ReviewQueue": {
+      "type": "object",
+      "required": ["schema", "kind", "id", "name", "layout", "blind"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "daimon.eval.review/1"},
+        "kind": {"const": "queue"},
+        "id": {"$ref": "#/$defs/Id"},
+        "name": {"type": "string"},
+        "layout": {"enum": ["single", "side_by_side"]},
+        "blind": {"type": "boolean"},
+        "arms": {"type": "array", "items": {"$ref": "#/$defs/Id"}},
+        "criteria": {"type": "array", "items": {"type": "string"}, "description": "Rubric ids, `overall`, or `preference`."},
+        "reviewers_per_item": {"type": "integer", "minimum": 1},
+        "reviewers": {"type": "array", "items": {"$ref": "#/$defs/PrincipalRef"}},
+        "status": {"enum": ["open", "closed"]}
+      }
+    },
+    "Comment": {
+      "type": "object",
+      "required": ["schema", "kind", "id", "author", "text", "at"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "daimon.eval.review/1"},
+        "kind": {"const": "comment"},
+        "id": {"$ref": "#/$defs/Id"},
+        "item_id": {"$ref": "#/$defs/Id"},
+        "case_id": {"$ref": "#/$defs/Id"},
+        "parent_id": {"$ref": "#/$defs/Id"},
+        "author": {"$ref": "#/$defs/PrincipalRef"},
+        "text": {"type": "string"},
+        "anchors": {"type": "array", "items": {"$ref": "#/$defs/Anchor"}},
+        "resolved": {"type": "boolean", "default": false},
+        "at": {"$ref": "#/$defs/Timestamp"}
+      },
+      "anyOf": [{"required": ["item_id"]}, {"required": ["case_id"]}]
+    }
+  }
+}

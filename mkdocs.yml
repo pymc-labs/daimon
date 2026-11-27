@@ -39,6 +39,7 @@ nav:
       - Context providers: context-providers.md
       - Lead intake: lead-intake.md
       - Ask a person: support.md
+      - Evals: evals.md
   - Concepts:
       - How Daimon works: how-daimon-works.md
       - Architecture: architecture.md

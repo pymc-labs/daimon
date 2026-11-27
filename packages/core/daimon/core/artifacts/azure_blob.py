@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from urllib.parse import quote
 
+from azure.core.exceptions import ResourceNotFoundError
 from azure.identity import ManagedIdentityCredential
 from azure.storage.blob import (
     BlobSasPermissions,
@@ -15,7 +16,7 @@ from azure.storage.blob import (
     ContentSettings,
     generate_blob_sas,
 )
-from daimon.core.artifacts import StoredArtifact
+from daimon.core.artifacts.store import StoredArtifact
 from daimon.core.config import ArtifactsSettings
 
 
@@ -90,6 +91,26 @@ class AzureBlobArtifactStore:
 
         # SDK clients and credentials are closed in the worker, including on errors.
         return await asyncio.to_thread(_store_and_sign)
+
+    async def put(self, *, key: str, content: bytes, content_type: str) -> None:
+        def _put() -> None:
+            with self._client_factory() as client:
+                blob = client.get_blob_client(container=self._container, blob=key)
+                settings = ContentSettings(content_type=content_type)
+                blob.upload_blob(content, overwrite=True, content_settings=settings)
+
+        await asyncio.to_thread(_put)
+
+    async def read(self, *, key: str) -> bytes | None:
+        def _read() -> bytes | None:
+            with self._client_factory() as client:
+                blob = client.get_blob_client(container=self._container, blob=key)
+                try:
+                    return blob.download_blob().readall()
+                except ResourceNotFoundError:
+                    return None
+
+        return await asyncio.to_thread(_read)
 
 
 def build_azure_blob_store(settings: ArtifactsSettings) -> AzureBlobArtifactStore:

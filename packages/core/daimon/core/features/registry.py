@@ -29,7 +29,7 @@ Binding = Literal["turn", "session_mutable", "session_identity", "provision", "r
 in place on the next message. ``session_identity``: held by the live session until ``/new`` or a
 replacement (system prompt, skills, memory). ``provision``: on the agent's next save or sync.
 ``restart``: read once when the process starts."""
-Category = Literal["model_input", "chat", "capabilities", "limits", "guardrails"]
+Category = Literal["model_input", "chat", "capabilities", "web", "limits", "guardrails"]
 Requirement = Literal[
     "platform_adapter",
     "anthropic_key",
@@ -523,7 +523,7 @@ _ADMIN: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS)
 # Monitoring keeps what people say: workspace admins switch it on, an agent's owner may not.
 _ADMIN_NOT_OWNER: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS, agent_owner=False)
 WEB_MODULES: Final[tuple[str, ...]] = (
-    "chat", "agents", "channels", "routines", "credits", "integrations",
+    "chat", "agents", "channels", "routines", "credits", "integrations", "evals",
 )  # fmt: skip
 
 
@@ -862,7 +862,7 @@ _WORKSPACE: Final[tuple[FeatureSpec, ...]] = tuple(
     FeatureSpec(
         key=f"web.{module}",
         name=f"Web app: {module}",
-        category="capabilities",
+        category="web",
         effect="capability",
         values=_ON_OFF,
         default="on",
@@ -1233,6 +1233,15 @@ def _limit(
 
 
 _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
+    _capability(
+        "evals",
+        "Evals",
+        "People build and share eval suites. Off hides evals and their tools.",
+        tiers=("deployment", "workspace"),
+        default="off",
+        authority=_ADMIN,
+        page="evals.md#turn-it-on",
+    ),
     _capability(
         "watches",
         "Watches",

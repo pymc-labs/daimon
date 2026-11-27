@@ -1,0 +1,28 @@
+{
+  "description": [
+    "Add a case to an eval suite, or save its next revision; eval_suite_update pins it.",
+    "Check it first with eval_case_validate; the hash is filled in when missing."
+  ],
+  "parameters": {
+    "$defs": {
+      "JsonValue": {}
+    },
+    "additionalProperties": false,
+    "properties": {
+      "case": {
+        "additionalProperties": {
+          "$ref": "#/$defs/JsonValue"
+        },
+        "type": "object"
+      },
+      "suite_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "suite_id",
+      "case"
+    ],
+    "type": "object"
+  }
+}

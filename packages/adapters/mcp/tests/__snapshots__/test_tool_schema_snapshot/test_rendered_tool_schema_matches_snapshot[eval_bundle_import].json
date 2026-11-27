@@ -1,0 +1,23 @@
+{
+  "description": [
+    "Import a bundle uploaded with create_file_upload_url. Only an owner or an admin",
+    "can accept one that is not scrubbed. Encrypted bundles are imported from the command",
+    "line."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "accept_unscrubbed": {
+        "default": false,
+        "type": "boolean"
+      },
+      "file_handle": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "file_handle"
+    ],
+    "type": "object"
+  }
+}

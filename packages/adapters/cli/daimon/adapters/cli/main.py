@@ -21,6 +21,7 @@ from daimon.adapters.cli.commands.defaults import defaults_app
 from daimon.adapters.cli.commands.deployment import deployment_app
 from daimon.adapters.cli.commands.dm import dm_app
 from daimon.adapters.cli.commands.environments import environments_app
+from daimon.adapters.cli.commands.evals import evals_app
 from daimon.adapters.cli.commands.features import features_app
 from daimon.adapters.cli.commands.github import github_app
 from daimon.adapters.cli.commands.help import help_app
@@ -55,6 +56,7 @@ app.add_typer(backup_app, name="backup")
 app.add_typer(channels_app, name="channels")
 app.add_typer(deployment_app, name="deployment")
 app.add_typer(environments_app, name="environments")
+app.add_typer(evals_app, name="evals")
 app.add_typer(tenants_app, name="tenants")
 app.add_typer(usage_app, name="usage")
 app.add_typer(audit_app, name="audit")

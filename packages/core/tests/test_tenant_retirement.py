@@ -69,6 +69,8 @@ PURGED_DESPITE_MONEY = {
     "web_messages": "a message's cost is shown to people; usage_events bill it",
     "long_job": "a job's cost is shown to people; usage_events bill it",
     "turn_outcomes": "turn diagnostics; usage_events bill the turn",
+    "eval_runs": "a run's cap is configuration; usage_events bill its spend",
+    "eval_suite_version_cases": "a case's scoring weight, not an amount of money",
 }
 _MONEY = ("_usd", "_tokens")
 _PERSON = ("account_id", "platform_user_id", "session_id", "thread_id", "user_id")

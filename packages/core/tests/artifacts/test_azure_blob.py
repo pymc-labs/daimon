@@ -10,8 +10,8 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from azure.storage.blob import BlobServiceClient, ContentSettings, UserDelegationKey
-from daimon.adapters.mcp.artifacts import build_artifact_store
-from daimon.adapters.mcp.artifacts.azure_blob import AzureBlobArtifactStore
+from daimon.core.artifacts.azure_blob import AzureBlobArtifactStore
+from daimon.core.artifacts.s3 import build_artifact_store
 from daimon.core.config import ArtifactsSettings
 
 NOW = dt.datetime(2026, 10, 20, 12, 0, tzinfo=dt.UTC)
@@ -111,8 +111,8 @@ async def test_factory_selects_managed_identity_and_closes_credential() -> None:
         azure_client_id="charts-identity",
     )
     with (
-        patch("daimon.adapters.mcp.artifacts.azure_blob.ManagedIdentityCredential") as credential,
-        patch("daimon.adapters.mcp.artifacts.azure_blob.BlobServiceClient") as service,
+        patch("daimon.core.artifacts.azure_blob.ManagedIdentityCredential") as credential,
+        patch("daimon.core.artifacts.azure_blob.BlobServiceClient") as service,
     ):
         client = FakeBlobService()
         service.return_value.__enter__.return_value = client

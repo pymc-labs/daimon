@@ -37,6 +37,7 @@ from daimon.core.stores.domain import (
     RoutineRow,
 )
 from daimon.core.stores.security_audit import append_event
+from daimon.core.stores.tenants import background_tenant_ids
 from sqlalchemy import and_, delete, false, func, or_, select, text, true, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
@@ -1110,7 +1111,7 @@ async def claim_due_fireable(
         select(Routine.id)
         .where(
             Routine.enabled.is_(True),
-            Routine.tenant_id.in_(select(Tenant.id).where(Tenant.archived_at.is_(None))),
+            Routine.tenant_id.in_(background_tenant_ids()),
             Routine.next_fire_at.is_not(None),
             or_(Routine.catch_up_policy == "run-once", Routine.next_fire_at >= window_start),
             Routine.id.not_in(exclude_ids),

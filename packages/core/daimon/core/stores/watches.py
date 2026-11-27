@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 from daimon.core._models import (
     Account,
     TaskContinuation,
-    Tenant,
     Watch,
     WatchCapability,
     WatchControl,
@@ -42,7 +41,7 @@ from daimon.core.stores.domain import (
     WatchRow,
 )
 from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
-from daimon.core.stores.tenants import get_tenant
+from daimon.core.stores.tenants import background_tenant_ids, get_tenant
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.untrusted import render_untrusted
 from sqlalchemy import delete, func, or_, select, text, update
@@ -2280,7 +2279,7 @@ async def claim_import_notice(
                 func.coalesce(Watch.expires_at, Watch.paused_at + PAUSED_PERMANENT_EXPIRY)
                 >= now - timedelta(hours=24),
             ),
-            Watch.tenant_id.in_(select(Tenant.id).where(Tenant.archived_at.is_(None))),
+            Watch.tenant_id.in_(background_tenant_ids()),
             # An import never messages the owner: leave out what nobody confirmed.
             Watch.source_state["confirmed"].as_boolean().is_distinct_from(False),
             or_(

@@ -1,0 +1,32 @@
+{
+  "description": [
+    "Read one eval case as JSON. No revision reads the latest."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "case_id": {
+        "type": "string"
+      },
+      "revision": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "suite_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "suite_id",
+      "case_id"
+    ],
+    "type": "object"
+  }
+}
