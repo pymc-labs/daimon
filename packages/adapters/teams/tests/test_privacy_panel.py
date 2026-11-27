@@ -49,6 +49,22 @@ POLICY_URL = "https://example.com/privacy"
 NAME = USER_NAME
 
 
+def test_terms_button_follows_the_policy_only_when_given() -> None:
+    """Terms is an open-url action after Policy; without a terms page the card is unchanged."""
+    with_terms = panel_card(bot="daimon", policy_url=POLICY_URL, terms_url="https://example.com/t")
+    bare = panel_card(bot="daimon", policy_url=POLICY_URL)
+
+    def urls(card: object) -> list[tuple[str, str]]:
+        actions = card.model_dump(by_alias=True)["body"][-1]["actions"]  # pyright: ignore[reportAttributeAccessIssue]
+        return [(a["title"], a["url"]) for a in actions if a["type"] == "Action.OpenUrl"]
+
+    assert urls(with_terms) == [
+        ("📄 Policy", POLICY_URL),
+        ("📜 Terms", "https://example.com/t"),
+    ], "Policy then Terms"
+    assert urls(bare) == [("📄 Policy", POLICY_URL)], "no Terms while unset"
+
+
 def test_paused_panel_keeps_policy_and_export() -> None:
     rendered = json.dumps(
         panel_card(bot="daimon", policy_url=POLICY_URL, delete_enabled=False).model_dump(),

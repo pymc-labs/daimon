@@ -15,7 +15,8 @@ import datetime as dt
 import json
 import re
 import uuid
-from collections.abc import AsyncIterator, Callable, Iterable
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -60,6 +61,7 @@ from daimon.core.tool_safety import (
     ToolCall,
     ToolSafetyPolicy,
 )
+from daimon.core.turn.io import TurnEvent
 from daimon.testing import ma_agent, ma_environment, with_coordinator, with_hidden_capability
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter
@@ -91,6 +93,7 @@ Call = tuple[str, str, dict[str, Any]]
 @pytest.fixture(autouse=True)
 def _fast_polls(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(safety, "_REOPEN_S", 0.01)
+    monkeypatch.setattr(safety, "_CATCH_UP_GAP_S", 0.01)
 
 
 def _toolset(server: str, policy: str, *names: str) -> dict[str, Any]:
@@ -144,6 +147,19 @@ class _Log(list[dict[str, Any]]):
             stream.frames.put_nowait(None)
         self.streams.clear()
 
+    def unheard(self) -> AbstractContextManager[None]:
+        """Events appended inside reach the list but no stream: a missed event."""
+
+        @contextmanager
+        def muted() -> Iterator[None]:
+            streams, self.streams = self.streams, []
+            try:
+                yield
+            finally:
+                self.streams = streams
+
+        return muted()
+
 
 class FakeSession:
     """One MA session: tool updates, the event log, and what was sent, in order.
@@ -179,6 +195,12 @@ class FakeSession:
         # With `live`, the events stream stays open and delivers the log as it grows.
         self.live = False
         self.status = "idle"
+        # The next N status reads still say "running": the status trails the events.
+        self.stale_status_reads = 0
+        # The next N event lists show only the first `_listed` events: the list
+        # trails the stream.
+        self.stale_lists = 0
+        self._listed = 0
         self.page_size = 1000
         self.fail_update = False
         self.unconstrainable: Callable[[Any], Any] | None = None
@@ -306,7 +328,15 @@ class FakeSession:
 
     def _retrieve(self, _r: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         self.reads += 1
-        return httpx.Response(200, json=self.model.model_dump(mode="json"))
+        body = self.model.model_dump(mode="json")
+        if self.stale_status_reads > 0:
+            self.stale_status_reads -= 1
+            body["status"] = "running"
+        return httpx.Response(200, json=body)
+
+    def list_trails(self, lists: int) -> None:
+        """The next `lists` event lists show nothing appended from now on."""
+        self.stale_lists, self._listed = lists, len(self.events)
 
     def _stream(self, _r: httpx.Request, _m: re.Match[str]) -> httpx.Response:
         """A live connection, or (the default) one that closes at once: a stream that
@@ -333,6 +363,9 @@ class FakeSession:
         self.reads += 1
         params = request.url.params
         events = list(self.events)
+        if self.stale_lists > 0:
+            self.stale_lists -= 1
+            events = events[: self._listed]
         types = params.get_list("types[]") or params.get_list("types")
         if types:
             events = [e for e in events if e["type"] in types]
@@ -1760,10 +1793,176 @@ async def test_the_worker_sleeps_on_the_event_stream_and_reads_only_on_news(
     assert await _reads_while_quiet(fake) == 0
 
     fake.status = "idle"
-    fake._pause_on(fake._remaining.pop(0))  # pyright: ignore[reportPrivateUsage]
+    _pause_now(fake)
     assert await asyncio.wait_for(worker, timeout=5) is True
     assert [c["result"] for c in fake.confirmations] == ["allow"]
     assert fake.opened == 1, "one subscription served the whole turn"
+
+
+def _pause_now(fake: FakeSession) -> None:
+    fake._pause_on(fake._remaining.pop(0))  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_the_worker_answers_a_pause_the_status_read_does_not_show(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Staging, 2026-11-26: right after the idle event the session's status still said
+    running, the worker read it once and went back to waiting for an event that never
+    came. Where a turn stands is read from its events."""
+    fake = FakeSession(script=[[("linear", "get_issue", {})], [("linear", "get_issue", {})]])
+    runtime = _runtime(fake, factory, _ENABLED)
+    boundary = _running_turn(fake)
+
+    worker = safety.watch_turn(
+        runtime, _auth(), _SESSION, turn_event_id=boundary, rules_channel_id=None
+    )
+    await _reads_while_quiet(fake)
+    _pause_now(fake)  # the status stays "running" through both pauses and the end
+    assert await asyncio.wait_for(worker, timeout=5) is True
+    assert [c["result"] for c in fake.confirmations] == ["allow", "allow"]
+
+
+async def test_the_worker_waits_for_the_event_list_to_show_the_pause(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The list can trail the stream: the state is read once it shows the event."""
+    fake = FakeSession(script=[[("linear", "get_issue", {})]])
+    runtime = _runtime(fake, factory, _ENABLED)
+    boundary = _running_turn(fake)
+
+    worker = safety.watch_turn(
+        runtime, _auth(), _SESSION, turn_event_id=boundary, rules_channel_id=None
+    )
+    await _reads_while_quiet(fake)
+    fake.list_trails(3)
+    fake.status = "idle"
+    _pause_now(fake)
+    assert await asyncio.wait_for(worker, timeout=5) is True
+    assert [c["result"] for c in fake.confirmations] == ["allow"]
+
+
+async def test_the_worker_finds_a_pause_no_stream_event_brought(
+    factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stream only saves reads. A missed event costs one recheck, never the turn."""
+    monkeypatch.setattr(safety, "RECHECK_S", 0.05)
+    fake = FakeSession(script=[[("linear", "get_issue", {})]])
+    runtime = _runtime(fake, factory, _ENABLED)
+    boundary = _running_turn(fake)
+
+    worker = safety.watch_turn(
+        runtime, _auth(), _SESSION, turn_event_id=boundary, rules_channel_id=None
+    )
+    await _eventually(lambda: fake.opened == 1)
+    fake.status = "idle"
+    with fake.events.unheard():
+        _pause_now(fake)
+    await _eventually(lambda: len(fake.confirmations) == 1)
+    assert await asyncio.wait_for(worker, timeout=5) is True
+    assert fake.opened == 1, "a recheck reads the state; it does not reopen the stream"
+
+
+async def test_await_turn_finds_an_end_no_stream_event_brought(
+    factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(agent_chat, "RECHECK_S", 0.05)
+    fake = FakeSession()
+    runtime = _runtime(fake, factory, _ENABLED)
+    await _record(factory, _running_turn(fake))
+
+    waiting = asyncio.create_task(_await_turn_impl(runtime, _auth(), _SESSION))
+    await _eventually(lambda: fake.opened == 1)
+    with fake.events.unheard():
+        _finish(fake)
+    news = await asyncio.wait_for(waiting, timeout=5)
+
+    assert (news.status, news.messages) == ("idle", ("done",))
+
+
+async def test_ask_returns_the_answer_when_the_status_read_trails_the_end(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The stream says the turn ended while the status still says running: `ask`
+    reads again at once instead of sleeping to its next recheck."""
+    fake = FakeSession(script=[[("linear", "get_issue", {})]])
+    fake.live = True
+    fake.on_confirm = lambda: setattr(fake, "stale_status_reads", 2)
+    runtime = _runtime(fake, factory, _ENABLED)
+
+    result = await asyncio.wait_for(_ask_impl(runtime, _auth(), "hi", handle=_SESSION), timeout=5)
+
+    assert result.message == "done"
+    assert fake.stale_status_reads == 0, "the trailing status was read through"
+
+
+@pytest.mark.parametrize("status", ["running", "idle"])
+async def test_a_pause_whose_calls_are_all_confirmed_reads_as_running(
+    factory: async_sessionmaker[AsyncSession], status: str
+) -> None:
+    """The confirmation is in and the running event is not listed yet. Nothing waits
+    for anybody, so no read says paused and no caller is told to resume. The turn is
+    not over either, whatever the status still says: a read that said idle would let
+    `ask` take a progress line for the final answer."""
+    fake = FakeSession(frozen="always_ask")
+    runtime = _runtime(fake, factory, _ENABLED)
+    await _record(factory, fake.pause())
+    for tool_use_id in fake._pending():  # pyright: ignore[reportPrivateUsage]
+        fake.events.append(
+            {"id": "evt_confirmed", "type": "user.tool_confirmation", "tool_use_id": tool_use_id}
+        )
+    fake.status = status
+
+    info = await _get_session_impl(runtime, _auth(), _SESSION)
+
+    assert (info.status, info.hint) == ("running", None)
+    # Nothing is left to resume, and nothing is answered twice.
+    with pytest.raises(ToolError, match="message is required"):
+        await _continue_turn_impl(runtime, _auth(), _SESSION, None)
+    assert fake.confirmations == [] and _no_workers()
+
+
+@dataclasses.dataclass(frozen=True)
+class _Unwaited:
+    """A stream event of a kind no wait is for."""
+
+    id: str
+    type: str = "span.model_request_end"
+
+
+class _BusyStream:
+    """A stream on which an event outside every caller's `kinds` is always ready."""
+
+    def __init__(self) -> None:
+        self.read = 0
+
+    async def __anext__(self) -> Any:
+        self.read += 1
+        await asyncio.sleep(0)
+        return TurnEvent(native=_Unwaited(f"evt_{self.read}"))  # type: ignore[arg-type]
+
+    async def close(self) -> None:
+        return None
+
+
+async def test_a_busy_stream_does_not_carry_a_wait_past_its_time_or_its_worker(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The recheck must come on time while events it does not wait for keep arriving."""
+    feed = safety.TurnFeed(_runtime(FakeSession(), factory, _ENABLED), _auth(), _SESSION)
+    stream = _BusyStream()
+    feed._stream = stream  # type: ignore[assignment]  # pyright: ignore[reportPrivateUsage]
+
+    woke = await asyncio.wait_for(feed.next(safety.TURN_STOPPED, within=0.05), timeout=5)
+    assert woke is None and stream.read > 1
+
+    finished: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+    finished.set_result(False)
+    before = stream.read
+    woke = await asyncio.wait_for(
+        feed.next(safety.TURN_STOPPED, within=60, or_done=finished), timeout=5
+    )
+    assert woke is None and stream.read - before <= 2, "a finished worker ends the wait at once"
+    await feed.close()
 
 
 async def test_a_dropped_stream_is_reopened_and_the_pause_still_answered(
@@ -1781,7 +1980,7 @@ async def test_a_dropped_stream_is_reopened_and_the_pause_still_answered(
     await _eventually(lambda: fake.opened == 2)
     # Paused while no stream delivered it: the read after the reopen finds it.
     fake.status = "idle"
-    fake._pause_on(fake._remaining.pop(0))  # pyright: ignore[reportPrivateUsage]
+    _pause_now(fake)
     assert await asyncio.wait_for(worker, timeout=5) is True
     assert [c["result"] for c in fake.confirmations] == ["allow"]
 

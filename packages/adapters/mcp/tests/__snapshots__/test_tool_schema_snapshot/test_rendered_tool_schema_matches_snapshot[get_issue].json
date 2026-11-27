@@ -1,0 +1,25 @@
+{
+  "description": [
+    "Read one issue by its ``fingerprint`` (from list_issues): what it is about, when it",
+    "started, who it reached and its latest events. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "events_limit": {
+        "default": 20,
+        "maximum": 100,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "fingerprint": {
+        "maxLength": 64,
+        "type": "string"
+      }
+    },
+    "required": [
+      "fingerprint"
+    ],
+    "type": "object"
+  }
+}

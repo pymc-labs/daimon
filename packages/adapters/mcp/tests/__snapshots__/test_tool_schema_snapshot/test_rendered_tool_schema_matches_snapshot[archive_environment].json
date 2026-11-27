@@ -1,0 +1,26 @@
+{
+  "description": [
+    "Archive the MA environment and delete from the tenant pool.",
+    "",
+    "Channels and the workspace default that picked it are cleared, so they",
+    "fall through to the next tier; read ``note`` back to the user. When that",
+    "leaves a sealed channel on an environment with unrestricted networking,",
+    "pass ``confirm_open_network=true`` only after the caller confirms it."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "confirm_open_network": {
+        "default": false,
+        "type": "boolean"
+      },
+      "name": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "name"
+    ],
+    "type": "object"
+  }
+}

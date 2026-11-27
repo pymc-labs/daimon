@@ -1,0 +1,24 @@
+{
+  "description": [
+    "Rotate a page signing key, revoke the old key and cancel queued wakes. The fresh",
+    "key goes to its owner by private DM once. Requires an attended owner turn;",
+    "an admin cannot rotate another owner's key. Server-side owner card proof is",
+    "required; backends without tool confirmation refuse."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "type": "string"
+      },
+      "watch_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "watch_id",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

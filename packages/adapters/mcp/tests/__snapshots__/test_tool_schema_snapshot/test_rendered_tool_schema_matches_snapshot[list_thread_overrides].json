@@ -1,0 +1,30 @@
+{
+  "description": [
+    "List the threads of a channel that keep their own participation, progress plan,",
+    "access rule or handoff. Admin-only.",
+    "``next_page`` goes back as ``after``."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "after": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "channel_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "channel_id"
+    ],
+    "type": "object"
+  }
+}

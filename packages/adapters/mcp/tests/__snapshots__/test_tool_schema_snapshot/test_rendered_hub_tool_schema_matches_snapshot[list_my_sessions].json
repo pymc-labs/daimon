@@ -1,0 +1,24 @@
+{
+  "description": [
+    "Sessions you started with this Daimon, for resuming with ``handle``.",
+    "",
+    "Other people's conversations with the same Daimon are not listed and",
+    "their handles are not accepted; nor are conversations from a sealed",
+    "channel, which can only be read from inside it. An admin also",
+    "sees everyone's open channel conversations with this Daimon, and can",
+    "read them with ``get_session``/``list_events``. No one, admins",
+    "included, sees another person's conversation from a sealed channel."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "daimon_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "daimon_id"
+    ],
+    "type": "object"
+  }
+}

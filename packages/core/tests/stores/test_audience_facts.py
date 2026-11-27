@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import pytest
+import structlog
 from daimon.core.audience_facts import UNKNOWN_FACTS, RoomFacts
 from daimon.core.stores import audience_facts as store
 from daimon.core.stores.audience_facts import StoredRoom
@@ -201,3 +204,106 @@ async def test_known_survives_a_database_round_trip_for_every_kind_of_row(
     assert (narrow.contained, narrow.narrow) == (False, True)
     assert not (await _read(db_session, tenant.id, "404")).known
     assert (await _read(db_session, tenant.id, "70", parent_id="1")).known, "from the parent"
+
+
+def _status(**kw: object) -> store.AudienceStatus:
+    base = dict(complete=True, generation=1, fresh_until=NOW, updated_at=NOW, usable=False)
+    return store.AudienceStatus(**{**base, **kw})  # type: ignore[arg-type]
+
+
+def test_a_publish_is_expected_only_soon_after_a_retire_or_a_lapse() -> None:
+    soon = NOW + timedelta(seconds=5)
+    late = NOW + timedelta(seconds=300)
+    retired = _status(complete=False, fresh_until=None)
+    assert store._publish_expected(retired, soon)
+    assert not store._publish_expected(retired, late), "a long outage"
+    assert store._publish_expected(_status(), soon), "lapsed seconds ago"
+    assert not store._publish_expected(_status(), late)
+    assert not store._publish_expected(_status(usable=True), soon)
+    assert not store._publish_expected(None, soon), "no state row"
+
+
+class _FakeTime:
+    """A clock the wait's pauses and slow reads advance; no real time passes."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, *, read_s: float = 0.0) -> None:
+        self.now = 1000.0
+        self.pauses = 0
+        self._read_s = read_s
+        real_read = store.read_status
+
+        async def read(*args: object, **kwargs: object) -> object:
+            self.now += self._read_s
+            return await real_read(*args, **kwargs)  # type: ignore[arg-type]
+
+        async def pause(seconds: float) -> None:
+            self.pauses += 1
+            self.now += seconds
+
+        monkeypatch.setattr(store, "_clock", lambda: self.now)
+        monkeypatch.setattr(store, "_pause", pause)
+        monkeypatch.setattr(store, "read_status", read)
+
+
+async def test_the_wait_ends_by_elapsed_time_when_reads_are_slow(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="3011")
+    await _publish(db_session, tenant.id, at=datetime.now(UTC) - timedelta(seconds=300))
+    await store.retire_facts(db_session, tenant_id=tenant.id, now=datetime.now(UTC))
+    clock = _FakeTime(monkeypatch, read_s=3.0)
+    called: list[int] = []
+
+    async def on_wait() -> None:
+        called.append(1)
+
+    with structlog.testing.capture_logs() as logs:
+        waited = await store.wait_for_usable_facts(db_session, tenant_id=tenant.id, on_wait=on_wait)
+
+    assert waited is not None and 20.0 <= waited < 24.0, "ends by the deadline, not 40 polls"
+    assert clock.pauses < 10 and called == [1]
+    [log] = [e for e in logs if e["event"] == "audience.facts_wait"]
+    assert log["result"] == "gave_up" and log["waited_s"] == round(waited, 1)
+
+
+async def test_a_spent_budget_means_no_wait_and_no_callback(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="3012")
+    await _publish(db_session, tenant.id, at=datetime.now(UTC) - timedelta(seconds=300))
+    await store.retire_facts(db_session, tenant_id=tenant.id, now=datetime.now(UTC))
+    clock = _FakeTime(monkeypatch)
+
+    async def on_wait() -> None:
+        raise AssertionError("no wait, no callback")
+
+    assert (
+        await store.wait_for_usable_facts(
+            db_session, tenant_id=tenant.id, budget_s=0, on_wait=on_wait
+        )
+        is None
+    )
+    waited = await store.wait_for_usable_facts(db_session, tenant_id=tenant.id, budget_s=1.0)
+    assert waited is not None and waited <= 1.0 and clock.pauses == 2
+
+
+@pytest.mark.parametrize("failure", ["slow", "error"])
+async def test_a_slow_or_failing_callback_never_holds_the_wait(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="3013")
+    await _publish(db_session, tenant.id, at=datetime.now(UTC) - timedelta(seconds=300))
+    await store.retire_facts(db_session, tenant_id=tenant.id, now=datetime.now(UTC))
+    clock = _FakeTime(monkeypatch)
+    monkeypatch.setattr(store, "FACTS_WAIT_CALLBACK_S", 0.01)
+
+    async def on_wait() -> None:
+        if failure == "slow":
+            await asyncio.sleep(5)
+        raise RuntimeError("typing failed")
+
+    waited = await store.wait_for_usable_facts(
+        db_session, tenant_id=tenant.id, budget_s=1.0, on_wait=on_wait
+    )
+
+    assert waited is not None and clock.pauses == 2, "the wait went on"

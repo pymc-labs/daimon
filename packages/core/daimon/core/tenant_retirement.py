@@ -1,0 +1,336 @@
+"""Retire a tenant, then delete what it left with the provider and the hosts.
+
+`retire` deletes the tenant's data in batches and queues the provider
+sessions, memory stores, vaults and skills its rows named, the agents and
+environments stamped with its id, plus its report and notebook host content.
+`clean_upstream` works one tenant's queue off and keeps whatever failed; the
+scheduler retries every queue through `sweep`.
+"""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import Awaitable, Callable, Mapping
+from datetime import UTC, datetime
+from typing import Literal
+
+import anthropic as anthropic_errors
+import httpx
+import structlog
+from anthropic import AsyncAnthropic
+from daimon.core.channel_backend import backend_refusal_causes
+from daimon.core.config import Settings
+from daimon.core.defaults.ma_index import list_agents_by_tenant, list_environments_by_tenant
+from daimon.core.errors import SettlePending
+from daimon.core.ma import core_admin_port, delete_skill_and_versions
+from daimon.core.mcp_vault import RELAY_VAULT_PREFIX, SHARED_VAULT_PREFIX
+from daimon.core.mux_backend import managed_agents, platform_scope, resource_ref, resource_scope
+from daimon.core.mux_compat import (
+    archive_agent,
+    archive_environment,
+    delete_environment,
+    delete_memory_store,
+    delete_vault,
+    legacy_call,
+    list_vaults,
+)
+from daimon.core.stores import tenant_retirement as store
+from mux.contracts.ids import Scope
+from mux.errors import ProviderError
+from pydantic import HttpUrl, SecretStr
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+log = structlog.get_logger(__name__)
+
+# Each upstream call runs under the tenant lock a reinstall waits on, so it is kept short.
+_UPSTREAM_TIMEOUT_SECONDS = 10.0
+# Removing finished items rewrites the whole queue, so it is done this many at a time.
+_REMOVE_BATCH = 50
+_NAMED_VAULT_PREFIXES = ("daimon-mcp:", RELAY_VAULT_PREFIX, SHARED_VAULT_PREFIX)
+
+Deleter = Callable[[str], Awaitable[None]]
+
+
+PURGE_BATCH = 500
+
+
+async def retire(
+    sm: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    archived_before: datetime | None = None,
+    force: bool = False,
+) -> bool:
+    """Retire the tenant now, in short transactions so a large tenant never holds locks
+    for long. False when it does not exist, is not due (`archived_before`, the sweep's
+    rule, which also waits out usage still settling), or a reinstall stopped it. Without
+    `archived_before`, usage still settling raises `SettlePending` unless `force`.
+    An interrupted retirement resumes on the next call.
+    """
+    try:
+        async with sm() as session, session.begin():
+            archived_at = await store.begin_retirement(
+                session, tenant_id=tenant_id, archived_before=archived_before, force=force
+            )
+    except SettlePending:
+        if archived_before is None:
+            raise
+        # Not due yet: the next sweep tries again once the usage settles.
+        log.info("tenant_retirement.deferred", tenant_id=str(tenant_id), reason="settle_pending")
+        return False
+    if archived_at is None:
+        return False
+    for table in store.purge_tables():
+        while True:
+            async with sm() as session, session.begin():
+                removed = await store.purge_batch(
+                    session,
+                    tenant_id=tenant_id,
+                    archived_at=archived_at,
+                    table=table,
+                    limit=PURGE_BATCH,
+                )
+            if removed is None:
+                return False
+            if removed < PURGE_BATCH:
+                break
+    async with sm() as session, session.begin():
+        return await store.finish_retirement(session, tenant_id=tenant_id, archived_at=archived_at)
+
+
+def _session_deleter(client: AsyncAnthropic, scope: Scope) -> Deleter:
+    async def delete(session_id: str) -> None:
+        backend = managed_agents(
+            client, scope=scope, resources=frozenset({("session", session_id)})
+        )
+        port = core_admin_port(backend)
+        await legacy_call(
+            port.delete_session(scope, resource_ref(backend, "session", session_id, scope=scope))
+        )
+
+    return delete
+
+
+def _host_deleter(settings: Settings, http: httpx.AsyncClient, tenant_id: uuid.UUID) -> Deleter:
+    targets: dict[str, tuple[HttpUrl | None, SecretStr | None]] = {
+        "reports": (settings.report_host.host_url, settings.report_host.admin_secret),
+        "notebooks": (settings.notebook.host_url, settings.notebook.admin_secret),
+    }
+
+    async def delete(host: str) -> None:
+        url, secret = targets[host]
+        if url is None or secret is None:
+            return  # No host configured, so nothing was published there.
+        response = await http.delete(
+            f"{str(url).rstrip('/')}/admin/tenants/{tenant_id}/{host}",
+            headers={"Authorization": f"Bearer {secret.get_secret_value()}"},
+            timeout=_UPSTREAM_TIMEOUT_SECONDS,
+        )
+        if response.status_code != 404:
+            response.raise_for_status()
+
+    return delete
+
+
+def names_owner(display_name: str, owner: str) -> bool:
+    """Whether an MCP vault (`<prefix><account or shared owner>[:<agent>...]`) is `owner`'s.
+    Agents can serve many tenants, so a vault is never matched by its agent."""
+    return display_name.startswith(_NAMED_VAULT_PREFIXES) and display_name.split(":")[1] == owner
+
+
+def deleters(
+    client: AsyncAnthropic, settings: Settings, http: httpx.AsyncClient, tenant_id: uuid.UUID
+) -> dict[str, Deleter]:
+    """One delete per queued kind; each treats an already missing resource as done."""
+    client = client.with_options(timeout=_UPSTREAM_TIMEOUT_SECONDS)
+    scope = resource_scope(tenant_id=str(tenant_id), authorization_id="tenant-retirement")
+    vault_scope = platform_scope("tenant_retirement.named_vaults")
+    listed: list[tuple[str, str]] | None = None
+
+    async def memory_store(store_id: str) -> None:
+        await delete_memory_store(client, store_id, scope=scope)
+
+    async def vault(vault_id: str) -> None:
+        await delete_vault(client, vault_id, scope=scope)
+
+    async def named_vaults(owner: str) -> None:
+        # Listed once per pass: every owner's vaults come from the same listing.
+        nonlocal listed
+        if listed is None:
+            listed = [(v.id, v.display_name) async for v in list_vaults(client, scope=vault_scope)]
+        for vault_id, name in listed:
+            if names_owner(name, owner):
+                await delete_vault(client, vault_id, scope=vault_scope)
+
+    async def skill(skill_id: str) -> None:
+        await delete_skill_and_versions(client, skill_id, scope=scope)
+
+    async def agents(_tagged: str) -> None:
+        # The provider can only archive an agent. Only agents stamped with this tenant
+        # are listed, so deployment-wide ones are never touched.
+        for agent in await list_agents_by_tenant(client, tenant_id=tenant_id):
+            await archive_agent(client, agent.id, scope=scope)
+
+    async def environments(_tagged: str) -> None:
+        for environment in await list_environments_by_tenant(client, tenant_id=tenant_id):
+            try:
+                await delete_environment(client, environment.id, scope=scope)
+            except anthropic_errors.ConflictError:  # still used by a session: archive it
+                await archive_environment(client, environment.id, scope=scope)
+
+    return {
+        "sessions": _session_deleter(client, scope),
+        "agents": agents,
+        "environments": environments,
+        "memory_stores": memory_store,
+        "vaults": vault,
+        "named_vaults": named_vaults,
+        "skills": skill,
+        "hosts": _host_deleter(settings, http, tenant_id),
+    }
+
+
+# Client errors a retry cannot fix. Auth and permission errors are left out: a bad key
+# would otherwise drop the whole queue.
+_RETRYABLE_CLIENT_ERRORS = {401, 403, 408, 409, 429}
+# Failures about the whole provider (a bad key, a rate limit, no connection): the kind
+# waits for the next pass, and no item is charged a try.
+_PROVIDER_WIDE = {401, 429}
+
+
+def _status(error: Exception) -> int | None:
+    if isinstance(error, ProviderError):
+        return {"auth": 401, "rate_limited": 429, "invalid_request": 400}.get(error.category)
+    if isinstance(error, anthropic_errors.APIStatusError):
+        return error.status_code
+    if isinstance(error, httpx.HTTPStatusError):
+        return error.response.status_code
+    return None
+
+
+def _permanent(error: Exception) -> bool:
+    """Whether an upstream failure is about the item itself, so retrying is pointless."""
+    status = _status(error)
+    return status is not None and 400 <= status < 500 and status not in _RETRYABLE_CLIENT_ERRORS
+
+
+def _provider_wide(error: Exception) -> bool:
+    if isinstance(error, (anthropic_errors.APIConnectionError, httpx.TransportError)):
+        return True
+    if isinstance(error, ProviderError) and error.category == "transient_network":
+        return True
+    return _status(error) in _PROVIDER_WIDE
+
+
+Cleaned = Literal["done", "retry", "stop_kind", "stopped"]
+
+
+async def _clean_item(
+    sm: async_sessionmaker[AsyncSession],
+    tenant_id: uuid.UUID,
+    kind: str,
+    item: str,
+    delete: Deleter,
+) -> Cleaned:
+    """Delete one queued item under the tenant lock: done (or dropped as permanent or
+    after `ITEM_TRIES`), retry later, stop the kind on a provider-wide failure, or
+    stopped because the tenant came back or the item is gone."""
+    async with sm() as session, session.begin():
+        if not await store.lock_item(session, tenant_id=tenant_id, kind=kind, item=item):
+            return "stopped"
+        try:
+            await delete(item)
+        except anthropic_errors.NotFoundError:
+            pass
+        except (anthropic_errors.APIError, ProviderError, httpx.HTTPError) as error:
+            fields = {
+                "tenant_id": str(tenant_id),
+                "kind": kind,
+                "error": type(error).__name__,
+                "causes": backend_refusal_causes(error),
+            }
+            if _provider_wide(error):
+                log.warning("tenant_retirement.upstream_failed", **fields)
+                return "stop_kind"
+            if not _permanent(error):
+                key = f"{kind}:{item}"
+                tries = await store.note_failure(session, tenant_id=tenant_id, key=key)
+                if tries < store.ITEM_TRIES:
+                    log.warning("tenant_retirement.upstream_failed", **fields)
+                    return "retry"
+            # Logged once: the item leaves the queue, so it is never retried.
+            log.warning("tenant_retirement.upstream_dropped", **fields)
+    return "done"
+
+
+async def _remove(
+    sm: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID, kind: str, done: set[str]
+) -> None:
+    if done:
+        async with sm() as session, session.begin():
+            await store.remove_done(session, tenant_id=tenant_id, kind=kind, done=done)
+        done.clear()
+
+
+async def clean_upstream(
+    sm: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, deleters: Mapping[str, Deleter]
+) -> bool:
+    """Delete one tenant's queued upstream resources, one transaction per item, each
+    re-checking that the tenant is still retired. A failed item is passed over; a kind
+    stops at a provider-wide failure, and the queue backs off. True when nothing is left."""
+    async with sm() as session:
+        pending = await store.get_work(session, tenant_id=tenant_id)
+    if pending is None:
+        return True
+    failed = progressed = False
+    for kind in store.PENDING_KINDS:
+        done: set[str] = set()
+        kind_failed = finished = False
+        try:
+            for item in pending.get(kind, []):
+                outcome = await _clean_item(sm, tenant_id, kind, item, deleters[kind])
+                if outcome == "stopped":
+                    await _remove(sm, tenant_id, kind, done)
+                    return await _finished(sm, tenant_id)
+                if outcome != "done":
+                    kind_failed = True
+                    if outcome == "stop_kind":
+                        break
+                    continue
+                done.add(item)
+                finished = True
+                if len(done) >= _REMOVE_BATCH:
+                    await _remove(sm, tenant_id, kind, done)
+        # Boundary: one kind failing in an unforeseen way must not starve the others.
+        except Exception:
+            kind_failed = True
+            log.exception("tenant_retirement.kind_failed", tenant_id=str(tenant_id), kind=kind)
+        await _remove(sm, tenant_id, kind, done)
+        failed |= kind_failed
+        progressed |= kind_failed and finished
+    if failed:
+        async with sm() as session, session.begin():
+            now = datetime.now(UTC)
+            await store.defer(session, tenant_id=tenant_id, now=now, progressed=progressed)
+    return await _finished(sm, tenant_id)
+
+
+async def _finished(sm: async_sessionmaker[AsyncSession], tenant_id: uuid.UUID) -> bool:
+    async with sm() as session:
+        return await store.get_work(session, tenant_id=tenant_id) is None
+
+
+async def sweep(
+    client: AsyncAnthropic, sm: async_sessionmaker[AsyncSession], settings: Settings
+) -> None:
+    """Retry every retired tenant's upstream cleanup, isolating failures by tenant."""
+    async with sm() as session:
+        work = await store.list_work(session, now=datetime.now(UTC))
+    async with httpx.AsyncClient() as http:
+        for tenant_id, _pending in work:
+            try:
+                await clean_upstream(
+                    sm, tenant_id=tenant_id, deleters=deleters(client, settings, http, tenant_id)
+                )
+            except Exception:
+                log.exception("tenant_retirement.sweep_failed", tenant_id=str(tenant_id))

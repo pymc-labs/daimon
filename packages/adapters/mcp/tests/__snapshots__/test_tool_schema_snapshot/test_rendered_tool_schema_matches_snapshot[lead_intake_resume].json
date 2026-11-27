@@ -1,0 +1,27 @@
+{
+  "description": [
+    "Recover lead effects and mailbox coverage without blindly retrying uncertain creates.",
+    "",
+    "Without an ID, resumes up to 25 pending records and scans archived mail",
+    "from the operator checkpoint. Inspect scan errors and remaining work.",
+    "Records the caller may not read are omitted from the result."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "intake_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

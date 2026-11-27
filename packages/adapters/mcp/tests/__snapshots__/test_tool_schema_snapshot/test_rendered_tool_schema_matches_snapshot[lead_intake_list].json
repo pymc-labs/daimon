@@ -1,0 +1,26 @@
+{
+  "description": [
+    "Read up to 100 tenant leads the caller may read, oldest first.",
+    "",
+    "Leads the caller may not read are omitted; pass the last listed ID as",
+    "after_id for the next page."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "after_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

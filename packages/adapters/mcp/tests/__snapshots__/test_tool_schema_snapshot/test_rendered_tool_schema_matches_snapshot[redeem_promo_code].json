@@ -1,0 +1,24 @@
+{
+  "description": [
+    "Redeem credit with a direct personal platform-admin CLI credential.",
+    "For example, apply the code someone was given to add credit to the balance.",
+    "",
+    "Case, spaces and dashes in ``code`` do not matter. Each code works once",
+    "per workspace. Timed credit only exists between its start and",
+    "end and is spent before other credit; whatever is left expires at the",
+    "end. Repeated wrong codes pause redemption for a few minutes. Requires",
+    "a live platform admin acting directly; chat and routines are refused."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "code": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "code"
+    ],
+    "type": "object"
+  }
+}

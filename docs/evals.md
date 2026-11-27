@@ -10,8 +10,10 @@ Evals are off by default. Turn on the `evals` feature for the deployment or a
 workspace, as in [Features](features.md). Off hides the eval tools and refuses
 every eval request.
 
+<!-- knowledge: web -->
 To offer the evals section of the [web app](web.md), add `evals` to
 [`DAIMON_WEB__MODULES`](configuration.md#daimon_web__modules).
+<!-- /knowledge -->
 
 ## Suites and cases
 
@@ -33,13 +35,16 @@ daimon evals cases validate case.json
 Make cases from a conversation you can read. Each turn the agent answered becomes
 one case: the messages before it are history, and the world holds only what that
 turn used. Send a Discord, Slack or Teams link to the `eval_case_from_thread` tool,
-a web chat link to `POST /api/evals/suites/{id}/cases/from-thread`, or a web chat
-link or a saved thread file to the command line:
+or a chat link or a saved thread file to the command line:
 
 ```bash
 daimon evals cases from-thread support-basics https://example.com/chat/<id>
 daimon evals cases from-thread support-basics --record thread.json
 ```
+
+<!-- knowledge: web -->
+The web app sends a chat link to `POST /api/evals/suites/{id}/cases/from-thread`.
+<!-- /knowledge -->
 
 Chat platforms keep messages, not tool calls, so these cases have `text` fidelity
 and the simulator fills the gaps. A case starts with the recorded answer as its
@@ -182,12 +187,17 @@ signature from a trusted key is always refused.
 
 A passphrase encrypts the bundle with AES-256-GCM and a scrypt key. Share the
 passphrase another way than the file. MCP tools never take a passphrase: export
-and import encrypted bundles from the command line or the web app.
+and import encrypted bundles from the command line.
+<!-- knowledge: web -->
+The web app can do both too.
+<!-- /knowledge -->
 
 ## Where to use it
 
 The same rules apply on every surface:
 
+<!-- knowledge: web -->
 - The web app, under `/api/evals`.
+<!-- /knowledge -->
 - MCP tools whose names start with `eval_`, listed in [MCP tools](mcp-tools.md).
 - The `daimon evals` commands.

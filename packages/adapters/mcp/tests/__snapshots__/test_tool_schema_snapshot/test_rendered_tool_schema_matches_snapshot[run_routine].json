@@ -1,0 +1,20 @@
+{
+  "description": [
+    "Run a routine now, ahead of its schedule; its own schedule continues after.",
+    "",
+    "The routine's owner or an admin. A paused routine is refused: resume it first."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "routine_id": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "routine_id"
+    ],
+    "type": "object"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "description": [
+    "List the eval suites you can see, with your role on each."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

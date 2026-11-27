@@ -1,0 +1,49 @@
+{
+  "description": [
+    "Remember information for the bound working repository across sessions.",
+    "",
+    "Save only at the person's request. References appear in a catalog;",
+    "directives are standing rules included in turns, within a size budget.",
+    "Personal preferences use kind=directive, scope=user. Other people cannot",
+    "see them. Shared entries can be updated by anyone using this repo.",
+    "Titles become slugs (64 characters); re-saving a slug replaces content",
+    "and cannot change scope. Restricted conversations and routines refuse.",
+    "Use this reply's origin_context_id. Do not put repo memories in MA files."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "body": {
+        "type": "string"
+      },
+      "kind": {
+        "default": "reference",
+        "enum": [
+          "reference",
+          "directive"
+        ],
+        "type": "string"
+      },
+      "origin_context_id": {
+        "type": "string"
+      },
+      "scope": {
+        "default": "repo",
+        "enum": [
+          "repo",
+          "user"
+        ],
+        "type": "string"
+      },
+      "title": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "title",
+      "body",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "description": [
+    "Read an eval suite: its cases, weights and defaults. No version reads the latest."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "suite_id": {
+        "type": "string"
+      },
+      "version": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "suite_id"
+    ],
+    "type": "object"
+  }
+}

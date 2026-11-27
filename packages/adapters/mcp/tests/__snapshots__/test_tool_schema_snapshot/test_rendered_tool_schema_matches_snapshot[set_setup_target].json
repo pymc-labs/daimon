@@ -1,0 +1,25 @@
+{
+  "description": [
+    "Switch this setup conversation to an explicitly selected MA agent identity.",
+    "",
+    "Pass the current turn's origin_context_id and a current agent's MA id.",
+    "State the target switch briefly. Other running turns keep their own target.",
+    "This changes no routing or editing permissions."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_id": {
+        "type": "string"
+      },
+      "origin_context_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "origin_context_id",
+      "agent_id"
+    ],
+    "type": "object"
+  }
+}

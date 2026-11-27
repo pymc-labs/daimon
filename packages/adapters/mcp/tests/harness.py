@@ -228,7 +228,7 @@ class QuietFeed:
     async def open(self) -> None:
         return None
 
-    async def next(self, kinds: Collection[str]) -> str | None:
+    async def next(self, kinds: Collection[str], **_wait: object) -> None:
         del kinds
         self.waits += 1
         if self._on_wait is not None:

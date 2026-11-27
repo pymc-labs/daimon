@@ -1,0 +1,38 @@
+{
+  "description": [
+    "Remove your own, by ids from list_my_data or list_coding_keys: memory (agent_id), a",
+    "connected account (its kind, as listed), an mcp sign-in (agent_id, key) or a",
+    "coding_key (key; an admin adds agent_id for another person's)."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_id": {
+        "default": "",
+        "type": "string"
+      },
+      "key": {
+        "default": "",
+        "type": "string"
+      },
+      "kind": {
+        "enum": [
+          "memory",
+          "microsoft",
+          "slack",
+          "mcp",
+          "coding_key"
+        ],
+        "type": "string"
+      },
+      "origin_context_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "kind",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

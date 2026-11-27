@@ -11,11 +11,13 @@ import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsVault
 from daimon.core import mcp_vault_janitor
+from daimon.core._models import ProviderBindingSlot
 from daimon.core.mcp_vault_janitor import (
     archive_idle_relay_vaults,
     archive_orphan_mcp_vaults,
     partition_orphan_vault_ids,
 )
+from daimon.core.shared_threads import shared_owner, shared_slot
 from daimon.testing.factories import make_account, make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -202,9 +204,27 @@ async def test_archive_orphan_apply_archives_only_orphans(
     )
 
 
-async def test_relay_vaults_no_live_session_mounts_are_archived_after_the_grace(
+async def test_idle_relay_and_unbound_shared_vaults_go_after_the_grace(
     monkeypatch: pytest.MonkeyPatch,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
+    tenant = await make_tenant(db_session)
+    thread = ("slack", "C1", "t1")
+    db_session.add(
+        ProviderBindingSlot(
+            binding_id="b1",
+            tenant_id=tenant.id,
+            platform=thread[0],
+            channel_id=thread[1],
+            thread_id=thread[2],
+            account_id=None,
+            generation=1,
+        )
+    )
+    await db_session.flush()
+    bound = shared_owner(shared_slot(tenant.id, *thread))
+
     def relay(vault_id: str, age: dt.timedelta) -> dict[str, Any]:
         name = f"daimon-relay:{uuid.uuid4()}:{uuid.uuid4()}"
         return _vault(vault_id, name, created_at=NOW - age).model_dump(mode="json")
@@ -212,7 +232,16 @@ async def test_relay_vaults_no_live_session_mounts_are_archived_after_the_grace(
     hour, minute = dt.timedelta(hours=1), dt.timedelta(minutes=1)
     listed = [relay("vlt_idle", hour), relay("vlt_mounted", hour), relay("vlt_new", minute)]
     listed.append(_vault("vlt_mcp", f"daimon-mcp:{uuid.uuid4()}").model_dump(mode="json"))
+    for vault_id, owner, age in [
+        ("vlt_unbound", uuid.uuid4(), hour),
+        ("vlt_bound", bound, hour),
+        ("vlt_shared_mounted", uuid.uuid4(), hour),
+        ("vlt_young", uuid.uuid4(), minute),
+    ]:
+        name = f"daimon-shared:{owner}:{bound}"  # an agent segment equal to a bound owner
+        listed.append(_vault(vault_id, name, created_at=NOW - age).model_dump(mode="json"))
     archived: list[str] = []
+    deleted: list[str] = []
 
     def handler(req: httpx.Request) -> httpx.Response:
         if req.method == "GET" and req.url.path == "/v1/vaults":
@@ -220,11 +249,16 @@ async def test_relay_vaults_no_live_session_mounts_are_archived_after_the_grace(
         if req.method == "POST" and req.url.path.endswith("/archive"):
             archived.append(req.url.path.split("/")[-2])
             return httpx.Response(200, json=listed[0])
+        if req.method == "DELETE":
+            deleted.append(req.url.path.split("/")[-1])
+            return httpx.Response(200, json={"id": deleted[-1], "type": "vault_deleted"})
         raise AssertionError(f"unexpected call: {req.method} {req.url}")
 
     async def mounted(client: AsyncAnthropic, *, scope: object) -> frozenset[str]:
-        return frozenset({"vlt_mounted"})
+        return frozenset({"vlt_mounted", "vlt_shared_mounted"})
 
     monkeypatch.setattr(mcp_vault_janitor, "mounted_live_vault_ids", mounted)
-    idle = await archive_idle_relay_vaults(_make_client(httpx.MockTransport(handler)), now=NOW)
+    client = _make_client(httpx.MockTransport(handler))
+    idle = await archive_idle_relay_vaults(client, session_factory=db_session_factory, now=NOW)
     assert idle == archived == ["vlt_idle"], "only an old relay vault no live session mounts"
+    assert deleted == ["vlt_unbound"], "only an old, unmounted shared vault whose thread is unbound"

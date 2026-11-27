@@ -1,0 +1,25 @@
+{
+  "description": [
+    "Estimate what it costs to draft expectations for cases with a model. Drafting itself",
+    "needs a confirmation of the cost, given in the app or on the command line."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "case_ids": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "suite_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "suite_id",
+      "case_ids"
+    ],
+    "type": "object"
+  }
+}

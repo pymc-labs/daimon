@@ -1,0 +1,35 @@
+{
+  "description": [
+    "Look up one of your sessions by id (tenant-scoped).",
+    "",
+    "``status`` ``paused`` means the turn waits on tool confirmations;",
+    "``hint`` says who can let it go on. List tools report the provider's",
+    "own status, so a paused turn lists as ``idle``.",
+    "",
+    "A conversation from a sealed channel is refused unless",
+    "``origin_context_id`` is this turn's origin inside that channel."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id"
+    ],
+    "type": "object"
+  }
+}
