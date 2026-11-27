@@ -1,0 +1,34 @@
+{
+  "description": [
+    "Make scrubbed eval cases from a thread you can read, given its link: one case per turn",
+    "the agent answered. People, places and secrets are replaced before anything is saved.",
+    "Threads under a sealed channel need origin_context_id, as read_thread does."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "link": {
+        "type": "string"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "suite_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "suite_id",
+      "link"
+    ],
+    "type": "object"
+  }
+}

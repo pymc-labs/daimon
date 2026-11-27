@@ -70,6 +70,14 @@ def shared_owner(slot: Slot) -> uuid.UUID:
     return uuid.uuid5(SHARED_OWNER_NAMESPACE, key)
 
 
+async def bound_shared_owners(
+    session: AsyncSession, *, tenant_id: uuid.UUID | None = None
+) -> set[str]:
+    """The owners of every shared thread that still has a binding slot."""
+    keys = await mux_state.shared_thread_keys(session, tenant_id=tenant_id)
+    return {str(shared_owner(shared_slot(*key))) for key in keys}
+
+
 def may_have_shared_binding(revision: ConfigRevision | None, *, ever_shared: bool) -> bool:
     """Whether a thread under `revision` can be shared, so its binding must be read.
 

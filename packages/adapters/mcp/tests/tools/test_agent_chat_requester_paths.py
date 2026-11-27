@@ -287,7 +287,8 @@ def test_the_state_that_names_a_driver_is_written_only_under_the_session_fence()
             "packages/core/daimon/core/agent_chat_requester.py:record_driver"
         }, writer
     assert callers("erase_agent_chat_provenance_for_tenant") == {
-        "packages/core/daimon/core/stores/tenants.py:delete_tenant"
+        "packages/core/daimon/core/stores/tenants.py:delete_tenant",
+        "packages/core/daimon/core/stores/tenant_retirement.py:begin_retirement",
     }
     # The account eraser is an `erasure.ERASABLE` entry, named there and nowhere else.
     users = {

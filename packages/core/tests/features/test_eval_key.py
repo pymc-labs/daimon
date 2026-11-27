@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from daimon.core import turn_origin
+from daimon.core import self_knowledge, turn_origin
 from daimon.core._models import ThreadSession
 from daimon.core.features.eval_key import EvalKey, sample_controls
 from daimon.core.features.registry import FEATURES
@@ -54,6 +54,9 @@ def test_the_controls_hash_follows_the_rendered_wording(monkeypatch: pytest.Monk
     assert len(set(levels)) == 2, "the controls read differently with and without web links"
     monkeypatch.setattr(turn_origin, "WEB_SENTENCE", " Other web wording.")
     assert sample_controls() != levels, "a changed sentence changes what is hashed"
+    monkeypatch.undo()
+    monkeypatch.setattr(self_knowledge, "SELF_KNOWLEDGE_HINT", "Other hint wording.")
+    assert sample_controls() != levels, "a changed Knows Daimon hint changes what is hashed"
 
 
 async def test_key_is_written_to_the_session_row_and_the_turn_outcome(

@@ -1,0 +1,16 @@
+{
+  "description": [
+    "Thumbs and the reasons picked per agent over the last ``days`` days, as counts.",
+    "A count of one or two is withheld (null), as it could point to a voter. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "days": {
+        "default": 30,
+        "type": "integer"
+      }
+    },
+    "type": "object"
+  }
+}

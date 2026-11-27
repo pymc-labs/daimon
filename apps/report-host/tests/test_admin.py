@@ -367,6 +367,47 @@ async def test_delete_with_matching_tenant_removes_report_and_directory(
     assert not report_dir.exists()
 
 
+async def test_delete_tenant_reports_removes_only_that_tenants_reports_and_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = reports_store.connect(tmp_path / "data")
+    settings = _settings(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    app = _make_app(settings=settings, conn=conn)
+    for slug in ("acme-a", "acme-b", "other"):
+        (settings.data_dir / slug).mkdir(parents=True)
+    async with await _client(app) as client:
+        for slug, tenant in (("acme-a", "tenant-1"), ("acme-b", "tenant-1"), ("other", "tenant-2")):
+            await client.put(
+                f"/admin/reports/{slug}",
+                json=_publish_body(tenant_id=tenant),
+                headers={"authorization": AUTH},
+            )
+        resp = await client.delete(
+            "/admin/tenants/tenant-1/reports", headers={"authorization": AUTH}
+        )
+        again = await client.delete(
+            "/admin/tenants/tenant-1/reports", headers={"authorization": AUTH}
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {"deleted": 2}, "both of the tenant's reports should be counted"
+    assert again.json() == {"deleted": 0}, "a second call finds nothing and is not an error"
+    assert reports_store.list_slugs_for_tenant(conn, tenant_id="tenant-1") == []
+    assert reports_store.load_report(conn, slug="other") is not None, "other tenants are untouched"
+    assert not (settings.data_dir / "acme-a").exists()
+    assert not (settings.data_dir / "acme-b").exists()
+    assert (settings.data_dir / "other").exists()
+
+
+async def test_delete_tenant_reports_without_authorization_header_returns_401(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = reports_store.connect(tmp_path / "data")
+    app = _make_app(settings=_settings(tmp_path=tmp_path, monkeypatch=monkeypatch), conn=conn)
+    async with await _client(app) as client:
+        resp = await client.delete("/admin/tenants/tenant-1/reports")
+    assert resp.status_code == 401
+
+
 async def test_delete_with_mismatched_tenant_returns_403_and_report_still_exists(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

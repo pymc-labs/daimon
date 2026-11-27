@@ -1,0 +1,25 @@
+{
+  "description": [
+    "Delete a memory file."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "type": "string"
+      },
+      "path": {
+        "type": "string"
+      },
+      "personal": {
+        "default": false,
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "origin_context_id",
+      "path"
+    ],
+    "type": "object"
+  }
+}

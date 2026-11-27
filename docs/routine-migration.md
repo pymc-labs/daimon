@@ -73,7 +73,7 @@ must equal `source_next_run` exactly. Timestamps need an explicit offset, and
 T cannot be in the future.
 
 Applying stores T and sets the next fire time and `enabled` together. An
-ordinary resume schedules from now, so use seeding for the first move.
+ordinary resume schedules from the time of the resume, so use seeding for the first move.
 
 ## Hand routines back
 
