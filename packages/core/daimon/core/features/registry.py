@@ -908,6 +908,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         doc="Block answers installs from the fake world.",
         platforms=EVERY_PLATFORM,
         authority=_ADMIN,
+        page="evals.md#sandboxes",
     ),
     FeatureSpec(
         key="host_call_gate",
