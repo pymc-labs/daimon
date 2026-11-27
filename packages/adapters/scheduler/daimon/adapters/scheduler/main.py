@@ -1496,6 +1496,7 @@ async def _sweep_lead_intake(sm: async_sessionmaker[AsyncSession]) -> None:
         log.error("scheduler.lead_retention_failed")
 
 
+_DATA_READS_PRUNE_INTERVAL = timedelta(hours=1)
 _last_data_reads_prune: dict[str, datetime] = {}
 
 
@@ -1506,7 +1507,7 @@ async def _sweep_data_reads(sm: async_sessionmaker[AsyncSession]) -> None:
 
     now = datetime.now(UTC)
     last = _last_data_reads_prune.get("started")
-    if last is not None and now - last < _OPS_EVENTS_PRUNE_INTERVAL:
+    if last is not None and now - last < _DATA_READS_PRUNE_INTERVAL:
         return
     _last_data_reads_prune["started"] = now
     try:
