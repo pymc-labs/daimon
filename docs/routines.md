@@ -172,7 +172,7 @@ On success the run saves the last 1,000 characters of the result as
 ## Delivery
 
 For a routine with a destination, a successful run queues its full result. If
-the agent already called `send_message` to that exact destination, the result is
+the agent already posted there, or in a thread under that channel, the result is
 skipped as `agent_posted`. Otherwise the chat adapter for the tenant's platform
 posts it, in chunks that keep code fences intact. The post reads `Result from
 <agent>'s daily routine at 09:00 UTC:` followed by the result. The Routine

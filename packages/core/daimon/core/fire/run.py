@@ -67,7 +67,7 @@ from daimon.core.provider_routine import (
 from daimon.core.routine_delivery import (
     OWNER_LACKS_ROLE_ERROR,
     DirectPost,
-    agent_posted_to,
+    agent_delivered_itself,
     delivery_target,
     lapsed_role,
     placement_unknown_is_unsafe,
@@ -967,6 +967,7 @@ async def fire_turn(subject: Subject, store: FireStore, deps: FireDeps) -> None:
     )
 
     await _record_run(
+        sm,
         subject,
         store,
         result,
@@ -1079,6 +1080,7 @@ async def _gated_and_healed(
 
 
 async def _record_run(
+    sm: async_sessionmaker[AsyncSession],
     subject: Subject,
     store: FireStore,
     result: str,
@@ -1096,7 +1098,7 @@ async def _record_run(
         return
     # Fallback post: only when the agent did not deliver to the
     # destination itself. The chat adapter for `platform` posts it.
-    posted = state is not None and agent_posted_to(state, subject)
+    posted = state is not None and await agent_delivered_itself(sm, state, subject)
     run_text = split_run_text(result)
     payload = run_text.post
     needs_delivery = not posted
@@ -1214,4 +1216,4 @@ async def _fire_native(
     async def files(text: str) -> str:
         return await stage_routine_files(sm, run.outputs, tenant_id=subject.tenant_id, text=text)
 
-    await _record_run(subject, store, run.text, run.state, files=files, hold=hold)
+    await _record_run(sm, subject, store, run.text, run.state, files=files, hold=hold)

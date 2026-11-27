@@ -3150,6 +3150,7 @@ async def _fire_with_fake_turn(
     fires: int = 1,
     final: str = "Weekly summary: all green.",
     reports_problem: bool = False,
+    agent_post_tool: str = "send_message",
 ) -> tuple[RoutineRow, dict[str, object]]:
     from daimon.core.stores.direct_messages import set_dm_enabled
     from daimon.core.turn.state import ToolUseBlock, TurnState
@@ -3193,7 +3194,7 @@ async def _fire_with_fake_turn(
                     kind="tool_use",
                     id="tu_post",
                     type="agent.mcp_tool_use",
-                    name="send_message",
+                    name=agent_post_tool,
                     input={"channel_id": agent_posts_to, "content": "done"},
                     mcp_server_name="daimon-mcp",
                     status="complete",
@@ -3317,17 +3318,22 @@ async def test_fire_with_destination_queues_no_text_for_a_quiet_run(
     assert after.last_result_tail == "nothing new", "the record keeps the reason"
 
 
+@pytest.mark.parametrize("tool", ["send_message", "create_thread"])
 async def test_fire_with_destination_skips_the_fallback_when_the_agent_posted(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
+    tool: str,
 ) -> None:
+    """A post to the channel, or a thread opened under it, is the run's own delivery."""
     after, _seen = await _fire_with_fake_turn(
         db_session,
         db_session_factory,
         monkeypatch,
         destination=("channel", "111222333"),
         agent_posts_to="111222333",
+        agent_post_tool=tool,
+        final="I posted the check-in thread for today's meeting.",
     )
 
     assert (after.delivery_status, after.delivery_note) == ("skipped", "agent_posted")
