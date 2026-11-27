@@ -192,6 +192,7 @@ AFTER_MERGE_COLUMNS = {
     ("routines", "owner_notice"),
     ("compute_tasks", "wait_until"),
     ("compute_sessions", "wake_turns"),
+    ("repo_memory", "data_refs"),
 }
 AFTER_MERGE_OBJECTS = {
     "ix_usage_observation_provider_observed_at",
@@ -454,14 +455,6 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
                 and name == "login_id"
                 and getattr(getattr(obj, "table", None), "name", None) == "web_sessions"
             )
-        ):
-            return False
-        # Added by the data memory migration (0244), the head.
-        if (
-            expected != HEAD
-            and kind == "column"
-            and name == "data_refs"
-            and getattr(getattr(obj, "table", None), "name", None) == "repo_memory"
         ):
             return False
         # Added by the invite files migration (0177).

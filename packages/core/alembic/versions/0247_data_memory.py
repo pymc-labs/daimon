@@ -5,6 +5,7 @@ items read before a memory was saved (None: none). Credential forms gain the `da
 kind. Additive only.
 
 downgrade: destructive
+schema: contract
 """
 
 import sqlalchemy as sa

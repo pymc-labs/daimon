@@ -1442,6 +1442,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         # Writes after a data read must wait for a card: tool safety is what cards them.
         depends_on=("data_sources", "tool_safety"),
         authority=_ADMIN_NOT_OWNER,
+        page="features.md#data-source-reads",
     ),
     _limit(
         "long_jobs_max_usd",

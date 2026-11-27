@@ -164,7 +164,7 @@ below the last applied one is ignored. Credentials are `env:NAME` or `file:/path
 
 `daimon data access-check --tenant <id> --source <id>` shows a source's state and freshness.
 Add `--record <id>` for the record's holders, and `--account <id>` to say whether that account
-can read it now, and why not.
+can read it, and why not.
 
 ## Vector search
 

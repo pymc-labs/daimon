@@ -33,8 +33,7 @@ thread takes the strictest of its own, its channel's and its category's rule.
 
 On Discord, a direct @mention in a `writers: none` channel gets a lock
 reaction and a DM naming the rule. It sends at most one per person per channel within
-[the cooldown](configuration.md#daimon_discord__protected_channel_notice_cooldown_min),
-and posts nothing in the channel.
+[the cooldown](configuration.md#daimon_discord__protected_channel_notice_cooldown_min).
 
 ## What a channel rule limits
 

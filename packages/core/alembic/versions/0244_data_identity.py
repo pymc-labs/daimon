@@ -1,15 +1,16 @@
 """data_identity: who each source identity is, link decisions and connections.
 
 Runs `0004_identity.sql` through `daimon.data.revision`. Nothing reads or writes them until
-the `data_sources` feature is on. As with 0230, a server that lacks what the store needs, or
+the `data_sources` feature is on. As with 0239, a server that lacks what the store needs, or
 an install without the `daimon-data` package, does nothing here; `daimon data init` applies
 it later.
 
-Its list holds the earlier files too, as 0232's does. Downgrading drops what this file made
-and puts back 0001's reader functions (`0004_identity_down.sql`); 0231's downgrade drops the
+Its list holds the earlier files too, as 0241's does. Downgrading drops what this file made
+and puts back 0001's reader functions (`0004_identity_down.sql`); 0240's downgrade drops the
 store.
 
 downgrade: destructive
+schema: contract
 """
 
 from __future__ import annotations

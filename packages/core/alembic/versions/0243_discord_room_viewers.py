@@ -5,6 +5,7 @@ generation. Written by the Discord gateway owner only while a workspace has data
 sources on. Additive only.
 
 downgrade: destructive
+schema: expand
 """
 
 import sqlalchemy as sa
