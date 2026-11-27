@@ -13,11 +13,14 @@
   write with nobody watching when its arguments fit a stated scope. Workflows,
   their pages, mentions (`workflow_mentions`) and polls (`workflow_polls`) are
   on; webhooks, code steps and scoped writes (`workflow_scoped_writes`) stay off
-  until an admin turns them on. The routine result header and routine sandbox
-  tools have a Workflow level, for a workflow's routine steps. Routines still
-  work but are marked Legacy, and every routines list offers an admin "Move to a
-  workflow". A moved routine becomes the workflow, with its pending post, owner
-  notice, settings and intake binding; `daimon routines translate --dry-run`
-  checks every routine. A workflow's routine step signs the same identity claims
-  as a routine, plus its run. See [Workflows](docs/workflows.md) and
+  until an admin turns them on. Workflows run on every provider, and Discord,
+  Slack and Teams can build one with the agent. An agent step can work in a
+  channel or thread, take the run's person's personal memory, write as the
+  server allows (`writes: policy`) and end quietly. A post can go out as an
+  agent. Routines still work but are marked Legacy, and every routines list
+  offers an admin "Move to a workflow". A moved routine becomes an agent step,
+  with a post for its result, its pending post, owner notice, settings and
+  intake binding; `daimon routines translate --dry-run` checks every routine.
+  Servers that approved a routine by its identity claims approve the moved
+  workflow again. See [Workflows](docs/workflows.md) and
   [Advanced workflows](docs/workflows-advanced.md).

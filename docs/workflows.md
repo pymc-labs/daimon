@@ -60,6 +60,17 @@ limit. Validation names each problem, and a draft with errors cannot be publishe
 An Agent step can load skills from the workspace library by name. Each publish
 pins the version it saw, so a later library edit reaches runs after a republish.
 
+An Agent step can work in a place: home, where the run started, or a channel or
+thread. The place's access rules apply, and the agent can post there itself. A
+later step reads where it posted in `steps.<id>.posted`. With personal memory, the
+step reads the memory of the person the run is for. Its result is private and it
+works in no place, so only a Post to that person can use the result.
+
+`writes: policy` lets a step write exactly as the server's rules for unattended
+runs allow. A step with no output fields completes with its plain reply as its
+summary. A step runs on the provider its agent uses in the place it works in. A step that can finish early ends the run quietly when its reply starts
+or ends with `NO_POST`.
+
 ## Triggers
 
 A workflow starts by hand, on a schedule, from a webhook, from a chat mention,
@@ -102,6 +113,12 @@ workflow tools.
 
 A private workflow is hidden from other members until you share it.
 
+On Discord, Slack and Teams, ask the agent to build or change a workflow, and it
+edits the draft with the same tools.
+<!-- knowledge: web -->
+It links the workflow's page in the web app for the full canvas.
+<!-- /knowledge -->
+
 `/workflows` opens the workflows panel on Discord, Slack and Teams. In chat, the
 agent does not publish or start a live run itself. It posts a card for you to
 press: the draft with Publish, or the inputs with Run. A run started from a card
@@ -140,8 +157,7 @@ Each step's spend counts against the allowance of the person the run is for.
 
 An admin can move a routine to a workflow and back from the CLI.
 The workflow takes over the routine's schedule, posts waiting to go out and
-settings, and a paused routine moves paused. A routine that posts to its
-owner's direct messages keeps posting there. A routine that is
+settings, and a paused routine moves paused. A routine that is
 running, or already moved, stays. A copy made while migrating from another
 system moves like any other and keeps its link to its source. A workflow on a
 one-time or multi-week schedule cannot move back.
@@ -150,9 +166,15 @@ one-time or multi-week schedule cannot move back.
 The web app can move one too.
 <!-- /knowledge -->
 
-A moved routine's step writes as the routine did: it runs the routine's own
-turn, under the same tool policy. The preview lists what the admin approves by
-moving it, which for a routine step is nothing.
+The routine's message becomes an Agent step with `writes: policy`. The step works
+where the routine posted. If it did not post for itself, a Post step sends its
+result there under the routine's agent. A routine that posts to its owner's
+direct messages becomes a private step with personal memory, then a Post to its
+owner. The preview lists what the admin approves by moving it, which is nothing.
+
+A Post step takes an agent in `as_agent`. With [agent identity](agent-identity.md)
+on, the post goes out under that agent's name and picture. Otherwise it comes
+from Daimon.
 
 ## CLI
 
@@ -180,7 +202,6 @@ name each routine.
 
 ## Limits
 
-- Workflows run only on the Anthropic backend.
 - A run form in chat holds 5 fields on Discord and 10 on Slack and Teams.
 <!-- knowledge: web -->
 - A longer form opens in the web app.

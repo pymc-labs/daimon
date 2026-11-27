@@ -44,7 +44,18 @@ _SKILLS = (
 )
 _TRIGGERS = f"{_V}[valid mention, poll and schedule triggers]"
 _SHAPES = f"{_V}[mention, poll and schedule shapes]"
-_ROUTINE = _W + "test_convert.py::test_converted_step_decides_like_its_routine"
+_ROUTINE = _W + "test_convert.py::test_converted_step_writes_as_the_server_allows"
+_MOVED = (
+    _W + "test_routine_translation.py::test_a_routine_works_where_it_posts_and_posts_unless_it_did"
+)
+_PLACE = (
+    _W + "test_validate.py::test_an_agent_works_in_a_channel_or_thread_and_a_personal_one_nowhere"
+)
+_PRIVATE = _W + "test_validate.py::test_only_a_post_to_the_person_reads_a_personal_steps_result"
+_IDENTITY = (
+    "packages/core/tests/test_agent_identity_scope.py::test_identity_defaults_and_global_switch"
+)
+_QUIET = _W + "test_agent_step.py::test_finish_early_ends_the_run_with_nothing_to_do"
 _DEFAULTS = _W + "test_features.py::test_workflow_features_defaults"
 _EDIT = _MCP + "test_edit_workflow_draft_when_edits_add_and_connect_nodes_then_the_revision_moves"
 _INBOX = _W + "test_waits.py::test_the_inbox_lists_and_decides_for_the_addressee"
@@ -211,15 +222,36 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
         _W + "test_convert.py::test_a_routine_moves_to_a_workflow_and_back_with_each_slot_once",
         _W + "test_convert.py::test_a_paused_routine_moves_to_a_paused_workflow",
     ),
-    "posts to its owner's direct messages": (
-        _W + "test_convert.py::test_a_dm_routine_becomes_an_owner_dm_step_that_posts_to_the_owner",
-        _LANES + "test_an_owner_dm_step_runs_as_the_owners_dm_and_skips_when_they_are_busy",
+    "posts to its owner's direct messages": _W
+    + "test_convert.py::test_a_dm_routine_becomes_a_private_step_that_posts_to_the_person_it_runs_as",
+    "becomes an Agent step with `writes: policy`": _ROUTINE,
+    "The step works where the routine posted.": _MOVED,
+    "If it did not post for itself": _MOVED,
+    "takes an agent in `as_agent`": _MOVED,
+    "the post goes out under that agent's name and picture": _IDENTITY,
+    "Otherwise it comes from Daimon.": _IDENTITY,
+    "can work in a place": (_PLACE, f"{_V}[an agent works at home]"),
+    "The place's access rules apply": "packages/adapters/scheduler/tests/test_agent_place.py::"
+    "test_only_admit_place_runs_the_access_hold_and_origin_checks",
+    "reads where it posted in `steps.<id>.posted`": f"{_V}[a personal step still shows where it posted]",
+    "With personal memory, the step reads": _PRIVATE,
+    "so only a Post to that person can use the result": (
+        _PRIVATE,
+        f"{_V}[only a post to the run-as person reads a personal result]",
+        f"{_V}[an agent with personal memory works nowhere]",
     ),
+    "`writes: policy` lets a step write": _ROUTINE,
+    "completes with its plain reply as its": _QUIET,
+    "runs on the provider its agent uses": _LANES
+    + "test_agent_then_finish_runs_metered_through_the_loops",
+    "ends the run quietly when its reply": _QUIET,
+    "ask the agent to build or change a workflow": _EDIT,
+    "links the workflow's page in the web app": _W
+    + "test_chat_cards.py::test_a_card_links_the_web_only_where_web_awareness_is_on_at_its_place",
     "keeps its link to its source": _W
     + "test_convert.py::test_a_cutover_copy_converts_and_keeps_its_source_link",
     "cannot move back": _W
     + "test_convert.py::test_a_workflow_on_a_multi_week_or_one_time_schedule_does_not_move_back",
-    "A moved routine's step writes as the routine did": _ROUTINE,
     "The preview lists what the admin approves": _ROUTINE,
     "or already moved, stays": _W + "test_convert.py::test_routines_that_cannot_move_are_refused",
     "commands act as a workspace admin": _CLI
@@ -231,8 +263,6 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
     "checks a run's record": _CLI + "test_runs_are_listed_redriven_cancelled_and_verified",
     "only previews until": _CLI
     + "test_from_routine_previews_without_moving_then_moves_and_moves_back",
-    "only on the Anthropic backend": _W
-    + "test_runs.py::test_a_home_channel_on_another_backend_refuses_the_run",
     "A run form in chat holds": _GAPS,
     "A longer form opens in the web app.": _GAPS,
     "A draft card does not refresh": _GAPS,
@@ -383,7 +413,11 @@ GUIDANCE = (
     "Each is a field of the workflow spec",
     "covers mentions, polls and schedules",
     "Prefer it to `writes: allow`.",
-    "Leave `writes: routine` to routines that moved.",
+    "`writes: policy` writes only as the server allows every",
+    "link the workflow page for the full canvas",
+    "An agent step may work `at`",
+    "With `memory: personal` it reads",
+    "lists where it posted itself",
     "How workflows run, how people take part",
     "Deployment caps on steps, runs, items and webhooks are under",
     "Name the workspace with `--tenant`.",

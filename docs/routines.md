@@ -1,8 +1,8 @@
 # Routines
 
-How to create a routine, how it runs, where its result goes and what happens
-when it fails. Legacy: admins can
-[move routines to workflows](workflows.md#routines-and-workflows).
+How to create and run a routine, and find its result and failures. Legacy: admins can
+[move routines to workflows](workflows.md#routines-and-workflows), as
+agent steps.
 
 A routine is a recurring [unattended](unattended.md) turn: a cron expression,
 a timezone, an agent and one prompt. The scheduler fires it, the agent runs
