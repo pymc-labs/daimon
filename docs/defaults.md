@@ -30,12 +30,15 @@ written:
 
 An agent requires `name` and `model`. It accepts `description`, `system`,
 `tools`, `mcp_servers`, `multiagent`, `skills`, `skill_repos`, `isolated` and
-`template`. A file with `template: true` is a starting point for new agents in
-the web app and is never provisioned.
+`template`. A file with `template: true` is never provisioned.
 `metadata` is not authorable, because Daimon sets it so that reconciliation
 recognises what it owns. Declaring `mcp_servers` without a matching
 `{type: mcp_toolset, mcp_server_name: ...}` entry in `tools` is rejected at
 parse time.
+
+<!-- knowledge: web -->
+The web app offers a `template: true` file as a starting point for new agents.
+<!-- /knowledge -->
 
 A `skills:` entry is a reference. Use `{type: custom, skill_id: <name>}` for a
 skill in `defaults/skills/`, with the bare authoring name and never a provider
@@ -162,8 +165,8 @@ uv run python scripts/sync_workflow_runtime.py --check
 ## Add invocation context fragments
 
 Core adds a `turn_context` block before the user message, chosen by the
-trusted caller origin: `chat`, `routine`, `relay` or `handoff`. Default chat
-adds nothing. An agent's YAML accepts `context_fragments`, keyed by origin, with
+trusted caller origin: `chat`, `routine`, `relay`, `handoff` or `helper`. Default
+chat adds nothing. An agent's YAML accepts `context_fragments`, keyed by origin, with
 `text` and an optional `mode` (`replace`, the default, or `extend`).
 
 ```yaml
@@ -179,6 +182,21 @@ The configuration is stored in the agent's system field, so it survives upload,
 forks and fingerprints. Replacing that field without it removes the overrides.
 An empty replacement disables a fragment. Fragments affect prompting only and
 grant no permissions.
+
+## Rename an agent
+
+Agent names are identity, so `daimon agents update` refuses a rename. Rename an
+agent you own, keeping its id, keys, memory and sessions:
+
+```bash
+daimon agents rename OLD NEW --guild GUILD_ID --dry-run
+```
+
+Channel defaults, rules, routines, bindings and access-policy rules move with it.
+History and audit rows keep the old name. A built-in name is refused unless you
+pass `--replace-seeded`: it retires the seeded agent in this workspace only, as
+`NEW-seeded-retired-<date>`, and frees the name, such as `default`, for your own
+agent. Later `defaults apply` runs leave the renamed agent alone.
 
 ## Apply defaults
 
@@ -243,7 +261,7 @@ Apply skips a skill only when a provider skill matches by name, a row exists,
 and its id and hash both match. Otherwise it pushes a **new version**. It never
 deletes and recreates, because deleting a referenced skill breaks every turn of
 the agents that pin it. The row is written after the upload succeeds, and apply
-drops the rows of skills no longer in the tree. In practice:
+drops the rows of skills missing from the tree. In practice:
 
 - **You edit `defaults/skills/**`.** The hash changes and apply pushes a new
   version to every install. It overwrites anyone's edits to that skill, with no

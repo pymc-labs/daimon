@@ -1,0 +1,165 @@
+{
+  "description": [
+    "Show what an edit to your watch would change, old and new, without changing it.",
+    "",
+    "Call this first, then `update_watch` with the same changes, `expected_revision`",
+    "set to `revision` and `before` exactly as returned. Only the owner can edit; an",
+    "admin can pause, delete and list another owner's watch but not edit it. Leave",
+    "a field out to keep it. `key=\"\"` and `evidence=[]` remove them. The tool and its",
+    "server never change: make a new watch for another source. `lifetime_days`",
+    "(1–30) counts from approval; `permanent=true` and `max_turns_per_day` above 24",
+    "need the owner to be an admin (`needs_admin`)."
+  ],
+  "parameters": {
+    "$defs": {
+      "JsonValue": {}
+    },
+    "additionalProperties": false,
+    "properties": {
+      "arguments": {
+        "anyOf": [
+          {
+            "additionalProperties": {
+              "$ref": "#/$defs/JsonValue"
+            },
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "delivery": {
+        "anyOf": [
+          {
+            "enum": [
+              "thread",
+              "dm",
+              "new_thread"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "evidence": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "instructions": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "interval": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "key": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "lifetime_days": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "max_turns_per_day": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "permanent": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "projection": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "rule": {
+        "anyOf": [
+          {
+            "enum": [
+              "change",
+              "added",
+              "updated"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "watch_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "watch_id"
+    ],
+    "type": "object"
+  }
+}

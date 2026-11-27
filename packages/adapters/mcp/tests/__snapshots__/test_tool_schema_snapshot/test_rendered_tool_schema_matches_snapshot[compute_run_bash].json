@@ -1,0 +1,89 @@
+{
+  "description": [
+    "Run bash on your session and wait up to wait_seconds (0 to 40) for it to end.",
+    "",
+    "A command that ends in time returns its exit_code and stdout, the last 16 KiB",
+    "of its output. truncated says there is more: read output_path with",
+    "compute_read_file. A command that needs longer keeps running and returns its",
+    "task_id with state `running`; a chat gets one message when it ends, agent chat",
+    "none. Check it with compute_task_status and compute_task_result.",
+    "run_in_background returns at once, in the same way.",
+    "",
+    "timeout, in milliseconds, ends an inline command at that time; a background",
+    "command ignores it. Otherwise the command can run for timeout_minutes (default",
+    "8 hours, capped by the operator TTL). description is accepted and not used.",
+    "",
+    "Do not retry an uncertain response automatically: check compute_task_status or",
+    "files first. Commands, file writes and running commands renew the idle lease.",
+    "Reads do not renew it."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "command": {
+        "type": "string"
+      },
+      "description": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "run_in_background": {
+        "default": false,
+        "type": "boolean"
+      },
+      "session_id": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "timeout": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "timeout_minutes": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "wait_seconds": {
+        "default": 40,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "session_id",
+      "command"
+    ],
+    "type": "object"
+  }
+}

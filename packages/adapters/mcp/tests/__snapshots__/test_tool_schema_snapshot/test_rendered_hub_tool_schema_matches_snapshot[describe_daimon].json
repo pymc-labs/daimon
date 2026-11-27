@@ -1,0 +1,19 @@
+{
+  "description": [
+    "Describe one Daimon: role, skills, repo, environment, platform and workspace.",
+    "",
+    "``monitoring``, when set, is a notice to show the person before they ask anything."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "daimon_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "daimon_id"
+    ],
+    "type": "object"
+  }
+}

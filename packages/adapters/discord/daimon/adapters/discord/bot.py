@@ -5688,6 +5688,14 @@ class DaimonBot(commands.Bot):
 
         # --- Stage one: admission (identity, config cascade, missing-config
         # bail, MA resolve/retrieve, balance gate, cap gate) -- admit(). ---
+        async def show_typing_while_waiting() -> None:
+            # Admission waits for room facts: show activity once; a failure changes nothing.
+            try:
+                async with message.channel.typing():
+                    pass
+            except Exception as exc:
+                log.debug("discord.facts_wait_typing_failed", error=str(exc))
+
         try:
             admission = await admit(
                 self.runtime.turn_deps,
@@ -5707,6 +5715,7 @@ class DaimonBot(commands.Bot):
                 category_id=category_id,
                 category_unresolved=category_unresolved,
                 public_thread=is_public_thread(thread),
+                on_facts_wait=show_typing_while_waiting,
             )
         except MissingTurnConfigError as err:
             log.info(

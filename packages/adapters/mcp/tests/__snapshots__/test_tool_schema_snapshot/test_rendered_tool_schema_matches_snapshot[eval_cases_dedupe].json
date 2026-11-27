@@ -1,0 +1,33 @@
+{
+  "description": [
+    "Mark near-duplicate cases of a suite with a group. With `keep`, also drop all but that",
+    "many of each group from the suite's next version."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "keep": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "suite_id": {
+        "type": "string"
+      },
+      "threshold": {
+        "default": 0.8,
+        "type": "number"
+      }
+    },
+    "required": [
+      "suite_id"
+    ],
+    "type": "object"
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "description": [
+    "Return one finished turn's raw provider cost, before markup.",
+    "",
+    "Pass the ``turn_started_at``/``turn_event_id`` returned by",
+    "``start_turn`` or ``continue_turn``. Call this once per terminal —",
+    "the host polls status every two seconds and should read cost once,",
+    "not on every poll. Returns ``{\"cost_usd\": \"<decimal string>\" | None,",
+    "\"event_count\": <int>}``. ``cost_usd`` is ``None`` when the session's",
+    "model has no pricing row (never zero — zero would falsely claim the",
+    "turn was free). This figure is NOT expected to equal the tenant",
+    "ledger's debit for the same turn: the ledger applies",
+    "``settings.billing.markup`` on top of it."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "handle": {
+        "type": "string"
+      },
+      "turn_event_id": {
+        "type": "string"
+      },
+      "turn_started_at": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "handle",
+      "turn_started_at",
+      "turn_event_id"
+    ],
+    "type": "object"
+  }
+}

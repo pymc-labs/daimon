@@ -1,0 +1,17 @@
+{
+  "description": [
+    "Search the public web and return the top results: title, link and a short extract."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "query": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "type": "object"
+  }
+}

@@ -31,6 +31,7 @@ AGENT_WRAPPERS = {
 }
 SKILLS = "skill ids exist only on Anthropic; the agent is read to attach one"
 SESSIONS = "session, vault, output and extension ports exist only on Anthropic"
+RETIRED = "retirement cleans the provider; Daimon-owned records are tenant rows it purges"
 # Files whose bare-name agent lookups stay Anthropic-only, with the reason.
 WRAPPER_ALLOWED = {
     "core/daimon/core/defaults/": "platform seeding reconciles Anthropic agents by tag",
@@ -45,6 +46,7 @@ WRAPPER_ALLOWED = {
     "core/daimon/core/agent_convert.py": "converting back creates the Anthropic agent by tag",
     "core/daimon/core/ma_resolver.py": "resolves Anthropic agents by name; dm_ ids use records",
     "adapters/web/": "web adapter sweep is separate",
+    "core/daimon/core/tenant_retirement.py": RETIRED,
 }
 # Files whose literal managed_agents( ports stay Anthropic-only, with the reason.
 PORT_ALLOWED = {
@@ -57,6 +59,7 @@ PORT_ALLOWED = {
     "core/daimon/core/turn/": SESSIONS,
     "core/daimon/core/headless_runner.py": SESSIONS,
     "core/daimon/core/long_jobs_ma.py": SESSIONS,
+    "core/daimon/core/tenant_retirement.py": RETIRED,
     "core/daimon/core/pending_file_sweeper.py": SESSIONS,
     "core/daimon/core/usage_sweep.py": SESSIONS,
     "core/daimon/core/workspace_transfer.py": "workspace files are Anthropic session resources",

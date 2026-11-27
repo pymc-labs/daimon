@@ -1,0 +1,54 @@
+{
+  "description": [
+    "Remove owner/repo from this agent only.",
+    "",
+    "A clear ask is enough: call it right away and reply with the returned",
+    "line. Ask only if the repo or agent is unclear. confirmed is ignored.",
+    "The Connect GitHub page also adds and removes repos. If it was the working",
+    "repo, the working repo is cleared. Other agents keep their access. An admin or an",
+    "owner of the agent may remove any repo from it.",
+    "Pass the current turn origin and selected agent identity."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_name": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "confirmed": {
+        "default": false,
+        "type": "boolean"
+      },
+      "expected_ma_agent_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "origin_context_id": {
+        "default": "",
+        "type": "string"
+      },
+      "repo_name": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "repo_name"
+    ],
+    "type": "object"
+  }
+}

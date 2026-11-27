@@ -7,33 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **Eval suites and bundles.** With the Evals feature on, people build suites of
-  cases, share them, and move them between deployments as signed or encrypted
-  bundles. `daimon evals bundle validate` checks a bundle offline.
-
-- **Eval cases from threads.** Turn answered chat turns into scrubbed eval cases,
-  draft their pass criteria after a cost estimate, and mark near-duplicates.
-  `daimon evals bundle scrub` scrubs a bundle offline with a dictionary of names.
-
-- **Eval runs with spending caps.** Estimate a run, start it with a cap, or cancel it,
-  from the web API, MCP tools or `daimon evals runs`. A cap past the operator's limits
-  waits for the operator's approval. Items play the case's script on a simulated chat
-  and stop at the cap, even mid-turn, and at their turn and time limits.
-  `daimon evals worker` runs each item as a real turn of a copy of the arm's agent in its
-  own sandbox, and the script presses its approve cards and receives its files.
-
-- **A fake world for eval cases.** A running case's web, GitHub, Google, git and
-  MCP calls are answered from the case, its earlier writes or a checked
-  simulation, and never reach real services.
-
-- **Enclosed sandboxes for eval cases.** Each eval item can run its tools in a
-  sandbox pod on a Docker host or in a Kubernetes namespace. A gateway in the
-  pod answers every request from the fake world, and only the provider worker
-  that runs the agent reaches its provider. Anthropic, OpenAI and Gemini agents
-  run in it through self-hosted environments without their own web tools, and
-  the self-hosted harness runs inside it. Package installs are blocked unless
-  the `eval_package_registries` feature lets them reach the real registries.
-
 - **A long job asked through agent chat runs to its end with one tool: `await_turn`.**
   Call it after `start_turn`. It returns when the agent says something, when the turn
   ends, or after about four minutes, and reports the tool call running now. Nothing is
@@ -59,7 +32,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   limit what it returns to what that place may read
   ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).
 
-||||||| parent of de496c9a2 (feat(mcp): wait for a turn on its event stream, and add await_turn)
 - **Each request to a signed-identity MCP server carries a new token with its own `jti`.**
   A server can accept each token once, so a copied token cannot be replayed
   ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).

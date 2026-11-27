@@ -1,0 +1,10 @@
+{
+  "description": [
+    "List everyone and each group people sign in with, with head counts. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

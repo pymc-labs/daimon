@@ -1,0 +1,41 @@
+{
+  "description": [
+    "Check one of your background commands: state, exit code and output size.",
+    "",
+    "A running command is waited for up to wait_seconds (at most 40), and the result",
+    "comes as soon as it ends. A finished command returns at once. Do not call this",
+    "in a loop: end your reply. A chat gets a message when the command ends; in agent",
+    "chat, check again in a later turn. A running command keeps its session alive up",
+    "to the maximum lifetime. The",
+    "call can take a little longer than wait_seconds when the machine or the database",
+    "is slow."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "task_id": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "wait_seconds": {
+        "default": 40,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "task_id"
+    ],
+    "type": "object"
+  }
+}

@@ -1,0 +1,213 @@
+{
+  "description": [
+    "Create an arm, or change one you created. Admins can change any arm. A live arm's",
+    "agent must be one of this workspace's; its config hash is computed for you."
+  ],
+  "parameters": {
+    "$defs": {
+      "Arm": {
+        "additionalProperties": false,
+        "properties": {
+          "baseline": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BaselineArm"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "config_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "live",
+              "baseline"
+            ],
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "live": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/LiveArm"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "BaselineArm": {
+        "additionalProperties": false,
+        "properties": {
+          "recorded_from": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "recorded_to": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "source_system": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "type": "object"
+      },
+      "BlobRef": {
+        "additionalProperties": false,
+        "properties": {
+          "media_type": {
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sha256",
+          "size",
+          "media_type"
+        ],
+        "type": "object"
+      },
+      "JsonValue": {},
+      "LiveArm": {
+        "additionalProperties": false,
+        "properties": {
+          "agent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "agent_snapshot": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BlobRef"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "backend": {
+            "type": "string"
+          },
+          "effort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "model": {
+            "type": "string"
+          },
+          "overrides": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/$defs/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "backend",
+          "model"
+        ],
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "arm": {
+        "$ref": "#/$defs/Arm"
+      }
+    },
+    "required": [
+      "arm"
+    ],
+    "type": "object"
+  }
+}

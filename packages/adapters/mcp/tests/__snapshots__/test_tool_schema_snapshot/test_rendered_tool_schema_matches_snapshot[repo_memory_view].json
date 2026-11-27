@@ -1,0 +1,35 @@
+{
+  "description": [
+    "Read a repository memory's full body by its listed slug.",
+    "",
+    "Omit repo for the working repository; another repo requires personal",
+    "GitHub read access. Use this reply's origin_context_id."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "name": {
+        "type": "string"
+      },
+      "origin_context_id": {
+        "type": "string"
+      },
+      "repo": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "name",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

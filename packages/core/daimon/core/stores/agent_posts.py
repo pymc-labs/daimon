@@ -21,9 +21,10 @@ from typing import Any, Literal, cast
 
 from daimon.core._models import AgentPostedMessage
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import CursorResult, delete, func, select, update
+from sqlalchemy import CursorResult, and_, delete, func, literal_column, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnClause
 
 PostKind = Literal["message", "thread"]
 PostSource = Literal["tool", "turn", "auto_thread", "routine"]
@@ -279,18 +280,34 @@ async def clear_requester(
     return cast(CursorResult[Any], result).rowcount
 
 
-async def prune_posts(session: AsyncSession, *, tenant_id: uuid.UUID, older_than: datetime) -> int:
+async def prune_posts(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    older_than: datetime,
+    limit: int | None = None,
+) -> int:
     """Remove a tenant's post records older than the cutoff (`daimon audit prune`).
 
-    A pruned post can no longer be tidied with the tools.
+    A pruned post can no longer be tidied with the tools. With `limit` it removes at
+    most that many, oldest first, for a batched sweep.
     """
     if older_than.utcoffset() is None:
         raise ValueError("older_than must include a timezone")
-    result = await session.execute(
-        delete(AgentPostedMessage).where(
-            AgentPostedMessage.tenant_id == tenant_id,
-            AgentPostedMessage.posted_at < older_than,
-        )
+    condition = and_(
+        AgentPostedMessage.tenant_id == tenant_id, AgentPostedMessage.posted_at < older_than
     )
+    statement = delete(AgentPostedMessage).where(condition)
+    if limit is not None:
+        ctid: ColumnClause[Any] = literal_column("ctid")
+        oldest = (
+            select(ctid)
+            .select_from(AgentPostedMessage)
+            .where(condition)
+            .order_by(AgentPostedMessage.posted_at)
+            .limit(limit)
+        )
+        statement = delete(AgentPostedMessage).where(ctid.in_(oldest))
+    result = await session.execute(statement)
     await session.flush()
     return cast(CursorResult[Any], result).rowcount

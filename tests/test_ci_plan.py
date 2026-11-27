@@ -26,9 +26,9 @@ def _ci() -> dict[str, Any]:
 @pytest.mark.parametrize(
     ("path", "expected"),
     [
-        ("README.md", "docs"),
+        ("README.md", "prose"),
         ("docs/quickstart.md", "docs"),
-        ("docs/mcp-tools.md", "mcp-catalogue"),
+        ("docs/mcp-tools.md", "docs"),
         ("defaults/skills/x/SKILL.md", "core"),
         ("packages/adapters/web/daimon/adapters/web/app.py", "web"),
         ("packages/adapters/web/README.md", "web"),
@@ -53,7 +53,7 @@ def _ci() -> dict[str, Any]:
         (".github/PULL_REQUEST_TEMPLATE.md", "tooling"),
         ("apps/harness/README.md", "tooling"),
         (".gitignore", "tooling"),
-        ("LICENSE", "docs"),
+        ("LICENSE", "prose"),
         ("apps/report-host/src/report_host/app.py", "report-host"),
         ("apps/compute-session/src/compute_session/server.py", "compute-session"),
         ("apps/compute-session/README.md", "tooling"),
@@ -80,7 +80,12 @@ def test_unknown_base_or_root_file_runs_everything() -> None:
 
 
 def test_prose_runs_nothing() -> None:
-    assert _tests(["README.md", "docs/self-hosting.md", "CHANGELOG.md"]) == (set(), set())
+    assert _tests(["README.md", "CHANGELOG.md"]) == (set(), set())
+
+
+def test_a_docs_page_runs_the_docs_knowledge_tests() -> None:
+    suites, jobs = _tests(["docs/self-hosting.md"])
+    assert suites == {"core"} and jobs == {"pytest-db"}, "tests/test_docs_knowledge.py reads docs/"
 
 
 def test_web_adapter_change_runs_only_its_suites() -> None:
@@ -151,7 +156,14 @@ def test_jobs_match_ci_yml() -> None:
         legs = plan.matrix_legs(job)
         if legs and "suite" in legs[0]:
             assert {leg["suite"] for leg in legs} == set(owned), name
-    selected = {"changes", "journeys-offline", "docker-publish-candidate", "deploy-gcp"}
+    selected = {
+        "changes",
+        "conventions",
+        "journeys-offline",
+        "docker-publish-candidate",
+        "staging-quiet",
+        "deploy-gcp",
+    }
     assert set(jobs) == set(plan.JOBS) | selected
 
 
