@@ -53,6 +53,21 @@ jobs:
           BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || '' }}
         run: python3 scripts/ci/plan.py tests --base "$BASE"
 
+  # The delivery-flow rules (CLAUDE.md, CONTRIBUTING.md), checked on the merge
+  # result against its base. No path filter and no `needs`, so it always
+  # reports and can be a required check. Stdlib only: no dependency install.
+  conventions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 2
+      # On a pull request HEAD is the merge of the PR into its base, so HEAD^1
+      # is the base. Pushes and manual runs check the tree only.
+      - name: conventions
+        run: python3 scripts/check_conventions.py ${{ github.event_name == 'pull_request' && '--base HEAD^1' || '' }}
+
   lint:
     needs: changes
     if: contains(fromJSON(needs.changes.outputs.jobs), 'lint')
@@ -92,20 +107,19 @@ jobs:
         continue-on-error: true
         run: uv run python scripts/check_price_expiry.py
 
-      - name: lint migrations
-        run: uv run python scripts/lint_migrations.py
-
       - name: env example check
         run: uv run python scripts/generate_env_example.py --check
 
-      - name: config reference check
-        run: uv run python scripts/generate_config_reference.py --check
+      # Built by the docs workflow and never committed: run, not compared, so a
+      # generator that stops working fails here before it fails there.
+      - name: config reference builds
+        run: uv run python scripts/generate_config_reference.py
 
-      - name: mcp tool catalogue check
-        run: uv run python scripts/generate_mcp_tool_catalogue.py --check
+      - name: mcp tool catalogue builds
+        run: uv run python scripts/generate_mcp_tool_catalogue.py
 
-      - name: feature reference check
-        run: uv run python scripts/generate_feature_reference.py --check
+      - name: feature reference builds
+        run: uv run python scripts/generate_feature_reference.py
 
       - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
@@ -655,6 +669,19 @@ jobs:
           tags: daimon:smoke
       - name: provider TLS with the image's certificate roots
         run: docker run --rm -i --entrypoint python daimon:smoke - < scripts/ci/image_tls_check.py
+      - name: docs and source the self_knowledge tools read are in the image
+        run: >-
+          docker run --rm --entrypoint python daimon:smoke -c
+          'from daimon.core.config import SelfKnowledgeSettings as S;
+          from daimon.core.self_knowledge import Library;
+          s = S();
+          lib = Library(s.docs_root, s.source_root, s.docs_url, s.repo_url, "smoke", True);
+          index = lib.read_docs();
+          assert "how-daimon-works.md" in index, "docs missing from the image";
+          assert "features.md" in index, "generated pages missing from the image";
+          lib.read_docs("how-daimon-works.md");
+          lib.read_docs("features.md");
+          lib.read_source("packages/core/daimon/core/self_knowledge.py")'
       - name: create the test database with the image's alembic
         env:
           PGPASSWORD: daimon
@@ -747,7 +774,7 @@ jobs:
             daimon-harness:test bash -c \
             'mount -o remount,hidepid=2,gid=60002 /proc && chmod 755 /tmp /var/tmp /dev/shm /run/lock && exec python -' < apps/harness/tests/image_probe.py
 
-  # Unique candidate tags are deliberately not the 7-char SHA tags consumed
+  # Unique candidate tags are deliberately not the full-SHA tags consumed
   # by promote.yml. Passing digests pins staging to these exact tested images;
   # deploy.yml assigns promotable SHA tags only after all staging gates pass.
   docker-publish-candidate:
@@ -834,9 +861,34 @@ jobs:
           cache-from: type=gha,scope=report-host
           cache-to: type=gha,mode=max,scope=report-host,ignore-error=true
 
+  # Debounce for staging deploys. It starts with the push, in parallel with the
+  # tests, and deploy-gcp waits for it, so a SHA deploys once its CI passes and
+  # this floor (STAGING_QUIET_MINUTES: default 5, 0 = none, max 30) has elapsed;
+  # the effective window is whichever is longer. deploy.yml's superseded check
+  # then skips every SHA main moved past meanwhile, so a burst of merges deploys
+  # once, from its last commit. Never cancel-in-progress here: a cancelled job
+  # would turn the older main runs "cancelled".
+  staging-quiet:
+    name: Staging quiet window
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && vars.GCP_WIF_PROVIDER != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: wait
+        env:
+          QUIET: ${{ vars.STAGING_QUIET_MINUTES }}
+        run: |
+          minutes="${QUIET:-5}"
+          if ! [[ "$minutes" =~ ^[0-9]+$ ]] || [ "$((10#$minutes))" -gt 30 ]; then
+            echo "::error::STAGING_QUIET_MINUTES must be a whole number from 0 to 30, got '$minutes'."
+            exit 1
+          fi
+          echo "Waiting $minutes minute(s) so a burst of merges deploys once."
+          sleep "$((10#$minutes * 60))"
+
   deploy-gcp:
     name: Deploy to GCP (staging)
-    needs: [lint, shard-check, pytest-db, pytest-data, pytest-discord, pytest-light, mux-standalone, pytest-notebook-host, pytest-staging-config, journeys-offline, docker-publish-candidate]
+    needs: [lint, conventions, staging-quiet, shard-check, pytest-db, pytest-data, pytest-discord, pytest-light, mux-standalone, pytest-notebook-host, pytest-staging-config, journeys-offline, docker-publish-candidate]
     # vars.GCP_WIF_PROVIDER doubles as the deploy switch: repository variables
     # don't propagate to forks/clones, so a repo with no GCP config skips this
     # job cleanly (green CI) instead of failing at the auth step. Operators

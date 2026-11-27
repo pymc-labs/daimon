@@ -1,0 +1,37 @@
+{
+  "description": [
+    "Publish text files as a library skill's next version. A file whose content is null",
+    "keeps its bytes from ``expected_version``, the version you read; a later version",
+    "is refused. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "expected_version": {
+        "type": "string"
+      },
+      "files": {
+        "additionalProperties": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": "object"
+      },
+      "skill_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "skill_id",
+      "files",
+      "expected_version"
+    ],
+    "type": "object"
+  }
+}

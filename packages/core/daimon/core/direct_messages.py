@@ -17,6 +17,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 import anthropic
+import httpx
 import structlog
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
 from daimon.core.access_policy import (
@@ -34,9 +35,11 @@ from daimon.core.features.model_input import DEFAULT_DM_HISTORY, DmHistoryCap
 from daimon.core.handoff_context import TranscriptTurn, render_previous_session
 from daimon.core.ma import interrupt_orphaned_session
 from daimon.core.ma_resolver import MAResolverMissError
+from daimon.core.mcp_identity import DmRoutineRelay
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.monitoring import MonitoringNotice
 from daimon.core.mux_backend import resource_scope
+from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.output_runtime import OutputRuntime
 from daimon.core.permissions import dm_source_limited, limited_among, limited_ids
 from daimon.core.platform_words import words_for
@@ -79,7 +82,7 @@ from daimon.core.stores.thread_sessions import (
     retire_dm_scope,
     update_watermark,
 )
-from daimon.core.turn.admission import Admission, AdmissionGrant, DmSource, admit
+from daimon.core.turn.admission import Admission, AdmissionGrant, DmSource, admit, reauthorize
 from daimon.core.turn.ceiling import LONGEST_TURN_CEILING_S, TURN_CEILING_S, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied, DmSourceSealedError, SessionBusyError
@@ -950,6 +953,7 @@ async def _run_admitted_dm_turn(
             effective_is_admin=prepared.admission.is_admin,
             web=prepared.admission.web,
             features=prepared.admission.features,
+            daimon_tools=prepared.admission.toolset.daimon_tools,
         )
         user_message = f"{controls}\n{prompt}"
 
@@ -1327,6 +1331,8 @@ async def run_dm_routine(
     budget_channel_id: str | None,
     requester_org: RequesterOrg,
     sandbox: RoutineSandbox | None = None,
+    relay: DmRoutineRelay | None = None,
+    open_dm: Callable[[], Awaitable[str]] | None = None,
 ) -> DmRoutineReply:
     """Run a DM routine's fire as a fresh, unattended private DM turn of its owner.
 
@@ -1337,7 +1343,9 @@ async def run_dm_routine(
     bills. `requester_org` is the owner's standing at this fire, so an owner who lost the
     internal role starts no private turn. Nothing is posted here: the caller queues the
     final output. Built-ins stay off unless `sandbox` is an operator's agent-level opt-in
-    the session matches.
+    the session matches. With `relay` and `open_dm` (a server signs DM routines), the
+    owner's DM is opened, sending nothing, and bound into the turn's relay credential
+    (`_with_owner_dm`).
     """
     token = dm_routine_sandbox.set(sandbox)
     try:
@@ -1351,6 +1359,8 @@ async def run_dm_routine(
             source=source,
             budget_channel_id=budget_channel_id,
             own_dm_reach=True,
+            relay=relay,
+            open_dm=open_dm,
         )
     finally:
         dm_routine_sandbox.reset(token)
@@ -1547,6 +1557,8 @@ async def _run_dm_fire(
     timer_row: TaskContinuationRow | None = None,
     requester_org: RequesterOrg = RequesterOrg.HOST,
     own_dm_reach: bool = False,
+    relay: DmRoutineRelay | None = None,
+    open_dm: Callable[[], Awaitable[str]] | None = None,
 ) -> DmRoutineReply:
     async with owner_dm_turn(deps, platform="discord", owner=owner_user_id, wait=False) as fence:
         now = datetime.now(UTC)
@@ -1626,6 +1638,10 @@ async def _run_dm_fire(
                         MANAGED_AGENTS_ONLY,
                         message="DM routines require a gateable Managed Agents runtime.",
                     ) from error
+            if relay is not None and open_dm is not None and not provider:
+                admission = await _with_owner_dm(
+                    deps, admission, relay, open_dm, tenant_id=tenant_id
+                )
             deadline = turn_deadline(now=now, ceiling_s=admission.turn_ceiling_s)
             prepared = await bind_session(
                 deps,
@@ -1684,6 +1700,51 @@ async def _run_dm_fire(
             # Someone waits for a watch's report or a timer's reminder, so those say something.
             may_end_empty=watch_row is None and timer_row is None,
         )
+
+
+async def _with_owner_dm(
+    deps: TurnDeps,
+    admission: Admission,
+    relay: DmRoutineRelay,
+    open_dm: Callable[[], Awaitable[str]],
+    *,
+    tenant_id: uuid.UUID,
+) -> Admission:
+    """`admission` carrying a DM routine's relay binding with its owner's DM.
+
+    The DM is opened only once the owner is admitted again now (`reauthorize` raises
+    for an owner refused since), and opening sends nothing. An open that fails is
+    reported and the turn runs with today's binding: never another destination.
+    """
+    admission = await reauthorize(deps, admission)
+    try:
+        channel = await open_dm()
+    except (httpx.HTTPError, ValueError) as error:
+        reason = (
+            str(error.response.status_code)
+            if isinstance(error, httpx.HTTPStatusError)
+            else type(error).__name__
+        )
+        _log.warning(
+            "routine.dm_open_failed",
+            routine_id=str(relay.routine_id),
+            tenant_id=str(tenant_id),
+            reason=reason,
+        )
+        report_ops_event(
+            deps.sessionmaker,
+            OpsEvent(
+                code="bridge.relay_failed",
+                tenant_id=tenant_id,
+                reason=reason,
+                routine_id=relay.routine_id,
+                platform="discord",
+                subject_key="dm_routine_open",
+            ),
+            logged=False,
+        )
+        return admission
+    return replace(admission, dm_routine_relay=replace(relay, channel=channel))
 
 
 async def _run_unattended_turn(

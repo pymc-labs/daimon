@@ -181,6 +181,11 @@ class PurgeReport(BaseModel):
     dm_rules: int = 0
     dm_grant_users: int = 0
     credential_requests: int = 0
+    task_continuations: int = 0
+    turn_outcomes: int = 0
+    thread_sessions: int = 0
+    switch_cards: int = 0
+    long_job_cancel_audit: int = 0
     secret_shares: int = 0
     wizard_sessions: int = 0
     message_feedback: int = 0

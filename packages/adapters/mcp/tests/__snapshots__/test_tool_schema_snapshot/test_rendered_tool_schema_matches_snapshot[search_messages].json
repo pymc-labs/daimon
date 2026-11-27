@@ -1,0 +1,125 @@
+{
+  "description": [
+    "Search messages with server-side filters.",
+    "",
+    "Limit caps at 25 per page — paginate with offset. When the search is",
+    "scoped to channel_ids, total_results is the exact count for those",
+    "channels (you must be able to view them; they are rejected before",
+    "searching). Unscoped searches report only the visible rows — the",
+    "workspace-wide count is withheld because it includes channels you cannot",
+    "view. Which filters apply depends on where you are: content is always",
+    "supported, and a call using a filter that is not accepted is refused with",
+    "the ones that are. Some searches scan only the most recently active posts",
+    "(and their replies) of up to 10 channels; complete=false says the scan",
+    "stopped short. 1:1 private-chat hits are only returned in a private chat",
+    "with daimon. Hits in sealed channels are withheld unless origin_context_id",
+    "places this turn inside that channel; scoping to one from outside is",
+    "refused."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "author_ids": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "author_types": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "channel_ids": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "content": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "has": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "limit": {
+        "default": 25,
+        "type": "integer"
+      },
+      "mentions": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "offset": {
+        "default": 0,
+        "type": "integer"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

@@ -26,7 +26,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import fields
-from typing import Final
+from typing import TYPE_CHECKING, Final, NamedTuple
 
 from daimon.core.erasure import ERASABLE, Subject
 from daimon.core.stores import accounts as accounts_store
@@ -39,6 +39,9 @@ from daimon.core.turn.notices import provider_name
 from mux.profiles import INLINE_REUSE, PERSISTENT_WORKSPACE
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+if TYPE_CHECKING:
+    from daimon.core.config import Settings
 
 
 class PurgePreviewRow(BaseModel):
@@ -86,6 +89,11 @@ class PurgePreview(BaseModel):
     dm_rules: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     dm_grant_users: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     credential_requests: PurgePreviewRow
+    task_continuations: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    turn_outcomes: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    thread_sessions: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    switch_cards: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    long_job_cancel_audit: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     secret_shares: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     wizard_sessions: PurgePreviewRow
     message_feedback: PurgePreviewRow
@@ -140,6 +148,10 @@ def held_lines(preview: PurgePreview) -> list[str]:
         (preview.selfhosted_operations, "self-hosted retry record"),
         (preview.slack_user_tokens, "saved access token"),
         (preview.slack_turn_contexts, "temporary request record"),
+        (preview.task_continuations, "follow-up task"),
+        (preview.turn_outcomes, "reply record"),
+        (preview.thread_sessions, "conversation link"),
+        (preview.switch_cards, "pending model switch"),
         (preview.direct_message_conversations, "private conversation"),
         (preview.dm_carry_overs, "imported earlier conversation"),
         (preview.held_timers, "imported timer"),
@@ -255,6 +267,26 @@ DELETE_PAUSED: Final[str] = (
     "Deleting your account is paused during the event.\n\n"
     "Ask the team running Daimon if you need it deleted now."
 )
+
+
+class LegalLinks(NamedTuple):
+    """The deployment's own legal pages; `terms` is None until the operator sets one."""
+
+    privacy: str
+    terms: str | None
+
+
+def legal_links(settings: Settings) -> LegalLinks:
+    """Where every surface sends people for the policy and the terms.
+
+    One rule for the web app and each chat platform's privacy panel: the
+    privacy link is always there, the terms link only when
+    `DAIMON_TERMS_URL` is set.
+    """
+    return LegalLinks(
+        privacy=str(settings.privacy_policy_url),
+        terms=None if settings.terms_url is None else str(settings.terms_url),
+    )
 
 
 MONITORED_LINE: Final[str] = "Admins can read your conversations with the agents they monitor."

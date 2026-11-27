@@ -1,0 +1,103 @@
+{
+  "description": [
+    "Apply evidence-backed human CRM selections as a sales resolver or core-role member.",
+    "",
+    "Show exact records and proposed writes before approval. Routines never",
+    "resolve. Completed identities are immutable; uncertain creates must be",
+    "recovered before selecting replacements. Server admin alone is no grant.",
+    "The resolver must also be able to read the lead."
+  ],
+  "parameters": {
+    "$defs": {
+      "IntakeResolution": {
+        "additionalProperties": false,
+        "properties": {
+          "company_id": {
+            "anyOf": [
+              {
+                "maxLength": 20,
+                "pattern": "^\\d+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "contact_id": {
+            "anyOf": [
+              {
+                "maxLength": 20,
+                "pattern": "^\\d+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "deal_id": {
+            "anyOf": [
+              {
+                "maxLength": 20,
+                "pattern": "^\\d+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "discord_message_id": {
+            "anyOf": [
+              {
+                "maxLength": 20,
+                "pattern": "^\\d+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "discord_post_absence_confirmed": {
+            "default": false,
+            "type": "boolean"
+          },
+          "evidence": {
+            "maxLength": 2000,
+            "minLength": 20,
+            "type": "string"
+          },
+          "separate_opportunity_confirmed": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "evidence"
+        ],
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "intake_id": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "resolution": {
+        "$ref": "#/$defs/IntakeResolution"
+      }
+    },
+    "required": [
+      "intake_id",
+      "resolution"
+    ],
+    "type": "object"
+  }
+}

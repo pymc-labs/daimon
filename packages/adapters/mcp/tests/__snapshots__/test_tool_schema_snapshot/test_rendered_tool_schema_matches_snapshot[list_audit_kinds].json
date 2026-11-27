@@ -1,0 +1,11 @@
+{
+  "description": [
+    "List the kinds of audit entry the workspace has recorded, for the log's ``kind``",
+    "filter. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

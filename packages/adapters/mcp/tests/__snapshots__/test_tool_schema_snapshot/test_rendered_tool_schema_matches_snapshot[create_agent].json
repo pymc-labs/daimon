@@ -1,0 +1,539 @@
+{
+  "description": [
+    "Create an agent called, for example, churn-explorer. Pass fields directly —",
+    "there is NO ``spec`` wrapper.",
+    "",
+    "Required: ``name`` and ``model``. Use ``\"claude-sonnet-5-5\"`` when the user",
+    "asks for Sonnet and ``\"claude-opus-5-5\"`` when they ask for Opus — always",
+    "the current generation. For the cheapest Claude, use ``\"claude-haiku-5-5\"``:",
+    "Haiku is the cheapest current generation, never ``claude-haiku-4-5``. Use",
+    "``\"claude-fable-5-2\"`` only when the user asks for Fable: it costs four",
+    "times Sonnet. Only pass an older id (``claude-sonnet-5``, ``claude-opus-5``,",
+    "…) when the user names that version themselves.",
+    "Any other provider's model works the same way, by name: ``\"flash\"``,",
+    "``\"argon\"``, ``\"luna\"``, ``\"astra\"`` (or its id). The agent is created on that",
+    "provider directly: never create it on Claude first, and nothing else is needed",
+    "afterwards. The result's ``applies`` says where it runs and what it won't have",
+    "there: post it.",
+    "Optional: ``description``, ``system`` (the system prompt), ``tools``,",
+    "``mcp_servers``, and ``skill_repos`` — GitHub repos to sync skills from,",
+    "e.g. ``[{\"url\": \"https://github.com/owner/repo\", \"branch\": \"main\"}]``.",
+    "",
+    "Do not pass a ``skills`` field here. To add skills, either sync a repo via",
+    "``skill_repos`` or use ``sync_skills`` after the agent is created.",
+    "",
+    "A returned ``answering`` field says the new agent is routed nowhere yet:",
+    "post it verbatim. Always pass this turn's ``origin_context_id``: a chat turn",
+    "without it is refused while a channel in the workspace is confidential, and with"
+  ],
+  "parameters": {
+    "$defs": {
+      "BetaManagedAgentsAgentToolConfigParams": {
+        "description": "Configuration override for a specific tool within a toolset.",
+        "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "enum": [
+              "bash",
+              "edit",
+              "read",
+              "write",
+              "glob",
+              "grep",
+              "web_fetch",
+              "web_search"
+            ],
+            "type": "string"
+          },
+          "permission_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BetaManagedAgentsAlwaysAllowPolicyParam"
+              },
+              {
+                "$ref": "#/$defs/BetaManagedAgentsAlwaysAskPolicyParam"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "BetaManagedAgentsAgentToolset20260401Params": {
+        "description": "Configuration for built-in agent tools.\n\nUse this to enable or disable groups of tools available to the agent.",
+        "properties": {
+          "configs": {
+            "items": {
+              "$ref": "#/$defs/BetaManagedAgentsAgentToolConfigParams"
+            },
+            "type": "array"
+          },
+          "default_config": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BetaManagedAgentsAgentToolsetDefaultConfigParams"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "type": {
+            "const": "agent_toolset_20260401",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "BetaManagedAgentsAgentToolsetDefaultConfigParams": {
+        "description": "Default configuration for all tools in a toolset.",
+        "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "permission_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BetaManagedAgentsAlwaysAllowPolicyParam"
+              },
+              {
+                "$ref": "#/$defs/BetaManagedAgentsAlwaysAskPolicyParam"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "BetaManagedAgentsAlwaysAllowPolicyParam": {
+        "description": "Tool calls are automatically approved without user confirmation.",
+        "properties": {
+          "type": {
+            "const": "always_allow",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "BetaManagedAgentsAlwaysAskPolicyParam": {
+        "description": "Tool calls require user confirmation before execution.",
+        "properties": {
+          "type": {
+            "const": "always_ask",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "BetaManagedAgentsCustomToolInputSchemaParam": {
+        "additionalProperties": true,
+        "description": "JSON Schema for custom tool input parameters.",
+        "properties": {
+          "properties": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "required": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "type": {
+            "const": "object",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "BetaManagedAgentsCustomToolParams": {
+        "description": "A custom tool that is executed by the API client rather than the agent.\n\nWhen the agent calls this tool, an `agent.custom_tool_use` event is emitted and the session goes idle, waiting for the client to provide the result via a `user.custom_tool_result` event.",
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "input_schema": {
+            "$ref": "#/$defs/BetaManagedAgentsCustomToolInputSchemaParam"
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "const": "custom",
+            "type": "string"
+          }
+        },
+        "required": [
+          "description",
+          "input_schema",
+          "name",
+          "type"
+        ],
+        "type": "object"
+      },
+      "BetaManagedAgentsMCPToolConfigParams": {
+        "description": "Configuration override for a specific MCP tool.",
+        "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "permission_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BetaManagedAgentsAlwaysAllowPolicyParam"
+              },
+              {
+                "$ref": "#/$defs/BetaManagedAgentsAlwaysAskPolicyParam"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "BetaManagedAgentsMCPToolsetDefaultConfigParams": {
+        "description": "Default configuration for all tools from an MCP server.",
+        "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "permission_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BetaManagedAgentsAlwaysAllowPolicyParam"
+              },
+              {
+                "$ref": "#/$defs/BetaManagedAgentsAlwaysAskPolicyParam"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "BetaManagedAgentsMCPToolsetParams": {
+        "description": "Configuration for tools from an MCP server defined in `mcp_servers`.",
+        "properties": {
+          "configs": {
+            "items": {
+              "$ref": "#/$defs/BetaManagedAgentsMCPToolConfigParams"
+            },
+            "type": "array"
+          },
+          "default_config": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/BetaManagedAgentsMCPToolsetDefaultConfigParams"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mcp_server_name": {
+            "type": "string"
+          },
+          "type": {
+            "const": "mcp_toolset",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mcp_server_name",
+          "type"
+        ],
+        "type": "object"
+      },
+      "BetaManagedAgentsURLMCPServerParams": {
+        "description": "URL-based MCP server connection.",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "const": "url",
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "type",
+          "url"
+        ],
+        "type": "object"
+      },
+      "ModelConfig": {
+        "properties": {
+          "effort": {
+            "anyOf": [
+              {
+                "enum": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "inference_geo": {
+            "anyOf": [
+              {
+                "enum": [
+                  "us",
+                  "global"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "speed": {
+            "anyOf": [
+              {
+                "enum": [
+                  "standard",
+                  "fast"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "ModelSelection": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "$ref": "#/$defs/ModelConfig"
+          }
+        ]
+      },
+      "SkillRepo": {
+        "additionalProperties": false,
+        "description": "Authoring-time reference to a GitHub skill repository.\n\nUsed by the `sync_agent_skills` orchestrator. Excluded from\n`AgentSpec.model_dump()` because skill_repos do not serialize to MA —\nthe sync pipeline turns them into uploaded `BetaManagedAgentsSkillParams`.",
+        "properties": {
+          "branch": {
+            "default": "main",
+            "type": "string"
+          },
+          "path": {
+            "default": "",
+            "type": "string"
+          },
+          "split": {
+            "default": true,
+            "type": "boolean"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "description": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "mcp_servers": {
+        "anyOf": [
+          {
+            "items": {
+              "$ref": "#/$defs/BetaManagedAgentsURLMCPServerParams"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "model": {
+        "$ref": "#/$defs/ModelSelection"
+      },
+      "name": {
+        "type": "string"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "skill_repos": {
+        "anyOf": [
+          {
+            "items": {
+              "$ref": "#/$defs/SkillRepo"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "system": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "tools": {
+        "anyOf": [
+          {
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BetaManagedAgentsAgentToolset20260401Params"
+                },
+                {
+                  "$ref": "#/$defs/BetaManagedAgentsMCPToolsetParams"
+                },
+                {
+                  "$ref": "#/$defs/BetaManagedAgentsCustomToolParams"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "name",
+      "model"
+    ],
+    "type": "object"
+  }
+}

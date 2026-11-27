@@ -1,0 +1,61 @@
+{
+  "description": [
+    "Change the person's files or notes through Microsoft Graph, as them.",
+    "",
+    "- Upload or replace a file: PUT /me/drive/root:/Folder/name.docx:/content",
+    "  (or .../items/{id}/content) with file_handle from create_file_upload_url.",
+    "- Excel: POST or PATCH .../items/{id}/workbook/... with a JSON body, e.g.",
+    "  PATCH .../workbook/worksheets/Sheet1/range(address='A1:B2') {\"values\": ...}.",
+    "- OneNote, 1:1 chat only: POST /me/onenote/sections/{id}/pages with the",
+    "  page HTML as a string body; PATCH /me/onenote/pages/{id}/content with a",
+    "  JSON list of patch commands.",
+    "Nothing else is accepted: the path is at most 500 characters and the body at most",
+    "8,000 characters (14,000 bytes, so less for emoji and most non-Latin text); make big",
+    "changes in several calls. Mail and invites go through microsoft_send.",
+    "Where tool safety is on, each call waits for the person's Approve.",
+    "Pass origin_context_id from the current chat (OneNote needs it)."
+  ],
+  "parameters": {
+    "$defs": {
+      "JsonValue": {}
+    },
+    "additionalProperties": false,
+    "properties": {
+      "body": {
+        "$ref": "#/$defs/JsonValue",
+        "default": null
+      },
+      "file_handle": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "method": {
+        "enum": [
+          "POST",
+          "PATCH",
+          "PUT"
+        ],
+        "type": "string"
+      },
+      "origin_context_id": {
+        "default": "",
+        "type": "string"
+      },
+      "path": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "method",
+      "path"
+    ],
+    "type": "object"
+  }
+}

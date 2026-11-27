@@ -1,0 +1,10 @@
+{
+  "description": [
+    "Unavailable over MCP: list deployment-wide promos with the human operator CLI."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

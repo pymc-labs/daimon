@@ -41,9 +41,12 @@ nav:
       - Lead intake: lead-intake.md
       - Ask a person: support.md
   - Concepts:
+      - How Daimon works: how-daimon-works.md
       - Architecture: architecture.md
       - Isolation: isolation.md
       - Permissions: permissions.md
+      - Approvals: approvals.md
+      - Helpers and handoffs: helpers.md
       - Rooms with outside people: outside-people.md
       - Admins: admins.md
       - Unattended turns: unattended.md

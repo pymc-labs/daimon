@@ -1,0 +1,51 @@
+{
+  "description": [
+    "Replace the text of a message you posted.",
+    "",
+    "Use it to correct or update your own post instead of posting again.",
+    "Your own posts are those you sent with send_message or create_thread",
+    "and, where the chat shows them, your chat replies and status cards (a status",
+    "card's embed is replaced by the new text). A person's message, another",
+    "agent's or another bot's is refused. A reply or card is refused while",
+    "its turn is still running, and unless the person asking started that",
+    "turn, opened the thread, or is an admin. channel_id is where the message is,",
+    "as send_message or a read tool returned it (the thread id for a message in a",
+    "thread; the channel id with message_id as the message ts; or the",
+    "conversation_id with the activity_id send_message returned). Pass this",
+    "turn's origin_context_id. Limited to 10 edits or deletes per turn and",
+    "40 per hour. Refused in protected channels, channels you may not post",
+    "in, sealed channels outside their own conversations and the support",
+    "escalation channel."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "channel_id": {
+        "type": "string"
+      },
+      "content": {
+        "type": "string"
+      },
+      "message_id": {
+        "type": "string"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "channel_id",
+      "message_id",
+      "content"
+    ],
+    "type": "object"
+  }
+}

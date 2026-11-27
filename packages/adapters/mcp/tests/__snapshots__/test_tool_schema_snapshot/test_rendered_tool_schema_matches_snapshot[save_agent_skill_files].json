@@ -1,0 +1,55 @@
+{
+  "description": [
+    "Edit an agent's skill file: publish text files as a new version of one of its skills,",
+    "or a new skill when ``skill_id`` is left out, and pin it. A null file keeps its bytes",
+    "from ``version`` (the one you read)."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_id": {
+        "type": "string"
+      },
+      "files": {
+        "additionalProperties": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": "object"
+      },
+      "skill_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "version": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "agent_id",
+      "files"
+    ],
+    "type": "object"
+  }
+}

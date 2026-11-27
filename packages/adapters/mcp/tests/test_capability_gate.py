@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -23,12 +24,13 @@ from daimon.core.config import (
     ComputeSettings,
     NotebookSettings,
     ReportHostSettings,
+    SelfKnowledgeSettings,
     Settings,
     WebSettings,
 )
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.snapshot import FeaturePlace
-from daimon.core.features.tool_gate import STOP_TOOLS, server_gate_key
+from daimon.core.features.tool_gate import SELF_KNOWLEDGE_TOOLS, STOP_TOOLS, server_gate_key
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
 from daimon.core.scope import DeploymentDefault
@@ -462,6 +464,53 @@ async def test_a_session_with_two_turns_in_one_place_reads_that_place(
         sessionmaker, tenant_id, "routines", "off", FeatureTarget("channel", channel_id="chan-a")
     )
     assert OFF in await _gate(sessionmaker, auth, "list_routines"), "that place's Off holds"
+
+
+async def test_self_knowledge_tools_follow_the_feature_for_every_caller(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Off: hidden and refused, the `call_tool` proxy too; On (the default), they read this
+    release's docs, web pages left out where the web app is Off. A chat credential's list,
+    the catalogue a pinned provider install keeps exactly, never changes with it."""
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs/slack.md").write_text("# Slack\n\nInstall the app.\n")
+    (tmp_path / "docs/web.md").write_text("---\nknowledge: web\n---\n# Web\n")
+    roots = SelfKnowledgeSettings(docs_root=tmp_path / "docs", source_root=tmp_path)
+    mcp = await _app(sessionmaker, _set_up().model_copy(update={"self_knowledge": roots}))
+    tenant_id = await _tenant(sessionmaker)
+    page, search = {"page": "slack.md"}, {"query": "Daimon's own documentation"}
+    await _set(sessionmaker, tenant_id, "self_knowledge", "off")
+    _as(monkeypatch, tenant_id, platform="discord", chat_agent_id=str(uuid.uuid4()))
+    async with Client(mcp) as client:
+        chat_before = {t.name for t in await client.list_tools()}
+        chat_found_off = str(await client.call_tool("search_tools", search))
+    _as(monkeypatch, tenant_id, platform="cli")
+    async with Client(mcp) as client:
+        hidden = str(await client.call_tool("search_tools", search))
+        refused = await _error(client, "read_daimon_docs", page)
+        proxied = await _error(client, "call_tool", {"name": "read_daimon_docs", "arguments": page})
+        await _set(sessionmaker, tenant_id, "self_knowledge", "on")
+        shown = str(await client.call_tool("search_tools", search))
+        read = await client.call_tool("call_tool", {"name": "read_daimon_docs", "arguments": page})
+        web_on = await _error(client, "read_daimon_docs", {"page": "web.md"})
+        await _set(sessionmaker, tenant_id, "web_awareness", "off")
+        web_off = await _error(client, "read_daimon_docs", {"page": "web.md"})
+    _as(monkeypatch, tenant_id, platform="discord", chat_agent_id=str(uuid.uuid4()))
+    async with Client(mcp) as client:
+        chat_after = {t.name for t in await client.list_tools()}
+        chat_found_on = str(await client.call_tool("search_tools", search))
+    assert "read_daimon_docs" not in hidden, "Off: search does not find it"
+    assert OFF in refused and OFF in proxied, f"Off refuses, the proxy too: {proxied!r}"
+    assert "read_daimon_docs" in shown, "On, search finds it"
+    assert "Install the app." in str(read.content), f"On reads the page: {read.content!r}"
+    assert not web_on, f"a web page reads where the web app is On: {web_on!r}"
+    assert "no page" in web_off, f"a web page is hidden where the web app is Off: {web_off!r}"
+    assert chat_before == chat_after, "a chat credential's list is left whole"
+    assert "read_daimon_docs" not in chat_found_off, "Off: a chat credential's search skips it"
+    assert "read_daimon_docs" in chat_found_on, "On: and finds it"
+    assert not chat_after & SELF_KNOWLEDGE_TOOLS, "behind search: a pinned catalogue keeps"
 
 
 _UNREADABLE = "Couldn't check whether this tool is turned on here. Nothing was done. Try again."

@@ -1,0 +1,38 @@
+{
+  "description": [
+    "Delete one message you posted: one part of a reply, or one card.",
+    "",
+    "Use it only when asked for a specific message. A reply often spans",
+    "several messages plus status, notice and controls cards; to remove",
+    "\"your reply\" or \"your last reply\", use delete_reply. The same rules",
+    "as edit_message: only your own posts and replies, pass",
+    "origin_context_id, the same limits and the same refused channels."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "channel_id": {
+        "type": "string"
+      },
+      "message_id": {
+        "type": "string"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "channel_id",
+      "message_id"
+    ],
+    "type": "object"
+  }
+}

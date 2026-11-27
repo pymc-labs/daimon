@@ -1,0 +1,24 @@
+{
+  "description": [
+    "Read Daimon's own documentation, for the release that is running.",
+    "",
+    "With no page: how Daimon works and the list of pages. With a page from that list",
+    "(`quickstart.md`): its text from `start_line`; `quickstart.md#heading-anchor` reads",
+    "only that section. Use it to answer how Daimon works, how to set it up or why it",
+    "behaves as it does."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "page": {
+        "default": "",
+        "type": "string"
+      },
+      "start_line": {
+        "default": 1,
+        "type": "integer"
+      }
+    },
+    "type": "object"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "description": [
+    "Read how the workspace is doing: answers and the share that failed, direct message and",
+    "routine failures, status (healthy, degraded or failing, from the last hour), failures per",
+    "area, an answers chart and the issues that need attention. ``period`` is 1h, 24h, 7d or",
+    "30d. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "period": {
+        "default": "24h",
+        "enum": [
+          "1h",
+          "24h",
+          "7d",
+          "30d"
+        ],
+        "type": "string"
+      }
+    },
+    "type": "object"
+  }
+}

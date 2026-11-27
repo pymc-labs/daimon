@@ -10,6 +10,7 @@ from daimon.testing.asgi import (
     parse_jsonrpc_response,
 )
 from daimon.testing.crypto import make_fernet
+from daimon.testing.migrations import load_migration
 
 if TYPE_CHECKING:
     # Only for type checkers; at runtime these resolve through `__getattr__`.
@@ -121,6 +122,7 @@ __all__ = [
     "build_turn_router",
     "call_mcp_tool",
     "link_principals",
+    "load_migration",
     "ma_agent",
     "ma_environment",
     "with_coordinator",
