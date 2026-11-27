@@ -460,6 +460,7 @@ EXEMPT: dict[str, str] = {
     "set_allowance_amount": _TENANT,
     "set_display_identity": _LIVE,
     "set_never_tag": _OWN,
+    "set_skill_scope": _NEW,
     "set_routine_sandbox_tools": _SCHEDULED,
     "set_web_invite_files": _TENANT,
     "share_secret_with": _LIVE,
