@@ -57,6 +57,18 @@ CAPABILITY_TOOLS: Final[dict[str, frozenset[str]]] = {
             "list_notebooks",
         }
     ),
+    "artifacts": frozenset(
+        {
+            "artifact_upload_url",
+            "artifact_publish",
+            "artifact_list",
+            "artifact_source",
+            "artifact_db_query",
+            "artifact_db_write",
+            "artifact_delete",
+            "artifact_transfer",
+        }
+    ),
     "report_publish": frozenset({"publish_report", "delete_report"}),
     "secret_sharing": frozenset({"share_secret_with"}),
     "media": frozenset({"fetch_youtube_transcript"}),

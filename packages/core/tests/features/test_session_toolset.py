@@ -319,7 +319,7 @@ def test_capabilities_without_setup_hide_their_tools_only_where_the_setup_is_jud
         for key, spec in FEATURES.items()
     }
     toolset = agent_toolset(FeatureSnapshot(place, 1, features), _agent())
-    unset = {"notebooks", "report_publish", "media", "microsoft_365", "compute"}
+    unset = {"notebooks", "report_publish", "artifacts", "media", "microsoft_365", "compute"}
     expected = (unset if server_setup else set()) | set(_OFF_BY_DEFAULT)
     assert toolset.off_capabilities == expected, "setup missing where judged, or Off by default"
     for key in ("watches", "github", "routines", "lead_intake"):

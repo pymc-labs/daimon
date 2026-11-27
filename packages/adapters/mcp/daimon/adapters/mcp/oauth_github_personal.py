@@ -20,6 +20,7 @@ from daimon.adapters.mcp.tools.github_request_delivery import deliver_private_re
 from daimon.adapters.mcp.web_icons import icon
 from daimon.core.config import Settings
 from daimon.core.github_app_session import effective_repo_state
+from daimon.core.github_connect_views import host_cookie
 from daimon.core.github_credentials import decrypt_token, encrypt_token
 from daimon.core.github_request_cards import RequestCard
 from daimon.core.stores.github_access import list_authorized_repos
@@ -127,6 +128,7 @@ def build_personal_link_routes(
     github = settings.github_app
     if root is None or github.client_id is None or github.client_secret is None:
         raise ValueError("GitHub linking is not configured")
+    cookie_name = host_cookie(_COOKIE, root)
     github_client_secret = github.client_secret.get_secret_value()
     factory = client_factory or (lambda: httpx.AsyncClient(timeout=20.0, follow_redirects=False))
     platform_callback_url = f"{root}/oauth/github/link/platform-callback"
@@ -248,7 +250,7 @@ def build_personal_link_routes(
             return _page("GitHub didn't answer. Try again in a minute.", status=503)
         response = RedirectResponse(f"{endpoint}?{urlencode(params)}")
         response.set_cookie(
-            _COOKIE,
+            cookie_name,
             cookie,
             max_age=600,
             httponly=True,
@@ -260,7 +262,7 @@ def build_personal_link_routes(
     async def platform_callback(request: Request) -> Response:
         state = request.query_params.get("state", "")
         code = request.query_params.get("code", "")
-        cookie_hash = digest(request.cookies.get(_COOKIE, ""))
+        cookie_hash = digest(request.cookies.get(cookie_name, ""))
         async with sessionmaker() as session:
             intent = await find_by_state(session, state=state, phase="platform")
             if intent is None or intent.browser_cookie_hash != cookie_hash:
@@ -385,7 +387,7 @@ def build_personal_link_routes(
         if not state.startswith("link_"):
             return None
         code = request.query_params.get("code", "")
-        cookie_hash = digest(request.cookies.get(_COOKIE, ""))
+        cookie_hash = digest(request.cookies.get(cookie_name, ""))
         async with sessionmaker() as session:
             intent = await find_by_state(session, state=state, phase="github")
             if (
@@ -560,7 +562,9 @@ def build_personal_link_routes(
             status=200,
             back=_back(platform, workspace_id),
         )
-        response.delete_cookie(_COOKIE)
+        response.delete_cookie(
+            cookie_name, secure=root.startswith("https://"), httponly=True, samesite="lax"
+        )
         return response
 
     return start, platform_callback, github_callback

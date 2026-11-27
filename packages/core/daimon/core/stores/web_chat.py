@@ -34,13 +34,16 @@ async def create_thread(
     agent_id: str,
     agent_name: str,
     title: str,
+    artifact_id: uuid.UUID | None = None,
 ) -> WebThreadRow:
+    """`artifact_id` makes it the person's ask thread for that page (one per page)."""
     orm = WebThread(
         tenant_id=tenant_id,
         person_id=person_id,
         agent_id=agent_id,
         agent_name=agent_name,
         title=title,
+        artifact_id=artifact_id,
     )
     session.add(orm)
     await session.flush()
@@ -62,6 +65,27 @@ async def get_thread(
         )
     ).scalar_one_or_none()
     return None if orm is None else WebThreadRow.model_validate(orm)
+
+
+async def get_ask_thread(
+    session: AsyncSession, *, person_id: uuid.UUID, artifact_id: uuid.UUID
+) -> WebThreadRow | None:
+    """The person's live ask thread for a page, or None."""
+    orm = await session.scalar(
+        select(WebThread).where(
+            WebThread.person_id == person_id,
+            WebThread.artifact_id == artifact_id,
+            WebThread.deleted_at.is_(None),
+        )
+    )
+    return None if orm is None else WebThreadRow.model_validate(orm)
+
+
+async def unlink_ask_thread(session: AsyncSession, *, thread_id: uuid.UUID) -> None:
+    """The thread stops being its page's ask thread and stays an ordinary chat."""
+    await session.execute(
+        update(WebThread).where(WebThread.id == thread_id).values(artifact_id=None)
+    )
 
 
 async def list_threads(

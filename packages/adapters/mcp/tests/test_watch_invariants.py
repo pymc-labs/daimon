@@ -270,7 +270,7 @@ async def test_card_proof_each_enrollment_requires_actual_server_side_card_proof
 
 
 @pytest.mark.fresh_schema
-async def test_create_page_event_watch_is_refused(attended_owner, monkeypatch):
+async def test_create_page_event_watch_without_a_page_is_refused(attended_owner, monkeypatch):
     runtime, _, auth, origin = attended_owner
     proof = AsyncMock(return_value=None)
     monkeypatch.setattr(_session_gate, "session_card_gap", proof)
@@ -278,7 +278,7 @@ async def test_create_page_event_watch_is_refused(attended_owner, monkeypatch):
         patch(
             "daimon.adapters.mcp.tools.watches.watches.register_page_watch", AsyncMock()
         ) as register,
-        pytest.raises(ToolError, match="until a page-event producer exists"),
+        pytest.raises(ToolError, match="Name the page"),
     ):
         await create_watch_impl(
             runtime,

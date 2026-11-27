@@ -1065,13 +1065,16 @@ def origin_of(url: str) -> str:
     return f"{parts.scheme}://{host}{suffix}"
 
 
-WebProvider = Literal["discord", "slack", "microsoft"]
-WebModuleKey = Literal["chat", "agents", "channels", "routines", "credits", "integrations", "admin"]
+WebProvider = Literal["discord", "slack", "microsoft", "google"]
+WebModuleKey = Literal[
+    "chat", "agents", "channels", "routines", "artifacts", "credits", "integrations", "admin"
+]
 _WEB_MODULES: tuple[WebModuleKey, ...] = (
     "chat",
     "agents",
     "channels",
     "routines",
+    "artifacts",
     "credits",
     "integrations",
     "admin",
@@ -1086,6 +1089,27 @@ def _split_csv(value: object) -> object:
     if text.startswith("["):
         return json.loads(text)
     return tuple(part.strip() for part in text.split(",") if part.strip())
+
+
+# `https://{id}.pages.example.com`: a host per page; `https://pages.example.com` a shared one.
+_CONTENT_URL = re.compile(r"(https?)://(\{id\}\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)*)(:\d{1,5})?/?")
+_LEGACY_HOST = re.compile(r"[a-z0-9-]+(\.[a-z0-9-]+)+(:\d{1,5})?")
+# A CSP source an operator adds: scheme, host (a leading `*.` allowed), optional port; or,
+# on an exact host, a path prefix ending in `/` (`https://img.example.com/acct/upload/`).
+_ASSET_HOST = re.compile(
+    r"https://(\*\.)?[a-z0-9-]+(\.[a-z0-9-]+)+(:\d{1,5})?"
+    r"|https://[a-z0-9-]+(\.[a-z0-9-]+)+(:\d{1,5})?(/[A-Za-z0-9._~-]+)+/"
+)
+
+
+def _site_of(host: str) -> str:
+    """At least the registrable domain: the last two labels, or the whole host for an IP
+    or a single label. Two hosts that differ here are never the same site."""
+    try:
+        ipaddress.ip_address(host.strip("[]"))
+        return host
+    except ValueError:
+        return ".".join(host.split(".")[-2:])
 
 
 def _is_loopback_host(host: str | None) -> bool:
@@ -1169,12 +1193,23 @@ class WebSettings(BaseModel):
         default=_WEB_MODULES,
         description=(
             "Sections of the web app that are on, comma-separated: "
-            "chat, agents, channels, routines, credits, integrations, admin."
+            "chat, agents, channels, routines, artifacts, credits, integrations, admin."
         ),
     )
     nodes: WebNodesSettings = Field(
         default_factory=WebNodesSettings,
         description="Connection nodes offered in the agent editor.",
+    )
+    google_client_id: str | None = Field(
+        default=None,
+        description=(
+            "Client ID of a Google OAuth client that lets guests sign in with their Google "
+            "account. Its redirect URI is `<public url>/auth/google/callback`. Members never "
+            "sign in this way. Set it with `google_client_secret`."
+        ),
+    )
+    google_client_secret: SecretStr | None = Field(
+        default=None, description="Client secret of that Google OAuth client."
     )
     session_ttl_days: int = Field(
         default=30,
@@ -1198,8 +1233,100 @@ class WebSettings(BaseModel):
             "Refused unless the public URL is localhost or a loopback address."
         ),
     )
+    artifact_content_url: str | None = Field(
+        default=None,
+        description=(
+            "Where artifact page code runs: a host per page "
+            "(`https://{id}.pages.example.com`, a wildcard DNS record and certificate) on a "
+            "domain of its own, other than the public URL's. Pages can then keep storage and "
+            "embed YouTube and Drive players. Unset: an opaque sandbox."
+        ),
+    )
+    artifact_content_shared_host: bool = Field(
+        default=False,
+        description=(
+            "Let `DAIMON_WEB__ARTIFACT_CONTENT_URL` be one host every page shares "
+            "(`https://pages.example.com`), on the public URL's site or another. Needs "
+            "`DAIMON_ARTIFACT_PAGES__WORKSPACES` to list exactly one workspace, whose pages "
+            "then share browser storage and can set cookies for the parent domain."
+        ),
+    )
+    artifact_asset_hosts: Annotated[tuple[str, ...], NoDecode] = Field(
+        default=(),
+        description=(
+            "More hosts artifact pages may load scripts, styles, fonts and images from, "
+            "comma-separated (`https://cdn.example.com`), or a path of a host, ending in `/`. "
+            "List only a source that never fetches other URLs, or pages could send data out "
+            "through it: a path is no barrier, since a service can fetch through its URL "
+            "options and browsers ignore the path after a redirect. On Cloudinary, turn on "
+            "strict transformations and turn off fetched URLs."
+        ),
+    )
+    artifact_legacy_hosts: Annotated[tuple[str, ...], NoDecode] = Field(
+        default=(),
+        description=(
+            "Hosts that used to serve imported pages, comma-separated "
+            "(`pages.old.example.com`). A request for `/a/<name>` on one redirects to the "
+            "page imported from that address, keeping its query and renaming `key` to `k`; "
+            "anything else there is not found. The lookup spans every workspace, and an "
+            "address two workspaces imported is not found. Point the host's DNS and "
+            "certificate here."
+        ),
+    )
+    artifact_db_pool_size: int = Field(
+        default=5,
+        ge=4,
+        description="Database connections kept for artifact page calls, apart from chat's.",
+    )
+    forwarded_allow_ips: str = Field(
+        default="127.0.0.1",
+        description=(
+            "Proxy addresses whose X-Forwarded-For and X-Forwarded-Proto are trusted, "
+            "comma-separated, or `*`. Set it to your reverse proxy so per-address limits "
+            "see the client's address."
+        ),
+    )
 
-    _split_lists = field_validator("modules", mode="before")(_split_csv)
+    _split_lists = field_validator(
+        "modules", "artifact_asset_hosts", "artifact_legacy_hosts", mode="before"
+    )(_split_csv)
+
+    @field_validator(
+        "artifact_content_url", "google_client_id", "google_client_secret", mode="before"
+    )
+    @classmethod
+    def _blank_is_unset(cls, value: object) -> object:
+        raw = value.get_secret_value() if isinstance(value, SecretStr) else value
+        return None if isinstance(raw, str) and not raw.strip() else value
+
+    @property
+    def google_configured(self) -> bool:
+        return bool(self.google_client_id and self.google_client_secret)
+
+    @field_validator("artifact_asset_hosts")
+    @classmethod
+    def _check_asset_hosts(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for host in value:
+            # Dot segments would climb out of the prefix to the host's proxy path.
+            dotted = any(part in (".", "..") for part in host.split("/")[3:])
+            if not _ASSET_HOST.fullmatch(host) or dotted:
+                raise ValueError(
+                    f"DAIMON_WEB__ARTIFACT_ASSET_HOSTS: {host!r} is not an https host such as "
+                    "https://cdn.example.com, or a path ending in / such as "
+                    "https://img.example.com/account/upload/"
+                )
+        return value
+
+    @field_validator("artifact_legacy_hosts")
+    @classmethod
+    def _check_legacy_hosts(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        for host in value:
+            if not _LEGACY_HOST.fullmatch(host):
+                raise ValueError(
+                    f"DAIMON_WEB__ARTIFACT_LEGACY_HOSTS: {host!r} is not a lowercase host "
+                    "such as pages.old.example.com"
+                )
+        return value
 
     @model_validator(mode="after")
     def _check_deployment(self) -> WebSettings:
@@ -1210,7 +1337,38 @@ class WebSettings(BaseModel):
             raise ValueError(
                 "DAIMON_WEB__DEV needs DAIMON_WEB__PUBLIC_URL to be localhost or a loopback address"
             )
+        if (self.google_client_id is None) != (self.google_client_secret is None):
+            raise ValueError(
+                "DAIMON_WEB__GOOGLE_CLIENT_ID and DAIMON_WEB__GOOGLE_CLIENT_SECRET go together"
+            )
+        if self.artifact_content_url is not None:
+            self._check_content_url(self.artifact_content_url)
+        if origin_of(str(self.public_url)).split("://", 1)[1] in self.artifact_legacy_hosts:
+            raise ValueError("DAIMON_WEB__ARTIFACT_LEGACY_HOSTS cannot list the public URL's host")
         return self
+
+    def _check_content_url(self, url: str) -> None:
+        """Page code on the content host must never share the app's site: same-site
+        requests carry the app's cookies and count as the app's own."""
+        found = _CONTENT_URL.fullmatch(url)
+        shared = found is not None and found[2] is None
+        if found is None or (found[1] != "https" and not self.dev):
+            raise ValueError("DAIMON_WEB__ARTIFACT_CONTENT_URL must be https://{id}.host")
+        if shared and not self.artifact_content_shared_host:
+            raise ValueError(
+                "DAIMON_WEB__ARTIFACT_CONTENT_URL must be https://{id}.host, one host per page: "
+                "a single host shares storage across every page "
+                "(DAIMON_WEB__ARTIFACT_CONTENT_SHARED_HOST allows it)"
+            )
+        public_host = (self.public_url.host or "").lower()
+        if shared:
+            if found[3] == public_host:
+                raise ValueError("DAIMON_WEB__ARTIFACT_CONTENT_URL must be another host")
+        elif _site_of(found[3]) == _site_of(public_host):
+            raise ValueError(
+                "DAIMON_WEB__ARTIFACT_CONTENT_URL must be on another site than "
+                "DAIMON_WEB__PUBLIC_URL (another registrable domain)"
+            )
 
 
 def decode_github_app_private_key(value: object) -> object:
@@ -2291,6 +2449,50 @@ class ArtifactsSettings(BaseModel):
         return self
 
 
+class ArtifactPagesSettings(BaseModel):
+    """Caps for artifact pages, the pages agents publish. Data caps are per page, times its
+    data scale (1-10)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    html_bytes: int = Field(default=2 * 1024 * 1024, ge=1024, description="Largest page HTML.")
+    versions_kept: int = Field(default=20, ge=1, description="Versions kept per page.")
+    document_bytes: int = Field(default=64 * 1024, ge=1024, description="Largest data document.")
+    documents: int = Field(default=5000, ge=1, description="Documents per page at 1x data space.")
+    data_bytes: int = Field(
+        default=20 * 1024 * 1024, ge=1024, description="Data bytes per page at 1x data space."
+    )
+    list_documents: int = Field(default=1000, ge=1, description="Documents per list call.")
+    list_bytes: int = Field(default=4 * 1024 * 1024, ge=1024, description="Bytes per list call.")
+    events: int = Field(default=1000, ge=1, description="Events kept per page at 1x data space.")
+    events_bytes: int = Field(
+        default=4 * 1024 * 1024, ge=1024, description="Event bytes kept per page at 1x data space."
+    )
+    event_bytes: int = Field(default=64 * 1024, ge=1024, description="Largest single event.")
+    requests_per_minute: int = Field(
+        default=600, ge=1, description="Page API calls per page and viewer each minute."
+    )
+    asks_per_minute: int = Field(
+        default=10, ge=1, description="Page asks per page and viewer each minute."
+    )
+    shares_per_day: int = Field(
+        default=20, ge=1, description="New visitors each person may invite by sharing a page."
+    )
+    workspaces: Annotated[tuple[uuid.UUID, ...], NoDecode] = Field(
+        default=(),
+        description=(
+            "The workspaces that have artifacts, by tenant UUID, comma-separated. Elsewhere "
+            "the feature, its pages, tools and skill do not exist. Empty: every workspace."
+        ),
+    )
+
+    _split_workspaces = field_validator("workspaces", mode="before")(_split_csv)
+
+    def has_workspace(self, tenant_id: uuid.UUID) -> bool:
+        """Whether artifacts exist in the workspace (`DAIMON_ARTIFACT_PAGES__WORKSPACES`)."""
+        return not self.workspaces or tenant_id in self.workspaces
+
+
 class DirectMessagePolicy(BaseModel):
     """Tenant recipient restrictions; platform membership is always required."""
 
@@ -2758,6 +2960,15 @@ def _default_pollable_tools() -> list[PollableTool]:
             label=label,
         )
         for tool, label in (("read_thread", "Discord thread"), ("read_channel", "Discord channel"))
+    ] + [
+        PollableTool(
+            server="daimon-mcp",
+            tool="artifact_db_query",
+            credential="none",
+            returns_chat=False,
+            max_interval_floor_s=60,
+            label="Page data",
+        )
     ]
 
 
@@ -2799,7 +3010,8 @@ class WatchesSettings(BaseModel):
             "for MCP servers), returns_chat (required: true only for native readers, which "
             "drop Daimon's own messages), max_interval_floor_s (shortest interval, at "
             "least 60, default 300) and label (shown on the approval card). Native "
-            "entries must be read_thread or read_channel. Daimon's chat readers and chat_tools "
+            "entries must be read_thread, read_channel or artifact_db_query (a page's data, "
+            "read as the watch owner). Daimon's chat readers and chat_tools "
             "are refused on MCP servers. Credential owner polls with each watch owner's "
             "own read-only key, which they send once through a private form: for example "
             "a read-scoped API key the person creates on that server. Credential relay "
@@ -2810,7 +3022,8 @@ class WatchesSettings(BaseModel):
             "list does, and a server can still write when it says it only reads. A "
             "watch below a raised floor polls at the "
             "floor. Default (also used when the value is empty): read_thread and "
-            "read_channel on daimon-mcp, credential none, returns_chat true, floor 60. "
+            "read_channel on daimon-mcp, credential none, returns_chat true, floor 60, "
+            "and artifact_db_query with returns_chat false. "
             "Set [] to allow no polls."
         ),
     )
@@ -3452,6 +3665,7 @@ class Settings(BaseSettings):
             "Bounded image embeds still run when this is unset."
         ),
     )
+    artifact_pages: ArtifactPagesSettings = Field(default_factory=ArtifactPagesSettings)
     defaults_root: Path = Field(
         default_factory=lambda: Path("defaults"),
         description=(
@@ -3543,6 +3757,21 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _shared_content_host_has_one_workspace(self) -> Settings:
+        """A shared content host shares storage and cookies across pages, so only one
+        workspace's pages may run on it."""
+        if (
+            self.web is not None
+            and self.web.artifact_content_shared_host
+            and len(set(self.artifact_pages.workspaces)) != 1
+        ):
+            raise ValueError(
+                "DAIMON_WEB__ARTIFACT_CONTENT_SHARED_HOST needs "
+                "DAIMON_ARTIFACT_PAGES__WORKSPACES to list exactly one workspace"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _relay_polls_name_this_deployment(self) -> Settings:
         """A relay poll sends Daimon's own credential, so its URL must be this relay's."""
         from daimon.core.mcp_identity import relay_server_name
@@ -3615,6 +3844,20 @@ class FeatureEnvSettings(BaseSettings):
     @classmethod
     def _features_are_registered(cls, value: dict[str, str]) -> dict[str, str]:
         return _registered_features(value)
+
+    model_config = SettingsConfigDict(
+        env_prefix="DAIMON_",
+        env_nested_delimiter="__",
+        env_file=".env",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
+
+
+class ArtifactPagesEnvSettings(BaseSettings):
+    """Only `DAIMON_ARTIFACT_PAGES__*`, for a reader handed no `Settings`."""
+
+    artifact_pages: ArtifactPagesSettings = Field(default_factory=ArtifactPagesSettings)
 
     model_config = SettingsConfigDict(
         env_prefix="DAIMON_",

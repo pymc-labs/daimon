@@ -351,6 +351,7 @@ token.
 | `agents:archive` | `archive_channel_copy` |
 | `promo:redeem` | `redeem_promo_code` |
 | `issues:read` | `get_ops_overview`, `list_issues`, `get_issue` |
+| `artifacts:data` | `artifact_list`, `artifact_db_query`, `artifact_db_write` |
 | `promo:create` | `create_promo_code`, `list_promo_codes`, `revoke_promo_code` (deployment-wide) |
 
 On each request the token must be unrevoked and unexpired, and its account must

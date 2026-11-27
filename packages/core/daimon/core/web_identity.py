@@ -3,15 +3,18 @@ workspace) it acts as, and the principal their turns, spend and memory run as.
 
 A sign-in proves a chat account (`VerifiedIdentity`); this module maps it to person
 rows, one per workspace the account is in and Daimon is installed in, each running as
-the account's chat principal. Only the platform id ever links, never an email.
+the account's chat principal. Only the platform id ever links, never an email. The one
+exception is a guest's Google sign-in, which has no chat account: Google's confirmed
+address finds the guests invited by it (`resolve_google_visitors`).
 """
 
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Final, Literal
+from typing import Final, Literal, NoReturn
 
 from daimon.core.authz import Subject
 from daimon.core.channel_audience import audience_mode, requester_standing
@@ -31,7 +34,7 @@ from daimon.core.stores.domain import ChatPlatform, Role, WebPersonRow
 from daimon.core.stores.identity import (
     create_platform_principal,
     find_platform_principal,
-    list_platform_principals_for_account,
+    list_platform_principals_for_accounts,
 )
 from daimon.core.stores.workspace_members import member_role_ids
 from daimon.core.turn_hold import RequesterOrg
@@ -42,6 +45,10 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 class WebSignInRefused(UserFacingError):
     """The sign-in is valid but may not enter; the message is safe to show the person."""
+
+
+def _refuse_no_workspace() -> NoReturn:
+    raise WebSignInRefused("Daimon isn't in any of your workspaces yet. Ask an admin.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +63,7 @@ class VerifiedIdentity:
     # The chat platform's own id for the person, when `subject` also names the workspace
     # (Slack and Teams ids are only unique within one).
     platform_user_id: str | None = None
-    # Only a sign-in whose provider vouches for one (Microsoft) carries an email.
+    # Only a sign-in whose provider vouches for one (Microsoft, Google) carries an email.
     email: str | None = None
     # False when a workspace name is only a stand-in the sign-in could not look up: it
     # names a new person's row but never replaces a stored name.
@@ -85,6 +92,8 @@ async def resolve_web_people(
     The person runs as their platform principal there, the one the chat adapters use,
     so spend, memory and roles are the same on the web as in chat.
     """
+    if identity.provider == "google":
+        return await resolve_google_visitors(session_factory, identity=identity)
     tenants = await resolve_hub_tenants(
         session_factory,
         platform=PLATFORM_OF[identity.provider],
@@ -92,7 +101,7 @@ async def resolve_web_people(
         workspaces=identity.workspaces,
     )
     if not tenants:
-        raise WebSignInRefused("Daimon isn't in any of your workspaces yet. Ask an admin.")
+        _refuse_no_workspace()
     people: list[WebPersonRow] = []
     async with session_factory() as session, session.begin():
         for tenant in tenants:
@@ -118,6 +127,46 @@ async def resolve_web_people(
             )
             people.append(person)
     return people
+
+
+async def resolve_google_visitors(
+    session_factory: async_sessionmaker[AsyncSession], *, identity: VerifiedIdentity
+) -> list[WebPersonRow]:
+    """The active guests a confirmed Google account signs in as, one per workspace.
+
+    Where the account is already pinned (`web_identities`) that guest signs in. In every
+    other workspace, the oldest active guest with the account's email and no Google
+    sign-in yet is pinned to it, so a later sign-in never depends on the email again.
+    Members never match, by email or otherwise: they sign in with their chat account.
+    """
+    assert identity.email is not None, "a Google identity carries its confirmed email"
+    async with session_factory() as session, session.begin():
+        pins = await identities_store.find_identity(
+            session, provider="google", issuer="", subject=identity.subject
+        )
+        pinned = await people_store.get_people(session, person_ids=[p.person_id for p in pins])
+        reached = [p for p in pinned if p.kind == "visitor" and p.status == "active"]
+        held = {p.tenant_id for p in pins}
+        for person in await people_store.list_visitors_without_sign_in(
+            session, email=identity.email, provider="google"
+        ):
+            if person.tenant_id in held:
+                continue
+            held.add(person.tenant_id)
+            await identities_store.link_identity(
+                session,
+                tenant_id=person.tenant_id,
+                person_id=person.id,
+                provider="google",
+                issuer="",
+                subject=identity.subject,
+                label=identity.display_name,
+                groups=(),
+            )
+            reached.append(person)
+    if not reached:
+        _refuse_no_workspace()
+    return sorted(reached, key=lambda p: (p.created_at, p.id))
 
 
 async def _has_history(session: AsyncSession, person: WebPersonRow, user_id: str) -> bool:
@@ -305,15 +354,24 @@ async def chat_identity(
     session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID
 ) -> tuple[str, str] | None:
     """`(platform, user id)` of the account's first chat principal in the tenant, if any."""
+    found = await chat_identities(session, tenant_id=tenant_id, account_ids=[account_id])
+    return found.get(account_id)
+
+
+async def chat_identities(
+    session: AsyncSession, *, tenant_id: uuid.UUID, account_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, tuple[str, str]]:
+    """`chat_identity` of each account that has one, in one read."""
     linked = [
         p
-        for p in await list_platform_principals_for_account(session, account_id=account_id)
-        if p.platform in _LINKABLE and p.tenant_id == tenant_id
+        for p in await list_platform_principals_for_accounts(
+            session, tenant_id=tenant_id, account_ids=account_ids
+        )
+        if p.platform in _LINKABLE
     ]
-    if not linked:
-        return None
-    first = min(linked, key=lambda p: (_LINKABLE.index(p.platform), p.created_at))
-    return first.platform, first.external_id
+    # Later keys win, so each account keeps its first by platform order and age.
+    ordered = sorted(linked, key=lambda p: (_LINKABLE.index(p.platform), p.created_at))
+    return {p.account_id: (p.platform, p.external_id) for p in reversed(ordered)}
 
 
 async def principal_of(
@@ -330,7 +388,9 @@ async def principal_of(
     org = RequesterOrg.OTHER if visitor else RequesterOrg.HOST
     roles: tuple[str, ...] | None = None
     if not visitor and platform == "discord":
-        org = await _linked_member_standing(session, person, external_id)
+        org = await linked_member_standing(
+            session, tenant_id=person.tenant_id, external_id=external_id
+        )
         roles = await member_role_ids(session, tenant_id=person.tenant_id, user_id=external_id)
     return WebPrincipal(
         platform=platform,
@@ -344,19 +404,17 @@ async def principal_of(
     )
 
 
-async def _linked_member_standing(
-    session: AsyncSession, person: WebPersonRow, external_id: str
+async def linked_member_standing(
+    session: AsyncSession, *, tenant_id: uuid.UUID, external_id: str
 ) -> RequesterOrg:
     """OUTSIDER for a member linked to a Discord account with no internal role, in a server
     whose `audience_hold` is `on`; HOST otherwise. The web has no Discord client, so the
     member mirror is the only source: a member it cannot say anything about is an outsider
     here, as in `requester_standing`."""
-    mode = await audience_mode(session, FeaturePlace(person.tenant_id, "discord"))
+    mode = await audience_mode(session, FeaturePlace(tenant_id, "discord"))
     if mode != "on":
         return RequesterOrg.HOST
-    return await requester_standing(
-        session, tenant_id=person.tenant_id, user_id=external_id, mode=mode
-    )
+    return await requester_standing(session, tenant_id=tenant_id, user_id=external_id, mode=mode)
 
 
 async def with_spend_person(

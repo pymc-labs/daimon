@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Content run sheet</title>
+<style>
+:root{--ink:#0c1f40;--mute:#5b677d;--line:#e4e8ee;--bg:#f6f8fa;--teal:#0c9e82;--card:#fff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+.wrap{max-width:860px;margin:0 auto;padding:28px 24px 40px}
+header{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap}
+h1{margin:0;font-size:22px;letter-spacing:-.01em}.sub{color:var(--mute);font-size:13px;margin-top:2px}
+button{font:inherit;cursor:pointer}
+.primary{background:var(--ink);color:#fff;border:0;border-radius:8px;padding:8px 14px;font-weight:500}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:20px 0}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.stat b{display:block;font-size:22px;line-height:1.2}.stat span{font-size:12px;color:var(--mute);display:flex;align-items:center;gap:6px}
+.dot{width:8px;height:8px;border-radius:50%}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+table{width:100%;border-collapse:collapse}th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--mute);text-align:left;font-weight:600;padding:10px 14px;background:#fafbfc;border-bottom:1px solid var(--line)}
+td{padding:11px 14px;border-bottom:1px solid var(--line);vertical-align:middle}tr:last-child td{border-bottom:0}
+.t{font-weight:500}.ch{font-size:12px;color:var(--mute)}
+.who{display:flex;align-items:center;gap:8px;white-space:nowrap}.av{width:24px;height:24px;border-radius:50%;background:var(--ink);color:#fff;font-size:10px;font-weight:600;display:grid;place-items:center}
+.steps{display:flex;gap:3px}.steps button{border:0;background:#edf0f4;color:var(--mute);font-size:11px;font-weight:500;padding:4px 9px;border-radius:6px}
+.steps button.on{color:#fff}
+.Plan.on{background:#6b7a99}.Draft.on{background:#2f6db5}.Review.on{background:#d0731d}.Done.on{background:var(--teal)}
+form{display:none;gap:10px;padding:14px;border-bottom:1px solid var(--line);background:#fafbfc;flex-wrap:wrap}form.open{display:flex}
+input,select{font:inherit;border:1px solid #cfd6e0;border-radius:8px;padding:7px 10px;background:#fff;color:var(--ink)}input{flex:1;min-width:180px}
+.ask{margin-top:20px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
+.ask h2{margin:0 0 8px;font-size:13px}.row{display:flex;gap:8px}.ans{margin-top:10px;font-size:13px;color:var(--mute);display:none;background:#f3f6f8;border-radius:8px;padding:10px 12px}
+@media(max-width:560px){.stats{grid-template-columns:repeat(2,1fr)}.hide{display:none}}
+</style></head><body><div class="wrap">
+<header><div><h1>Content run sheet</h1><div class="sub">Week of 23 November, 6 runs</div></div><button class="primary" id="req">Request a run</button></header>
+<div class="stats" id="stats"></div>
+<div class="panel">
+<form id="form"><input id="title" placeholder="Run title"><select id="chan"><option>LinkedIn</option><option>Blog</option><option>Email</option><option>X</option></select><button class="primary" type="submit">Add run</button></form>
+<table><thead><tr><th>Run</th><th class="hide">Owner</th><th class="hide">Due</th><th>Stage</th></tr></thead><tbody id="rows"></tbody></table>
+</div>
+<div class="ask"><h2>Ask the agent</h2><div class="row"><input id="q" value="Which runs are waiting on review?"><button class="primary" id="go">Ask</button></div><div class="ans" id="ans"></div></div>
+</div>
+<script>
+const STAGES=["Plan","Draft","Review","Done"],COL={Plan:"#6b7a99",Draft:"#2f6db5",Review:"#d0731d",Done:"#0c9e82"};
+const runs=[["Spring launch teaser","LinkedIn","Sofia Brandt","27 Nov",0],["Larkspur Q3 case study","Blog","Priya Raman","25 Nov",1],["Elasticity explainer thread","X","Maya Lindqvist","24 Nov",2],["Webinar recap email","Email","Jonas Weber","23 Nov",2],["Almanac changelog, November","Blog","Tom Okafor","18 Nov",3],["Cobalt churn teaser","LinkedIn","Marco Alvarez","14 Nov",3]].map(([t,c,o,d,s])=>({t,c,o,d,s}));
+const ini=n=>n.split(" ").map(w=>w[0]).join("");
+function draw(){
+ stats.innerHTML=STAGES.map((s,i)=>`<div class="stat"><span><i class="dot" style="background:${COL[s]}"></i>${s}</span><b>${runs.filter(r=>r.s===i).length}</b></div>`).join("");
+ rows.innerHTML=runs.map((r,k)=>`<tr><td><div class="t">${r.t}</div><div class="ch">${r.c}</div></td><td class="hide"><div class="who"><span class="av">${ini(r.o)}</span>${r.o}</div></td><td class="hide">${r.d}</td><td><div class="steps">${STAGES.map((s,i)=>`<button class="${s}${r.s===i?" on":""}" data-k="${k}" data-i="${i}">${s}</button>`).join("")}</div></td></tr>`).join("");
+}
+rows.onclick=e=>{const b=e.target.closest("button");if(b){runs[b.dataset.k].s=+b.dataset.i;draw()}};
+req.onclick=()=>form.classList.toggle("open");
+form.onsubmit=e=>{e.preventDefault();if(!title.value.trim())return;runs.unshift({t:title.value.trim(),c:chan.value,o:"Maya Lindqvist",d:"30 Nov",s:0});title.value="";form.classList.remove("open");draw()};
+go.onclick=()=>{const r=runs.filter(x=>x.s===2);ans.style.display="block";ans.textContent=r.length+" runs are in Review: "+r.map(x=>x.t).join(", ")+"."};
+draw();
+</script></body></html>

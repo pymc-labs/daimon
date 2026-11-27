@@ -26,6 +26,8 @@ from typing import Any
 #: Files outside the code that tests read or lint regenerates and compares.
 FILES: dict[str, str] = {
     ".env.example": "generated",
+    # Its claims test checks the page against the limits and roles in code.
+    "docs/artifacts.md": "parity",
     "docs/slack-app-manifest.yaml": "slack-manifest",
     "docs/teams-app-manifest.yaml": "teams-manifest",
     "docker-compose.yml": "docs",

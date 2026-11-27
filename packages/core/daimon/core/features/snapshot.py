@@ -19,7 +19,7 @@ from typing import Final, cast
 import structlog
 from daimon.core.access_policy import place_thread_id
 from daimon.core.config import Settings, get_repo_memory_settings
-from daimon.core.features.deployment import deployment_value
+from daimon.core.features.deployment import deployment_value, in_workspace
 from daimon.core.features.registry import (
     FEATURES,
     FeatureSpec,
@@ -115,13 +115,22 @@ _SETUP: Final[Mapping[Requirement, Callable[[Settings], bool]]] = {
     "microsoft_accounts": lambda s: s.microsoft_accounts_enabled and bool(s.crypto.keys),
     "repo_memory_setup": lambda s: get_repo_memory_settings(s).enabled,
     "teams_public_url": lambda s: s.teams is not None and s.teams.public_url is not None,
+    # Pages are served by the web app; their links and page-event keys need the crypto keys.
+    "web_public_url": lambda s: s.web is not None and bool(s.crypto.keys),
 }
 """One integration's setup, exactly the condition its tools need to run. Unmet, the session is not
 offered them, so a check here must never be stricter than the tools. Watches and GitHub have none:
 their tools work (and list or remove what exists) without the operator gate or the App."""
 
 SERVER_SETUP: Final[frozenset[Requirement]] = frozenset(
-    {"compute_setup", "notebook_host", "report_host", "gemini_key", "microsoft_accounts"}
+    {
+        "compute_setup",
+        "notebook_host",
+        "report_host",
+        "gemini_key",
+        "microsoft_accounts",
+        "web_public_url",
+    }
 )
 """Setup only the MCP server's tools use. A worker may not carry it, so a session's toolset leaves
 it to the MCP server, whose capability gate judges it with its own settings."""
@@ -155,7 +164,10 @@ def unavailable_reason(
     """Why `spec` cannot apply at `place`, or None. `depends_on` is checked by the caller;
     without `settings` (a reader of a feature with no deployment tier) `requires` is too,
     and without `server_setup` the requirements in `SERVER_SETUP` are.
-    `support` is the workspace's own setup (`support_setup`), for the support requirements."""
+    `support` is the workspace's own setup (`support_setup`), for the support requirements.
+    A feature the workspace lacks (`in_workspace`) is judged with or without `settings`."""
+    if not in_workspace(spec, settings, place.tenant_id):
+        return "workspace"
     if not spec.on_platform(place.platform):
         return "platform"
     judged: list[Requirement] = [

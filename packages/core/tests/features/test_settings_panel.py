@@ -9,6 +9,7 @@ import pytest
 from daimon.core import settings_panel as panel
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Subject
+from daimon.core.config import ArtifactPagesSettings
 from daimon.core.features import service
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.service import FeatureActor, read_features
@@ -59,9 +60,9 @@ async def test_the_root_picks_a_group_and_each_group_lists_its_features(
     assert groups and root.back is None
     seen: set[str] = set()
     for op in groups:
-        screen = await panel.show(db_session_factory, _settings(), actor, _place(actor), op)
-        assert screen is not None and screen.back is not None
-        seen |= {o.value.split(":")[2] for o in screen.selects[0].options}
+        for screen in await _walk(db_session_factory, actor, op, None):
+            assert screen.back is not None
+            seen |= {o.value.split(":")[2].split("~")[0] for o in screen.selects[0].options}
     place = _place(actor)
     views = await read_features(db_session_factory, _settings(), place)
     discord = {
@@ -106,6 +107,16 @@ async def test_every_feature_opens_with_a_control_for_an_admin(
         assert len(screen.selects) <= 4, spec.key
         for select in screen.selects:
             assert 0 < len(select.options) <= panel.SELECT_LIMIT, spec.key
+
+
+async def test_a_feature_outside_its_workspaces_opens_as_an_unknown_key(
+    db_session: AsyncSession, db_session_factory: Sessions
+) -> None:
+    actor = _actor(await _tenant(db_session), True)
+    pages = ArtifactPagesSettings(workspaces=(uuid.uuid4(),))
+    settings = _settings().model_copy(update={"artifact_pages": pages})
+    op = panel.open_op("capabilities", "artifacts")
+    assert await panel.show(db_session_factory, settings, actor, _place(actor), op) is None
 
 
 async def test_a_member_is_told_who_can_help_when_nothing_is_theirs(
@@ -190,7 +201,7 @@ async def test_a_builtin_tool_is_not_offered_per_agent_in_chat(
 async def test_no_select_is_cut_by_the_platform_option_limit(
     db_session: AsyncSession, db_session_factory: Sessions
 ) -> None:
-    """Discord allows 25 options a select: a group lists every shown feature on the platform within
+    """Discord allows 25 options a select: a group pages its shown features on the platform within
     it, and an agent picker never offers more, so nothing is silently dropped."""
     actor = _actor(await _tenant(db_session), True)
     many = [panel.AgentChoice(f"a{i}", f"Agent {i}") for i in range(40)]
@@ -207,17 +218,15 @@ async def test_no_select_is_cut_by_the_platform_option_limit(
             )
         }
         for category in {spec.category for spec in FEATURES.values()}:
-            screen = await panel.show(
-                db_session_factory, _settings(), actor, place, panel.open_op(category)
-            )
-            assert screen is not None
-            offered = len(screen.selects[0].options)
+            screens = await _walk(db_session_factory, actor, panel.open_op(category), None, place)
+            assert all(len(s.selects[0].options) <= panel.SELECT_LIMIT for s in screens)
+            offered = sum(len(s.selects[0].options) for s in screens)
             wanted = sum(
                 1
                 for s in FEATURES.values()
                 if s.category == category and s.on_platform(platform) and s.key in shown
             )
-            assert offered == wanted <= panel.SELECT_LIMIT, f"{platform} {category} is cut"
+            assert offered == wanted, f"{platform} {category} is cut"
     op = panel.open_op("chat", "progress_plans")
     screen = await panel.show(
         db_session_factory, _settings(), actor, _place(actor), op, agents=agents
@@ -227,13 +236,17 @@ async def test_no_select_is_cut_by_the_platform_option_limit(
 
 
 async def _walk(
-    db_session_factory: Sessions, actor: FeatureActor, op: str, agents: panel.AgentLoader | None
+    db_session_factory: Sessions,
+    actor: FeatureActor,
+    op: str,
+    agents: panel.AgentLoader | None,
+    place: FeaturePlace | None = None,
 ) -> list[panel.PanelScreen]:
     """The screens reached from `op` by pressing Next until there is none."""
     screens: list[panel.PanelScreen] = []
     while True:
         screen = await panel.show(
-            db_session_factory, _settings(), actor, _place(actor), op, agents=agents
+            db_session_factory, _settings(), actor, place or _place(actor), op, agents=agents
         )
         assert screen is not None, op
         screens.append(screen)

@@ -373,12 +373,12 @@ def feature_refusal(
     """Why the names, place or lock rule out the change, before any read; None if not. Pure;
     `support` is the workspace's own support setup (`support_setup`)."""
     spec = FEATURES.get(key)
-    if spec is None:
+    reason = None if spec is None else unavailable_reason(spec, settings, place, support)
+    if spec is None or reason == "workspace":
         return _refused(
             f"There is no such setting. Open {_settings_pointer(place.platform)} to see them.",
             "unknown_key",
         )
-    reason = unavailable_reason(spec, settings, place, support)
     if reason == "requires" and unseen_setup_allows(spec, value, settings, place, support):
         reason = None
     for failed, message, code in (

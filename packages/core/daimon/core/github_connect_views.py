@@ -27,6 +27,13 @@ FLOW_COOKIE_MAX_AGE = 900
 # After a save the flow cookie proves the browser that saved, so its receipt page
 # keeps working for a week.
 SAVED_COOKIE_MAX_AGE = 7 * 24 * 60 * 60
+
+
+def host_cookie(name: str, root: str) -> str:
+    """`name`, `__Host-` prefixed over https, so no other subdomain can set it for this host."""
+    return ("__Host-" if root.startswith("https://") else "") + name
+
+
 # A save posts one `repo=<id>` per addition plus one shared `access=write`,
 # so 256 KiB covers several thousand repos while bounding what one request can
 # make the server read and parse. The cap is checked before any other work.

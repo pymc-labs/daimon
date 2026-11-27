@@ -1,0 +1,10 @@
+{
+  "description": [
+    "List the pages you can use: slug, title, URL, version, sharing and capabilities."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

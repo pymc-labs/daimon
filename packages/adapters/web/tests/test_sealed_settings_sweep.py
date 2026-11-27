@@ -159,6 +159,7 @@ _DM_ROUTING = (
 )
 
 #: Every other mutating route, with why it is not swept.
+_PAGE = "an artifact page, not a channel or an agent's settings"
 EXEMPT: dict[str, str] = {
     "POST /auth/logout": ("signs the caller out"),
     "POST /auth/{provider_id}/connect": ("links the caller's own sign-in"),
@@ -312,6 +313,21 @@ EXEMPT: dict[str, str] = {
     "PATCH /{path:path}": "the app's page fallback: it serves the page and changes nothing",
     "POST /{path:path}": "the app's page fallback: it serves the page and changes nothing",
     "PUT /{path:path}": "the app's page fallback: it serves the page and changes nothing",
+    "DELETE /api/artifacts/{artifact_id}": _PAGE,
+    "DELETE /api/artifacts/{artifact_id}/data/{collection}/{doc_id}": _PAGE,
+    "PATCH /api/artifacts/{artifact_id}": _PAGE,
+    "PUT /api/artifacts/{artifact_id}/data/{collection}/{doc_id}": _PAGE,
+    "POST /api/artifacts/{artifact_id}/link": _PAGE,
+    "POST /api/artifacts/{artifact_id}/transfer": _PAGE,
+    "POST /api/artifacts/{artifact_id}/versions/{version}/restore": _PAGE,
+    "POST /api/artifacts/{artifact_id}/people": _PAGE,
+    "POST /api/artifacts/{artifact_id}/watches/{watch_id}": _PAGE,
+    "DELETE /api/artifacts/{artifact_id}/watches/{watch_id}": _PAGE,
+    "PUT /api/artifacts/{artifact_id}/versions/{version}/thumbnail": _PAGE,
+    "DELETE /api/artifacts/{artifact_id}/consent": _PAGE,
+    "POST /a/{public_id}/_api/consent": _PAGE,
+    "POST /a/{public_id}/_api/ask": _PAGE,
+    "POST /a/{public_id}/_api/{method}": _PAGE,
 }
 
 FILL = {

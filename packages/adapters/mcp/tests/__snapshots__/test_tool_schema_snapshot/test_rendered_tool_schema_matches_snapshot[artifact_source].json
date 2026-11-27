@@ -1,0 +1,35 @@
+{
+  "description": [
+    "Get a 15-minute URL to download a page's HTML (the current version, or `version`).",
+    "",
+    "Fetch it with curl from your sandbox before changing a page, then republish with",
+    "artifact_upload_url and artifact_publish. Pass your active `origin_context_id`."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "type": "string"
+      },
+      "slug": {
+        "type": "string"
+      },
+      "version": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "slug",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

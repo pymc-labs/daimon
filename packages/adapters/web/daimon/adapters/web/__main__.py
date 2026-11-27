@@ -10,6 +10,7 @@ import structlog
 import uvicorn
 from daimon.adapters.web.app import create_app
 from daimon.adapters.web.boot_sweep import (
+    sweep_expired_artifacts_forever,
     sweep_expired_web_sessions_forever,
     sweep_orphaned_web_turns,
     sweep_stale_web_uploads_forever,
@@ -20,6 +21,7 @@ from daimon.adapters.web.runtime import build_runtime
 from daimon.adapters.web.server_skills import server_skills_node, sync_server_skills_forever
 from daimon.adapters.web.single_process import WebProcessAlreadyRunning
 from daimon.adapters.web.turns import WebTurns
+from daimon.adapters.web.watch_runner import WebWatchRunner
 from daimon.core.config import Settings, WebSettings, load_settings
 from daimon.core.logging_setup import configure_logging
 from daimon.core.observability import init_sentry
@@ -101,6 +103,9 @@ async def _serve(settings: Settings, web: WebSettings) -> None:
                 host="0.0.0.0",
                 port=web.port,
                 log_config=None,  # JSON chain already configured; uvicorn uses structlog.
+                # The client's address behind a reverse proxy, for per-address limits.
+                proxy_headers=True,
+                forwarded_allow_ips=web.forwarded_allow_ips,
                 timeout_graceful_shutdown=int(DRAIN_S) + 20,
             ),
             runtime.turns,
@@ -111,7 +116,11 @@ async def _serve(settings: Settings, web: WebSettings) -> None:
         sweepers = [
             asyncio.create_task(sweep_expired_web_sessions_forever(runtime.sessionmaker)),
             asyncio.create_task(sweep_stale_web_uploads_forever(runtime.sessionmaker)),
+            asyncio.create_task(sweep_expired_artifacts_forever(runtime.sessionmaker)),
         ]
+        if (turns := runtime.turns) is not None:
+            watching = WebWatchRunner(turns).pollers(lambda: turns.draining)
+            sweepers.extend(asyncio.create_task(poller) for poller in watching)
         node = server_skills_node(runtime)
         if node is not None:
             sweepers.append(asyncio.create_task(sync_server_skills_forever(runtime, node)))

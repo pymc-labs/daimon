@@ -31,7 +31,7 @@ UTF-8 root SKILL.md, safe canonical paths and no file/directory collisions.
 The host must supply an authorized, idempotent publisher, immutable retention
 and provider-readable GCS access; the driver discovers no bucket/credentials
 and does not make content public. Its receipt is the publisher's attestation,
-not an independent remote download verification. Offline tests carry all twelve
+not an independent remote download verification. Offline tests carry all thirteen
 real default bundles byte-for-byte through a scripted publisher and the actual
 SDK over MockTransport. They certify compiler/pin behavior, not a live GCS
 deployment. F1's adapter supplies no publisher, so its dependency remains

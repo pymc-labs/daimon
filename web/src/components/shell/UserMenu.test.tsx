@@ -21,9 +21,10 @@ const LEGAL = { privacy: "https://example.com/privacy", terms: "https://example.
 
 const open = async (m: Me, legal: Legal = LEGAL) => {
   vi.mocked(api.get).mockImplementation(async (path: string) => (path === "/api/me" ? m : path === "/auth/legal" ? legal : [
-    { id: "discord", label: "Discord", kind: "redirect" },
-    { id: "slack", label: "Slack", kind: "redirect" },
-    { id: "microsoft", label: "Microsoft", kind: "redirect" },
+    { id: "discord", label: "Discord", kind: "redirect", connectable: true },
+    { id: "slack", label: "Slack", kind: "redirect", connectable: true },
+    { id: "microsoft", label: "Microsoft", kind: "redirect", connectable: true },
+    { id: "google", label: "Google", kind: "redirect", connectable: false },
   ]) as never)
   const view = render(<QueryClientProvider client={new QueryClient()}><MemoryRouter><UserMenu /></MemoryRouter></QueryClientProvider>)
   await userEvent.click(await screen.findByText("Maya Lindqvist"))
@@ -46,7 +47,7 @@ describe("UserMenu", () => {
     expect(api.post).toHaveBeenCalledWith("/auth/slack/connect", { next: "/chat" })
   })
 
-  it("hides the menu once every provider is connected", async () => {
+  it("hides the menu once every connectable provider is connected, never offering a guest-only one", async () => {
     const all = ["discord", "slack", "microsoft"].map((p) => ({ id: p, provider: p, provider_label: p, label: p, last_used: "", current: p === "discord" }))
     await open(me({ accounts: all }))
     expect(screen.queryByText("Connect account")).toBeNull()

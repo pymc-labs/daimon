@@ -93,7 +93,7 @@ async def test_me_has_the_shape_the_app_reads(
     }
     assert me["workspaces"] == [me["workspace"]]
     assert (me["role"], me["credit"], me["dev"]) == ("member", None, False)
-    assert me["modules"] == ["chat", "agents", "channels", "routines", "credits"]
+    assert me["modules"] == ["chat", "agents", "channels", "routines", "artifacts", "credits"]
     assert me["capabilities"] == sorted(
         [
             "chat.use",
@@ -104,6 +104,7 @@ async def test_me_has_the_shape_the_app_reads(
             "channels.view",
             "routines.view",
             "routines.manage",
+            "artifacts.view",
             "credits.view_own",
         ]
     )
@@ -143,6 +144,7 @@ async def test_roles_are_read_from_grants_held_now(
                 "agents",
                 "channels",
                 "routines",
+                "artifacts",
                 "credits",
                 "integrations",
                 "admin",

@@ -4,6 +4,7 @@ import { useNavigate } from "react-router"
 
 import { reset } from "@/modules/chat/turns"
 import { api } from "./api"
+import { isServerPage } from "./safe-next"
 import type { AgentRef, Capability, ChatSession, Group, Legal, Me, Person, Provider } from "./types"
 
 /** `value` once it has held still for `ms`. */
@@ -23,7 +24,7 @@ export function useSwitchWorkspace(next: string, { replace = false, onError }: {
   const navigate = useNavigate()
   return useMutation({
     mutationFn: (id: string) => api.post("/api/workspaces/switch", { id }),
-    onSuccess: () => { qc.clear(); reset(); navigate(next, { replace }) },
+    onSuccess: () => { qc.clear(); reset(); if (isServerPage(next)) window.location.assign(next); else navigate(next, { replace }) },
     onError,
   })
 }

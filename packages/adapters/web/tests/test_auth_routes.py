@@ -45,7 +45,9 @@ async def test_providers_lists_discord_once_configured(web_client: WebClientFact
         configured = (await client.get("/auth/providers")).json()
     async with web_client() as client:
         bare = (await client.get("/auth/providers")).json()
-    assert configured == [{"id": "discord", "label": "Discord", "kind": "redirect"}], configured
+    assert configured == [
+        {"id": "discord", "label": "Discord", "kind": "redirect", "connectable": True}
+    ], configured
     assert bare == [], "without the Discord app there is no way to sign in"
 
 
@@ -54,7 +56,7 @@ async def test_providers_offers_the_dev_user_only_in_dev(web_client: WebClientFa
         dev = (await client.get("/auth/providers")).json()
     async with web_client() as client:
         prod = (await client.get("/auth/providers")).json()
-    assert {"id": "dev", "label": "Dev user", "kind": "dev"} in dev, dev
+    assert {"id": "dev", "label": "Dev user", "kind": "dev", "connectable": False} in dev, dev
     assert all(p["id"] != "dev" for p in prod), "production never offers the dev user"
 
 

@@ -7,6 +7,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
+import pytest
+from daimon.adapters.web.providers import SlackSignIn
 from daimon.core.stores import workspace_members as members_store
 from daimon.core.stores.domain import Platform
 from daimon.testing.factories import make_tenant, make_web_person
@@ -15,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .chat_support import signed_in
 from .conftest import (
     PUBLIC_URL,
+    FakeUpstream,
     WebClientFactory,
     chat_settings,
     fake_discord,
@@ -152,3 +155,53 @@ async def test_disconnect_removes_an_account_but_never_the_one_signed_in_with(
     assert removed.status_code == 200, removed.text
     assert [a["provider"] for a in after["accounts"]] == ["discord"], after
     assert [w["platform"] for w in after["workspaces"]] == ["discord"], "its workspace left too"
+
+
+async def test_a_callback_for_another_provider_or_one_not_connectable_is_refused(
+    web_client: WebClientFactory,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flow is bound to the provider it started with, and only a connectable provider
+    connects an account, so a code is never redeemed at a provider the flow did not name."""
+    tenant = await make_tenant(db_session, platform="discord", workspace_id="g1")
+    await make_tenant(db_session, platform="slack", workspace_id="T1")
+    ada = await make_web_person(db_session, tenant=tenant, email="ada@example.com")
+    await db_session.commit()
+    asked: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        asked.append(request.url.host)
+        return _PROVIDER.handler(request)
+
+    def state_of(url: str) -> dict[str, str]:
+        return {"code": "c", "state": parse_qs(urlsplit(url).query)["state"][0]}
+
+    async with web_client(
+        web_settings(google_client_id="gid", google_client_secret="gs"),
+        sessionmaker=db_session_factory,
+        provider=FakeUpstream(handler),
+        settings=chat_settings(),
+    ) as client:
+        start = await client.get("/auth/discord/start")
+        crossed = await client.get(
+            "/auth/slack/callback", params=state_of(start.headers["location"])
+        )
+        client.cookies.set(
+            _SESSION, await signed_in(db_session_factory, ada), domain="web.example.com"
+        )
+        connect = await client.post("/auth/slack/connect", json={}, headers=_OWN)
+        to_google = await client.get(
+            "/auth/google/callback", params=state_of(connect.json()["url"])
+        )
+        crossed_asked = list(asked)
+        connect = await client.post("/auth/slack/connect", json={}, headers=_OWN)
+        monkeypatch.setattr(SlackSignIn, "connectable", False)
+        closed = await client.get("/auth/slack/callback", params=state_of(connect.json()["url"]))
+        me = await _me(client)
+
+    for refused in (crossed, to_google, closed):
+        assert urlsplit(refused.headers["location"]).path == "/signin", refused.headers
+    assert crossed_asked == [], "no provider is asked to redeem another's code"
+    assert all(a["provider"] != "slack" for a in me["accounts"]), "nothing connected"

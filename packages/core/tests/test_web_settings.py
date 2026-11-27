@@ -28,6 +28,18 @@ def test_lists_parse_from_comma_separated_env(monkeypatch: pytest.MonkeyPatch) -
     assert web.modules == ("chat", "credits"), "modules should split on commas"
 
 
+def test_google_sign_in_needs_both_its_client_id_and_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DAIMON_WEB__PUBLIC_URL", "https://web.example.com")
+    monkeypatch.setenv("DAIMON_WEB__GOOGLE_CLIENT_ID", "gid")
+    with pytest.raises(ValidationError, match="go together"):
+        load_settings(_env_file=None)
+    monkeypatch.setenv("DAIMON_WEB__GOOGLE_CLIENT_SECRET", "gsecret")
+    web = load_settings(_env_file=None).web
+    assert web is not None and web.google_configured, "both set turns Google sign-in on"
+
+
 def test_public_url_must_be_https_unless_dev(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAIMON_WEB__PUBLIC_URL", "http://localhost:5174")
     with pytest.raises(ValidationError, match="https"):
@@ -124,3 +136,103 @@ def test_a_node_error_never_echoes_its_client_secret(monkeypatch: pytest.MonkeyP
     with pytest.raises(ValidationError) as caught:
         load_settings(_env_file=None)
     assert "s3cret-value" not in str(caught.value), "settings errors hide their input"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://pages.example.com",
+        "https://pages.example.net",
+        "https://{id}.app.example.com",
+        "http://{id}.pages.example.net",
+    ],
+)
+def test_page_content_is_one_host_per_page_off_the_apps_site(
+    monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    monkeypatch.setenv("DAIMON_WEB__PUBLIC_URL", "https://app.example.com")
+    monkeypatch.setenv("DAIMON_WEB__ARTIFACT_CONTENT_URL", url)
+    with pytest.raises(ValidationError, match="ARTIFACT_CONTENT_URL"):
+        load_settings(_env_file=None)
+
+
+_ONE = "8d8ac610-566d-4ef0-9c22-186b2c5ed793"
+_TWO = "0b0c3f5e-2f4b-4c8e-9a51-6f1a1b2c3d4e"
+
+
+@pytest.mark.parametrize(
+    ("workspaces", "url", "boots"),
+    [
+        (_ONE, "https://pages.example.com", True),
+        (_ONE, "https://pages.example.net", True),
+        (_ONE, "https://app.example.com", False),
+        ("", "https://pages.example.com", False),
+        (f"{_ONE},{_TWO}", "https://pages.example.com", False),
+    ],
+)
+def test_a_shared_content_host_needs_its_switch_and_one_workspace(
+    monkeypatch: pytest.MonkeyPatch, workspaces: str, url: str, boots: bool
+) -> None:
+    """With the switch, one plain host may serve every page, even on the app's own site, but
+    only while the deployment lists exactly one workspace with artifacts."""
+    monkeypatch.setenv("DAIMON_WEB__PUBLIC_URL", "https://app.example.com")
+    monkeypatch.setenv("DAIMON_WEB__ARTIFACT_CONTENT_URL", url)
+    monkeypatch.setenv("DAIMON_WEB__ARTIFACT_CONTENT_SHARED_HOST", "true")
+    monkeypatch.setenv("DAIMON_ARTIFACT_PAGES__WORKSPACES", workspaces)
+    if not boots:
+        with pytest.raises(ValidationError, match="ARTIFACT_CONTENT"):
+            load_settings(_env_file=None)
+        return
+    settings = load_settings(_env_file=None)
+    assert settings.web is not None and settings.web.artifact_content_url == url
+    assert [str(w) for w in settings.artifact_pages.workspaces] == [_ONE], "the list parses"
+
+
+def test_a_content_host_and_asset_hosts_parse(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_WEB__PUBLIC_URL", "https://app.example.com")
+    monkeypatch.setenv("DAIMON_WEB__ARTIFACT_CONTENT_URL", "https://{id}.pages.example.net")
+    monkeypatch.setenv(
+        "DAIMON_WEB__ARTIFACT_ASSET_HOSTS", "https://cdn.example.org, https://*.example.io"
+    )
+    web = load_settings(_env_file=None).web
+    assert web is not None and web.artifact_asset_hosts == (
+        "https://cdn.example.org",
+        "https://*.example.io",
+    )
+    monkeypatch.setenv("DAIMON_WEB__ARTIFACT_ASSET_HOSTS", "cdn.example.org; img-src *")
+    with pytest.raises(ValidationError, match="ASSET_HOSTS"):
+        load_settings(_env_file=None)
+
+
+def test_an_asset_source_may_be_one_path_of_a_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DAIMON_WEB__PUBLIC_URL", "https://app.example.com")
+    monkeypatch.setenv(
+        "DAIMON_WEB__ARTIFACT_ASSET_HOSTS",
+        "https://img.example.org/acct/image/upload/, https://cdn.example.org",
+    )
+    web = load_settings(_env_file=None).web
+    assert web is not None and web.artifact_asset_hosts == (
+        "https://img.example.org/acct/image/upload/",
+        "https://cdn.example.org",
+    ), "a path with its trailing slash is a CSP prefix source"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "https://img.example.org/acct/image/upload",  # no trailing slash: one exact URL
+        "https://img.example.org/",  # the whole host, as a path
+        "https://*.example.org/acct/",  # a path on a wildcard host
+        "https://img.example.org/acct/../fetch/",  # climbs out of the prefix
+        "https://img.example.org/%2e%2e/fetch/",
+        "https://img.example.org/acct/?q=1/",
+        "http://img.example.org/acct/",
+    ],
+)
+def test_an_asset_path_must_be_a_plain_prefix_of_an_exact_https_host(
+    monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    monkeypatch.setenv("DAIMON_WEB__PUBLIC_URL", "https://app.example.com")
+    monkeypatch.setenv("DAIMON_WEB__ARTIFACT_ASSET_HOSTS", source)
+    with pytest.raises(ValidationError, match="ASSET_HOSTS"):
+        load_settings(_env_file=None)

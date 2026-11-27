@@ -47,6 +47,7 @@ from daimon.core.github_connect_views import (
     PendingView,
     SavedAgentView,
     WorkspacePickerView,
+    host_cookie,
     read_capped,
     selection_from_form,
     selection_too_large,
@@ -1640,6 +1641,7 @@ def build_oauth_github_routes(
     web = WebLinks.from_settings(settings.web)
     if root is None:
         raise ValueError("GitHub connection is not configured")
+    flow_name, state_name = (host_cookie(name, root) for name in (FLOW_COOKIE, STATE_COOKIE))
     flow = GitHubConnectFlow(
         settings=settings,
         sessionmaker=sessionmaker,
@@ -1663,7 +1665,7 @@ def build_oauth_github_routes(
                 root,
                 state=request.query_params.get("state", ""),
                 code=request.query_params.get("code", ""),
-                flow_cookie=request.cookies.get(FLOW_COOKIE, ""),
+                flow_cookie=request.cookies.get(flow_name, ""),
             )
         )
 
@@ -1675,13 +1677,13 @@ def build_oauth_github_routes(
             await flow.setup(
                 root,
                 state=request.query_params.get("state") or "",
-                flow_cookie=request.cookies.get(FLOW_COOKIE, ""),
-                state_cookie=request.cookies.get(STATE_COOKIE, ""),
+                flow_cookie=request.cookies.get(flow_name, ""),
+                state_cookie=request.cookies.get(state_name, ""),
             )
         )
 
     async def confirm(request: Request) -> Response:
-        cookie = request.cookies.get(FLOW_COOKIE, "")
+        cookie = request.cookies.get(flow_name, "")
         if request.method == "POST":
             raw_body = await read_capped(
                 request.stream(), request.headers.get("content-length"), MAX_CONFIRM_BODY_BYTES

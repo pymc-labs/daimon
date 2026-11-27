@@ -20,6 +20,7 @@ from daimon.core.github_connect_views import (
     ConnectInstallation,
     ConnectRepo,
     agent_editor_view,
+    host_cookie,
 )
 
 # The fixture is defined next to the route tests; importing it registers it here.
@@ -147,16 +148,20 @@ async def test_setup_without_state_still_needs_the_matching_flow_cookie(
     state, _hidden = await env.open_editor()
     params = {"installation_id": "78", "setup_action": "update"}
 
-    flow_cookie = env.browser.cookies.get(FLOW_COOKIE)
-    env.browser.cookies.delete(FLOW_COOKIE)
+    flow_name, state_name = (
+        host_cookie(name, "https://mcp.test") for name in (FLOW_COOKIE, STATE_COOKIE)
+    )
+    assert flow_name == "__Host-daimon_gh_connect"
+    flow_cookie = env.browser.cookies.get(flow_name)
+    env.browser.cookies.delete(flow_name)
     assert (await env.browser.get("/oauth/github/setup", params=params)).status_code == 400
 
-    env.browser.cookies.set(FLOW_COOKIE, "someone-else")
+    env.browser.cookies.set(flow_name, "someone-else")
     assert (await env.browser.get("/oauth/github/setup", params=params)).status_code == 400
 
     assert flow_cookie is not None
-    env.browser.cookies.set(FLOW_COOKIE, flow_cookie)
-    env.browser.cookies.delete(STATE_COOKIE)
+    env.browser.cookies.set(flow_name, flow_cookie)
+    env.browser.cookies.delete(state_name)
     assert (await env.browser.get("/oauth/github/setup", params=params)).status_code == 400
 
     # A state in the query wins over the remembered one and must still be the flow's.

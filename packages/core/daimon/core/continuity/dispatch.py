@@ -13,6 +13,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from typing import Literal
 
 import anthropic as anthropic_pkg
 import structlog
@@ -106,7 +107,7 @@ async def dispatch_pending_continuations(
     anthropic: AsyncAnthropic,
     *,
     tenant_id: uuid.UUID,
-    platform: ChatPlatform,
+    platform: ChatPlatform | Literal["web"],
     thread_id: str,
     run_follow_up: RunFollowUp | None = None,
     post_notice: PostNotice | None = None,

@@ -1,4 +1,5 @@
-"""The deployment tier: `DAIMON_FEATURES__<KEY>`, or a feature's deprecated variable.
+"""The deployment tier: `DAIMON_FEATURES__<KEY>`, or a feature's deprecated variable; and
+the workspaces a feature exists in (`in_workspace`).
 
 The only reader of the deprecated deployment-wide fields (`progress_plans.mode`,
 `thread_participation.mode`, `mcp_context.enabled`, `_LEGACY_FLAG`); `tests/features/
@@ -7,12 +8,18 @@ test_feature_contracts.py` holds every other reader to that.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable, Mapping
 from functools import cache
 
 import structlog
-from daimon.core.config import FeatureEnvSettings, Settings
-from daimon.core.features.registry import FeatureSpec, parse_deployment
+from daimon.core.config import (
+    ArtifactPagesEnvSettings,
+    ArtifactPagesSettings,
+    FeatureEnvSettings,
+    Settings,
+)
+from daimon.core.features.registry import FeatureSpec, Requirement, parse_deployment
 from daimon.core.features.resolver import TierValue
 from daimon.core.scope_cascade import CascadeMode
 
@@ -76,6 +83,28 @@ _LEGACY_LIMIT: Mapping[str, Callable[[Settings], str | None]] = {
 def env_features() -> Mapping[str, str]:
     """`DAIMON_FEATURES__*` read once, for writers handed no `Settings` (an agent edit)."""
     return FeatureEnvSettings().features  # pyright: ignore[reportCallIssue]
+
+
+@cache
+def _env_artifact_pages() -> ArtifactPagesSettings:
+    """`DAIMON_ARTIFACT_PAGES__*` read once, for readers handed no `Settings`."""
+    return ArtifactPagesEnvSettings().artifact_pages  # pyright: ignore[reportCallIssue]
+
+
+_IN_WORKSPACE: Mapping[Requirement, Callable[[Settings | None, uuid.UUID], bool]] = {
+    "artifact_workspace": lambda s, tenant_id: (
+        s.artifact_pages if s is not None else _env_artifact_pages()
+    ).has_workspace(tenant_id),
+}
+"""A requirement the workspace itself meets or not. Unmet, the feature does not exist there:
+no listing shows it, no change takes it, and its tools, pages and skill are gone."""
+
+
+def in_workspace(spec: FeatureSpec, settings: Settings | None, tenant_id: uuid.UUID) -> bool:
+    """Whether `spec` exists in the workspace. Without `settings` the process env answers."""
+    return all(
+        _IN_WORKSPACE[need](settings, tenant_id) for need in spec.requires if need in _IN_WORKSPACE
+    )
 
 
 def deployment_value(settings: Settings | None, spec: FeatureSpec) -> TierValue | None:

@@ -24,11 +24,16 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _session_gate
 from daimon.adapters.mcp.tools._channel_policy import require_dm_grant, require_dm_recipient_allowed
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.mcp.tools.artifacts import create_page_watch
 from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     rest_client,
 )
-from daimon.adapters.mcp.tools.setup_target import refuse_helper, require_turn_origin
+from daimon.adapters.mcp.tools.setup_target import (
+    get_web_turn_origin,
+    refuse_helper,
+    require_turn_origin,
+)
 from daimon.adapters.mcp.watch_polling import (
     CredentialMissing,
     PollAccessRevoked,
@@ -40,10 +45,12 @@ from daimon.adapters.mcp.watch_polling import (
 )
 from daimon.core import channel_backend
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
+from daimon.core.artifact_pages.events import describe_where
 from daimon.core.config import Settings, env_dm_policy, load_watches_settings
 from daimon.core.confirmation import watch_card_skipped
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.continuity.poll_tools import (
+    PAGE_DATA_TOOL,
     SourceChanged,
     catalogue_digest,
     require_listed,
@@ -60,10 +67,17 @@ from daimon.core.mcp_tool_call import McpCallError
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
-from daimon.core.stores import mux_state, watches
+from daimon.core.stores import artifact_pages, mux_state, turn_origins, watches, web_people
 from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX, dm_enabled
-from daimon.core.stores.domain import ChatPlatform, TurnOriginRow, WatchDelivery, WatchRow
+from daimon.core.stores.domain import (
+    CHAT_PLATFORMS,
+    ChatPlatform,
+    TurnOriginRow,
+    WatchDelivery,
+    WatchRow,
+)
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
+from daimon.core.web_identity import linked_identity
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.config import BackendConfig, resolve_default
@@ -91,6 +105,8 @@ class WatchSummary(BaseModel):
     permanent: bool = False
     max_turns_per_day: int = watches.DEFAULT_WATCH_CAP
     revision: int = 0
+    # A page watch's event filter in plain words.
+    where: str | None = None
 
 
 def summary(row: WatchRow, *, key_id: str | None = None) -> WatchSummary:
@@ -111,6 +127,7 @@ def summary(row: WatchRow, *, key_id: str | None = None) -> WatchSummary:
         permanent=row.expires_at is None,
         max_turns_per_day=row.max_turns_per_day,
         revision=row.revision,
+        where=describe_where(row.source_state.get("where")),
     )
 
 
@@ -239,9 +256,34 @@ async def private_key_delivery(
     )
 
 
+async def _in_attended_turn(runtime: McpRuntime, auth: AuthIdentity) -> bool:
+    """Whether a person started and is in the calling turn: a watch, routine or ask turn has
+    no one there, however admin its token's owner, and a page's ask turn is attended but not
+    started by a person. A web turn's origin is under `web`."""
+    if auth.chat_session_id is None:
+        return False
+    async with runtime.session_factory() as db:
+        for platform in {auth.platform or "web", "web"}:
+            origin = await turn_origins.get_session_origin(
+                db,
+                tenant_id=auth.tenant_id,
+                account_id=auth.account_id,
+                platform=platform,
+                chat_session_id=auth.chat_session_id,
+                now=datetime.now(UTC),
+            )
+            if origin is not None:
+                return origin.attended and origin.human_invocation is True
+    return False
+
+
 async def fresh_admin(runtime: McpRuntime, auth: AuthIdentity) -> bool:
+    """An admin now: Discord looks it up afresh; web, Slack and Teams take the token's
+    admin claim, but only in a turn a person is attending."""
     if not auth.admin_for():
         return False
+    if auth.platform in ("web", "slack", "teams"):
+        return await _in_attended_turn(runtime, auth)
     if auth.platform != "discord" or auth.platform_user_id is None:
         return False
     subject = await resolve_subject(
@@ -259,8 +301,12 @@ async def require_attended_owner(
 ) -> TurnOriginRow:
     if origin_context_id is None:
         raise ToolError("An active reply from the owner is required")
-    origin = refuse_helper(await require_turn_origin(runtime, auth, origin_context_id))
-    if not origin.attended or auth.platform != "discord" or auth.platform_user_id is None:
+    web = await get_web_turn_origin(runtime, auth, origin_context_id)
+    origin = refuse_helper(
+        web if web is not None else await require_turn_origin(runtime, auth, origin_context_id)
+    )
+    chat = auth.platform in CHAT_PLATFORMS and auth.platform_user_id is not None
+    if not origin.attended or (origin.platform != "web" and not chat):
         raise ToolError("An attended owner conversation is required")
     try:
         slot = Slot(
@@ -316,6 +362,25 @@ async def require_attended_owner(
     return origin
 
 
+async def owner_principal(
+    runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow
+) -> tuple[ChatPlatform | None, str]:
+    """`(principal platform, user id)` a watch made at `origin` runs as: the caller's own
+    chat id, or on the web the person's linked chat id (None: their own web id). A web
+    visitor is no member, so never owns a watch."""
+    if origin.platform != "web":
+        assert auth.platform_user_id is not None
+        return None, auth.platform_user_id
+    async with runtime.session_factory() as db:
+        person = await web_people.get_person_for_account(
+            db, tenant_id=auth.tenant_id, account_id=auth.account_id
+        )
+        if person is None or person.kind == "visitor":
+            raise ToolError("Only members of this team can make a watch.")
+        platform, external_id = await linked_identity(db, person)
+    return None if platform == "web" else cast(ChatPlatform, platform), external_id
+
+
 async def require_delivery_allowed(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -333,7 +398,9 @@ async def require_delivery_allowed(
     """
     if delivery == "thread":
         return
-    if auth.platform != "discord" or auth.platform_user_id is None:
+    if origin.platform == "web" and delivery == "new_thread":
+        return  # a new chat of the owner's own, as private as this one
+    if origin.platform != "discord" or auth.platform_user_id is None:
         raise ToolError("Watches here can only report in this thread. Leave delivery as thread.")
     if origin.thread_id.startswith(DM_SCOPE_PREFIX):
         raise ToolError("A watch made in a DM reports in that DM. Leave delivery as thread.")
@@ -370,6 +437,9 @@ async def require_delivery_allowed(
     if not isinstance(parent, discord.TextChannel):
         raise ToolError("Threads cannot be started in this channel. Leave delivery as thread.")
 
+
+#: Where the watch tools show: page watches run everywhere (`watches.require_watch_platform`).
+WATCH_PLATFORMS = {"discord", "slack", "teams", "web"}
 
 #: Plain words for what only an admin may approve.
 ADMIN_ONLY = (
@@ -465,13 +535,28 @@ async def create_watch_impl(
     delivery: WatchDelivery = "thread",
     permanent: bool = False,
     max_turns_per_day: int | None = None,
+    page: str | None = None,
+    select: str | None = None,
+    where: dict[str, JsonValue] | None = None,
 ) -> WatchSummary:
     origin = await require_attended_owner(
         runtime, auth, origin_context_id, tool_name="create_watch"
     )
+    try:
+        polled = "mcp_poll" if source == "poll" and server != DAIMON_SERVER_NAME else source
+        watches.require_watch_platform(origin.platform, polled, tool)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
     if source == "page_event":
-        raise ToolError("Page-event watches are unavailable until a page-event producer exists")
-    assert auth.platform_user_id is not None
+        if page is None:
+            raise ToolError("Name the page to watch in `page`.")
+        if delivery == "dm":
+            raise ToolError("A page watch reports in this thread or a new one.")
+    elif select is not None or where is not None:
+        raise ToolError("`select` and `where` are for page watches; polls use `projection`.")
+    if source == "page_event" or (polled == "poll" and tool == PAGE_DATA_TOOL):
+        await _require_pages_here(runtime, auth.tenant_id, origin)
+    principal_platform, owner_id = await owner_principal(runtime, auth, origin)
     await require_skip_defaults(
         runtime,
         auth,
@@ -489,10 +574,11 @@ async def create_watch_impl(
     if source != "callback" and not permanent and not 1 <= lifetime_days <= 30:
         raise ToolError("Watch lifetime must be 1 to 30 days")
     # Left out, the default daily limit; the firing SQL still holds it to the ceiling.
+    # A permanent page watch still ends with its page, so it needs no admin.
     approver = await admin_approval(
         runtime,
         auth,
-        permanent=permanent,
+        permanent=permanent and source != "page_event",
         max_turns_per_day=max_turns_per_day or watches.DEFAULT_WATCH_CAP,
         check_ceiling=max_turns_per_day is not None,
     )
@@ -502,11 +588,12 @@ async def create_watch_impl(
     expires_at = None if permanent else now + timedelta(days=lifetime_days)
     binding = ContinuationRequest(
         tenant_id=auth.tenant_id,
-        platform=cast(ChatPlatform, auth.platform),
+        platform=cast("ChatPlatform | Literal['web']", origin.platform),
+        principal_platform=principal_platform,
         parent_channel_id=origin.parent_channel_id,
         thread_id=origin.thread_id,
         requester_account_id=auth.account_id,
-        requester_external_user_id=auth.platform_user_id,
+        requester_external_user_id=owner_id,
         target_ma_agent_id=origin.responder_ma_agent_id,
         target_name=origin.responder_name,
         requested_work=None,
@@ -514,6 +601,25 @@ async def create_watch_impl(
         idempotency_key=uuid.uuid4(),
     )
     await require_delivery_allowed(runtime, auth, origin, delivery)
+    if source == "page_event":
+        assert page is not None
+        try:
+            row, key_id = await create_page_watch(
+                runtime,
+                auth,
+                binding,
+                slug=page,
+                instructions=instructions,
+                expires_at=expires_at,
+                max_turns_per_day=daily,
+                now=now,
+                delivery=delivery,
+                select_path=select,
+                where=where,
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        return summary(row, key_id=key_id)
     if source == "callback":
         return await create_callback_watch(
             runtime,
@@ -569,6 +675,23 @@ async def create_watch_impl(
         return summary(watch)
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
+
+
+async def _require_pages_here(
+    runtime: McpRuntime, tenant_id: uuid.UUID, origin: TurnOriginRow
+) -> None:
+    """A page watch or page-data poll is made only where `artifacts` is On for this place and
+    agent, as the page tools are (`CapabilityGateMiddleware`)."""
+    place = FeaturePlace.of(
+        tenant_id,
+        origin.platform,
+        origin.parent_channel_id,
+        origin.thread_id,
+        agent_id=origin.responder_ma_agent_id,
+    )
+    async with runtime.session_factory() as db:
+        if not (await feature_in(db, runtime.settings, place, "artifacts")).on:
+            raise ToolError('This source isn\'t available here. Use "poll" or "callback".')
 
 
 async def callback_watch_terms(
@@ -780,6 +903,10 @@ async def rotate_watch_impl(
         )
         if watch.source != "page_event":
             raise ValueError("Poll watches have no signing key")
+        async with runtime.session_factory() as db:
+            on_page = await artifact_pages.get(db, watch.page_id) is not None
+        if on_page:
+            return await rotate_page_key(runtime, auth, watch)
         key_id, key = secrets.token_hex(12), secrets.token_urlsafe(48)
         async with runtime.session_factory.begin() as db:
             current = await watches.require_owned_watch(
@@ -800,6 +927,18 @@ async def rotate_watch_impl(
         return await deliver_rotated_key(runtime, auth, watch, key_id=key_id, key=key)
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
+
+
+async def rotate_page_key(runtime: McpRuntime, auth: AuthIdentity, watch: WatchRow) -> WatchSummary:
+    """A page watch's key is derived, not delivered: enroll a fresh one and say its id."""
+    async with runtime.session_factory.begin() as db:
+        current = await watches.require_owned_watch(
+            db, watch.id, tenant_id=auth.tenant_id, account_id=auth.account_id, is_admin=False
+        )
+        require_unchanged_enrollment(watch, current)
+        keys = tuple(k.get_secret_value() for k in runtime.settings.crypto.keys)
+        key_id, _ = await watches.enroll_page_key(db, watch, keys, now=datetime.now(UTC))
+    return summary(watch, key_id=key_id)
 
 
 async def enrollment_preflight(
@@ -1154,12 +1293,12 @@ async def update_watch_impl(
 
 
 def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
-    @mcp.tool(tags={"discord"})
+    @mcp.tool(tags=WATCH_PLATFORMS)
     async def create_watch(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         origin_context_id: str,
         instructions: str,
-        source: Literal["poll", "callback"],
+        source: Literal["poll", "callback", "page_event"],
         server: str = DAIMON_SERVER_NAME,
         tool: str = "read_thread",
         arguments: dict[str, object] | None = None,
@@ -1172,8 +1311,12 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         delivery: Literal["thread", "dm", "new_thread"] = "thread",
         permanent: bool = False,
         max_turns_per_day: int | None = None,
+        page: str | None = None,
+        select: str | None = None,
+        where: dict[str, JsonValue] | None = None,
     ) -> WatchSummary:
-        """Watch a listed read tool from this conversation, or wake on posts to a secret link.
+        """Watch a listed read tool from this conversation, wake on posts to a secret link, or
+        wake on a page's events.
 
         With source "callback" nothing is polled: Daimon DMs the owner a private link, and
         each POST to it (UTF-8 text, 4 KiB unless the deployment allows more) wakes the agent
@@ -1183,8 +1326,20 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Daimon allows (30 days unless they changed it, or permanent), so
         `lifetime_days` and `permanent` do not apply to it.
         The tool, server, arguments, projection, rule, interval and key fields are for polls.
+        With source "page_event", `page` names a page you can use that sends events: each
+        event its viewers send wakes the agent, and no key is shown or needed. `select` (such
+        as `.data.vote`) keeps only that part of each event and skips events where it is
+        empty. `where` wakes it only for events whose top-level fields match: each key
+        maps to one allowed value or a list of up to 20, at most 8 keys, and every key must
+        match, as in `{"event": ["vote", "undo"], "sender": "member"}`. The event's fields
+        are `event`, `data`, `by`, `sender`, `page_visible_outside_workspace` and `at`.
+        A page watch reports in this thread, or with "new_thread" in a new thread
+        per report. `permanent=true` needs no admin for a page watch, which still ends
+        with its page. A page holds up to 5 watches; someone who does not manage it holds
+        one. Page watches work in every chat. Other sources are offered only where the
+        deployment supports them, and a poll of artifact_db_query also works in the Daimon app.
 
-        Binds the current human owner, tenant, agent and exact Discord thread.
+        Binds the current human owner, tenant, agent and exact thread.
         `delivery` says where each report goes: "thread" (this thread, the default),
         "dm" (the owner's DM, never anyone else's) or "new_thread" (a new public thread
         under this thread's channel for each report). A watch made in a DM reports there,
@@ -1195,7 +1350,8 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Polls run without an AI turn; firings
         use unattended read-and-report turns and current access/spend checks.
         Only tools on this deployment's watch list (set by whoever runs Daimon) can be
-        checked; by default that is read_thread and read_channel on daimon-mcp. An
+        checked; by default that is read_thread, read_channel and artifact_db_query (a
+        page's data, read as the owner) on daimon-mcp. An
         unlisted tool is refused, and a watch whose tool is taken off the list pauses
         and its owner is told. For read_thread and read_channel the arguments must name
         a source different from the reporting thread.
@@ -1222,7 +1378,7 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         and an owner has at most 5. `max_turns_per_day` (default 24) is how many
         reports a day this watch may make, up to the ceiling whoever runs Daimon sets;
         above 24 also needs an admin. Producers remain disabled until both operator
-        gates are enabled. Page-event watches are refused until a producer exists.
+        gates are enabled.
         """
         return await create_watch_impl(
             runtime,
@@ -1242,6 +1398,9 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             delivery=delivery,
             permanent=permanent,
             max_turns_per_day=max_turns_per_day,
+            page=page,
+            select=select,
+            where=where,
         )
 
     @mcp.tool(tags={"discord"})
@@ -1339,7 +1498,7 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             ),
         )
 
-    @mcp.tool(tags={"discord"})
+    @mcp.tool(tags=WATCH_PLATFORMS)
     async def list_watches(  # pyright: ignore[reportUnusedFunction]
         ctx: Context, scope: Literal["mine", "all"] = "mine"
     ) -> list[WatchListEntry]:
@@ -1353,21 +1512,21 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """
         return await list_watches_impl(runtime, await _auth(ctx), scope=scope)
 
-    @mcp.tool(tags={"discord"})
+    @mcp.tool(tags=WATCH_PLATFORMS)
     async def show_watch(ctx: Context, watch_id: str) -> WatchSummary:  # pyright: ignore[reportUnusedFunction]
         """Show your watch's immutable destination, source, status and expiry. Admins may inspect
         within their workspace.
         """
         return await manage_watch_impl(runtime, await _auth(ctx), watch_id=watch_id, action="show")
 
-    @mcp.tool(tags={"discord"})
+    @mcp.tool(tags=WATCH_PLATFORMS)
     async def pause_watch(ctx: Context, watch_id: str) -> WatchSummary:  # pyright: ignore[reportUnusedFunction]
-        """Pause your watch and cancel its queued wakes. Workspace admins may pause another
+        """Pause your watch and cancel its queued wakes. Admins may pause another
         owner's watch.
         """
         return await manage_watch_impl(runtime, await _auth(ctx), watch_id=watch_id, action="pause")
 
-    @mcp.tool(tags={"discord"})
+    @mcp.tool(tags=WATCH_PLATFORMS)
     async def resume_watch(ctx: Context, watch_id: str, origin_context_id: str) -> WatchSummary:  # pyright: ignore[reportUnusedFunction]
         """Resume your paused watch from an attended owner turn after fresh access checks.
         Only the owner may resume; an admin cannot override the owner pause.
@@ -1385,16 +1544,16 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool(tags={"discord"})
     async def rotate_watch_key(ctx: Context, watch_id: str, origin_context_id: str) -> WatchSummary:  # pyright: ignore[reportUnusedFunction]
-        """Rotate a page signing key, revoke the old key and cancel queued wakes. The fresh
-        key goes to its owner by private DM once. Requires an attended owner turn;
-        an admin cannot rotate another owner's key. Server-side owner card proof is
-        required; backends without tool confirmation refuse.
+        """Rotate a watch's signing key, revoke the old key and cancel queued wakes. A page
+        watch's new key is set up by Daimon; any other's goes to its owner by private DM once.
+        Requires an attended owner turn; an admin cannot rotate another owner's key.
+        Server-side owner card proof is required; backends without tool confirmation refuse.
         """
         return await rotate_watch_impl(
             runtime, await _auth(ctx), watch_id=watch_id, origin_context_id=origin_context_id
         )
 
-    @mcp.tool(tags={"discord"})
+    @mcp.tool(tags=WATCH_PLATFORMS)
     async def delete_watch(ctx: Context, watch_id: str) -> WatchSummary:  # pyright: ignore[reportUnusedFunction]
         """Delete your watch and its retained evidence after cancelling queued wakes; admins may
         delete within their workspace.

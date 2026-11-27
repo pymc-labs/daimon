@@ -60,6 +60,7 @@ class ProviderOut(BaseModel):
     id: str
     label: str
     kind: Literal["redirect", "dev"]
+    connectable: bool
 
 
 class ConnectStart(BaseModel):
@@ -119,9 +120,12 @@ def auth_router(runtime: WebRuntime) -> APIRouter:
 
     @router.get("/auth/providers")
     async def list_providers() -> list[ProviderOut]:  # pyright: ignore[reportUnusedFunction]
-        out = [ProviderOut(id=p.id, label=p.label, kind="redirect") for p in providers.values()]
+        out = [
+            ProviderOut(id=p.id, label=p.label, kind="redirect", connectable=p.connectable)
+            for p in providers.values()
+        ]
         if web.dev:
-            out.append(ProviderOut(id="dev", label="Dev user", kind="dev"))
+            out.append(ProviderOut(id="dev", label="Dev user", kind="dev", connectable=False))
         return out
 
     @router.get("/auth/legal")
@@ -143,9 +147,11 @@ def auth_router(runtime: WebRuntime) -> APIRouter:
         return await current_caller(request, Response())
 
     async def finish_connect(
-        request: Request, flow: SignInFlow, identity: VerifiedIdentity
+        request: Request, flow: SignInFlow, provider: SignInProvider, identity: VerifiedIdentity
     ) -> Response:
         """Connect the proven account to the session that started the flow on this browser."""
+        if not provider.connectable:
+            return fail(_FAILED)
         try:
             caller = await signed_in_caller(request)
         except HTTPException:
@@ -176,11 +182,14 @@ def auth_router(runtime: WebRuntime) -> APIRouter:
         clear_cookie(response, web, name=flow_cookie_name(web))
         return response
 
-    def new_flow(next: str | None, connect_session: str | None = None) -> SignInFlow:
+    def new_flow(
+        provider: SignInProvider, next: str | None, connect_session: str | None = None
+    ) -> SignInFlow:
         return SignInFlow(
             verifier=secrets.token_urlsafe(48),
             state=secrets.token_urlsafe(24),
             next=safe_next(next),
+            provider=provider.id,
             connect_session=connect_session,
         )
 
@@ -210,7 +219,7 @@ def auth_router(runtime: WebRuntime) -> APIRouter:
         provider = providers.get(provider_id)
         if provider is None:
             raise HTTPException(status_code=404, detail="Unknown sign-in method.")
-        flow = new_flow(next)
+        flow = new_flow(provider, next)
         try:
             url = await authorize(provider, flow)
         except (DaimonError, httpx.HTTPError) as exc:
@@ -228,12 +237,12 @@ def auth_router(runtime: WebRuntime) -> APIRouter:
         provider's URL. A POST, so the page's own header and origin check guard it: a link
         opened by a stray GET could attach someone else's account to the session."""
         provider = providers.get(provider_id)
-        if provider is None:
+        if provider is None or not provider.connectable:
             raise HTTPException(status_code=404, detail="Unknown sign-in method.")
         caller = await signed_in_caller(request)
         if caller.person.kind == "visitor":
             raise HTTPException(status_code=403, detail=_VISITOR_CONNECT)
-        flow = new_flow(body.next, str(caller.session.id))
+        flow = new_flow(provider, body.next, str(caller.session.id))
         try:
             url = await authorize(provider, flow, interactive=True)
         except (DaimonError, httpx.HTTPError) as exc:
@@ -262,6 +271,7 @@ def auth_router(runtime: WebRuntime) -> APIRouter:
             or not code
             or not state
             or not hmac.compare_digest(state.encode(), flow.state.encode())
+            or flow.provider != provider_id
         ):
             return fail(_EXPIRED)
         try:
@@ -275,7 +285,7 @@ def auth_router(runtime: WebRuntime) -> APIRouter:
             log.warning("web.signin.rejected", provider=provider_id, error=type(exc).__name__)
             return fail(_FAILED)
         if flow.connect_session is not None:
-            return await finish_connect(request, flow, identity)
+            return await finish_connect(request, flow, provider, identity)
         try:
             people = await resolve_web_people(runtime.sessionmaker, identity=identity)
         except WebSignInRefused as refused:

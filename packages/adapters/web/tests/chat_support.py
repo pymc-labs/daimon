@@ -82,6 +82,7 @@ async def visitor_of(
     *,
     allow_files: bool = False,
     agent_ids: Sequence[str] = (),
+    email: str | None = None,
 ) -> WebPersonRow:
     """A visitor from a fresh invite to the workspace, on an account of their own."""
     person_id = uuid.uuid4()
@@ -106,7 +107,7 @@ async def visitor_of(
             kind="visitor",
             display_name="Guest",
             workspace_name="Acme",
-            email=None,
+            email=email,
             invite_id=invite.id,
             invited_by_account_id=ws.person.account_id,
         )

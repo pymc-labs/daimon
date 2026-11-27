@@ -168,7 +168,11 @@ async def test_rendered_tool_schema_matches_snapshot(
     assert not missing, f"expected tool group(s) missing from the rendered registry: {missing}"
 
     create = next(tool for tool in tools if tool.name == "create_watch")
-    assert create.parameters["properties"]["source"]["enum"] == ["poll", "callback"]
+    assert create.parameters["properties"]["source"]["enum"] == [
+        "poll",
+        "callback",
+        "page_event",
+    ]
     assert "page_id" not in create.parameters["properties"]
 
     named = {n for n, t in rendered.items() if re.search(r"(?i)\bweb\b", str(t))}

@@ -11,6 +11,7 @@ import click
 import typer
 from daimon.adapters.cli.commands.admins import admins_app
 from daimon.adapters.cli.commands.agents import agents_app
+from daimon.adapters.cli.commands.artifacts import artifacts_app
 from daimon.adapters.cli.commands.audit import audit_app
 from daimon.adapters.cli.commands.backup import backup_app
 from daimon.adapters.cli.commands.channels import channels_app
@@ -58,6 +59,7 @@ app.add_typer(environments_app, name="environments")
 app.add_typer(tenants_app, name="tenants")
 app.add_typer(usage_app, name="usage")
 app.add_typer(audit_app, name="audit")
+app.add_typer(artifacts_app, name="artifacts")
 app.add_typer(issues_app, name="issues")
 app.add_typer(monitoring_app, name="monitoring")
 app.add_typer(sessions_app, name="sessions")

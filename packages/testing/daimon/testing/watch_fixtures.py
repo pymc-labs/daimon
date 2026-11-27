@@ -197,6 +197,25 @@ async def install_poll_ports(session: AsyncSession) -> None:
     )
     await session.execute(text(f"GRANT EXECUTE ON FUNCTION {quoted}.{signature} TO daimon_sidecar"))
     await session.execute(text(f"REVOKE CREATE ON SCHEMA {quoted} FROM daimon_watch_ingress_owner"))
+    # page_watch_platforms replaces the page and poll ports: principal platform,
+    # non-thread page delivery.
+    platforms = load_migration("page_watch_platforms")
+    for sql in (platforms.PAGE_SQL, platforms.POLL_SQL):
+        await session.execute(text(cast(str, sql).format(schema=quoted)))
+    await session.execute(
+        text(
+            f"REVOKE ALL ON FUNCTION {quoted}.accept_watch_poll_result(uuid,text,jsonb,text) "
+            "FROM PUBLIC,daimon_sidecar,daimon_watch_ingress_owner"
+        )
+    )
+    page = "accept_watch_page_event(uuid,uuid,text,bigint,uuid,text,text,text)"
+    await session.execute(text(f"GRANT CREATE ON SCHEMA {quoted} TO daimon_watch_ingress_owner"))
+    await session.execute(text(f"REVOKE ALL ON FUNCTION {quoted}.{page} FROM PUBLIC"))
+    await session.execute(
+        text(f"ALTER FUNCTION {quoted}.{page} OWNER TO daimon_watch_ingress_owner")
+    )
+    await session.execute(text(f"GRANT EXECUTE ON FUNCTION {quoted}.{page} TO daimon_sidecar"))
+    await session.execute(text(f"REVOKE CREATE ON SCHEMA {quoted} FROM daimon_watch_ingress_owner"))
     await install_firing_trigger(session)
 
 

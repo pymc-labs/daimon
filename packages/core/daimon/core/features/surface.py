@@ -50,6 +50,12 @@ PAGE_MARK: Final = "~"
 """Splits a token from the pages its screen sat on: `~<list page>[~<agent picker page>]`."""
 
 
+def present(views: Iterable[FeatureView]) -> tuple[FeatureView, ...]:
+    """The views of features that exist in this workspace (`in_workspace`): every listing,
+    the web's and the CLI's included, leaves out the rest, saved values or not."""
+    return tuple(view for view in views if view.resolved.unavailable != "workspace")
+
+
 def listed(
     views: Iterable[FeatureView], settings: Settings | None, place: FeaturePlace
 ) -> tuple[FeatureView, ...]:
@@ -60,7 +66,7 @@ def listed(
     calls it."""
     return tuple(
         view
-        for view in views
+        for view in present(views)
         if view.resolved.unavailable is None
         or any(t.value != DEFAULT for t in view.tiers)
         or lacks_only_server_setup(view.spec, settings, place)

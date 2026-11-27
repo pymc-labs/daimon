@@ -5,12 +5,15 @@ Drives the real app: the live registry, the real identity middleware and `call_t
 
 from __future__ import annotations
 
+import json
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import mcp.types as mt
 import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -21,6 +24,7 @@ from daimon.adapters.mcp.tools._web_url import tenant_links
 from daimon.core.agent_chat_requester import UNREAD, record_driver
 from daimon.core.capability_tools import CAPABILITY_TOOLS
 from daimon.core.config import (
+    ArtifactPagesSettings,
     ComputeSettings,
     NotebookSettings,
     ReportHostSettings,
@@ -73,6 +77,7 @@ def _set_up() -> Settings:
                 cloud_run_project="p",
                 cloud_run_service_account="s@p.iam.gserviceaccount.com",
             ),
+            "web": WebSettings(public_url=HttpUrl("https://app.example.com/")),
         }
     )
 
@@ -346,6 +351,51 @@ async def test_notebook_tools_when_the_server_lacks_a_host_leave_a_chat_credenti
     assert "publish_report" in listed, "a tool that is set up stays listed"
     assert f"{FEATURES['notebooks'].name} {UNSET}" in message, f"wrong refusal: {message!r}"
     assert OFF not in message, f"a missing host is not a feature turned off: {message!r}"
+
+
+async def test_page_tools_outside_the_listed_workspaces_leave_every_list_and_are_refused(
+    sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`DAIMON_ARTIFACT_PAGES__WORKSPACES` without the caller's workspace: no page tool exists."""
+    settings = _set_up().model_copy(
+        update={"artifact_pages": ArtifactPagesSettings(workspaces=(uuid.uuid4(),))}
+    )
+    mcp = await _app(sessionmaker, settings)
+    tenant_id = await _tenant(sessionmaker)
+    pages = CAPABILITY_TOOLS["artifacts"]
+    _as(monkeypatch, tenant_id, platform="discord", chat_agent_id=str(uuid.uuid4()))
+    async with Client(mcp) as client:
+        listed_tools = await client.list_tools()
+        message = await _error(client, "artifact_list", {})
+    listed = {t.name for t in listed_tools}
+    assert not listed & pages, f"page tools listed: {listed & pages}"
+    assert "publish_report" in listed, "other tools stay listed"
+    assert message == "artifact_list isn't available here, so nothing was done."
+    _assert_pageless(listed_tools)
+
+
+def _assert_pageless(tools: list[mt.Tool]) -> None:
+    """The watch tools stay listed but never offer or name pages."""
+    watch = {t.name: t for t in tools if t.name in ("create_watch", "rotate_watch_key")}
+    assert set(watch) == {"create_watch", "rotate_watch_key"}, "the watch tools stay listed"
+    for tool in watch.values():
+        text = json.dumps(tool.inputSchema) + (tool.description or "")
+        assert not re.search("page|artifact", text, re.I), f"{tool.name} names pages: {text}"
+    assert watch["create_watch"].inputSchema["properties"]["source"]["enum"] == ["poll", "callback"]
+
+
+async def test_watch_tools_name_no_pages_where_artifacts_is_off(
+    sessionmaker: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcp = await _app(sessionmaker)
+    tenant_id = await _tenant(sessionmaker)
+    _as(monkeypatch, tenant_id, platform="discord")
+    async with Client(mcp) as client:
+        [before] = [t for t in await client.list_tools() if t.name == "create_watch"]
+        await _set(sessionmaker, tenant_id, "artifacts", "off")
+        after = await client.list_tools()
+    assert "page_event" in before.inputSchema["properties"]["source"]["enum"], "pages are on"
+    _assert_pageless(after)
 
 
 def test_server_gate_key_covers_every_gated_tool_but_the_stop_tools() -> None:

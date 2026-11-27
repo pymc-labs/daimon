@@ -50,6 +50,7 @@ DEFAULT_SKILLS = (
     "file-handling",
     "channel-tidy",
     "marimo_notebooks",
+    "artifacts",
     "workspace-setup",
     "pymc-artifact-style",
     "data-ingestion",
@@ -136,7 +137,7 @@ def skill_text(manifest: DefaultManifest) -> str:
     require(manifest.name == "default", "F1: expected authored default agent")
     require(
         tuple(s.name for s in manifest.skills) == DEFAULT_SKILLS,
-        "F1: default must bind all twelve authored skills",
+        "F1: default must bind all thirteen authored skills",
     )
     require(manifest.builtin_tools == DEFAULT_TOOLS, "F1: default builtin toolset changed")
     require(manifest.mcp.name == "daimon-mcp", "F1: reserved MCP server missing")
@@ -427,7 +428,7 @@ async def scenario(
             "F1: retrieved skill pin changed",
         )
         pins.append(pin)
-    require(len({pin.id for pin in pins}) == 12, "F1: twelve distinct uploaded skills required")
+    require(len({pin.id for pin in pins}) == 13, "F1: thirteen distinct uploaded skills required")
     require(
         transport.skill_uploads == tuple(adapter.uploaded(s.upload) for s in manifest.skills),
         "F1: upstream skill bytes changed",
@@ -494,7 +495,7 @@ async def scenario(
         "F1",
         "pass",
         (
-            "twelve exact skill uploads and immutable pins",
+            "thirteen exact skill uploads and immutable pins",
             "default toolset and daimon-mcp deployment/readback",
             "one root: skill read, two read-only MCP tools, "
             "six mapped builtin capabilities and completion",

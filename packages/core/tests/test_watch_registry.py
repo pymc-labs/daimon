@@ -10,12 +10,13 @@ from pydantic import ValidationError
 NATIVE = {"server": "daimon-mcp", "credential": "none", "returns_chat": True}
 
 
-def test_default_registry_lists_both_native_readers_at_the_old_floor(monkeypatch):
+def test_default_registry_lists_the_native_readers_at_the_old_floor(monkeypatch):
     monkeypatch.delenv("DAIMON_WATCHES__POLLABLE_TOOLS", raising=False)
     listed = load_watches_settings().pollable_tools
     assert {(entry.server, entry.tool) for entry in listed} == {
         ("daimon-mcp", "read_thread"),
         ("daimon-mcp", "read_channel"),
+        ("daimon-mcp", "artifact_db_query"),
     }
     assert all(entry.max_interval_floor_s == 60 for entry in listed)
     assert require_listed("daimon-mcp", "read_thread").credential == "none"

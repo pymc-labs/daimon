@@ -69,6 +69,7 @@ from daimon.adapters.mcp.tools.agent_chat import (
     agent_pin_names,
     still_waiting,
 )
+from daimon.adapters.mcp.tools.artifacts import register_hub_artifact_tools
 from daimon.adapters.mcp.tools.sessions import SessionEventOut, SessionInfo
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Subject
@@ -359,6 +360,12 @@ def register_hub_tools(
             pin_exempt=hub_exempt,
         )
         return admitted, subject, recheck
+
+    async def _page_caller(ctx: Context, daimon_id: str) -> tuple[AuthIdentity, str]:
+        _, agent, auth = await _identity(runtime, ctx, daimon_id)
+        return auth, str(agent.id)
+
+    register_hub_artifact_tools(mcp, runtime, _page_caller)
 
     @mcp.tool
     async def list_daimons(  # pyright: ignore[reportUnusedFunction]

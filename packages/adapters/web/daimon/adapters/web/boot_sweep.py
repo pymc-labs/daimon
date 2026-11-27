@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 import structlog
 from anthropic import AsyncAnthropic
 from daimon.adapters.web.files import UNREFERENCED_UPLOAD_TTL
-from daimon.core.stores import file_uploads, helper_asks
+from daimon.core.stores import artifact_pages, file_uploads, helper_asks
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores import web_sessions as sessions_store
 from daimon.core.stores.thread_sessions import list_orphaned_turns
@@ -33,6 +33,7 @@ log = structlog.get_logger(__name__)
 SESSION_SWEEP_EVERY_S = 3600.0
 #: Web files no message carries are deleted this often while the process runs.
 UPLOAD_SWEEP_EVERY_S = 3600.0
+ARTIFACT_SWEEP_EVERY_S = 3600.0
 
 
 async def sweep_orphaned_web_turns(
@@ -113,4 +114,19 @@ async def sweep_stale_web_uploads_forever(
         except SQLAlchemyError:
             # A database blip must not end the loop; the next pass retries the same rows.
             log.warning("web.upload.sweep_failed", exc_info=True)
+        await asyncio.sleep(every_s)
+
+
+async def sweep_expired_artifacts_forever(
+    sessionmaker: async_sessionmaker[AsyncSession], *, every_s: float = ARTIFACT_SWEEP_EVERY_S
+) -> None:
+    """Delete artifact pages long expired, now and then every `every_s` seconds."""
+    while True:
+        try:
+            async with sessionmaker.begin() as session:
+                removed = await artifact_pages.purge_expired(session, now=datetime.now(UTC))
+            if removed:
+                log.info("web.artifacts.expired_swept", pages=removed)
+        except SQLAlchemyError:
+            log.warning("web.artifacts.sweep_failed", exc_info=True)
         await asyncio.sleep(every_s)

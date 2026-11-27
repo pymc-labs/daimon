@@ -2,10 +2,10 @@
 
 export type Role = "owner" | "admin" | "member" | "visitor"
 export type Platform = "discord" | "slack" | "teams" | "web"
-export type ModuleKey = "chat" | "agents" | "channels" | "routines" | "credits" | "integrations" | "admin"
+export type ModuleKey = "chat" | "agents" | "channels" | "routines" | "artifacts" | "credits" | "integrations" | "admin"
 export type Capability =
   | "chat.use" | "files.attach" | "agents.view" | "agents.edit" | "agents.create" | "channels.view" | "channels.manage"
-  | "routines.view" | "routines.manage"
+  | "routines.view" | "routines.manage" | "artifacts.view" | "artifacts.manage"
   | "credits.view_own" | "credits.manage" | "people.manage" | "integrations.view" | "integrations.manage" | "audit.view" | "workspace.manage"
 
 export type Workspace = { id: string; name: string; platform: Platform; role: Role; members: number }
@@ -39,7 +39,8 @@ export type AgentRef = { id: string; name: string; avatar: string; model: string
 /** A group people can belong to, for pickers; `everyone` is the built-in one. */
 export type Group = { id: string; name: string; members: number }
 
-export type ChatSession = { id: string; title: string; agent: AgentRef; updated_at: string; running?: boolean }
+/** `artifact` marks a thread started by a page's Ask box. */
+export type ChatSession = { id: string; title: string; agent: AgentRef; updated_at: string; running?: boolean; artifact?: { id: string; title: string } | null }
 
 export type Person = {
   id: string
@@ -52,7 +53,7 @@ export type Person = {
 /** Sign-in methods the server offers; `dev` signs in locally without leaving the page. */
 /** The operator's legal pages; `terms` is null until they set one. */
 export type Legal = { privacy: string; terms: string | null }
-export type Provider = { id: string; label: string; kind: "redirect" | "dev" }
+export type Provider = { id: string; label: string; kind: "redirect" | "dev"; connectable: boolean }
 
 /** A cross-reference to a named object; `name` is null once it no longer exists. */
 export type EntityRef = { id: string | null; name: string | null; avatar?: string | null }

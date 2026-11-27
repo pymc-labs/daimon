@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button"
 import { api } from "@/lib/api"
 import { useLegal, useProviders } from "@/lib/hooks"
 import type { Me, Provider } from "@/lib/types"
-import { safeNext } from "@/lib/safe-next"
+import { isServerPage, safeNext } from "@/lib/safe-next"
 import { Card } from "./Card"
 
 const MOCK = import.meta.env.MODE === "mock"
@@ -27,7 +27,7 @@ export function SignIn() {
   const legal = useLegal().data
   const dev = useMutation({
     mutationFn: async (provider: string) => { await api.post("/auth/mock", { provider }); qc.clear(); return landing(next) },
-    onSuccess: (to) => navigate(to),
+    onSuccess: (to) => (isServerPage(to) ? window.location.assign(to) : navigate(to)),
     meta: { inline: true },
   })
   const go = (p: Provider) => {

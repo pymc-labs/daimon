@@ -168,7 +168,11 @@ class ContinuationRequest(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     tenant_id: uuid.UUID
-    platform: ChatPlatform
+    # "web" only for a watch made in a web chat; the queue itself runs chat platforms.
+    platform: ChatPlatform | Literal["web"]
+    # The requester principal's platform when it is not `platform` (a web person linked
+    # to a chat account runs as it). None is `platform`.
+    principal_platform: ChatPlatform | None = None
     parent_channel_id: str
     thread_id: str
     requester_account_id: uuid.UUID

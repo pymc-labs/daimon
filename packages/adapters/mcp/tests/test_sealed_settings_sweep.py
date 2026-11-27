@@ -254,6 +254,7 @@ _SCHEDULED = "a routine, timer, watch or long job of the caller; content side, a
 _TENANT = "tenant-wide: people, admins, credits, allowances, promo codes, invites, support or providers; not scoped to a channel or an agent"
 _OWN = "the caller's own data or preference"
 _NEW = "creates or edits a tenant library item or a new agent or environment; it changes no private channel and no agent's own setup"
+_PAGES = "a workspace page of the caller: tenant-scoped, a person-gated publish or a page-data read or write; no channel or agent setting"
 _MEMORY = "memory or files of the caller's own session; the isolation view hides a private channel's own agent from an outside caller"
 _CARD = "needs live provider (a request card posted into a channel); the agent and channel go through the isolation view and the caller's origin"
 
@@ -264,6 +265,14 @@ EXEMPT: dict[str, str] = {
     "approve_server_skill_update": _NEW,
     "archive_my_session": _LIVE,
     "archive_thread": _LIVE,
+    "artifact_db_query": _PAGES,
+    "artifact_db_write": _PAGES,
+    "artifact_delete": _PAGES,
+    "artifact_list": _PAGES,
+    "artifact_publish": _PAGES,
+    "artifact_source": _PAGES,
+    "artifact_transfer": _PAGES,
+    "artifact_upload_url": _PAGES,
     "ask": _TURN,
     "ask_helper": _TURN,
     "await_turn": _TURN,
@@ -468,6 +477,19 @@ EXEMPT: dict[str, str] = {
 #: The hub mount's tools. It forwards turns to a Daimon and lists sessions; it changes no setting.
 _HUB = "forwards a turn or reads a session of a Daimon; changes no channel or agent setting"
 HUB_EXEMPT: dict[str, str] = {
+    **{
+        name: _PAGES
+        for name in (
+            "artifact_db_query",
+            "artifact_db_write",
+            "artifact_delete",
+            "artifact_list",
+            "artifact_publish",
+            "artifact_source",
+            "artifact_transfer",
+            "artifact_upload_url",
+        )
+    },
     "ask": _HUB,
     "await_turn": _HUB,
     "continue_turn": _HUB,

@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Onboarding checklist</title>
+<style>
+:root{--ink:#0c1f40;--mute:#5b677d;--line:#e4e8ee;--teal:#0c9e82}
+*{box-sizing:border-box}body{margin:0;background:#f6f8fa;color:var(--ink);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+.wrap{max-width:820px;margin:0 auto;padding:28px 24px 40px}h1{margin:0;font-size:22px;letter-spacing:-.01em}.sub{color:var(--mute);font-size:13px;margin-bottom:18px}
+.layout{display:grid;grid-template-columns:230px 1fr;gap:14px}
+.people,.list{background:#fff;border:1px solid var(--line);border-radius:12px}.people{padding:6px;align-self:start}
+.p{display:flex;align-items:center;gap:10px;width:100%;border:0;background:none;text-align:left;font:inherit;padding:9px 10px;border-radius:8px;cursor:pointer;color:var(--ink)}.p.on{background:#edf0f4}
+.av{width:30px;height:30px;border-radius:50%;background:var(--ink);color:#fff;font-size:11px;font-weight:600;display:grid;place-items:center;flex:none}.p b{display:block;font-weight:600}.p small{color:var(--mute);font-size:12px}
+.head{padding:16px 18px;border-bottom:1px solid var(--line)}.head h2{margin:0;font-size:16px}.head small{color:var(--mute)}
+.prog{height:6px;background:#edf0f4;border-radius:3px;margin-top:10px;overflow:hidden}.prog i{display:block;height:100%;background:var(--teal);transition:width .2s}
+label{display:flex;align-items:center;gap:12px;padding:12px 18px;border-bottom:1px solid var(--line);cursor:pointer}label:last-child{border:0}
+input{appearance:none;width:18px;height:18px;border:1.5px solid #b9c2d0;border-radius:5px;margin:0;display:grid;place-items:center;flex:none;background:#fff;cursor:pointer}input:checked{background:var(--teal);border-color:var(--teal)}input:checked::after{content:"";width:9px;height:5px;border-left:2px solid #fff;border-bottom:2px solid #fff;transform:rotate(-45deg) translate(1px,-1px)}
+label:has(input:checked) span{color:var(--mute);text-decoration:line-through}.who{margin-left:auto;font-size:12px;color:var(--mute);white-space:nowrap}
+@media(max-width:620px){.layout{grid-template-columns:1fr}}
+</style></head><body><div class="wrap">
+<h1>Onboarding checklist</h1><div class="sub">3 people starting before 1 January</div>
+<div class="layout"><div class="people" id="people"></div><div class="list"><div class="head"><h2 id="n"></h2><small id="s"></small><div class="prog"><i id="bar"></i></div></div><div id="tasks"></div></div></div></div>
+<script>
+const P=[{id:"marco",n:"Marco Alvarez",r:"Data analyst",s:"24 Nov"},{id:"sofia",n:"Sofia Brandt",r:"Content lead",s:"1 Dec"},{id:"tom",n:"Tom Okafor",r:"ML engineer",s:"8 Dec"}];
+const T=[["Laptop and accounts","Jonas Weber"],["Warehouse read access","Jonas Weber"],["Intro call with the team","Maya Lindqvist"],["Clone the models repo","Marco Alvarez"],["First pull request","Priya Raman"]];
+const done={marco:[1,1,0,0,0],sofia:[1,0,0,0,0],tom:[0,0,0,0,0]};let cur="marco";
+const ini=n=>n.split(" ").map(w=>w[0]).join("");
+function draw(){
+ people.innerHTML=P.map(p=>`<button class="p${p.id===cur?" on":""}" data-id="${p.id}"><span class="av">${ini(p.n)}</span><span><b>${p.n}</b><small>${p.r}, starts ${p.s}</small></span></button>`).join("");
+ const p=P.find(x=>x.id===cur),d=done[cur],c=d.filter(Boolean).length;
+ n.textContent=p.n;s.textContent=c+" of "+T.length+" done";bar.style.width=c/T.length*100+"%";
+ tasks.innerHTML=T.map((t,i)=>`<label><input type="checkbox" data-i="${i}" ${d[i]?"checked":""}><span>${t[0]}</span><em class="who" style="font-style:normal">${t[1]}</em></label>`).join("");
+}
+people.onclick=e=>{const b=e.target.closest("button");if(b){cur=b.dataset.id;draw()}};
+tasks.onchange=e=>{done[cur][+e.target.dataset.i]=e.target.checked?1:0;draw()};
+draw();
+</script></body></html>

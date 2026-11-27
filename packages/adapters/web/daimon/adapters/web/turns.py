@@ -10,9 +10,9 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Callable, Coroutine
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final
 
 import anthropic
 import structlog
@@ -25,6 +25,7 @@ from daimon.adapters.web.refusals import busy, failed, refusal_for
 from daimon.adapters.web.stream import StreamRegistry, TurnStream
 from daimon.adapters.web.stream_events import ReplyView
 from daimon.core.anthropic_guard import guard_selfhosted_channel
+from daimon.core.artifact_pages.model import page_url
 from daimon.core.authz import Surface
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import Settings, WebSettings
@@ -40,10 +41,12 @@ from daimon.core.output_delivery import (
     sweep_outputs,
 )
 from daimon.core.output_runtime import OutputRuntime
+from daimon.core.stores import artifact_pages as artifact_store
 from daimon.core.stores import file_uploads
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores.domain import (
     Role,
+    TaskContinuationRow,
     WebCard,
     WebMessageBlocks,
     WebMessageRow,
@@ -70,7 +73,12 @@ from daimon.core.turn.admission import (
     backend_facts,
 )
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.errors import SessionAgentMismatch, SessionBusyError, SessionPreparationFailed
+from daimon.core.turn.errors import (
+    SessionAgentMismatch,
+    SessionBusyError,
+    SessionPreparationFailed,
+    TurnNotStarted,
+)
 from daimon.core.turn.outcomes import (
     current_outcome,
     finish_with_error,
@@ -81,8 +89,9 @@ from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.slots import holding, release_turn_slot, wait_for_slot
 from daimon.core.turn.state import ToolUseBlock
-from daimon.core.turn_origin import render_turn_origin, turn_origin
+from daimon.core.turn_origin import PageOrigin, render_turn_origin, turn_origin
 from daimon.core.turn_queue import TurnQueue
+from daimon.core.untrusted import render_untrusted
 from daimon.core.web_identity import WebPrincipal, place_of, thread_key, with_spend_person
 from mux.errors import ProviderError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -90,6 +99,20 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 log = structlog.get_logger(__name__)
 
 _BIND_REFUSALS = (SessionPreparationFailed, SessionBusyError, SessionAgentMismatch)
+#: What a watch turn hands back to its dispatcher, which retries or settles the wake.
+_WATCH_REFUSALS = (*_BIND_REFUSALS, TurnNotStarted, AdmissionDenied, UserFacingError)
+_SPEND_SLOTS = ("balance_depleted", "cap_exceeded", "allowance_exhausted")
+
+
+PAGE_ASK_ORIGIN: Final = "page"
+"""An ask thread's turns (`daimon.ask`): attended, but no person's own message."""
+
+
+def said(message: WebMessageRow) -> str:
+    """The message as the agent reads it: a page's text arrives as untrusted page text."""
+    if not message.blocks.from_page:
+        return message.content
+    return render_untrusted(message.content, source="artifact_page", tag="page_text")
 
 
 class WebTurns:
@@ -140,6 +163,41 @@ class WebTurns:
         self.spawn(self._run(person, principal, thread, message, stream))
         return stream
 
+    async def run_watch(
+        self,
+        row: TaskContinuationRow,
+        seed: str,
+        *,
+        person: WebPersonRow,
+        principal: WebPrincipal,
+        thread: WebThreadRow,
+    ) -> None:
+        """Run a fired watch's unattended turn in `thread`, seeded with its evidence. A busy
+        chat, a full queue or a refusal raises, so the wake is retried or settled; nothing
+        shows in the chat until the turn runs."""
+        cue = WebMessageRow(
+            id=uuid.uuid4(),
+            tenant_id=thread.tenant_id,
+            thread_id=thread.id,
+            role="user",
+            content=seed,
+            blocks=WebMessageBlocks(),
+            turn_id=None,
+            status="done",
+            cost_usd=None,
+            duration_ms=None,
+            feedback=None,
+            seq=2**62,  # after every message, so a reseed replays the whole chat
+            created_at=datetime.now(UTC),
+        )
+        try:
+            stream = self.streams.open(thread.id, cue.id)
+        except RuntimeError:
+            raise SessionBusyError(
+                pending_reasons=(row.reason,), retry_after=datetime.now(UTC) + timedelta(seconds=30)
+            ) from None
+        await self._run(person, principal, thread, cue, stream, watch=row)
+
     async def stop(self, thread_id: uuid.UUID, clicker: str) -> bool:
         """Stop the running turn; a card it waits on is answered Deny so it can end."""
         cancel = self._cancels.get(thread_id)
@@ -169,6 +227,7 @@ class WebTurns:
         thread: WebThreadRow,
         message: WebMessageRow,
         stream: TurnStream,
+        watch: TaskContinuationRow | None = None,
     ) -> None:
         turn_id, key, place = uuid.uuid4(), thread_key(thread.id), place_of(thread.person_id)
 
@@ -181,7 +240,9 @@ class WebTurns:
             files: tuple[WebOutputFile, ...] = (),
             cost_usd: Decimal | None = None,
         ) -> WebMessageRow:
-            blocks = WebMessageBlocks(steps=view.steps, files=files, card=card)
+            blocks = WebMessageBlocks(
+                steps=view.steps, files=files, card=card, artifacts=lifecycle.artifacts
+            )
             async with self.sessionmaker.begin() as session:
                 row = await chat_store.upsert_assistant_message(
                     session,
@@ -222,10 +283,12 @@ class WebTurns:
                 created_at=datetime.now(UTC),
             )
 
+        refusals = _WATCH_REFUSALS if watch is not None else ()
         lifecycle = self.lifecycles[thread.id] = WebTurnLifecycle(stream, save)
         cancel = self._cancels[thread.id] = asyncio.Event()
         try:
-            await save(lifecycle.reply_id, ReplyView(), "running", None, None)
+            if watch is None:
+                await save(lifecycle.reply_id, ReplyView(), "running", None, None)
             cap = await get_turn_cap(
                 self.sessionmaker,
                 tenant_id=thread.tenant_id,
@@ -233,6 +296,8 @@ class WebTurns:
             )
             ticket = self.queue.admit(thread.tenant_id, cap=cap, conversation_id=key)
             if ticket is None:
+                if watch is not None:
+                    raise TurnNotStarted("queue_full")
                 record_refusal(
                     self.sessionmaker,
                     tenant_id=thread.tenant_id,
@@ -261,9 +326,13 @@ class WebTurns:
                         thread_id=key,
                         caller_id=principal.external_id,
                     ):
-                        await self._admitted(person, principal, thread, message, lifecycle, cancel)
+                        await self._admitted(
+                            person, principal, thread, message, lifecycle, cancel, watch
+                        )
                 finally:
                     release_turn_slot()
+        except refusals:
+            raise
         except asyncio.CancelledError:
             await asyncio.shield(self._end(lifecycle, "stopped"))
             raise
@@ -297,6 +366,7 @@ class WebTurns:
         message: WebMessageRow,
         lifecycle: WebTurnLifecycle,
         cancel: asyncio.Event,
+        watch: TaskContinuationRow | None,
     ) -> None:
         deps, key, tenant_id = self.deps, thread_key(thread.id), thread.tenant_id
         place = place_of(thread.person_id)
@@ -319,7 +389,13 @@ class WebTurns:
                 surface=Surface.WEB,
                 principal_platform=principal.platform,
                 spend_person=principal.spend_person,
-                origin="chat",
+                # A page's ask is no person's own message: person-only tools refuse it.
+                origin=watch.reason
+                if watch is not None
+                else "chat"
+                if thread.artifact_id is None
+                else PAGE_ASK_ORIGIN,
+                attended=None if watch is None else False,
             )
         except (
             MissingTurnConfigError,
@@ -327,6 +403,8 @@ class WebTurns:
             AdmissionDenied,
             UserFacingError,
         ) as err:
+            if watch is not None:
+                raise
             await lifecycle.finish(
                 "done",
                 card=refusal_for(err, agent=thread.agent_name, admin=principal.role is Role.ADMIN),
@@ -352,9 +430,11 @@ class WebTurns:
                 tenant_id=tenant_id,
                 default_cap=self.web.max_concurrent_turns_per_tenant,
             )
+            if watch is not None and slot != "started":
+                raise AdmissionDenied(reason=slot) if slot in _SPEND_SLOTS else TurnNotStarted(slot)
             if slot == "cancelled":
                 await lifecycle.finish("stopped")
-            elif slot in ("balance_depleted", "cap_exceeded", "allowance_exhausted"):
+            elif slot in _SPEND_SLOTS:
                 await lifecycle.finish("done", card=refusal_for(AdmissionDenied(reason=slot)))
             elif slot != "started":
                 record_refusal(
@@ -367,7 +447,7 @@ class WebTurns:
                 await lifecycle.finish("done", card=busy())
             else:
                 await self._bind_and_run(
-                    principal, thread, message, admission, lifecycle, cancel, markers
+                    principal, thread, message, admission, lifecycle, cancel, markers, watch
                 )
         finally:
             async with self.sessionmaker.begin() as session:
@@ -384,6 +464,7 @@ class WebTurns:
         lifecycle: WebTurnLifecycle,
         cancel: asyncio.Event,
         markers: set[uuid.UUID],
+        watch: TaskContinuationRow | None = None,
     ) -> None:
         deps, key, tenant_id = self.deps, thread_key(thread.id), thread.tenant_id
         place = place_of(thread.person_id)
@@ -401,6 +482,8 @@ class WebTurns:
                 deadline=deadline,
             )
         except _BIND_REFUSALS as error:
+            if watch is not None:
+                raise
             await lifecycle.finish(
                 "done",
                 card=refusal_for(
@@ -442,7 +525,9 @@ class WebTurns:
             is_setup=config.thread_binding_kind == "setup",
             sender_foreign=admission.hold is not None and admission.hold.client,
             shared_channel=admission.shared_channel,
-            message_text=message.content,
+            attended=watch is None,
+            # Page text never settles the person's pending previews or grants, nor does a watch.
+            message_text=None if message.blocks.from_page or watch else message.content,
             platform_channel_id=key,
             platform_message_id=str(message.id),
         ) as origin:
@@ -452,6 +537,7 @@ class WebTurns:
                 **backend_facts(admission),
                 effective_is_admin=admission.is_admin,
                 session_state=None if continued else prepared.continuity.session_state(),
+                page=await self._page_of(thread),
             )
 
             async def reseed() -> str:
@@ -459,7 +545,7 @@ class WebTurns:
                 async with self.sessionmaker() as session:
                     earlier = await chat_store.list_messages(session, thread_id=thread.id)
                 previous = [
-                    TranscriptTurn(role="user" if m.role == "user" else "agent", text=m.content)
+                    TranscriptTurn(role="user" if m.role == "user" else "agent", text=said(m))
                     for m in earlier
                     if m.seq < message.seq and m.content
                 ]
@@ -467,7 +553,7 @@ class WebTurns:
                     bounded_turns(previous, admission.dm_history),
                     from_agent_name=admission.agent.name,
                 )
-                return f"{controls}\n{history}\n\n{prefix}{message.content}"
+                return f"{controls}\n{history}\n\n{prefix}{said(message)}"
 
             outcome = await run_prepared_turn(
                 deps,
@@ -476,8 +562,13 @@ class WebTurns:
                 platform="web",
                 thread_id=key,
                 external_user_id=principal.external_id,
-                user_message=f"{controls}\n\n{prefix}{message.content}",
-                request_text=message.content,
+                user_message=f"{controls}\n\n{prefix}{said(message)}",
+                # Page text never briefs the agent's MCP servers or counts as the person's question.
+                request_text=None if message.blocks.from_page or watch else message.content,
+                # A watch's turn reads and reports, unattended (`watch_turn`).
+                watch_row=watch,
+                continues=watch,
+                attended=None if watch is None else False,
                 request_ref=str(message.id),
                 lifecycle=lifecycle,
                 cancel=cancel,
@@ -513,7 +604,30 @@ class WebTurns:
                 and (revision is None or revision.backend != "selfhosted")
             ):
                 lifecycle.files = await self._outputs(outcome.outputs, tenant_id, thread.person_id)
+            async with self.sessionmaker() as session:
+                published = await artifact_store.published_in(
+                    session,
+                    platform="web",
+                    thread_id=key,
+                    message_id=str(message.id),
+                    public_url="",
+                )
+            lifecycle.artifacts = tuple(published)
             await lifecycle.finish("done")
+
+    async def _page_of(self, thread: WebThreadRow) -> PageOrigin | None:
+        """The page an ask thread was started from, so the agent knows who reads it."""
+        if thread.artifact_id is None:
+            return None
+        async with self.sessionmaker() as session:
+            artifact = await artifact_store.get(session, thread.artifact_id)
+            if artifact is None:
+                return None
+            outside = await artifact_store.visible_outside_workspace(session, artifact)
+        url = page_url(str(self.web.public_url), artifact.public_id, artifact.slug)
+        return PageOrigin(
+            slug=artifact.slug, title=artifact.title, url=url, visible_outside_workspace=outside
+        )
 
     def _link_for(self, tenant_id: uuid.UUID) -> Callable[[str], str] | None:
         fernet = self.deps.fernet

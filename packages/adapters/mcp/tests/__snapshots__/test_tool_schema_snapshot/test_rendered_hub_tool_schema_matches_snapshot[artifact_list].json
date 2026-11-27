@@ -1,0 +1,18 @@
+{
+  "description": [
+    "List the pages you can use: slug, title, URL, version, sharing and capabilities.",
+    "`daimon_id` (from list_daimons) is the Daimon that holds the page."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "daimon_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "daimon_id"
+    ],
+    "type": "object"
+  }
+}

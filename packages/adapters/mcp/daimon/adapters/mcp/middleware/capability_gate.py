@@ -12,7 +12,10 @@ results, so a feature that is Off here is not found (`_SEARCHING`).
 
 A tool whose setup this server lacks (`SERVER_SETUP`) leaves every list, that credential's too,
 and its call is refused as not set up: a worker can't judge that setup, and the server's
-settings, so that catalogue, stay fixed while it runs.
+settings, so that catalogue, stay fixed while it runs. So does a tool whose feature does not
+exist in the caller's workspace (`in_workspace`). Where pages are absent or not set up, or off
+for any other caller, the watch tools are listed without their page source and words
+(`without_pages`).
 """
 
 from __future__ import annotations
@@ -27,8 +30,10 @@ import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, list_running_origins
+from daimon.adapters.mcp.tools._pageless import without_pages
 from daimon.core.anthropic_guard import anthropic_disabled
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.features.deployment import in_workspace
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.snapshot import FeaturePlace, resolve_features, server_setup_met
 from daimon.core.features.surface import ask_to_turn_on
@@ -74,6 +79,11 @@ def _unset_refusal(tool: str, key: str) -> str:
         f"{FEATURES[key].name} isn't set up here yet, so {tool} can't run. Nothing was done. "
         "Ask whoever runs Daimon to set it up."
     )
+
+
+def absent_refusal(tool: str) -> str:
+    """A tool whose feature does not exist in the caller's workspace (`in_workspace`)."""
+    return f"{tool} isn't available here, so nothing was done."
 
 
 _UNREADABLE: Final = (
@@ -250,6 +260,9 @@ class CapabilityGateMiddleware(Middleware):
         auth = await ctx.get_state("auth") if key is not None and ctx is not None else None
         if key is None or not isinstance(auth, AuthIdentity):
             return await call_next(context)
+        if not in_workspace(FEATURES[key], self._runtime.settings, auth.tenant_id):
+            record_denial(UNSET_REASON)
+            raise ToolError(absent_refusal(tool))
         if not server_setup_met(FEATURES[key], self._runtime.settings):
             record_denial(UNSET_REASON)
             raise ToolError(_unset_refusal(tool, key))
@@ -285,10 +298,19 @@ class CapabilityGateMiddleware(Middleware):
         if not isinstance(auth, AuthIdentity):
             return tools
         settings = self._runtime.settings
-        unset = gated_tools(k for k in GATED_KEYS if not server_setup_met(FEATURES[k], settings))
+        unset = gated_tools(
+            k
+            for k in GATED_KEYS
+            if not server_setup_met(FEATURES[k], settings)
+            or not in_workspace(FEATURES[k], settings, auth.tenant_id)
+        )
         tools = [t for t in tools if t.name not in unset or server_gate_key(t.name) is None]
+        pages = FEATURES["artifacts"]
+        pageless = not in_workspace(pages, settings, auth.tenant_id) or not server_setup_met(
+            pages, settings
+        )
         if _lists_everything(auth) and not _SEARCHING.get():
-            return tools
+            return [without_pages(t) for t in tools] if pageless else tools
         try:
             places = await caller_places(self._runtime, auth, None)
             found = [
@@ -299,6 +321,11 @@ class CapabilityGateMiddleware(Middleware):
             ]
         except Exception:  # named boundary: the list stays whole; every call is still checked
             log.warning("capability_gate.list_read_failed", exc_info=True)
+            found = []
+        # Where pages are absent or off, the watch tools keep their names but never name pages.
+        if pageless or any(hides_tools(place.get("artifacts")) for place in found):
+            tools = [without_pages(t) for t in tools]
+        if not found:
             return tools
         off = gated_tools(
             key for key in GATED_KEYS if any(hides_tools(place.get(key)) for place in found)

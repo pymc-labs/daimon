@@ -100,6 +100,24 @@ def fake_discord(
     return FakeUpstream(handler)
 
 
+def fake_google(
+    *, sub: str, email: str | None, verified: bool = True, name: str = "Gus"
+) -> FakeUpstream:
+    """Google's token and userinfo endpoints, answering as the account `sub`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/token":
+            return httpx.Response(200, json={"access_token": "gtok"})
+        if request.url.path == "/v1/userinfo":
+            body: dict[str, object] = {"sub": sub, "name": name, "email_verified": verified}
+            if email is not None:
+                body["email"] = email
+            return httpx.Response(200, json=body)
+        return httpx.Response(404)
+
+    return FakeUpstream(handler)
+
+
 def fake_slack(
     *, team: tuple[str, str] | None, user_id: str = "U1", name: str = "ada"
 ) -> FakeUpstream:

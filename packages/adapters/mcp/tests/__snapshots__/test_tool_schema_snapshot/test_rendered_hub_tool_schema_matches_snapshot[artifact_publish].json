@@ -1,0 +1,221 @@
+{
+  "description": [
+    "Publish an HTML page at `slug`, or republish it, or change only its settings.",
+    "",
+    "Step 2 of 2 after artifact_upload_url: pass its `upload`. A new page needs an",
+    "upload and a title; later calls without `upload` change settings only. Returns the",
+    "page URL; give it to the user. `daimon_id` (from list_daimons) is the Daimon that holds the page.",
+    "`access`: `workspace` (everyone on the team, the default), \"people\" (only",
+    "`people`) or \"public\" (anyone with the link, which the URL carries). `people` and",
+    "`editors` are people in the app, named by their id there, a chat user id or an",
+    "@mention. Editors republish and change settings. `expires_in_days` takes the page",
+    "offline after that many days (0 means never). A page going public expires in 30 days",
+    "unless you set one. A public page cannot write data, ask, or both read data and send",
+    "events.",
+    "`data` is \"off\", \"read\" or \"write\": whether page code can read or also write the",
+    "page's data. `events` lets page code send events your watches can wake on; `ask`",
+    "lets viewers ask you from the page. `data_scale` (1-10) multiplies the data caps.",
+    "`rules` sets what viewers may do per collection, replacing the page's rules:",
+    "{\"votes\": {\"read\": \"all\"|\"own\", \"write\": \"all\"|\"own\"|\"none\"}}, where \"own\" is the",
+    "documents that viewer created. Owners and editors are not bound by them, and nor are",
+    "you when you act for one; you follow them for anyone else.",
+    "`new_link` replaces a public page's link."
+  ],
+  "parameters": {
+    "$defs": {
+      "CollectionRule": {
+        "additionalProperties": false,
+        "description": "What a page's viewers may do in one collection: `own` is the documents they created.\nManagers are not bound by it, nor are tools acting for one.",
+        "properties": {
+          "read": {
+            "default": "all",
+            "enum": [
+              "all",
+              "own"
+            ],
+            "type": "string"
+          },
+          "write": {
+            "default": "all",
+            "enum": [
+              "all",
+              "own",
+              "none"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "access": {
+        "anyOf": [
+          {
+            "enum": [
+              "workspace",
+              "people",
+              "public"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "ask": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "daimon_id": {
+        "type": "string"
+      },
+      "data": {
+        "anyOf": [
+          {
+            "enum": [
+              "off",
+              "read",
+              "write"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "data_scale": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "editors": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "editors_can_share": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "events": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "expires_in_days": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "new_link": {
+        "default": false,
+        "type": "boolean"
+      },
+      "people": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "rules": {
+        "anyOf": [
+          {
+            "additionalProperties": {
+              "$ref": "#/$defs/CollectionRule"
+            },
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "slug": {
+        "type": "string"
+      },
+      "title": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "upload": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "daimon_id",
+      "slug"
+    ],
+    "type": "object"
+  }
+}

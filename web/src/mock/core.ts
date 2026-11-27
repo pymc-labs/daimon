@@ -11,9 +11,9 @@ export const coreHandlers = [
     return m ? HttpResponse.json(m) : unauthorized()
   }),
   http.get("/auth/providers", () => HttpResponse.json([
-    { id: "discord", label: "Discord", kind: "redirect" },
-    { id: "slack", label: "Slack", kind: "redirect" },
-    { id: "microsoft", label: "Microsoft", kind: "redirect" },
+    { id: "discord", label: "Discord", kind: "redirect", connectable: true },
+    { id: "slack", label: "Slack", kind: "redirect", connectable: true },
+    { id: "microsoft", label: "Microsoft", kind: "redirect", connectable: true },
   ])),
   http.get("/auth/legal", () => HttpResponse.json({ privacy: "https://example.com/privacy", terms: "https://example.com/terms" })),
   // Every provider signs in the same demo admin; the dev panel passes `email` to switch people.

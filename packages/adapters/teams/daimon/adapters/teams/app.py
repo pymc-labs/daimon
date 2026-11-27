@@ -108,6 +108,7 @@ from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.channel_budget_notice import run_budget_alert_poller
 from daimon.core.channel_listing import run_channel_listing
 from daimon.core.continuity.continuation import (
+    WATCH_REASONS,
     check_wake_responder,
     continuation_attended,
     load_asking_agent_id,
@@ -119,6 +120,7 @@ from daimon.core.continuity.messages import (
     render_responder_changed_without_handoff,
 )
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller
+from daimon.core.continuity.watch_turn import pause_for_lost_access
 from daimon.core.direct_messages import DirectMessageAccessRevoked, require_dm_turn_grant
 from daimon.core.dm_debounce import DmBursts, debounce_seconds
 from daimon.core.dm_debounce import React as BurstMark
@@ -460,6 +462,8 @@ class TeamsApp:
         self._channel_files = channel_files
         # Records each team for the MCP server's channel reads; None records nothing.
         self._installs = installs
+        # Roster reads; a watch reports only while its owner is still in the conversation.
+        self._direct = direct
         # Commands and sender-only notices; `direct` opens a channel command's 1:1 chat.
         self._private = PrivateReplies(
             runtime=self.runtime,
@@ -2374,6 +2378,8 @@ class TeamsApp:
             )
 
         conversation = conversation_of(row.thread_id)
+        if row.reason in WATCH_REASONS:
+            await self._require_watch_owner(row, conversation)
         inbound = TeamsInbound(
             kind=kind_of(conversation, row.parent_channel_id),
             entra_tenant_id=self._teams.tenant_id,
@@ -2386,6 +2392,14 @@ class TeamsApp:
             service_url=service_url,
         )
         await self._run_turn(inbound, tenant_id, handoff=handoff, reraise=True, continuation=row)
+
+    async def _require_watch_owner(self, row: TaskContinuationRow, conversation: str) -> None:
+        """Every report rechecks the owner is still in the conversation's roster; proved
+        absence pauses the watch, and with no roster reader nothing can be proved."""
+        if self._direct is None:
+            raise AdmissionDenied(reason="invoker_not_allowed")
+        if await self._direct.member(conversation, row.requester_external_user_id) is None:
+            raise await pause_for_lost_access(self.runtime.sessionmaker, row)
 
     async def _settle(
         self,

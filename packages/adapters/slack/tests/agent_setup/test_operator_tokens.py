@@ -94,6 +94,7 @@ def test_the_form_offers_only_tenant_scopes_and_reads_back_the_pick() -> None:
         "agents:archive",
         "promo:redeem",
         "issues:read",
+        "artifacts:data",
     ], "never promo:create"
     submission = evaluate_operator_token_submission(_payload(["tenant:read"]))
     assert submission == OperatorTokenSubmission(meta=META, scopes=("tenant:read",), label="ci")

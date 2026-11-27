@@ -19,6 +19,7 @@ _FAMILIES = {
     "compute": lambda name: name.startswith("compute_"),
     "microsoft_365": lambda name: "microsoft" in name,
     "lead_intake": lambda name: name.startswith("lead_intake_"),
+    "artifacts": lambda name: name.startswith("artifact_"),
 }
 
 

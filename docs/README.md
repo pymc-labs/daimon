@@ -24,6 +24,7 @@ server](https://daimon.decision.ai/) instead.
 <!-- /knowledge -->
 - **Shape what it does:** [Defaults](defaults.md) for agents and skills,
   [Routines](routines.md) and [Watches](watches.md) for scheduled work,
+  [Artifacts](artifacts.md) for pages agents host,
   [Direct messages](direct-messages.md),
   [Repository memory](repo-memory.md),
   [Context providers](context-providers.md),

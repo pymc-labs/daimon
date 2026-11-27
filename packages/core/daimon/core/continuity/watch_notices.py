@@ -48,13 +48,14 @@ async def poll_watch_notices(
     sessions: async_sessionmaker[AsyncSession],
     *,
     deliver: DeliverNotice,
+    platform: str = "discord",
 ) -> None:
     async with sessions.begin() as db:
         await prune_notice_receipts(db, now=datetime.now(UTC))
     for _ in range(4):
         async with sessions.begin() as db:
             now = datetime.now(UTC)
-            notice = await claim_import_notice(db, now=now)
+            notice = await claim_import_notice(db, now=now, platform=platform)
             attempt = None if notice is None else await open_notice_attempt(db, notice[0], now=now)
         if notice is None:
             return

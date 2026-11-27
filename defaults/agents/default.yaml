@@ -201,6 +201,8 @@ skills:
   - type: custom
     skill_id: marimo_notebooks
   - type: custom
+    skill_id: artifacts
+  - type: custom
     skill_id: workspace-setup
   - type: custom
     skill_id: pymc-artifact-style

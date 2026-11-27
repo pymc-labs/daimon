@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Weekly metrics</title>
+<style>
+:root{--ink:#0c1f40;--mute:#5b677d;--line:#e4e8ee;--bg:#f6f8fa;--teal:#0c9e82;--blue:#2f6db5;--amber:#d0731d;--rose:#c2456b}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+.wrap{max-width:900px;margin:0 auto;padding:28px 24px 40px}h1{margin:0;font-size:22px;letter-spacing:-.01em}.sub{color:var(--mute);font-size:13px}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:20px 0 14px}
+.k,.card{background:#fff;border:1px solid var(--line);border-radius:12px}.k{padding:14px}.k span{font-size:12px;color:var(--mute)}.k b{display:block;font-size:24px;letter-spacing:-.02em;margin-top:2px}
+.d{font-size:12px;font-weight:500}.up{color:#1a7f53}.dn{color:#c93030}
+.grid{display:grid;grid-template-columns:1.6fr 1fr;gap:14px}.card{padding:16px}.card h2{margin:0 0 12px;font-size:13px}
+.leg{display:flex;gap:14px;font-size:12px;color:var(--mute);margin-bottom:6px}.leg i{display:inline-block;width:10px;height:3px;border-radius:2px;margin-right:6px;vertical-align:middle}
+.bar{display:grid;grid-template-columns:86px 1fr 40px;align-items:center;gap:8px;font-size:12px;margin:9px 0}.bar div{height:8px;background:#edf0f4;border-radius:4px;overflow:hidden}.bar div i{display:block;height:100%;background:var(--teal);border-radius:4px}
+table{width:100%;border-collapse:collapse;margin-top:14px;font-size:13px}th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--mute);padding:8px 10px;border-bottom:1px solid var(--line)}td{padding:9px 10px;border-bottom:1px solid var(--line)}td:not(:first-child),th:not(:first-child){text-align:right}
+@media(max-width:620px){.kpis{grid-template-columns:repeat(2,1fr)}.grid{grid-template-columns:1fr}}
+</style></head><body><div class="wrap">
+<h1>Weekly metrics</h1><div class="sub">2026-W46, refreshed 5 hours ago</div>
+<div class="kpis">
+<div class="k"><span>Spend</span><b>$142.6k</b><div class="d up">12% under last week</div></div>
+<div class="k"><span>Blended ROAS</span><b>2.9x</b><div class="d up">+0.2 vs W45</div></div>
+<div class="k"><span>Agent turns</span><b>298</b><div class="d dn">-4%</div></div>
+<div class="k"><span>Cost per turn</span><b>$0.48</b><div class="d up">-9%</div></div>
+</div>
+<div class="grid">
+<div class="card"><h2>Spend and ROAS, last 8 weeks</h2>
+<div class="leg"><span><i style="background:var(--blue)"></i>Spend ($k)</span><span><i style="background:var(--teal)"></i>ROAS</span></div>
+<svg viewBox="0 0 460 200" width="100%" role="img" aria-label="Spend and ROAS">
+<g stroke="#e4e8ee"><line x1="30" x2="450" y1="20" y2="20"/><line x1="30" x2="450" y1="70" y2="70"/><line x1="30" x2="450" y1="120" y2="120"/><line x1="30" x2="450" y1="170" y2="170"/></g>
+<g font-size="10" fill="#5b677d"><text x="0" y="24">180</text><text x="0" y="74">150</text><text x="0" y="124">120</text><text x="0" y="174">90</text></g>
+<polyline fill="none" stroke="#2f6db5" stroke-width="2.5" stroke-linejoin="round" points="50,90 110,62 170,48 230,76 290,40 350,58 410,34 440,52"/>
+<polyline fill="none" stroke="#0c9e82" stroke-width="2.5" stroke-linejoin="round" points="50,140 110,128 170,112 230,118 290,96 350,92 410,70 440,64"/>
+<g font-size="10" fill="#5b677d" text-anchor="middle"><text x="50" y="192">W39</text><text x="110" y="192">W40</text><text x="170" y="192">W41</text><text x="230" y="192">W42</text><text x="290" y="192">W43</text><text x="350" y="192">W44</text><text x="410" y="192">W45</text><text x="440" y="192">W46</text></g>
+</svg></div>
+<div class="card"><h2>Spend by agent</h2>
+<div class="bar">MMM Analyst<div><i style="width:100%"></i></div>$61k</div>
+<div class="bar">Daimon<div><i style="width:73%"></i></div>$45k</div>
+<div class="bar">Pricing<div><i style="width:35%"></i></div>$21k</div>
+<div class="bar">Reviewer<div><i style="width:25%"></i></div>$15k</div></div>
+</div>
+<div class="card" style="margin-top:14px"><h2>Largest routines</h2>
+<table><tr><th>Routine</th><th>Runs</th><th>Spend</th></tr>
+<tr><td>Nightly Larkspur refresh</td><td>7</td><td>$28.90</td></tr><tr><td>Weekly channel readout</td><td>1</td><td>$6.10</td></tr><tr><td>Overnight price test</td><td>5</td><td>$4.45</td></tr></table></div>
+</div></body></html>

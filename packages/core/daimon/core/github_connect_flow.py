@@ -68,6 +68,7 @@ from daimon.core.github_connect_views import (
     SavedAgentView,
     agent_editor_view,
     confirm_url,
+    host_cookie,
     install_url,
     receipt_signature,
     redact_hidden_grants,
@@ -279,7 +280,10 @@ def _chat_return(requester: AccountIdentityRow | None) -> ChatReturn | None:
 
 def _flow_cookie(root: str, value: str, max_age: int) -> ConnectCookie:
     return ConnectCookie(
-        name=FLOW_COOKIE, value=value, max_age=max_age, secure=root.startswith("https://")
+        name=host_cookie(FLOW_COOKIE, root),
+        value=value,
+        max_age=max_age,
+        secure=root.startswith("https://"),
     )
 
 
@@ -598,7 +602,12 @@ class GitHubConnectFlow:
         return ConnectRedirect(
             url=f"https://github.com/login/oauth/authorize?{params}",
             cookies=tuple(
-                ConnectCookie(name=name, value=value, max_age=FLOW_COOKIE_MAX_AGE, secure=secure)
+                ConnectCookie(
+                    name=host_cookie(name, root),
+                    value=value,
+                    max_age=FLOW_COOKIE_MAX_AGE,
+                    secure=secure,
+                )
                 for name, value in ((FLOW_COOKIE, cookie), (STATE_COOKIE, state))
             ),
         )

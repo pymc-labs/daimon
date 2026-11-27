@@ -1,0 +1,26 @@
+{
+  "description": [
+    "Publish an HTML page, step 1 of 2: get a one-time URL to PUT the file to.",
+    "",
+    "Write the page as one self-contained HTML file, then upload it from your sandbox:",
+    "`curl -sS -X PUT --data-binary @page.html \"<upload_url>\"`. The bytes never pass",
+    "through your context. Then call artifact_publish with the returned `upload`.",
+    "`daimon_id` (from list_daimons) is the Daimon that holds the page."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "daimon_id": {
+        "type": "string"
+      },
+      "filename": {
+        "default": "page.html",
+        "type": "string"
+      }
+    },
+    "required": [
+      "daimon_id"
+    ],
+    "type": "object"
+  }
+}

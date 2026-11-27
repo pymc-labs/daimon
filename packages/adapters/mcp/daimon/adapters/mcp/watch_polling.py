@@ -41,10 +41,13 @@ from daimon.adapters.mcp.tools.discord._visibility import (
     _ensure_thread_parent_cached,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.core.agent_mcp_credentials import resolve_hidden_mcp_server_names
+from daimon.core.artifact_pages.documents import build_list_query
+from daimon.core.artifact_pages.standing import visitor_accounts
 from daimon.core.authz import Action, Place, Surface, authorize, build_agent_ref
 from daimon.core.bot_access import BotAccessUnavailable, bot_access_wait_on, is_missing_access
 from daimon.core.config import load_watches_settings
 from daimon.core.continuity.poll_tools import (
+    PAGE_DATA_TOOL,
     SourceChanged,
     ToolUnlisted,
     catalogue_digest,
@@ -69,6 +72,7 @@ from daimon.core.continuity.watch_projection import (
     payload as evidence_payload,
 )
 from daimon.core.errors import WatchFeatureUnreadable
+from daimon.core.features.snapshot import FeaturePlace, feature_in
 from daimon.core.github_credentials import decrypt_token
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_chat_mcp_token
@@ -82,6 +86,7 @@ from daimon.core.mux_compat import retrieve_agent
 from daimon.core.ops_catalog import OpsCode
 from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.stores import agent_mcp_credentials as credential_store
+from daimon.core.stores import artifact_pages, web_people
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.direct_messages import is_dm_thread
@@ -355,6 +360,8 @@ async def authorize_source(
             listed.credential != watch.source_state.get("credential")
         ):
             raise PollAccessRevoked("Watch credential changed")
+    if watch.platform == "web":
+        return await _authorize_web_poll(runtime, watch)
     async with runtime.session_factory() as db:
         tenant = await get_tenant(db, watch.tenant_id)
         account = await get_account(db, watch.owner_account_id)
@@ -434,15 +441,17 @@ async def authorize_source(
         if current is not None and current.rule != "allow":
             raise PollAccessRevoked("Poll tool requires approval or is denied")
         arguments = cast(dict[str, object], watch.source_state.get("arguments", {}))
-        source_id = str(arguments.get("thread_id", arguments.get("channel_id", "")))
-        try:
-            require_distinct_source(arguments, watch.thread_id)
-        except ValueError as exc:
-            raise PollAccessRevoked(str(exc)) from exc
-        source_place = await poll_read_place(runtime, auth, source_id)
-        # Identity equality follows native resolution, never caller spelling.
-        if source_place.channel_id == place.channel_id:
-            raise PollAccessRevoked("Poll source resolves to the reporting thread")
+        if tool != PAGE_DATA_TOOL:
+            # A page's data has no chat place; its reader checks the owner's page access.
+            source_id = str(arguments.get("thread_id", arguments.get("channel_id", "")))
+            try:
+                require_distinct_source(arguments, watch.thread_id)
+            except ValueError as exc:
+                raise PollAccessRevoked(str(exc)) from exc
+            source_place = await poll_read_place(runtime, auth, source_id)
+            # Identity equality follows native resolution, never caller spelling.
+            if source_place.channel_id == place.channel_id:
+                raise PollAccessRevoked("Poll source resolves to the reporting thread")
     elif watch.source == "mcp_poll":
         server_url = str(watch.source_state["server_url"])
         tool = str(watch.source_state.get("tool"))
@@ -503,10 +512,92 @@ async def authorize_source(
     return auth, read, server_name, str(agent.name)
 
 
+async def _authorize_web_poll(
+    runtime: McpRuntime, watch: WatchRow
+) -> tuple[AuthIdentity, ChannelReadPolicy, str | None, str]:
+    """A web watch polls only a page's data, as its owner: a member still in the workspace,
+    not a visitor or an outsider. The read itself checks they can still use the page
+    (`read_page_data`)."""
+    if watch.source != "poll" or watch.source_state.get("tool") != PAGE_DATA_TOOL:
+        raise PollAccessRevoked("Web watches poll only page data")
+    async with runtime.session_factory() as db:
+        tenant = await get_tenant(db, watch.tenant_id)
+        account = await get_account(db, watch.owner_account_id)
+        person = await web_people.get_person_for_account(
+            db, tenant_id=watch.tenant_id, account_id=watch.owner_account_id
+        )
+        policy = await load_access_policy(db, tenant_id=watch.tenant_id)
+        visitor = await visitor_accounts(
+            db, tenant_id=watch.tenant_id, account_ids=[watch.owner_account_id]
+        )
+    if (
+        tenant is None
+        or account is None
+        or account.tenant_id != watch.tenant_id
+        or person is None
+        or person.status != "active"
+        or visitor
+    ):
+        raise PollAccessRevoked("Watch owner unavailable")
+    agent = await retrieve_agent(
+        runtime.client,
+        watch.agent_id,
+        scope=resource_scope(tenant_id=str(watch.tenant_id)),
+        records=runtime.session_factory,
+    )
+    auth = AuthIdentity(
+        account_id=watch.owner_account_id,
+        tenant_id=watch.tenant_id,
+        role=account.role,
+        platform=watch.principal_platform or watch.platform,
+        external_id=tenant.external_id,
+        platform_user_id=watch.owner_external_id,
+        chat_agent_id=derive_agent_uuid(tenant_id=watch.tenant_id, ma_agent_id=watch.agent_id),
+    )
+    return auth, ChannelReadPolicy(policy), None, str(agent.name)
+
+
+async def read_page_data(runtime: McpRuntime, watch: WatchRow) -> JsonValue:
+    """`artifact_db_query` as the watch owner: refused once they can no longer use the page, or
+    `artifacts` is off for its agent (which covers a workspace without artifacts)."""
+    arguments = cast(dict[str, JsonValue], watch.source_state["arguments"])
+    limits = runtime.settings.artifact_pages
+    order_by = cast(str | None, arguments.get("order_by"))
+    query = build_list_query(
+        str(arguments["collection"]),
+        order_by=order_by,
+        descending=arguments.get("descending") is True,
+        limit=min(int(str(arguments.get("limit", 20))), limits.list_documents),
+        by_creation=order_by is None,
+        limits=limits,
+    )
+    async with runtime.session_factory() as db:
+        page = await artifact_pages.get_by_slug(
+            db, tenant_id=watch.tenant_id, slug=str(arguments["slug"])
+        )
+        role = (
+            "none"
+            if page is None
+            else await artifact_pages.tool_role(db, page, watch.owner_account_id, chat_admin=False)
+        )
+        if page is None or role == "none":
+            raise PollAccessRevoked("Watch owner can no longer use the page")
+        place = FeaturePlace(watch.tenant_id, "web", agent_id=page.agent_id)
+        if not (await feature_in(db, runtime.settings, place, "artifacts")).on:
+            raise PollAccessRevoked("Pages are off for the page's agent")
+        rule = artifact_pages.bound_rule(page, query.collection, role)
+        if rule is not None and rule.read == "own":
+            query = query.model_copy(update={"created_by": watch.owner_account_id})
+        rows = await artifact_pages.list_docs(db, page.id, query, limits=limits)
+    return {"rows": [{"id": row.doc_id, "data": row.data} for row in rows]}
+
+
 async def read_native(
     runtime: McpRuntime, auth: AuthIdentity, read: ChannelReadPolicy, watch: WatchRow
 ) -> JsonValue:
-    """A reviewed Discord reader, as the owner, keeping only human-authored rows."""
+    """A reviewed reader, as the owner; a chat reader keeps only human-authored rows."""
+    if watch.source_state["tool"] == PAGE_DATA_TOOL:
+        return await read_page_data(runtime, watch)
     arguments = cast(dict[str, JsonValue], watch.source_state["arguments"])
     limit = int(str(arguments.get("limit", 10)))
     if watch.source_state["tool"] == "read_thread":

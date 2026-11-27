@@ -108,6 +108,8 @@ class PurgePreview(BaseModel):
     teams_messages: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     microsoft_user_tokens: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     lead_intakes: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    artifacts: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    artifact_mentions: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     web_people: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     web_admin_grants: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     monitored_events: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
@@ -164,6 +166,8 @@ def held_lines(preview: PurgePreview) -> list[str]:
         (preview.platform_user_names, "remembered name"),
         (preview.teams_messages, "message record"),
         (preview.microsoft_user_tokens, "saved Microsoft account"),
+        (preview.artifacts, "artifact page"),
+        (preview.artifact_mentions, "mention on someone's artifact page"),
         (preview.web_people, "web app profile"),
         (preview.web_admin_grants, "web app admin role"),
         (preview.mux_slots, "saved conversation"),
@@ -257,6 +261,8 @@ def _plural(label: str) -> str:
         return "links from agents to your GitHub keys"
     if label == "post an agent made for you":
         return "posts agents made for you"
+    if label == "mention on someone's artifact page":
+        return "mentions on other people's artifact pages"
     if label == "record admins can read":
         return "records admins can read"
     return f"{label}s"

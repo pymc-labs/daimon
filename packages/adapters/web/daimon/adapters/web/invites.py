@@ -86,17 +86,63 @@ async def _opened_by(
     return origin or invite, person
 
 
+async def join_invite(db: AsyncSession, invite: WebInviteRow, now: datetime) -> WebPersonRow:
+    """The person an invite brings in: their own account, sign-in and allowance."""
+    person_id = uuid.uuid4()
+    principal = await get_or_create_platform_principal(
+        db, tenant_id=invite.tenant_id, platform="web", external_id=str(person_id)
+    )
+    person = await web_people.create_invited(
+        db,
+        person_id=person_id,
+        tenant_id=invite.tenant_id,
+        account_id=principal.account_id,
+        kind=invite.role,
+        display_name=invite.email.split("@")[0] or "Guest",
+        workspace_name=await _workspace_name(db, invite),
+        email=invite.email or None,
+        invite_id=invite.id,
+        invited_by_account_id=invite.created_by_account_id,
+    )
+    await web_identities.link_identity(
+        db,
+        tenant_id=invite.tenant_id,
+        person_id=person.id,
+        provider=INVITE_PROVIDER,
+        issuer="",
+        subject=str(invite.id),
+        label=invite.email,
+        groups=(),
+    )
+    if invite.credit_usd > 0:
+        await spend_allowances.create_allowance(
+            db,
+            tenant_id=invite.tenant_id,
+            subject_kind="invite",
+            subject_id=str(invite.id),
+            agent_id=None,
+            amount_usd=invite.credit_usd,
+            window="total" if invite.role == "visitor" else "month",
+            starts_at=now,
+            created_by_account_id=invite.created_by_account_id,
+        )
+    return person
+
+
 def invites_router(runtime: WebRuntime) -> APIRouter:
     router = APIRouter(prefix="/api/invites")
 
-    async def agents_of(tenant_id: uuid.UUID, agent_ids: Sequence[str]) -> list[dict[str, Any]]:
-        """The invite's agents as cards; the workspace's default when it names none."""
+    async def agents_of(
+        tenant_id: uuid.UUID, agent_ids: Sequence[str], *, member: bool
+    ) -> list[dict[str, Any]]:
+        """The invite's agents as cards; for a member, the workspace's default when it
+        names none. A visitor reaches only the agents named."""
         if runtime.turns is None:
             return []
         deps = runtime.turns.deps
         listed = await runtime.agents.agents(deps.anthropic, tenant_id)
         picked: list[BetaManagedAgentsAgent] = [a for a in listed if a.id in agent_ids]
-        if not picked:
+        if not picked and member:
             default = deps.deployment_default.agent_name
             picked = [a for a in listed if a.name == default][:1]
         avatars = await avatars_of(runtime, tenant_id, picked)
@@ -116,7 +162,9 @@ def invites_router(runtime: WebRuntime) -> APIRouter:
             "from": sender,
             "email": email,
             "kind": invite.kind,
-            "agents": await agents_of(invite.tenant_id, origin.agent_ids),
+            "agents": await agents_of(
+                invite.tenant_id, origin.agent_ids, member=origin.role == "member"
+            ),
             "credit_usd": float(origin.credit_usd),
             "expires_at": invite.expires_at.isoformat(),
         }
@@ -161,7 +209,7 @@ def invites_router(runtime: WebRuntime) -> APIRouter:
                 log.info("web.invite.owner", tenant_id=str(invite.tenant_id))
                 return {"ok": True}
             person = await (
-                _sign_in(db, invite) if invite.kind == "sign_in" else _join(db, invite, now)
+                _sign_in(db, invite) if invite.kind == "sign_in" else join_invite(db, invite, now)
             )
             await web_invites.set_accepted_by(db, invite_id=invite.id, person_id=person.id)
             if invite.kind == "sign_in":
@@ -220,48 +268,6 @@ def invites_router(runtime: WebRuntime) -> APIRouter:
             raise _gone()
         if person.status == "suspended":
             raise HTTPException(status_code=403, detail="This account is suspended.")
-        return person
-
-    async def _join(db: AsyncSession, invite: WebInviteRow, now: datetime) -> WebPersonRow:
-        """The person an invite brings in: their own account, sign-in and allowance."""
-        person_id = uuid.uuid4()
-        principal = await get_or_create_platform_principal(
-            db, tenant_id=invite.tenant_id, platform="web", external_id=str(person_id)
-        )
-        person = await web_people.create_invited(
-            db,
-            person_id=person_id,
-            tenant_id=invite.tenant_id,
-            account_id=principal.account_id,
-            kind=invite.role,
-            display_name=invite.email.split("@")[0] or "Guest",
-            workspace_name=await _workspace_name(db, invite),
-            email=invite.email or None,
-            invite_id=invite.id,
-            invited_by_account_id=invite.created_by_account_id,
-        )
-        await web_identities.link_identity(
-            db,
-            tenant_id=invite.tenant_id,
-            person_id=person.id,
-            provider=INVITE_PROVIDER,
-            issuer="",
-            subject=str(invite.id),
-            label=invite.email,
-            groups=(),
-        )
-        if invite.credit_usd > 0:
-            await spend_allowances.create_allowance(
-                db,
-                tenant_id=invite.tenant_id,
-                subject_kind="invite",
-                subject_id=str(invite.id),
-                agent_id=None,
-                amount_usd=invite.credit_usd,
-                window="total" if invite.role == "visitor" else "month",
-                starts_at=now,
-                created_by_account_id=invite.created_by_account_id,
-            )
         return person
 
     async def _signed_in(request: Request) -> WebCaller | None:

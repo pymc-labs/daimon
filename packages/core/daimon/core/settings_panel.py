@@ -30,6 +30,7 @@ from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.config import Settings
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+from daimon.core.features.deployment import in_workspace
 from daimon.core.features.registry import DEFAULT, FEATURES, LOCKABLE, Category, FeatureSpec
 from daimon.core.features.service import (
     FeatureActor,
@@ -462,7 +463,8 @@ async def show(
         return await _root(sessions, settings, place)
     if found.key is None:
         return await _category(sessions, settings, actor, place, found.category, found.page)
-    if not FEATURES[found.key].on_platform(place.platform):
+    spec = FEATURES[found.key]
+    if not spec.on_platform(place.platform) or not in_workspace(spec, settings, place.tenant_id):
         return None
     return await _feature(
         sessions, settings, actor, place, found.key, found.agent, agents, found.page, found.picker

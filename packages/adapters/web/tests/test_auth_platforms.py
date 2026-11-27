@@ -392,10 +392,10 @@ async def test_every_configured_chat_platform_is_offered(
         return (await client.get("/auth/providers")).json()
 
     providers = await _chat_rig(web_client, db_session_factory, fake_slack(team=None), listed)
-    assert [(p["id"], p["label"], p["kind"]) for p in providers] == [
-        ("discord", "Discord", "redirect"),
-        ("slack", "Slack", "redirect"),
-        ("microsoft", "Microsoft", "redirect"),
+    assert [(p["id"], p["label"], p["kind"], p["connectable"]) for p in providers] == [
+        ("discord", "Discord", "redirect", True),
+        ("slack", "Slack", "redirect", True),
+        ("microsoft", "Microsoft", "redirect", True),
     ], providers
 
 

@@ -27,6 +27,8 @@ export type Msg = {
   files?: FileOut[]
   attachments?: { name: string; size: number }[]
   card?: Card
+  /** Pages this reply published. */
+  artifacts?: { id: string; title: string; url: string; version: number; access: "workspace" | "people" | "public" }[]
   cost_usd?: number
   ms?: number
   feedback?: "up" | "down" | null

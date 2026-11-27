@@ -33,8 +33,8 @@ AUTH = SimpleNamespace(
 )
 
 
-def _origin(thread_id: str = "4242", parent_id: str = "4241"):
-    return SimpleNamespace(thread_id=thread_id, parent_channel_id=parent_id)
+def _origin(thread_id: str = "4242", parent_id: str = "4241", platform: str = "discord"):
+    return SimpleNamespace(thread_id=thread_id, parent_channel_id=parent_id, platform=platform)
 
 
 @pytest.fixture
@@ -73,7 +73,20 @@ async def test_a_watch_made_in_a_dm_reports_in_that_dm(discord_rest, delivery):
 async def test_other_platforms_refuse_dm_and_new_thread(discord_rest):
     slack = SimpleNamespace(platform="slack", platform_user_id="U1", tenant_id=TENANT)
     with pytest.raises(ToolError, match="only report in this thread"):
-        await require_delivery_allowed(_runtime(), slack, _origin(), "dm")  # type: ignore[arg-type]
+        await require_delivery_allowed(
+            _runtime(),
+            slack,
+            _origin(platform="slack"),
+            "dm",  # type: ignore[arg-type]
+        )
+
+
+async def test_a_web_watch_may_report_in_a_new_thread_of_its_own(discord_rest):
+    web = SimpleNamespace(platform="web", platform_user_id=None, tenant_id=TENANT)
+    origin = _origin(platform="web")
+    await require_delivery_allowed(_runtime(), web, origin, "new_thread")  # type: ignore[arg-type]
+    with pytest.raises(ToolError, match="only report in this thread"):
+        await require_delivery_allowed(_runtime(), web, origin, "dm")  # type: ignore[arg-type]
 
 
 async def test_dm_delivery_needs_dms_on_and_the_owner_allowed(discord_rest, monkeypatch):

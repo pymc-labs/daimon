@@ -17,6 +17,7 @@ from daimon.core.github_connect_views import (
     ConnectErrorView,
     ConnectOutcome,
     ConnectPage,
+    host_cookie,
     read_capped,
     selection_from_json,
     selection_too_large,
@@ -78,8 +79,10 @@ def github_connect_router(runtime: WebRuntime) -> APIRouter:
         teams_owner_ids=teams_admin_owner_ids,
     )
 
+    flow_name, state_name = (host_cookie(name, root) for name in (FLOW_COOKIE, STATE_COOKIE))
+
     def cookie(request: Request) -> str:
-        return request.cookies.get(FLOW_COOKIE, "")
+        return request.cookies.get(flow_name, "")
 
     @router.post("/start")
     async def start(body: TokenBody) -> Response:  # pyright: ignore[reportUnusedFunction]
@@ -93,10 +96,12 @@ def github_connect_router(runtime: WebRuntime) -> APIRouter:
 
     @router.post("/setup")
     async def setup(request: Request, body: StateBody) -> Response:  # pyright: ignore[reportUnusedFunction]
-        state_cookie = request.cookies.get(STATE_COOKIE, "")
         return respond(
             await flow.setup(
-                root, state=body.state, flow_cookie=cookie(request), state_cookie=state_cookie
+                root,
+                state=body.state,
+                flow_cookie=cookie(request),
+                state_cookie=request.cookies.get(state_name, ""),
             )
         )
 
