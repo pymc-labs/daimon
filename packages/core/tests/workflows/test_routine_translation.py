@@ -22,10 +22,10 @@ from daimon.core.delivery import job_payload
 from daimon.core.stores import routines
 from daimon.core.stores.domain import FeatureValueRow
 from daimon.core.stores.workflow_deliveries import DeliveryRow
-from daimon.core.workflows import convert
+from daimon.core.workflows import convert, engine
 from daimon.core.workflows import spec as specs
 from daimon.core.workflows.access import Who
-from daimon.core.workflows.delivery import target_for
+from daimon.core.workflows.delivery import dm_target, target_for
 from daimon.core.workflows.routine_translation import (
     FILES_PREFIX,
     OUTBOX_FILES,
@@ -42,7 +42,7 @@ from daimon.core.workflows.service import Env, Refused
 from daimon.core.workflows.validate import validate_document
 from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.workflows import NOW, agents_with, make_settings
+from daimon.testing.workflows import NOW, World, agents_with, make_settings
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -531,3 +531,30 @@ async def test_a_sandboxed_routine_moves_with_its_grant_and_stays_until_it_is_of
     assert grant.pins["node_hash"] == specs.node_hash(specs.parse_spec(spec).nodes["run"])
     with pytest.raises(Refused, match="built-ins off"):
         await convert.to_routine(env, flow)
+
+
+@pytest.mark.parametrize("channel", ["c1", None])
+async def test_failure_notice_one_place(db_session: AsyncSession, channel: str | None) -> None:
+    """A routine told its channel and its owner; a moved one tells home, else the owner."""
+    env = await _env(db_session)
+    tid, owner = env.who.tenant_id, env.who.account_id
+    row = await new_routine(
+        db_session, tid, created_by_user_id="owner-1", cron_expr="0 * * * *",
+        channel_id=channel, next_fire_at=SLOT,
+    )  # fmt: skip
+    await db_session.commit()
+    world = World(env.sm, env.settings, tid, owner, await convert.from_routine(env, row.id))
+    for _ in range(2):
+        run = await world.run()
+        await world.execute(await world.claim(run.id, "run"), engine.Failed("fatal", "boom"))
+        assert (await world.get(run.id)).status == "failed"
+    async with env.sm() as s:
+        mover = await s.scalar(select(Workflow.owner_account_id))
+        notices = list(
+            await s.scalars(select(WorkflowDelivery).where(WorkflowDelivery.kind == "notice"))
+        )
+    assert [n.target for n in notices] == [
+        target_for("home", home="c1", mode="live", run_as=mover, owner=mover)
+        if channel
+        else dm_target(mover, home=None)
+    ], "one notice per streak, in one place"

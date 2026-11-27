@@ -126,7 +126,12 @@ async def test_a_toolset_on_by_default_offers_its_unlisted_tools() -> None:
     """A server attached with only `default_config` (as `mcp_attach` does) enables every tool:
     its reads taint the agent's writes, and a spec may name its tools."""
     on = {"enabled": True, "permission_policy": {"type": "always_allow"}}
-    gmail = {"type": "mcp_toolset", "mcp_server_name": "gmail", "default_config": on, "configs": []}
+    gmail: dict[str, Any] = {
+        "type": "mcp_toolset",
+        "mcp_server_name": "gmail",
+        "default_config": on,
+        "configs": [],
+    }
 
     async def agents() -> list[Any]:
         return [ma_agent(id="agent_triage", name="triage", tools=[gmail])]
@@ -162,7 +167,7 @@ async def test_a_toolset_on_by_default_offers_its_unlisted_tools() -> None:
 @pytest.mark.parametrize("root", ["workflow.state", "workflow.last_run"])
 def test_an_agent_reading_what_earlier_runs_saved_is_exposed(root: str) -> None:
     """Earlier runs wrote it from whatever they read, so it is untrusted like their inputs."""
-    nodes = {
+    nodes: dict[str, Any] = {
         "a": {"kind": "agent", "instructions": "x", "inputs": {"seen": f"${{{{ {root} }}}}"}},
         "b": {"kind": "agent", "instructions": "y"},
     }

@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 from typing import Any, ClassVar, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from daimon.adapters.teams.direct_chats import SdkDirectChats
 from daimon.adapters.teams.lifecycle import TeamsSender
 from daimon.adapters.teams.workflow_delivery import make_teams_workflow_poster
+from daimon.core import routine_delivery
+from daimon.core.config import AgentIdentitySettings
 from daimon.core.delivery import DeliveryOutcome, JobPoster, poll_once
 from daimon.core.stores import accounts, tenants, workflow_deliveries
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.teams_bot_framework import SERVICE_URL
+from daimon.core.workflows import runs
+from daimon.core.workflows.post_step import PostStepExecutor
 from daimon.testing.factories import make_platform_principal
 from daimon.testing.platform_surface import PlatformMessageCapture, SurfaceRecorder
 from daimon.testing.teams_surface import OfflineTeamsSender
@@ -51,7 +57,9 @@ async def _world(db_session: AsyncSession, nodes: dict[str, Any]) -> World:
     return world
 
 
-async def _deliver(world: World) -> tuple[PlatformMessageCapture, ...]:
+async def _deliver(
+    world: World, client: object | None = None
+) -> tuple[PlatformMessageCapture, ...]:
     recorder = SurfaceRecorder(
         evidence_id="wf", destination_id=HOME, thread_id=None, clock=time.monotonic, decode=decode
     )
@@ -65,8 +73,9 @@ async def _deliver(world: World) -> tuple[PlatformMessageCapture, ...]:
         return None
 
     poster = make_teams_workflow_poster(
-        world.sm, chats, tenant_id=world.tenant_id, settings=world.settings, links=no_links
-    )
+        world.sm, chats, tenant_id=world.tenant_id, settings=world.settings, links=no_links,
+        client=client,  # type: ignore[arg-type]
+    )  # fmt: skip
     assert await poll_once(world.sm, platform="teams", post=JobPoster(no_routine, poster), now=NOW)
     return recorder.surviving_messages()
 
@@ -110,3 +119,31 @@ async def test_a_titled_post_goes_in_one_title_thread_and_says_where(
         assert await workflow_deliveries.opened_threads(s, run.id) == {thread}, (
             "the post says which thread it went to"
         )
+
+
+async def test_a_post_as_an_agent_carries_its_name_where_identity_is_on(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Teams has no per-message face: the agent's name heads the post, as in chat replies."""
+    monkeypatch.setattr(
+        routine_delivery, "find_agent_by_daimon_tag",
+        AsyncMock(return_value=SimpleNamespace(id="agent_d", metadata={})),
+    )  # fmt: skip
+    monkeypatch.setattr(routine_delivery, "agent_display_name", AsyncMock(return_value="Deal Desk"))
+    nodes = {
+        "p": {"kind": "post", "to": "home", "message": "Hi", "as_agent": "deal-desk", "next": "f"},
+        "f": {"kind": "finish"},
+    }
+    texts: list[str] = []
+    for on in (True, False):
+        world = await _world(db_session, nodes)
+        world.settings = world.settings.model_copy(
+            update={"agent_identity": AgentIdentitySettings(enabled=on)}
+        )
+        claimed = await world.claim((await world.run()).id, "p")
+        posts = {"post": PostStepExecutor(world.sm)}
+        await runs.execute(world.sm, world.settings, posts, claimed, clock=lambda: NOW)
+        [message] = await _deliver(world, SimpleNamespace())
+        texts.append(message.body_texts[0])
+    assert texts[0].startswith("**Deal Desk**\n\nHi"), texts
+    assert texts[1].startswith("Hi"), "identity off: as Daimon"

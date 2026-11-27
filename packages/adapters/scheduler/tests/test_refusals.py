@@ -104,9 +104,11 @@ async def test_a_refusal_is_an_issue_and_tells_the_owner_once(
     )
     await db_session.commit()
     reported: list[OpsEvent] = []
-    monkeypatch.setattr(
-        scheduler, "report_ops_event", lambda sm, event, *, logged: reported.append(event)
-    )
+
+    def report(_sm: object, event: OpsEvent, *, logged: bool) -> None:
+        reported.append(event)
+
+    monkeypatch.setattr(scheduler, "report_ops_event", report)
     told: list[tuple[str, bool]] = []
 
     async def notify(row: RoutineRow, reason: str, channel_told: bool) -> None:

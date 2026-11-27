@@ -95,3 +95,32 @@ async def test_a_private_step_signs_its_run_as_persons_dm(db_session: AsyncSessi
     other = RelayBinding("helper", workflow_run_id=run_id, owner="999", dm_channel="777")
     unbound, _ = await _signed(sm, await _token(sm, person, other), DM_SERVER, body)
     assert "workflow" not in unbound and "room" not in unbound, "another person signs nothing"
+
+
+async def test_parallel_agent_steps_sign_no_workflow_claims(db_session: AsyncSession) -> None:
+    """Deliberate: a lane's session and relay credential serve its run across steps (lanes
+    continue), so the credential names no step; with two agent steps running, which one
+    called is unknown, and the call signs no workflow rather than guess."""
+    world = await make_world(
+        db_session,
+        {"a": {"kind": "agent", "agent": "helper", "instructions": "go", "at": "home", "next": "b"},
+         "b": {"kind": "agent", "agent": "helper", "instructions": "go", "at": "home", "next": "f"},
+         "f": {"kind": "finish"}},
+        "a", home="555", workspace_id="guild-1",
+    )  # fmt: skip
+    run = await world.run()
+    async with world.sm.begin() as s:
+        await identity.create_platform_principal(
+            s, tenant_id=world.tenant_id, platform="discord", external_id=OWNER,
+            account_id=world.owner,
+        )  # fmt: skip
+        running: dict[tuple[str, int], Any] = {("a", 1): {"status": "running"}}
+        running[("b", 1)] = {"status": "running"}
+        await workflow_runs.save_steps(s, tenant_id=world.tenant_id, run_id=run.id, steps=running)
+        await workflow_runs.update_run(s, run.id, status="running")
+    body = _tool_call(requester_platform_user_id="666", requester_kind="person")
+    step = RelayBinding("helper", workflow_run_id=run.id, owner=OWNER)
+    claims, _ = await _signed(
+        world.sm, await _token(world.sm, _person(world), step), DM_SERVER, body
+    )
+    assert "workflow" not in claims and "room" not in claims, claims

@@ -19,8 +19,8 @@ from daimon.core.workflows import engine, service
 from daimon.core.workflows.access import Who
 from daimon.testing import ma_agent, tenant_metadata
 from daimon.testing.builders import new_routine
-from daimon.testing.ma import MARouter
 from daimon.testing.workflows import NOW, World, make_settings, make_world
+from mux.testing.drivers.anthropic.ma import MARouter
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession
 

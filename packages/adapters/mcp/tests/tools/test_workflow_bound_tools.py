@@ -60,7 +60,7 @@ async def test_a_step_credential_signs_its_run_and_grant(
     world = await _world(db_session)
     run = await world.run()
 
-    async def member(self, tenant_id, guild_id, user_id, require_fresh=False):
+    async def member(*_a: object, **_kw: object) -> Membership:
         return Membership(is_member=True, is_admin=False)
 
     monkeypatch.setattr(DiscordRestMembershipResolver, "resolve", member)
@@ -82,7 +82,9 @@ async def test_a_step_credential_signs_its_run_and_grant(
     seen: dict[str, Any] = {}
 
     @mcp.tool
-    async def whoami(ctx: Context) -> bool:
+    async def whoami(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context,
+    ) -> bool:
         seen["auth"] = await ctx.get_state("auth")
         return True
 
