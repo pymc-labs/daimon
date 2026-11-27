@@ -1,0 +1,72 @@
+{
+  "description": [
+    "Privately message one human member of the current workspace.",
+    "",
+    "``plan`` counts everything this turn posts outside this conversation: threads,",
+    "places and people; a DM to anyone but the requester needs it.",
+    "A person who asked never to be tagged is not messaged on someone else's",
+    "request; say so rather than retrying.",
+    "",
+    "Pass a user ID exactly as turn_controls or a read tool gives it, not a",
+    "channel or mention. Both sender and recipient must still belong to this",
+    "tenant, and the message arrives in the recipient's private chat with daimon.",
+    "Tenant policy may disable delivery or restrict recipients to an allowlist.",
+    "Plain text only, up to 19000 characters, split into bounded messages. Returns",
+    "all delivery IDs; a partial failure states how many messages were already",
+    "sent, so do not blindly resend the whole message. No attachments or",
+    "cross-tenant messages."
+  ],
+  "parameters": {
+    "$defs": {
+      "ReachPlan": {
+        "description": "Totals for a whole request: new threads, outside places, people tagged.",
+        "properties": {
+          "people": {
+            "default": 0,
+            "maximum": 10000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "places": {
+            "default": 0,
+            "maximum": 1000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "threads": {
+            "default": 0,
+            "maximum": 1000,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "content": {
+        "type": "string"
+      },
+      "plan": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ReachPlan"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "recipient_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "recipient_id",
+      "content"
+    ],
+    "type": "object"
+  }
+}

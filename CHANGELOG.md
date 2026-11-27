@@ -7,14 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- **Eval suites and bundles.** With the Evals feature on, people build suites of
-  cases, share them, and move them between deployments as signed or encrypted
-  bundles. `daimon evals bundle validate` checks a bundle offline.
-
-- **Eval cases from threads.** Turn answered chat turns into scrubbed eval cases,
-  draft their pass criteria after a cost estimate, and mark near-duplicates.
-  `daimon evals bundle scrub` scrubs a bundle offline with a dictionary of names.
-
 - **A long job asked through agent chat runs to its end with one tool: `await_turn`.**
   Call it after `start_turn`. It returns when the agent says something, when the turn
   ends, or after about four minutes, and reports the tool call running now. Nothing is
@@ -40,7 +32,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   limit what it returns to what that place may read
   ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).
 
-||||||| parent of de496c9a2 (feat(mcp): wait for a turn on its event stream, and add await_turn)
 - **Each request to a signed-identity MCP server carries a new token with its own `jti`.**
   A server can accept each token once, so a copied token cannot be replayed
   ([Let a server verify who is calling](docs/mcp-servers.md#let-a-server-verify-who-is-calling)).

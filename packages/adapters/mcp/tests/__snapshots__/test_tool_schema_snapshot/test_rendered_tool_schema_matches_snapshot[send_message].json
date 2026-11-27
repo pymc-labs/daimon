@@ -1,0 +1,161 @@
+{
+  "description": [
+    "Post a message to a channel.",
+    "",
+    "``plan`` counts everything this turn posts outside this conversation: threads,",
+    "places and people tagged; posts here need none. Past the limit the call is",
+    "refused until approve_reach returns approved. Tags become plain names for",
+    "people who asked not to be tagged.",
+    "``batch`` sends more text messages, each to its own ``channel_id``, in the same",
+    "call, counted together; files go with the first message only, and the result is",
+    "then a list.",
+    "",
+    "For TEXT: only call this when the user explicitly asks you to send or",
+    "post something to a channel. Do NOT call it to share results,",
+    "summaries, or outputs unless the user specifically requested a post.",
+    "Deliver text output in your reply instead.",
+    "",
+    "FILES follow the same rule. A file for the person in the chat you",
+    "were invoked from goes in /mnt/session/outputs, and daimon attaches it",
+    "to your reply after the turn; posting it into that thread with this tool",
+    "delivers a duplicate. Use ``file_handles`` to post a file somewhere else you",
+    "were asked to post, or from a scheduled routine, which has no reply.",
+    "",
+    "``file_handles=[handle_id, ...]`` references a file daimon is",
+    "holding: to post a file you made in your sandbox, call",
+    "``create_file_upload_url`` first and PUT the bytes to the URL it",
+    "returns — never base64 a file into a tool argument. Where it is accepted,",
+    "``attachments=[{url, filename}]`` takes the file links the conversation or a",
+    "read tool gave you (<=25 MiB each); other URLs are refused. Combined cap of",
+    "10 files per message. Include a short caption: the text posts first, then",
+    "files upload into that thread. If upload fails, the text remains posted;",
+    "do not send it again. A refusal says what permission or setup is missing.",
+    "",
+    "``channel_id`` is a channel or conversation id exactly as turn_controls or a",
+    "read tool gives it: ``thread_id`` from turn_controls replies in the current",
+    "thread. A thread can also be addressed as ``channel_id:thread_ts`` or",
+    "``<channel>;messageid=<root>``, the composite forms the read and create tools",
+    "return. Content is sent as-is, nothing is escaped, and a too-long message is",
+    "refused with its limit: split it across several calls. You must be a member",
+    "of the channel or conversation. A group chat takes no files. Channels the",
+    "workspace marked protected, and threads under them,",
+    "refuse every post — tell the caller rather than retrying elsewhere",
+    "unasked."
+  ],
+  "parameters": {
+    "$defs": {
+      "MessageDraft": {
+        "description": "One more message for a batched send_message call.",
+        "properties": {
+          "channel_id": {
+            "description": "Where this message goes, as send_message takes it.",
+            "type": "string"
+          },
+          "content": {
+            "description": "The message text.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel_id",
+          "content"
+        ],
+        "type": "object"
+      },
+      "ReachPlan": {
+        "description": "Totals for a whole request: new threads, outside places, people tagged.",
+        "properties": {
+          "people": {
+            "default": 0,
+            "maximum": 10000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "places": {
+            "default": 0,
+            "maximum": 1000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "threads": {
+            "default": 0,
+            "maximum": 1000,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "attachments": {
+        "anyOf": [
+          {
+            "items": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "batch": {
+        "anyOf": [
+          {
+            "items": {
+              "$ref": "#/$defs/MessageDraft"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "channel_id": {
+        "type": "string"
+      },
+      "content": {
+        "type": "string"
+      },
+      "file_handles": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "plan": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ReachPlan"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "channel_id",
+      "content"
+    ],
+    "type": "object"
+  }
+}

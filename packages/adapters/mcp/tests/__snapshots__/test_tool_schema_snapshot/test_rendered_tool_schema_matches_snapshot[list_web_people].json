@@ -1,0 +1,51 @@
+{
+  "description": [
+    "List the workspace's people, oldest first, with role, status and groups. ``query``",
+    "keeps those whose name or email contains it. Emails show only in a direct message with",
+    "the admin; elsewhere ``private_details`` is ``direct_message`` and they are null. Pass",
+    "this active turn's origin_context_id. ``next_page`` goes back as ``after``."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "after": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "limit": {
+        "default": 50,
+        "type": "integer"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "query": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

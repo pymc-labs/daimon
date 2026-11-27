@@ -1,0 +1,33 @@
+{
+  "description": [
+    "Approve the update waiting on a server skill, given as its ``pending_digest``.",
+    "Its new scripts and allowed tools reach every agent that uses the skill, so a",
+    "person confirms on a card first. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "digest": {
+        "maxLength": 128,
+        "minLength": 1,
+        "type": "string"
+      },
+      "origin_context_id": {
+        "maxLength": 200,
+        "minLength": 1,
+        "type": "string"
+      },
+      "skill_id": {
+        "maxLength": 200,
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "skill_id",
+      "digest",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

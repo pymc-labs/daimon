@@ -10,8 +10,10 @@ Evals are off by default. Turn on the `evals` feature for the deployment or a
 workspace, as in [Features](features.md). Off hides the eval tools and refuses
 every eval request.
 
+<!-- knowledge: web -->
 To offer the evals section of the [web app](web.md), add `evals` to
 [`DAIMON_WEB__MODULES`](configuration.md#daimon_web__modules).
+<!-- /knowledge -->
 
 ## Suites and cases
 
@@ -168,12 +170,17 @@ signature from a trusted key is always refused.
 
 A passphrase encrypts the bundle with AES-256-GCM and a scrypt key. Share the
 passphrase another way than the file. MCP tools never take a passphrase: export
-and import encrypted bundles from the command line or the web app.
+and import encrypted bundles from the command line.
+<!-- knowledge: web -->
+The web app can do both too.
+<!-- /knowledge -->
 
 ## Where to use it
 
 The same rules apply on every surface:
 
+<!-- knowledge: web -->
 - The web app, under `/api/evals`.
+<!-- /knowledge -->
 - MCP tools whose names start with `eval_`, listed in [MCP tools](mcp-tools.md).
 - The `daimon evals` commands.

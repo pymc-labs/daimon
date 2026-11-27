@@ -1,0 +1,21 @@
+{
+  "description": [
+    "Read one authorized tenant lead, its review state and durable effect progress.",
+    "",
+    "Readers are fixed when the lead is captured: those who can read the sales",
+    "channel it was captured for, and its dossier thread."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "intake_id": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "intake_id"
+    ],
+    "type": "object"
+  }
+}

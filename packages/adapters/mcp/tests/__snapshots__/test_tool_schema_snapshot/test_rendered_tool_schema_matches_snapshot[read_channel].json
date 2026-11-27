@@ -1,0 +1,66 @@
+{
+  "description": [
+    "Read channel messages, oldest-first, with pagination metadata.",
+    "",
+    "For threads use read_thread. Pass channel_id as turn_controls or",
+    "list_channels gives it (``parent_channel_id`` for the current channel). At",
+    "most 200 messages per call, and a smaller page may come back; where posts",
+    "carry replies you get up to 50 posts with their replies, ordered by latest",
+    "activity. To read older ones, pass the result's next_cursor as cursor, or its",
+    "next_before as before; the other parameter is rejected. A private 1:1 chat",
+    "cannot be read back.",
+    "",
+    "A channel the workspace sealed is readable only from a conversation inside",
+    "it: pass this turn's origin_context_id when reading one. Private and shared",
+    "channels can need it too; a refusal says so."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "before": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "channel_id": {
+        "type": "string"
+      },
+      "cursor": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "limit": {
+        "default": 50,
+        "type": "integer"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "channel_id"
+    ],
+    "type": "object"
+  }
+}

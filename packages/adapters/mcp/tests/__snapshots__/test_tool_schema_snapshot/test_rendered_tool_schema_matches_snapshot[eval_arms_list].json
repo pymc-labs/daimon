@@ -1,0 +1,10 @@
+{
+  "description": [
+    "List the arms (agent setups to compare) in this workspace."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

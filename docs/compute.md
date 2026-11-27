@@ -22,8 +22,12 @@ Keep the deployment id and auth key the same across restarts.
 
 Cloud computers stay off after this set-up. A server admin then turns on the
 [`compute` feature](features.md#cloud-computers) for a workspace or one agent,
-with `/settings` in chat, the web app or `daimon features`. To turn it on
-everywhere, set `DAIMON_FEATURES__COMPUTE=on` on every Daimon service.
+with `/settings` in chat or `daimon features`. To turn it on everywhere, set
+`DAIMON_FEATURES__COMPUTE=on` on every Daimon service.
+
+<!-- knowledge: web -->
+The web app turns it on too.
+<!-- /knowledge -->
 
 A value already set for a workspace, agent, channel or thread keeps it, so an
 Off there stays off, and only a server admin can change it. Turning the feature

@@ -1,0 +1,99 @@
+{
+  "description": [
+    "List the conversations kept for a monitored agent, most recent first, with",
+    "when each monitoring switch was turned on. ``where`` is ``direct_messages``,",
+    "``web`` or ``coding_tools``; filter by web person and UTC days ``first`` to ``last``",
+    "(YYYY-MM-DD). A person's coding-tool calls make one row per day. Person names show only",
+    "in a direct message with the admin; elsewhere ``private_details`` is",
+    "``direct_message`` and they read ``Person 1``, ``Person 2``. Pass this active turn's",
+    "origin_context_id. The read is audited. Admins only. ``next_page`` goes",
+    "back as ``after``."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "after": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "agent_id": {
+        "type": "string"
+      },
+      "first": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "last": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "limit": {
+        "default": 50,
+        "type": "integer"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "person_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "where": {
+        "anyOf": [
+          {
+            "enum": [
+              "direct_messages",
+              "web",
+              "coding_tools"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "agent_id"
+    ],
+    "type": "object"
+  }
+}

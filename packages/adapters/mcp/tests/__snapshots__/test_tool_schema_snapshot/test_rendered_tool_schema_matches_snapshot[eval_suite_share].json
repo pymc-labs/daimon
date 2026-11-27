@@ -1,0 +1,57 @@
+{
+  "description": [
+    "Replace who an eval suite is shared with: people or groups, as viewer, reviewer or",
+    "editor. Only its owner or an admin can share; a suite that is not scrubbed cannot be."
+  ],
+  "parameters": {
+    "$defs": {
+      "Share": {
+        "additionalProperties": false,
+        "description": "A person or group a suite is shared with. Ids are platform ids as sign-ins carry them.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "person",
+              "group"
+            ],
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "viewer",
+              "reviewer",
+              "editor"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "role"
+        ],
+        "type": "object"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "shares": {
+        "items": {
+          "$ref": "#/$defs/Share"
+        },
+        "type": "array"
+      },
+      "suite_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "suite_id",
+      "shares"
+    ],
+    "type": "object"
+  }
+}

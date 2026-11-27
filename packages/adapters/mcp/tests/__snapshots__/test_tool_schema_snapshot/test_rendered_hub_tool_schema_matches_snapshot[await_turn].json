@@ -1,0 +1,57 @@
+{
+  "description": [
+    "Wait for news from the turn running on ``handle``, without polling.",
+    "",
+    "Call this after ``start_turn`` or ``continue_turn``, and again each time",
+    "it returns ``running``. It returns as soon as one of these happens:",
+    "",
+    "- the Daimon said something: ``status`` ``running``, the new text in",
+    "  ``messages``. Pass ``cursor`` back as ``after`` on the next call;",
+    "- the turn ended: ``status`` ``idle``. The last of ``messages`` is the",
+    "  final answer, with any chart images and links;",
+    "- the turn stopped and cannot go on: ``status`` ``paused``, and ``hint``",
+    "  says why and what to do;",
+    "- the conversation is over: ``status`` ``terminated``;",
+    "- ``wait_seconds`` passed (at most about four minutes): ``status``",
+    "  ``running`` with no new messages. Call it again.",
+    "",
+    "A turn paused on tool confirmations nobody is answering is resumed by",
+    "this call, as ``continue_turn`` does. So a long job runs to its end",
+    "while you wait, with no ``get_session`` loop and no ``continue_turn``.",
+    "``activity``, when set, names the tool call running now and for how",
+    "long. ``wait_seconds=0`` only reads where the turn stands: it waits",
+    "for nothing and resumes nothing.",
+    "Only your own conversations opened through agent chat can be waited on."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "after": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "daimon_id": {
+        "type": "string"
+      },
+      "handle": {
+        "type": "string"
+      },
+      "wait_seconds": {
+        "default": 240.0,
+        "type": "number"
+      }
+    },
+    "required": [
+      "daimon_id",
+      "handle"
+    ],
+    "type": "object"
+  }
+}

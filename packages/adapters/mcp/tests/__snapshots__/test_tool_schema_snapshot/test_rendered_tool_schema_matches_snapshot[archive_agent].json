@@ -1,0 +1,31 @@
+{
+  "description": [
+    "Delete an agent, for example churn-explorer, by archiving it. Admin-only.",
+    "",
+    "This removes the agent from the tenant pool and clears its channel/workspace",
+    "defaults so those channels fall back to the next routing tier."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "expected_ma_agent_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "name": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "name"
+    ],
+    "type": "object"
+  }
+}

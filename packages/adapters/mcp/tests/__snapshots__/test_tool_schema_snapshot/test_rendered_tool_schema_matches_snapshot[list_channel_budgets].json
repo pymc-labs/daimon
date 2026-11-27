@@ -1,0 +1,10 @@
+{
+  "description": [
+    "List channel budgets with a personal platform-admin CLI credential."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

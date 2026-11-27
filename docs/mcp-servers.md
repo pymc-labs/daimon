@@ -112,6 +112,7 @@ The token carries these claims:
 | `channel`, `msg` | the channel, thread or DM the asking message is in, and that message |
 | `room` | on Discord, with `channel`: the kind of place the answer goes to |
 | `routine` | with `"routine_claims": true`: the routine whose run posts to `channel` |
+| `wake` | with `"wake_claims": true`: why a call with no new message runs |
 
 `room` is `dm` for a direct message. In a room it is `contained` or `narrow` as
 [Rooms with outside people](outside-people.md#contained-and-narrow-rooms) defines them,
@@ -124,9 +125,35 @@ the message's channel; a new public thread reads as its channel. A routine that 
 thread Daimon has not sorted yet, such as an archived one, signs `narrow`.
 
 A routine run names no person. On a server with `"routine_claims": true`, a run that posts
-to a Discord room carries `routine`, that room as `channel` and its `room`. A run that
-posts to a DM, or nowhere, carries none of them. Agent chat, the web app's tool list and
+to a Discord room carries `routine`, that room as `channel` and its `room`; a run posting
+nowhere carries none. A DM run needs
+[`dm_routine_claims`](unattended.md#a-routine-in-its-owners-dm) too. Agent chat and
 senders from another organisation name no person either.
+
+<!-- knowledge: web -->
+The web app's tool list names no person either.
+<!-- /knowledge -->
+
+On a server with `"wake_claims": true`, Daimon signs `wake` only for these turns:
+
+| Turn | `wake` | Signed with it |
+| --- | --- | --- |
+| A person's turn that is still running | `turn` | `sub`, `channel`, `msg` and `room`, as without the setting |
+| A queued turn that runs in its own thread | its reason: `timer`, `watch_fired`, `watch_report`, `job_finished`, `task_handoff`, `private_input_applied`, `github_access_ready` or `confirmed_call` | that thread as `channel`, its `room` judged as for a routine, no `sub` or `msg` |
+| A helper, a watch report into a new thread, a timer in a DM or channel, a sender from another organisation | none | what it signs without the setting |
+
+The settings are independent: `wake_claims` allows calls with no new message even with
+`routine_claims` off:
+
+| `routine_claims` | `wake_claims` | Calls with no new message the server can tell apart |
+| --- | --- | --- |
+| off | off | none |
+| on | off | routine runs |
+| off | on | running turns and queued turns in their thread |
+| on | on | all three |
+
+Update the server first, then all Daimon processes together, then turn `wake_claims` on;
+turn it off before rolling the server back. A call with `wake` never writes.
 
 Without `workspaces`, every workspace's agents reach the server. Request bodies over 4 MiB
 are refused.
@@ -235,6 +262,7 @@ A server with a shared token is asked with it. A relay server is asked with a
 signed token naming the person asking and the channel. A server that signs
 each person in separately cannot serve skills to Daimon.
 
+<!-- knowledge: web -->
 ### Follow a server's skills in the web app
 
 The agent editor's **Add skill** list offers the skills of the web app's
@@ -244,8 +272,8 @@ library read-only and follows the server.
 Daimon checks the server every 15 minutes, or on **Check now** in the library.
 A new version moves every agent that follows the skill. An agent that pins it
 shows **Update available** instead; following again moves it at once. A skill
-the server no longer offers keeps its last version. **Fork** makes an editable
-copy, under a name you choose, that no longer follows. Agents fixed by the
+the server stops offering keeps its last version. **Fork** makes an editable
+copy, under a name you choose, that does not follow. Agents fixed by the
 server's settings show **Managed by settings** and never move.
 
 An update that adds or changes a script, or changes `allowed-tools`, waits
@@ -256,6 +284,7 @@ An agent switched to OpenAI or Gemini follows updates too. OpenAI uploads each
 version of a custom or channel skill, and a skill over its size limit is off
 there. Gemini carries the default skills only.
 Self-hosted channels use their deployment's own skills.
+<!-- /knowledge -->
 
 ## Give an agent Google Workspace access
 

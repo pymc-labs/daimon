@@ -8,7 +8,7 @@ import os
 import secrets
 import sys
 import uuid
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
@@ -343,6 +343,8 @@ async def test_real_db_clock_is_stable_across_three_commits_in_all_five_tables(
                                 thread_id=f"thread_{index}",
                                 ma_session_id=f"session_{index}",
                                 active_turn_started_at=func.now(),
+                                # Added columns are recorded exactly, so pin this one.
+                                last_turn_at=datetime(2026, 10, 9, tzinfo=UTC),
                             ),
                             TaskContinuation(
                                 tenant_id=tenant.id,

@@ -132,8 +132,12 @@ The record does not cover what Daimon attaches to a run, such as the agent's
 keys, repository or channel skills. Review an opted-in routine after changing
 those. The setting is `routine_sandbox_tools` in the [features](features.md)
 table, and each change shows in the settings history with what it covers.
-`get_routine`, `list_routines`, the web Routines page and the Discord
+`get_routine`, `list_routines` and the Discord
 `/routines` panel show whether a routine is opted in.
+
+<!-- knowledge: web -->
+The web app's Routines page shows it too.
+<!-- /knowledge -->
 
 The `set_routine_sandbox_tools` MCP tool accepts only a live Discord server
 admin's own token, which no Daimon surface issues yet.
@@ -145,8 +149,8 @@ cannot continue, cancel or archive a platform conversation, even for the same
 account and agent.
 
 To wait for a turn, call `await_turn`. It returns when the agent says something,
-when the turn ends, or after about four minutes, so nothing is polled. One call
-per return carries a long job to its end.
+when the turn ends, or after about four minutes, so the caller polls nothing.
+One call per return carries a long job to its end.
 
 Reading a session with `get_session` or `list_events` never answers a tool
 call. If the service restarts while an agent-chat turn waits on one,
@@ -177,6 +181,47 @@ sandbox opt-in, so an OpenAI timer is refused. With the feature off,
 native turns that need MCP, sandbox, bash or custom tools are refused before
 the first message. A self-hosted harness inspects every tool at the host, so
 allowed reads continue while sandbox calls and unapproved writes are refused.
+
+## Reads from a signed server
+
+A [signed server](mcp-servers.md#let-a-server-verify-who-is-calling) decides what
+each call may read from the claims Daimon signs. Server settings say which turns
+with no new message it can recognise:
+
+| Turn | Signed as | Setting |
+| --- | --- | --- |
+| A routine that posts to a channel or thread | that routine and room | `routine_claims` |
+| A Managed Agents routine that posts to its owner's DM, while its run is live | that routine, the owner and their DM, room `dm` | `routine_claims` and `dm_routine_claims` |
+| A timer, watch report, finished long job, hand-off or resumed form that runs in its own thread | its reason, read as a routine posting there | `wake_claims` |
+| A person's turn, on each call while it runs | `wake: turn`, beside the person and message | `wake_claims` |
+
+Other turns sign none of these claims, so the settings do not change what they read.
+These include a routine with no destination or on OpenAI or Gemini, a timer in a DM or
+channel, and a watch report to a DM or a new thread. Watch polls, helpers, agent chat, `daimon run` and checkpoints
+are the same.
+
+### A routine in its owner's DM
+
+A routine that posts to its owner's DM signs `routine`, the owner as `sub`, the owner's
+DM as `channel` and `room: dm`, with no `msg`. Daimon opens that DM before the run,
+sending nothing. It signs only while the call comes from that routine's live run, and the
+routine is enabled, unedited, still posting to that owner's DM and running this agent.
+A pause or an edit removes these claims from the next call, which is then signed as
+without the setting. An agent that does not mount `daimon-mcp` never signs them.
+
+Switching `dm_routine_claims` on lets a stored prompt read for its owner with nobody
+watching, as a fresh DM from the owner would, without writes. The model or an admin may
+have written that prompt; the answer still goes only to the owner's DM.
+
+| `routine_claims` | `dm_routine_claims` | Routine runs the server can tell apart |
+| --- | --- | --- |
+| off | off | none |
+| on | off | runs posting to a channel or thread |
+| on | on | those, and runs posting to the owner's DM |
+| off | on | refused in configuration |
+
+Update the server first, then all Daimon processes, then turn `dm_routine_claims` on.
+Turn it off before rolling either back, and let running DM routines finish first.
 
 ## Origins
 

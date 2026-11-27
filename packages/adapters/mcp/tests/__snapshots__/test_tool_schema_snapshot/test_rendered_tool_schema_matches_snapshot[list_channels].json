@@ -1,0 +1,27 @@
+{
+  "description": [
+    "List the channels here that you can view.",
+    "",
+    "From inside a confidential channel (its own agent, or origin_context_id",
+    "placing this turn there) only that channel is listed. Where channels belong",
+    "to a group, each row names it. A group appears once daimon has seen activity",
+    "in it since being added."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

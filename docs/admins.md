@@ -99,9 +99,12 @@ daimon tenants access-policy get discord GUILD_ID --json
 
 `--invoker-role` replaces the role list. The server's own id (`@everyone`) is
 refused, and Slack and Teams refuse any role list. With the bypass off, admins
-on every platform must match the lists like anyone else. In the web chat, a
-role list and its bypass apply to the person's linked Discord account, checked
-live before each step.
+on every platform must match the lists like anyone else.
+
+<!-- knowledge: web -->
+In the web chat, a role list and its bypass apply to the person's linked
+Discord account, checked live before each step.
+<!-- /knowledge -->
 
 ## Limit an agent to roles
 
@@ -122,8 +125,12 @@ drops it.
 Membership is checked live when the agent is chosen, on queued sends and
 before each model call and approval card. A revoked role refuses the next
 step, not one already running. A handoff checks the person asking against the
-agent it moves to. In the web chat, the person's linked Discord account must hold
-the roles; with no linked account they can't run the agent there.
+agent it moves to.
+
+<!-- knowledge: web -->
+In the web chat, the person's linked Discord account must hold the roles; with
+no linked account they can't run the agent there.
+<!-- /knowledge -->
 
 A person who holds the agent's roles can run it unattended. A routine for a
 role-gated agent runs as its owner, and each run (and each message it sends)
@@ -153,9 +160,40 @@ changing anything, run:
 daimon routines check-roles --tenant TENANT_UUID
 ```
 
+## Read monitored conversations
+
+An admin can keep an agent's conversations for review. Two features turn it on, each
+at the deployment, workspace or agent level, and an agent's owner who is not an admin
+cannot set them:
+
+| Feature | Keeps |
+| --- | --- |
+| `monitor_direct_messages` | Questions and answers in direct messages. |
+| `monitor_mcp` | Questions and answers from coding tools, plus the name, time and outcome of each other tool call, never its content. |
+
+Monitoring starts when it is turned on and keeps nothing from before. Each person is
+told once per agent, in the conversation or their first tool result. Entries are
+deleted after
+[`DAIMON_MONITORING__RETENTION_DAYS`](configuration.md#daimon_monitoring__retention_days).
+
+Workspace admins read what is kept with the `list_monitored_activity` and
+`get_monitored_conversation` tools, or with the CLI. Every read is audited.
+
+<!-- knowledge: web -->
+The web app has an admin page for the same reads, and `monitor_direct_messages` also keeps web chat.
+<!-- /knowledge -->
+
+```bash
+daimon monitoring list TENANT_UUID --agent AGENT_ID --where coding_tools --json
+```
+
 ## How membership is checked
 
 Discord checks use `DAIMON_DISCORD__BOT_TOKEN`, so set it on the scheduler,
 MCP and web processes as well as the Discord service. Ordinary checks cache a
 positive answer for 30 seconds and a negative one for five. Private delivery
-and the web chat always look up live. A failed lookup never grants access.
+always looks up live. A failed lookup never grants access.
+
+<!-- knowledge: web -->
+The web chat always looks up live too.
+<!-- /knowledge -->

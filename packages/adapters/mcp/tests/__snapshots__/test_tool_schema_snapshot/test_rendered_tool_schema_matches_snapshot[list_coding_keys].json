@@ -1,0 +1,23 @@
+{
+  "description": [
+    "List live coding keys, never tokens. With agent_id: that agent's (all for an admin,",
+    "else your own). Without: yours on any agent."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

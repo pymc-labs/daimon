@@ -1,0 +1,21 @@
+{
+  "description": [
+    "Remove an extra skill from a channel, by id or name. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "channel_id": {
+        "type": "string"
+      },
+      "skill": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "channel_id",
+      "skill"
+    ],
+    "type": "object"
+  }
+}

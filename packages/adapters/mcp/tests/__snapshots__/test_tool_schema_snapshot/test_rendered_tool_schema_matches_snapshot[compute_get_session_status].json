@@ -1,0 +1,33 @@
+{
+  "description": [
+    "Read your session's machine state, capacity and expiry without renewing it.",
+    "",
+    "State `launching` means the machine is still starting and cannot run commands",
+    "yet. `running` means it has started. The machine's size is the result's cpus and",
+    "memory_mb; nproc on the machine can show more, so size parallel work from cpus."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "session_id": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id"
+    ],
+    "type": "object"
+  }
+}

@@ -1,4 +1,4 @@
-"""The web app's credit and feedback pages, from chat: a person's own use, the workspace
+"""The credit and feedback pages, from chat: a person's own use, the workspace
 overview, spend by person, agent or channel, and what people said about answers."""
 
 from __future__ import annotations

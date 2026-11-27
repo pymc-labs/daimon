@@ -1,0 +1,179 @@
+{
+  "description": [
+    "Change your watch in place, after `preview_watch_edit`, with the same changes.",
+    "",
+    "`expected_revision` and `before` come from that preview, unchanged; the owner's",
+    "card shows each change as old → new and where the watch reports. Requires an",
+    "attended owner turn and verified owner card approval; backends without tool",
+    "confirmation refuse. Refused when the watch changed since the preview. Queued",
+    "reports from before the edit are dropped, and the next check saves a new",
+    "starting point without reporting, so only later changes report."
+  ],
+  "parameters": {
+    "$defs": {
+      "JsonValue": {}
+    },
+    "additionalProperties": false,
+    "properties": {
+      "arguments": {
+        "anyOf": [
+          {
+            "additionalProperties": {
+              "$ref": "#/$defs/JsonValue"
+            },
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "before": {
+        "additionalProperties": {
+          "$ref": "#/$defs/JsonValue"
+        },
+        "type": "object"
+      },
+      "delivery": {
+        "anyOf": [
+          {
+            "enum": [
+              "thread",
+              "dm",
+              "new_thread"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "evidence": {
+        "anyOf": [
+          {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "expected_revision": {
+        "type": "integer"
+      },
+      "instructions": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "interval": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "key": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "lifetime_days": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "max_turns_per_day": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "origin_context_id": {
+        "type": "string"
+      },
+      "permanent": {
+        "anyOf": [
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "projection": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "rule": {
+        "anyOf": [
+          {
+            "enum": [
+              "change",
+              "added",
+              "updated"
+            ],
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "watch_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "watch_id",
+      "origin_context_id",
+      "expected_revision",
+      "before"
+    ],
+    "type": "object"
+  }
+}
