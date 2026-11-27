@@ -16,8 +16,12 @@ service turns the store off, and a workspace can turn the
 [`data_sources` feature](features.md#data-sources) off for itself.
 
 If the database user lacks CREATE on the database or CREATEROLE, the migration logs
-`data_store_skipped` and Daimon starts anyway, with the web app's Data pages hidden. Run
-`daimon data init` as that user, or with `--admin-url` for one that can.
+`data_store_skipped` and Daimon starts anyway. Run `daimon data init` as that user, or with
+`--admin-url` for one that can.
+
+<!-- knowledge: web -->
+Until then the web app's Data pages are hidden.
+<!-- /knowledge -->
 
 `daimon data init` is safe to run again. Settings are
 [`DAIMON_DATA__*`](configuration.md#daimon_data__schema_name); set
@@ -68,9 +72,12 @@ list its host name or address range in `DAIMON_DATA__PRIVATE_HOSTS`.
 
 A record a source shares with some of its users reads for a Daimon account only through a
 link to one of those users. Daimon links an account only on a proof the source or chat
-platform verified. That is a web app sign-in with Discord, Slack or Microsoft, a GitHub
-link, or the person signing in to the source. A person who only chats has no link until
-they sign in to the web app.
+platform verified. That is a GitHub link or the person signing in to the source.
+
+<!-- knowledge: web -->
+A web app sign-in with Discord, Slack or Microsoft is one too. A person who only chats has
+no link until they sign in to the web app.
+<!-- /knowledge -->
 
 A workspace admin can link any account by hand, their own included, and the
 audit trail records it. A link an admin ends or rejects stays ended when the person signs in again.
@@ -97,6 +104,7 @@ of linked people and records and needs a clean run no older than 36 hours. Any c
 showing more than the source does blocks publishing; showing less only warns. Other sources
 publish after a complete sync.
 
+<!-- knowledge: web -->
 ## In the web app
 
 With the feature on, the web app has a Data section for search and browsing, which shows each
@@ -105,6 +113,9 @@ Integrations > Data sources. Workspace admins manage scopes, grants, identity li
 redaction sets under Admin > Data access, or from chat. Granting oneself a scope or linking an
 account to oneself is allowed and marked in the audit trail. Declared sources show as bound and are read-only there. People link and
 connect their own accounts on their Profile.
+<!-- /knowledge -->
+
+## From chat
 
 From chat, admins can add a source, even the first, or refresh its credential. The value
 goes through a private form only the asker opens, straight onto the source. In a room, emails,
