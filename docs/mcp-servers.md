@@ -114,6 +114,7 @@ The token carries these claims:
 | `routine` | with `"routine_claims": true`: the routine whose run posts to `channel` |
 | `wake` | with `"wake_claims": true`: why a call with no new message runs |
 | `rev`, `routine_name` | with `routine`: a hash of its prompt, owner, agent name and destination (none while paused), and its name |
+| `owner` | with a channel or thread `routine`: its owner, not an asker |
 
 `room` is `dm` for a direct message. In a room it is `contained` or `narrow` as
 [Rooms with outside people](outside-people.md#contained-and-narrow-rooms) defines them,
@@ -125,11 +126,11 @@ When Daimon opens a thread for its answer, `room` judges that thread while `chan
 the message's channel; a new public thread reads as its channel. A routine that posts to a
 thread Daimon has not sorted yet, such as an archived one, signs `narrow`.
 
-A routine run names no person. On a server with `"routine_claims": true`, a run that posts
-to a Discord room carries `routine`, that room as `channel` and its `room`; a run posting
-nowhere carries none. A DM run needs
-[`dm_routine_claims`](unattended.md#a-routine-in-its-owners-dm) too. Agent chat and
-senders from another organisation name no person either.
+On a server with `"routine_claims": true`, a routine run that posts
+to a Discord room carries `routine`, that room as `channel`, its `room` and its `owner`
+while that run is live. A DM run needs
+[`dm_routine_claims`](unattended.md#a-routine-in-its-owners-dm) too. Update all Daimon
+processes together. Agent chat and outsiders name no person.
 
 <!-- knowledge: web -->
 The web app's tool list names no person either.

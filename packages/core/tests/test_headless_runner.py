@@ -67,6 +67,7 @@ from daimon.core import headless_runner
 from daimon.core.config import McpSettings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BILLING_EXEMPT
 from daimon.core.errors import TurnError
+from daimon.core.lead_intake_execution import current_intake_execution
 from daimon.core.rule_views import RoutineOrigin
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.testing.builders import new_agent_file
@@ -2031,25 +2032,32 @@ async def test_routine_relay_claim_only_when_a_server_names_the_requester_or_the
         raise _Stop
 
     monkeypatch.setattr("daimon.core.headless_runner.create_session", capture)
-    routine_id = uuid.uuid4()
-    with pytest.raises(_Stop):
-        await run_turn(
-            anthropic=_build_client([]),
-            agent_id="agent_x",
-            environment_id="env_x",
-            trigger_message="hi",
-            origin="routine",
-            routine_id=routine_id,
-            runs_as_user="42",
-            routine_destination="channel:9:",
-            feature_settings=settings,
-            tool_safety=OPEN_TOOL_SAFETY,
-        )
+    routine_id, execution = uuid.uuid4(), uuid.uuid4()
+    fire = current_intake_execution.set((routine_id, execution))
+    try:
+        with pytest.raises(_Stop):
+            await run_turn(
+                anthropic=_build_client([]),
+                agent_id="agent_x",
+                environment_id="env_x",
+                trigger_message="hi",
+                origin="routine",
+                routine_id=routine_id,
+                runs_as_user="42",
+                routine_destination="channel:9:",
+                feature_settings=settings,
+                tool_safety=OPEN_TOOL_SAFETY,
+            )
+    finally:
+        current_intake_execution.reset(fire)
     named = requester_meta or routine_claims
     assert seen["relay_routine_id"] == (routine_id if named else None)
     assert seen["relay_owner"] == ("42" if named else None)
     assert seen["relay_destination"] == ("channel:9:" if routine_claims else None), (
         "only a routine-claims deployment adds the destination an older image would refuse"
+    )
+    assert seen["relay_execution"] == (execution if routine_claims else None), (
+        "the fire the run is in, beside its destination: the relay signs only while it runs"
     )
 
 
