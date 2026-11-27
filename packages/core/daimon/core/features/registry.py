@@ -271,7 +271,7 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         doc=(
             "Instructions at the top of the agent's prompt on where its keys, repo, memory and "
             "files are and what it may share. Off leaves the agent's own prompt and the safety "
-            "rules. Applies the next time the agent is saved."
+            "rules. Applies when the agent is next saved."
         ),
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
@@ -288,9 +288,9 @@ _MODEL_INPUT: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent", "channel", "thread"),
         binds="turn",
         doc=(
-            "The agent knows about the web app: messages, routine runs and tool results carry "
-            "its address and the pages it may link to, its invite and access tools are offered, "
-            "and Daimon's cards show buttons into it. Off leaves it out."
+            "The agent knows the web app: messages, routine runs and tool results carry its "
+            "address and pages to link, its invite and access tools are offered, and cards show "
+            "buttons into it. Off leaves it out."
         ),
         platforms=EVERY_PLATFORM,
         authority=Authority(DelegatedAction.AGENT_SETTINGS),
@@ -750,14 +750,28 @@ _CHAT_BEHAVIOUR: Final[tuple[FeatureSpec, ...]] = (
         binds="restart",
         doc=(
             "Every message in private and shared channels is read through Microsoft Graph, not "
-            "only the ones that mention the agent. Needs the public address the bot is reached "
-            "at. Whoever runs Daimon sets it, and it applies after a restart."
+            "only the ones that mention the agent. Needs the bot's public address. Whoever runs "
+            "Daimon sets it, and it applies after a restart."
         ),
         platforms=frozenset({"teams"}),
         requires=("teams_public_url",),
         authority=_ADMIN,
         legacy_env=("DAIMON_PRIVATE_CHANNEL_MESSAGES__ENABLED",),
         page="teams.md#turn-on-private-and-shared-channel-messages-optional",
+    ),
+    FeatureSpec(
+        key="shared_connections",
+        name="Shared connections",
+        category="model_input",
+        effect="capability",
+        values=_ON_OFF,
+        default="on",
+        tiers=("deployment", "workspace"),
+        binds="session_mutable",
+        doc="Tool servers an admin shares, each tool approved first.",
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN,
+        page="shared-connections.md#share-a-server-with-the-workspace",
     ),
     FeatureSpec(
         key="direct_messages",
@@ -1003,6 +1017,25 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
         page="unattended.md#opt-a-routine-into-sandbox-tools",
     ),
     FeatureSpec(
+        key="shared_write_approval",
+        name="Approval for shared connection changes",
+        category="guardrails",
+        effect="guardrail",
+        values={"skip": "Skip the card", "ask": "Ask"},
+        default="ask",
+        tiers=("deployment", "workspace", "agent"),
+        binds="turn",
+        doc=(
+            "Skip runs shared connections' writes with no card in chat. After data reads"
+            " each call asks; routines need the operator."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN_NOT_OWNER,
+        # Ask is the default and the strict value: the nearer tier decides, as for watches.
+        combine_override="most_specific",
+        page="shared-connections.md#share-a-server-with-the-workspace",
+    ),
+    FeatureSpec(
         key="watch_approval",
         name="Approval for watches",
         category="guardrails",
@@ -1131,7 +1164,7 @@ _GUARDRAILS: Final[tuple[FeatureSpec, ...]] = (
             (
                 "monitor_mcp",
                 "Monitor coding tools",
-                "Keeps what people ask this agent from their coding tools and what it answers, "
+                "Keeps what people ask this agent from their coding tools and its answers, "
                 "plus the name, time and outcome of their other tool calls, never what they "
                 "sent or returned. People are told in the conversation or their first "
                 "tool result. Kept from when it is turned on, for the retention period.",
@@ -1237,9 +1270,9 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "watches",
         "Watches",
         (
-            "The agent can watch a page or feed and start a conversation when it changes. Off"
-            " removes the watch tools here and stops the watches made here. Watches only run "
-            "once whoever runs Daimon allows them, whatever this says."
+            "The agent can watch a page or feed and start a conversation when it changes. Off "
+            "removes the watch tools here and stops the watches made here. Watches only run once "
+            "whoever runs Daimon allows them."
         ),
         legacy_env=("DAIMON_WATCHES__ENABLED",),
         page="watches.md#how-a-watch-works",
@@ -1383,9 +1416,9 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace", "agent", "channel"),
         binds="turn",
         doc=(
-            "A submitted thumbs-down form (reasons, text, person, agent and a "
-            "link to the answer) is also posted where Ask a person requests go, and the form "
-            "says so first. It spends no credits. Off keeps the form in the database only."
+            "A submitted thumbs-down form (reasons, text, person, agent and a link to the answer) "
+            "also goes where Ask a person requests go, and the form says so. It spends no credits."
+            " Off keeps the form in the database only."
         ),
         requires=("support_channel",),
         authority=_SETTINGS,
@@ -1512,10 +1545,9 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "unattended_time_limit",
         "Unattended run time limit",
         (
-            "The longest a run nobody is watching may take before it is stopped: a routine, a "
-            "watch wake-up, an agent-to-agent chat or a command-line run. The standard 45 "
-            "minutes, or shorter. The smallest setting wins. Chats use the "
-            "answer time limit."
+            "The longest a run nobody watches may take: a routine, a watch wake-up, an "
+            "agent-to-agent chat or a command-line run. The standard 45 minutes, or shorter; the "
+            "smallest setting wins. Chats use the answer time limit."
         ),
         _TIME_LIMITS,
         default="45",

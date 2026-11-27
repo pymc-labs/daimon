@@ -1,0 +1,27 @@
+{
+  "description": [
+    "List the workspace's shared connections: each server's state and its tools, with",
+    "what each does, whether it is on, whether the upstream changed it and the ``seen``",
+    "fingerprint to turn it on as shown (the card shows its words). Addresses and errors",
+    "are [[private:...]] placeholders in a shared conversation (a channel or group): answer",
+    "without them and send any the admin needs with send_private_details. Pass this active",
+    "turn's origin_context_id. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

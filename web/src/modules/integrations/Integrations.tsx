@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from "react-router"
 import { Page } from "@/components/shell/Page"
+import { Connections } from "./Connections"
 import { useCan } from "@/lib/hooks"
 import { DataSources } from "./DataSources"
 import { Github } from "./Github"
@@ -9,7 +10,7 @@ import { WorkspacesTab } from "./Workspaces"
 
 const TABS = [
   { label: "Chat apps", to: "/integrations", end: true }, { label: "GitHub", to: "/integrations/github" },
-  { label: "Tool servers", to: "/integrations/mcp" }, { label: "API tokens", to: "/integrations/tokens" },
+  { label: "Tool servers", to: "/integrations/mcp" }, { label: "Shared connections", to: "/integrations/connections" }, { label: "API tokens", to: "/integrations/tokens" },
 ]
 const DATA = { label: "Data sources", to: "/integrations/data" }
 
@@ -22,6 +23,7 @@ export function Integrations() {
           <Route index element={<WorkspacesTab />} />
           <Route path="github" element={<Github />} />
           <Route path="mcp" element={<Mcp />} />
+          <Route path="connections" element={<Connections />} />
           <Route path="tokens" element={<Tokens />} />
           {data && <Route path="data" element={<DataSources />} />}
           <Route path="*" element={<Navigate to="/integrations" replace />} />

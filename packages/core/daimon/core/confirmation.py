@@ -73,6 +73,9 @@ __all__ = [
     "ConfirmationPrompt",
     "ToolRuleCardReference",
     "ServerSkillUpdateCard",
+    "SHARED_CONNECTION_TOOLS",
+    "SHARED_CONNECTION_UNREADABLE",
+    "SharedConnectionCard",
     "PendingConfirmations",
     "no_confirmation_surface",
     "prompt_for_tool_call",
@@ -211,6 +214,71 @@ class ServerSkillUpdateCard:
     new_version: str | None
     changes: Mapping[str, Sequence[str]]
     """`added`, `removed` and `changed` paths."""
+
+
+@dataclass(frozen=True)
+class SharedConnectionCard:
+    """What a shared connection change acts on, read from the store so the card never shows
+    what the call claims. It never holds the connection's address: a room reads the card.
+    `description` and `writes` are what a tool's callers get: for turn_on, the upstream's
+    words as listed."""
+
+    connection: str
+    tool: str | None = None
+    description: str | None = None
+    writes: bool | None = None
+    parameters: tuple[str, ...] = ()
+    """For turn_on, the argument names the approved schema takes."""
+
+
+SHARED_CONNECTION_UNREADABLE: Final = (
+    "This connection or tool isn't here, or changed since it was listed. List it again."
+)
+"""Why a change is refused when its card can't name what it acts on."""
+
+#: The tools whose card is a `SharedConnectionCard`.
+SHARED_CONNECTION_TOOLS: Final = frozenset(
+    {"change_shared_connection", "change_shared_connection_tool"}
+)
+
+_CONNECTION_VERBS: Final[Mapping[str, tuple[str, str | None]]] = MappingProxyType(
+    {
+        "add": ("Add shared connection {}", "Its tools stay off until an admin turns each on."),
+        "refresh": ("Read the tools of {} again", None),
+        "pause": ("Pause {}", "Its tools stop working until it is resumed."),
+        "resume": ("Resume {}", None),
+        "rescope": ("Change who can use {}", None),
+        "remove": ("Remove {}", "Its tools stop working for everyone."),
+        "turn_on": ("Turn on {}", None),
+        "turn_off": ("Turn off {} for everyone", None),
+        "mark_writes": ("Mark {} as changing things", "Agents then ask before each call."),
+        "mark_reads": ("Mark {} as only reading", "Agents then call it without asking."),
+    }
+)
+
+
+def _shared_connection_prompt(
+    data: Mapping[str, object], card: SharedConnectionCard
+) -> tuple[str, str | None, str, tuple[str, ...]]:
+    """Action, consequence, denied action and details of a shared connection change."""
+    connection = _one_line(card.connection, limit=64)
+    name = f"{connection}_{_one_line(card.tool, limit=64)}" if card.tool else connection
+    subject = name if card.tool else f'"{name}"'
+    verb, consequence = _CONNECTION_VERBS.get(str(data.get("action")), ("Change {}", None))
+    does = None if card.writes is None else "changes things" if card.writes else "only reads"
+    told = _one_line(card.description or "")
+    takes = ", ".join(_one_line(name, limit=64) for name in card.parameters)
+    turn_on = data.get("action") == "turn_on" and does is not None
+    if turn_on:
+        consequence = f"It {does}. Callers are told: {_preview(told)}"
+    scope = _one_line(data.get("scope") or "", limit=64) or "everyone"
+    details = (
+        f"{'Tool' if card.tool else 'Connection'}: {name}",
+        *((f"Does: {does}",) if does is not None else ()),
+        *((f"Callers are told: {told}", f"Takes: {takes or 'nothing'}") if turn_on else ()),
+        *((f"Scope: {scope}",) if data.get("action") in {"add", "rescope"} else ()),
+    )
+    return verb.format(subject), consequence, f"{subject} not changed", details
 
 
 #: How many paths of each kind the card names before it says how many more.
@@ -499,11 +567,13 @@ def prompt_for_tool_call(
     timeout: timedelta = CONFIRMATION_TIMEOUT,
     trusted_servers: frozenset[str] = frozenset({DAIMON_SERVER_NAME}),
     server_skill_update: ServerSkillUpdateCard | None = None,
+    shared_connection: SharedConnectionCard | None = None,
 ) -> ConfirmationPrompt:
     """The card for one gated write, with short product-facing details.
 
     `server_skill_update` is what `approve_server_skill_update` shows, read from the
-    mirror; without it that call gets the generic card."""
+    mirror, and `shared_connection` what a shared connection change acts on; without
+    them those calls get the generic card."""
     own_server = call.server_name in trusted_servers
     publishing = call.tool_name in PUBLISH_TOOLS and own_server
     data = call.input
@@ -730,6 +800,11 @@ def prompt_for_tool_call(
             ("Its files and allowed tools change for every agent that uses it.", *lines)
         )
         detail_lines = (f"Skill: {skill}", *lines)
+    elif call.tool_name in SHARED_CONNECTION_TOOLS and own_server and shared_connection is not None:
+        action, consequence, denied_action, detail_lines = _shared_connection_prompt(
+            data, shared_connection
+        )
+        title = f"{action}?"
     elif call.tool_name == "create_watch" and own_server:
         action = "Create watch"
         title = "Create this watch?"

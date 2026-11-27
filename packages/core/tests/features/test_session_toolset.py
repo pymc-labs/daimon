@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 from anthropic.types.beta import BetaManagedAgentsAgent
-from daimon.core.capability_tools import CAPABILITY_KEYS, CAPABILITY_TOOLS
+from daimon.core.capability_tools import CAPABILITY_KEYS, CAPABILITY_TOOLS, KEPT_BY
 from daimon.core.channel_changes import Expected
 from daimon.core.config import (
     AnthropicSettings,
@@ -262,14 +262,15 @@ def test_capabilities_change_nothing_at_their_defaults() -> None:
 def test_a_capability_off_turns_exactly_its_tools_off(key: str) -> None:
     agent = _agent()
     toolset = agent_toolset(_snapshot(**{key: "off"}), agent)
-    assert toolset.hidden_daimon_tools == CAPABILITY_TOOLS[key] - SESSION_KEPT_TOOLS
+    own = CAPABILITY_TOOLS[key] - SESSION_KEPT_TOOLS - KEPT_BY.keys()
+    assert toolset.hidden_daimon_tools == own
     tools = session_tools(
         agent, frozenset(), tool_safety=OPEN_TOOL_SAFETY, public_url=PUBLIC, toolset=toolset
     )
     daimon = next(t for t in _dicts(tools) if t.get("mcp_server_name") == "daimon-mcp")
-    assert {c["name"] for c in daimon["configs"] if c.get("enabled") is False} == (
-        CAPABILITY_TOOLS[key] - SESSION_KEPT_TOOLS
-    ), "each tool is off in the session"
+    assert {c["name"] for c in daimon["configs"] if c.get("enabled") is False} == own, (
+        "each tool is off in the session"
+    )
 
 
 def test_a_workspace_with_no_data_source_is_offered_only_what_adds_one() -> None:
@@ -708,3 +709,12 @@ def test_an_agent_that_names_a_renamed_tool_keeps_it_in_every_session() -> None:
     assert session_tools(
         plain, frozenset(), tool_safety=OPEN_TOOL_SAFETY, public_url=PUBLIC
     ) == list(plain.tools)
+
+
+def test_private_details_stay_while_either_data_or_shared_connections_is_on() -> None:
+    """Both hand out placeholders `send_private_details` opens; with both Off none exist."""
+    both = agent_toolset(_snapshot(data_sources="off", shared_connections="off"), _agent())
+    assert "send_private_details" in both.hidden_daimon_tools, "nothing hands out placeholders"
+    for key in ("data_sources", "shared_connections"):
+        one = agent_toolset(_snapshot(**{key: "off"}), _agent())
+        assert "send_private_details" not in one.hidden_daimon_tools, f"{key} Off alone keeps it"

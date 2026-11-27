@@ -28,6 +28,7 @@ nav:
       - Web app: web.md
       - GitHub: github.md
       - MCP servers: mcp-servers.md
+      - Shared connections: shared-connections.md
       - Claude Code plugin: plugin.md
   - Customise:
       - Defaults: defaults.md

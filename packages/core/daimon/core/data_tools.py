@@ -30,11 +30,11 @@ DATA_SOURCE_TOOLS: Final[frozenset[str]] = frozenset(
         "connect_my_data",
         "check_my_data_connection",
         "dismiss_data_notices",
-        "send_private_details",
     }
 )
 """The data management and sign-in tools: hidden with `data_sources`, and until a workspace has a
-source (`daimon.core.ports.data_ready`) but for `DATA_SETUP_TOOLS`."""
+source (`daimon.core.ports.data_ready`) but for `DATA_SETUP_TOOLS`. `send_private_details` is not
+among them: shared connections' tools hand out placeholders too (`capability_tools.KEPT_BY`)."""
 DATA_SETUP_TOOLS: Final[frozenset[str]] = frozenset({"list_data_sources", "change_data_source"})
 """What adds the first source: offered (to admins, by their `admin` tag) while the feature is on."""
 DATA_RESULT_MARK: Final = "[data source result]"

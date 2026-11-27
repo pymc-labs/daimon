@@ -23,6 +23,7 @@ from typing import Any, Final, cast
 from daimon.adapters.slack.modal_limits import MAX_TITLE_CHARS
 from daimon.core.constants import MAX_SECRET_VALUE_BYTES
 from daimon.core.credential_requests import (
+    DATA_FORM_KINDS,
     CredentialRequestKind,
     split_skill_repo_target,
 )
@@ -38,7 +39,7 @@ from daimon.core.posted_controls import (
     card_text,
     expired_message,
 )
-from daimon.core.posted_controls.cards import data_source_content
+from daimon.core.posted_controls.cards import data_form_content
 from daimon.core.stores.domain import CredentialRequestRow
 
 __all__ = [
@@ -66,6 +67,7 @@ _TITLE_FALLBACK: Final[dict[CredentialRequestKind, str]] = {
     "repo": "Your GitHub token",
     "skill_repo": "Your GitHub token",
     "data_source": "Source credential",
+    "data_connection": "Connection token",
 }
 
 
@@ -137,8 +139,9 @@ def _form_facts(
             f"anyone who talks to {agent_name} can use it",
             "the value is not shown in chat",
         )
-    if kind == "data_source":
-        return (f"for data source *{target}*", data_source_content(target)[1][0].lower())
+    if kind in DATA_FORM_KINDS:
+        what = "shared connection" if kind == "data_connection" else "data source"
+        return (f"for {what} *{target}*", data_form_content(kind, target)[1][0].lower())
     if kind == "env_file":
         return (
             f"for *{agent_name}*",
@@ -179,7 +182,7 @@ def _form_input(kind: CredentialRequestKind) -> dict[str, Any]:
                 "max_files": 1,
             },
         }
-    if kind in ("env", "data_source"):
+    if kind == "env" or kind in DATA_FORM_KINDS:
         return {
             "type": "input",
             "block_id": _VALUE_BLOCK,

@@ -12,7 +12,6 @@ import hashlib
 import uuid
 from datetime import datetime
 from typing import Annotated, Literal
-from urllib.parse import urlsplit
 
 from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.web.admin_common import (
@@ -28,7 +27,7 @@ from daimon.core.authz import Subject
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.integration_views import AgentServers, IntegrationsRefused
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.mcp_server_url import canonical_mcp_url
+from daimon.core.mcp_server_url import canonical_mcp_url, shown_mcp_url
 from daimon.core.operator_tokens import OperatorTokenError
 from daimon.core.panel_audit import PanelOp, PanelOutcome, record_panel_write
 from daimon.core.panel_operator_tokens import (
@@ -205,12 +204,7 @@ def _server_id(url: str) -> str:
     return hashlib.sha256(canonical_mcp_url(url).encode()).hexdigest()[:12]
 
 
-def _shown_url(url: str) -> str:
-    """The server's address without a sign-in or query, which can carry a key."""
-    parts = urlsplit(url.strip())
-    host = parts.hostname or ""
-    port = f":{parts.port}" if parts.port else ""
-    return f"{parts.scheme}://{host}{port}{parts.path}".rstrip("/")
+_shown_url = shown_mcp_url
 
 
 def _short(error: str) -> str:

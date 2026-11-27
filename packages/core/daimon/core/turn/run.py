@@ -27,6 +27,7 @@ from anthropic.types.beta.beta_managed_agents_system_content_block_param import 
     BetaManagedAgentsSystemContentBlockParam,
 )
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
+from daimon.core import shared_connections
 from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.config import get_repo_memory_settings
 from daimon.core.confirmation import (
@@ -2321,6 +2322,9 @@ async def run_prepared_turn_impl(
                 approval_gate_for=lambda: refresh_approval_gate(deps, prepared.admission),
                 server_urls=server_urls,
                 skill_update_for=skill_update_lookup(deps.sessionmaker, tenant_id=tenant_id),
+                shared_connection_for=shared_connections.card_lookup(
+                    deps.sessionmaker, tenant_id=tenant_id
+                ),
                 confirmed_tools=confirmed_tools,
                 daimon_rules=bool(prepared.admission.daimon_rule_tools),
                 rules_for=(

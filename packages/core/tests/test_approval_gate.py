@@ -12,7 +12,7 @@ import structlog.testing
 from daimon.core.access_policy import AgentApprovals, Approvals, ChannelRule, TenantAccessPolicy
 from daimon.core.approval_gate import ApprovalGate, resolve_approval_gate, set_approval_gate
 from daimon.core.authz import Action, Subject, authorize
-from daimon.core.confirmation import ServerSkillUpdateCard
+from daimon.core.confirmation import ServerSkillUpdateCard, SharedConnectionCard
 from daimon.core.errors import DaimonError
 from daimon.core.features.registry import FEATURES
 from daimon.core.features.service import place_tiers
@@ -98,6 +98,7 @@ async def test_every_fixed_daimon_gate_still_asks(tool: str) -> None:
         skill_update_for=AsyncMock(
             return_value=ServerSkillUpdateCard(name="S", version="1", new_version="2", changes={})
         ),
+        shared_connection_for=AsyncMock(return_value=SharedConnectionCard("crm", tool="send")),
     )(
         ToolCall(
             tool_use_id="t1",

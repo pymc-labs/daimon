@@ -1973,7 +1973,7 @@ class CredentialRequest(Base):
         ),
         CheckConstraint(
             "kind IN ('env', 'env_file', 'mcp', 'mcp_oauth', 'repo', 'skill_repo', "
-            "'watch_credential', 'data_source')",
+            "'watch_credential', 'data_source', 'data_connection')",
             name="ck_credential_requests_kind",
         ),
         UniqueConstraint("idempotency_key", name="uq_credential_requests_idempotency_key"),
@@ -6101,6 +6101,72 @@ class OpsIssueState(Base):
     state: Mapped[str]
     by_account_id: Mapped[AccountSetNull]
     at: Mapped[datetime]
+
+
+class McpConnection(Base):
+    """A tenant's shared MCP connection: one upstream server whose tools many people use.
+
+    The credential is a bearer token, encrypted with the shared MultiFernet and never read
+    back by a page. `scope` names the data scope a caller must hold (None: any member of the
+    workspace); the data package decides what a scope means. A `declared` row comes from the
+    deployment's declared file (its `connections` section): its address, token and scope are
+    read-only in the web app.
+    """
+
+    __tablename__ = "mcp_connections"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active', 'paused', 'error')", name="ck_mcp_connections_status"
+        ),
+        UniqueConstraint("tenant_id", "name", name="uq_mcp_connections_tenant_name"),
+    )
+
+    id: Mapped[UuidPk]
+    tenant_id: Mapped[TenantFK]
+    name: Mapped[str]
+    url: Mapped[str]
+    encrypted_auth: Mapped[bytes | None]
+    scope: Mapped[str | None]
+    status: Mapped[str] = mapped_column(server_default="active")
+    last_error: Mapped[str | None]
+    note: Mapped[str | None]
+    """What the last good refresh left out, and why."""
+    refreshed_at: Mapped[datetime | None]
+    declared: Mapped[FalseFlag]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNowOnUpdate]
+
+
+class McpConnectionTool(Base):
+    """One tool of a shared connection, with the text an admin approved.
+
+    Enabling a tool approves what the page showed: `description` and `input_schema` are what
+    callers see and what a call is checked against, `seen_*` is what the upstream last sent.
+    They differ after the server changes a tool, until an admin approves again, so a server
+    cannot change what its tools claim after review. A new tool starts disabled. `writes` is
+    Daimon's name rule at discovery, never lowered by a later read, and stays as an admin set
+    it (`writes_set`); `approved_writes` is what was approved, so a rise holds the tool too.
+    """
+
+    __tablename__ = "mcp_connection_tools"
+    __table_args__ = (Index("ix_mcp_connection_tools_tenant", "tenant_id"),)
+
+    connection_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("mcp_connections.id", ondelete="CASCADE"), primary_key=True
+    )
+    name: Mapped[str] = mapped_column(primary_key=True)
+    tenant_id: Mapped[TenantFK]
+    description: Mapped[str] = mapped_column(server_default="")
+    input_schema: Mapped[dict[str, Any]] = mapped_column(server_default=text("'{}'::jsonb"))
+    seen_description: Mapped[str] = mapped_column(server_default="")
+    seen_schema: Mapped[dict[str, Any]] = mapped_column(server_default=text("'{}'::jsonb"))
+    writes: Mapped[bool] = mapped_column(server_default=text("true"))
+    approved_writes: Mapped[bool] = mapped_column(server_default=text("true"))
+    writes_set: Mapped[FalseFlag]
+    enabled: Mapped[FalseFlag]
+    scope: Mapped[str | None]
+    created_at: Mapped[TsNow]
+    updated_at: Mapped[TsNowOnUpdate]
 
 
 def _install_erased_account_guards() -> None:

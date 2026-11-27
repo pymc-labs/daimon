@@ -49,6 +49,9 @@
   "DELETE /api/credits/allowances/{allowance_id}": {
    "tool": "delete_allowance"
   },
+  "DELETE /api/integrations/connections/{connection_id}": {
+   "tool": "change_shared_connection"
+  },
   "DELETE /api/integrations/tokens/{jti}": {
    "panel": {
     "discord": "daimon.adapters.discord.agent_setup.operator_tokens_view",
@@ -103,6 +106,12 @@
   },
   "PATCH /api/credits/allowances/{allowance_id}": {
    "tool": "set_allowance_amount"
+  },
+  "PATCH /api/integrations/connections/{connection_id}": {
+   "tool": "change_shared_connection"
+  },
+  "PATCH /api/integrations/connections/{connection_id}/tools/{name}": {
+   "tool": "change_shared_connection_tool"
   },
   "PATCH /api/routines/{routine_id}": {
    "tool": "update_routine"
@@ -272,6 +281,12 @@
   },
   "POST /api/github/connect/{step}": {
    "exempt": "the GitHub connect pages every platform's link opens; the invitation is the authority"
+  },
+  "POST /api/integrations/connections": {
+   "tool": "change_shared_connection"
+  },
+  "POST /api/integrations/connections/{connection_id}/refresh": {
+   "tool": "change_shared_connection"
   },
   "POST /api/integrations/data/sources": {
    "tool": "change_data_source"

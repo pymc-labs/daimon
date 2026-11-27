@@ -1,0 +1,21 @@
+{
+  "description": [
+    "List the tools a workspace has shared from its connected MCP servers.",
+    "",
+    "``workspace_id`` is the ``workspace_id`` of a Daimon from list_daimons. Pass a",
+    "tool's ``name`` to call_shared_tool. A tool with ``writes`` true changes things:",
+    "ask your user and get their yes before you call it."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "workspace_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "workspace_id"
+    ],
+    "type": "object"
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "description": [
+    "Add a shared connection (add: name, url, optional scope; its tools start off), or",
+    "refresh, pause, resume, rescope (scope; empty clears it) or remove one (connection:",
+    "its id or name). Runs on the asker's Approve card, which names the connection.",
+    "with_token, on add or refresh, posts the asker's private form for its token,",
+    "and saving it reads the server's tools; never ask for a token in chat or pass one here.",
+    "Addresses and errors in the answer are [[private:...]] placeholders in a shared",
+    "conversation: send them with send_private_details. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "action": {
+        "enum": [
+          "add",
+          "refresh",
+          "pause",
+          "resume",
+          "rescope",
+          "remove"
+        ],
+        "type": "string"
+      },
+      "connection": {
+        "default": "",
+        "type": "string"
+      },
+      "name": {
+        "default": "",
+        "type": "string"
+      },
+      "origin_context_id": {
+        "type": "string"
+      },
+      "scope": {
+        "default": "",
+        "type": "string"
+      },
+      "url": {
+        "default": "",
+        "type": "string"
+      },
+      "with_token": {
+        "default": false,
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "action",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

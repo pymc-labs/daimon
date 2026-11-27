@@ -17,11 +17,19 @@ from typing import TYPE_CHECKING, Any, cast
 import structlog
 from daimon.adapters.mcp.confirmed_call import host_confirmed_call
 from daimon.core import host_calls
-from daimon.core.features.snapshot import deployment_on
+from daimon.core.confirmation import (
+    SHARED_CONNECTION_TOOLS,
+    SHARED_CONNECTION_UNREADABLE,
+    prompt_for_tool_call,
+)
+from daimon.core.data_reading import reads_data
+from daimon.core.features.snapshot import FeaturePlace, deployment_on, place_guardrail
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.security_audit import record_denial
+from daimon.core.shared_connections import card_lookup
 from daimon.core.stores import host_call_cards as cards
 from daimon.core.stores.mcp_tokens import revoke_mcp_token
+from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.stores.turn_origins import get_session_origin
 from daimon.core.switch_cards import SWITCH_CARD_MAX_S
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall, confirmation_gated_tools
@@ -34,6 +42,7 @@ from mcp.types import TextContent
 if TYPE_CHECKING:
     from daimon.adapters.mcp.auth.resolver import AuthIdentity
     from daimon.adapters.mcp.runtime import McpRuntime
+    from daimon.core.stores.domain import TurnOriginRow
 
 log = structlog.get_logger()
 
@@ -140,14 +149,52 @@ class HostCallGate:
         """Whether the host call gate is off on this credential's platform."""
         return not deployment_on(self._runtime.settings, "host_call_gate", identity.platform or "")
 
+    async def _asks_writes(self, identity: AuthIdentity, origin: TurnOriginRow) -> bool:
+        """Whether a shared write asks at the turn's agent; a failed read asks."""
+        place = FeaturePlace.of(
+            identity.tenant_id, origin.platform, None, agent_id=origin.responder_ma_agent_id
+        )
+        found = await place_guardrail(
+            self._runtime.session_factory, self._runtime.settings, place, "shared_write_approval"
+        )
+        return found.value != "skip"
+
+    async def _read_data(self, identity: AuthIdentity, origin: TurnOriginRow) -> bool:
+        """Whether the turn's session reads data sources, now or in an earlier turn
+        (`SessionSnapshot.data_read`), as the driver's `data_read` reads it."""
+        place = FeaturePlace.of(
+            identity.tenant_id,
+            origin.platform,
+            origin.parent_channel_id,
+            origin.thread_id,
+            agent_id=origin.responder_ma_agent_id,
+        )
+        if await reads_data(self._runtime.session_factory, self._runtime.settings, place):
+            return True
+        async with self._runtime.session_factory() as session:
+            row = await get_live_thread_session(
+                session,
+                tenant_id=identity.tenant_id,
+                platform=origin.platform,
+                thread_id=origin.session_thread_id,
+                account_id=origin.account_id,
+            )
+        return (
+            row is not None and row.effective_config is not None and row.effective_config.data_read
+        )
+
     async def ask(
         self, context: MiddlewareContext, identity: AuthIdentity, run: CallNext
     ) -> object:
         """Record the gated call and post its card; fail closed on anything missing.
         A call Claude's session runs without a card runs through `run` here too, and so
-        does a call that only an agent tool rule sent here, where the rule allows it."""
+        does a call that only an agent tool rule sent here, where the rule allows it. A
+        shared-connection tool's is decided as a third party's, not as Daimon's own, after
+        a data read as every other write is, and only its card waits on the gate being on."""
+        from daimon.adapters.mcp.shared_connections import SharedConnectionTool
         from daimon.adapters.mcp.tools._own_card import post_own_card
         from daimon.core.confirmation import reach_title
+        from daimon.core.shared_connections import decide_shared_call
         from daimon.core.turn.approvals import (
             agent_rule_lookup,
             channel_for_tool_rules,
@@ -162,10 +209,13 @@ class HostCallGate:
         name, args = _call_of(context)
         settings = self._runtime.settings
         platform = identity.platform or ""
+        fastmcp_ctx = context.fastmcp_context
+        tool = None if fastmcp_ctx is None else await fastmcp_ctx.fastmcp.get_tool(name)
         # With the gate off a gated tool is refused as before; a tool only a rule sent
-        # here still runs where its rule allows it.
+        # here still runs where its rule allows it, and so does a shared-connection tool.
         off = self.off_for(identity)
-        if off and name in confirmation_gated_tools():
+        shared_tool = isinstance(tool, SharedConnectionTool)
+        if off and name in confirmation_gated_tools() and not shared_tool:
             raise _refuse("off")
         # A held turn gets here only with a held-allowlisted tool, as Claude's card asks.
         if (
@@ -192,25 +242,38 @@ class HostCallGate:
             != identity.chat_agent_id
         ):
             raise _refuse("no_origin")
-        fastmcp_ctx = context.fastmcp_context
-        tool = None if fastmcp_ctx is None else await fastmcp_ctx.fastmcp.get_tool(name)
         if tool is None:
             raise _refuse("no_tool")
         if (problem := schema_problem(tool.parameters, args)) is not None:
             raise ToolError(problem)
-        title = None
-        if name == "approve_reach":
-            try:
-                title = reach_title(args)
-            except ValueError:
-                raise ToolError(REACH_PLAN_TEXT) from None
-        policy = settings.tool_safety
         call = ToolCall(
             tool_use_id=f"host-{uuid.uuid4()}",
             server_name=DAIMON_SERVER_NAME,
             tool_name=name,
             input=args,
         )
+        title, facts = None, None
+        if name == "approve_reach":
+            try:
+                title = reach_title(args)
+            except ValueError:
+                raise ToolError(REACH_PLAN_TEXT) from None
+        elif name in SHARED_CONNECTION_TOOLS:
+            # As in chat: the card names what the change acts on, read from the store.
+            found = await card_lookup(self._runtime.session_factory, tenant_id=identity.tenant_id)(
+                call
+            )
+            if found is None:
+                raise ToolError(SHARED_CONNECTION_UNREADABLE)
+            prompt = prompt_for_tool_call(
+                call,
+                requester_platform_user_id=identity.platform_user_id or "",
+                now=now,
+                shared_connection=found,
+            )
+            title = prompt.title
+            facts = [line for line in (prompt.consequence, *prompt.detail_lines) if line]
+        policy = settings.tool_safety
         # The agent's and the channel's tool rules, read as Claude's decider reads them.
         rule, read_error = await rule_for(
             policy,
@@ -231,15 +294,28 @@ class HostCallGate:
                 ),
             ),
         )
-        verdict = await tool_call_verdict(
-            policy,
-            call,
-            attended=origin.attended,
-            trusted_servers=frozenset({DAIMON_SERVER_NAME}),
-            # As a chat turn's (`confirmed_tools_for_turn`): a reach always asks.
-            confirmed_tools=protected_tools(policy) | {"approve_reach"},
-            agent_rule=rule,
-        )
+        if isinstance(tool, SharedConnectionTool):
+            # A third party's tool: never trusted, its effect is the admin's flag.
+            verdict = decide_shared_call(
+                policy,
+                name,
+                args,
+                writes=tool.served.tool.writes,
+                attended=origin.attended,
+                agent_rule=rule,
+                data_read=await self._read_data(identity, origin),
+                ask_writes=not tool.served.tool.writes or await self._asks_writes(identity, origin),
+            )
+        else:
+            verdict = await tool_call_verdict(
+                policy,
+                call,
+                attended=origin.attended,
+                trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+                # As a chat turn's (`confirmed_tools_for_turn`): a reach always asks.
+                confirmed_tools=protected_tools(policy) | {"approve_reach"},
+                agent_rule=rule,
+            )
         if read_error:
             verdict = read_error_verdict(verdict, attended=origin.attended)
         if verdict.outcome == "allow":
@@ -270,6 +346,7 @@ class HostCallGate:
                     "server": self._server,
                     "args": args,
                     "title": title,
+                    "facts": facts,
                     # An admin's ask is pressed by a person who must still be one.
                     "admin": identity.is_admin,
                 },

@@ -1704,6 +1704,67 @@ class WebNodeTokenRow(BaseModel):
 ServerSkillStatus = Literal["current", "pending", "unavailable"]
 
 
+McpConnectionStatus = Literal["active", "paused", "error"]
+
+
+class McpConnectionRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    name: str
+    url: str
+    encrypted_auth: bytes | None = Field(repr=False)
+    scope: str | None
+    status: McpConnectionStatus
+    last_error: str | None
+    note: str | None
+    refreshed_at: datetime | None
+    declared: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class McpConnectionToolRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    connection_id: uuid.UUID
+    name: str
+    tenant_id: uuid.UUID
+    description: str
+    """What an admin approved; what callers see."""
+    input_schema: dict[str, JsonValue]
+    seen_description: str
+    seen_schema: dict[str, JsonValue]
+    writes: bool
+    approved_writes: bool
+    writes_set: bool
+    enabled: bool
+    scope: str | None
+    created_at: datetime
+    updated_at: datetime
+
+    @property
+    def changed(self) -> bool:
+        """The upstream sends, or the tool does, something other than what was approved."""
+        return (
+            self.seen_description != self.description
+            or self.seen_schema != self.input_schema
+            or self.writes != self.approved_writes
+        )
+
+
+class DiscoveredTool(BaseModel):
+    """One tool an upstream server listed, as `sync_tools` stores it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    description: str
+    input_schema: dict[str, JsonValue]
+    writes: bool
+
+
 class ServerSkillRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 

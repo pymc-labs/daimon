@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from typing import Final
 
 from daimon.core import ports
-from daimon.core.capability_tools import CAPABILITY_KEYS, CAPABILITY_TOOLS
+from daimon.core.capability_tools import CAPABILITY_KEYS, CAPABILITY_TOOLS, KEPT_BY
 from daimon.core.data_tools import DATA_READS
 from daimon.core.features.resolver import ResolvedFeature
 from daimon.core.repo_memory_tools import REPO_MEMORY_TOOLS
@@ -99,7 +99,9 @@ def gated_tools(keys: Iterable[str]) -> frozenset[str]:
     """The Daimon tools a session loses when `keys` (from `GATED_KEYS`) are Off."""
     ports.load()
     tools = {**_TOOLS, **_REGISTERED}
-    return frozenset[str]().union(*(tools[key] for key in keys)) - SESSION_KEPT_TOOLS
+    off = frozenset(keys)
+    kept = {tool for tool, key in KEPT_BY.items() if key not in off}
+    return frozenset[str]().union(*(tools[key] for key in off)) - SESSION_KEPT_TOOLS - kept
 
 
 def server_gate_key(tool: str) -> str | None:

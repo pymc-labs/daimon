@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
@@ -31,6 +31,7 @@ from daimon.core.authz import Subject
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.confirmation import (
     ServerSkillUpdateCard,
+    SharedConnectionCard,
     compute_card_skipped,
     confirmed_tools_for_turn,
 )
@@ -406,6 +407,46 @@ async def skill_update(_: ToolCall) -> ServerSkillUpdateCard:
     return ServerSkillUpdateCard(name="s", version="1", new_version="2", changes={})
 
 
+async def shared_connection(_: ToolCall) -> SharedConnectionCard:
+    return SharedConnectionCard("crm", tool="send")
+
+
+_GATE_LOOKUP = "daimon.adapters.mcp.middleware.host_call_gate.card_lookup"
+_Lookup = Callable[[ToolCall], Awaitable[SharedConnectionCard | None]]
+
+
+def _looking_up(lookup: _Lookup) -> Callable[..., _Lookup]:
+    """`card_lookup` as the gate builds it, reading `lookup` in place of the store."""
+    return lambda *_, **__: lookup  # pyright: ignore[reportUnknownLambdaType]
+
+
+async def test_a_shared_connection_change_card_names_what_it_acts_on(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As in chat, the card reads the store: the tool, its words and parameters;
+    a target that is gone is refused with no card."""
+    found = [SharedConnectionCard("crm", "send", "Sends.", True, ("id",))]
+
+    async def lookup(_: ToolCall) -> SharedConnectionCard | None:
+        return found[0] if found else None
+
+    monkeypatch.setattr(_GATE_LOOKUP, _looking_up(lookup))
+    rig.extra = ("change_shared_connection_tool",)
+    _attach(rig)
+    args = {"action": "turn_on", "connection": "crm", "tool": "send", "seen": _DIGEST}
+
+    await _call(rig, rig.identity(), "change_shared_connection_tool", args)
+    card = host_calls.requested_call_card(await _card(rig))
+    found.clear()
+
+    assert "crm_send" in card.headline, card.headline
+    for shown in ("Callers are told: Sends.", "Takes: id"):
+        assert shown in card.facts, f"{shown}: {card.facts}"
+    with pytest.raises(ToolError, match="List it again"):
+        await _call(rig, rig.identity(), "change_shared_connection_tool", args)
+    assert len(await _cards(rig)) == 1, "no card for a gone target"
+
+
 async def _claude_outcome(
     rig: Rig, policy: ToolSafetyPolicy, name: str, args: dict[str, Any]
 ) -> str:
@@ -434,6 +475,7 @@ async def _claude_outcome(
         daimon_rules=True,
         # Claude's card shows the skill's diff; a host card shows the call's own arguments.
         skill_update_for=skill_update,
+        shared_connection_for=shared_connection,
     )
     call = ToolCall(
         tool_use_id="claude", server_name=DAIMON_SERVER_NAME, tool_name=name, input=args
@@ -464,10 +506,11 @@ async def _set_rule(rig: Rig, name: str, rule: Literal["ask", "deny"], channel: 
 )
 @pytest.mark.parametrize("name", sorted(confirmation_gated_tools()))
 async def test_each_gated_tool_asks_and_runs_as_on_claude(
-    rig: Rig, name: str, safety: str, rule: str | None
+    rig: Rig, monkeypatch: pytest.MonkeyPatch, name: str, safety: str, rule: str | None
 ) -> None:
     """OpenAI and Gemini turns share this credential. Each gated tool gets the outcome
     Claude's own decider gives it: a card, then one run after the press, or run or refused."""
+    monkeypatch.setattr(_GATE_LOOKUP, _looking_up(shared_connection))
     rig.extra = tuple(sorted(confirmation_gated_tools() - _REAL_TOOLS))
     field = CONFIRMED_DAIMON_TOOLS.get(name)
     args = _GATED_ARGS.get(name, {} if field is None else {field: "x"})

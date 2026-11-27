@@ -93,8 +93,13 @@ CAPABILITY_TOOLS: Final[dict[str, frozenset[str]]] = {
     ),
     DATA_READS: DATA_TOOLS,
     DATA_SOURCES: DATA_SOURCE_TOOLS,
+    "shared_connections": frozenset({"send_private_details"}),
 }
 """Feature key to the tools it switches. Every one binds to the session, so a tier's Off takes
 the tools from the next message on; a test keeps these names equal to what the server registers."""
+
+KEPT_BY: Final[dict[str, str]] = {"send_private_details": DATA_SOURCES}
+"""A tool gated by one feature that stays while another is On: the data tools hand out
+placeholders `send_private_details` opens, as shared connections' do."""
 
 CAPABILITY_KEYS: Final[tuple[str, ...]] = tuple(CAPABILITY_TOOLS)

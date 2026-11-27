@@ -1,0 +1,49 @@
+{
+  "description": [
+    "Turn one tool of a shared connection on (turn_on: the ``seen`` fingerprint from",
+    "list_shared_connections, so it serves exactly what was shown) or off for the whole",
+    "workspace, mark it as changing things or only reading, or rescope it (scope; empty",
+    "clears it). To keep a tool from one agent, set that agent's tool rule instead.",
+    "Runs on the asker's Approve card, which names the tool, its server and, to turn it",
+    "on, the words its callers get. Admin-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "action": {
+        "enum": [
+          "turn_on",
+          "turn_off",
+          "mark_writes",
+          "mark_reads",
+          "rescope"
+        ],
+        "type": "string"
+      },
+      "connection": {
+        "type": "string"
+      },
+      "origin_context_id": {
+        "type": "string"
+      },
+      "scope": {
+        "default": "",
+        "type": "string"
+      },
+      "seen": {
+        "default": "",
+        "type": "string"
+      },
+      "tool": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "action",
+      "connection",
+      "tool",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

@@ -36,6 +36,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Annotated, Any
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.core.shared_connections import SERVED_TAG
 from daimon.core.tool_safety import APPROVAL_TOOLS, proxy_refusal
 from fastmcp.exceptions import ToolError
 from fastmcp.server.context import Context
@@ -117,7 +118,10 @@ class AgentChatAwareBM25SearchTransform(BM25SearchTransform):
             # Narrowed agent or operator session: skip the search collapse so
             # the visibility filter can surface the tools it was narrowed to.
             return tools
-        return await super().transform_tools(tools)
+        # A workspace's shared tools are few and its own: listed by name, so an agent's tool
+        # rules can name each one.
+        served = [tool for tool in tools if SERVED_TAG in tool.tags]
+        return [*await super().transform_tools(tools), *served]
 
     async def _enabled_by_name(self, tools: Sequence[Tool], names: frozenset[str]) -> list[Tool]:
         """`names` listed directly, with the search proxies only when `names` holds them."""

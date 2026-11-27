@@ -21,6 +21,9 @@ groups and marks by. Both therefore build the registry the same way, and the
 same fully-configured-settings reasoning applies to both — a partially
 configured Settings would quietly produce a shorter catalogue.
 
+The `/mcp` tool names also go to ``packages/core/daimon/core/daimon_tool_names.txt``, so a
+shared connection never serves a tool under one of Daimon's own names.
+
 Run: uv run python scripts/generate_mcp_tool_catalogue.py
 """
 
@@ -68,6 +71,7 @@ from _knowledge import web_only
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CATALOGUE_PATH = REPO_ROOT / "docs" / "mcp-tools.md"
+NAMES_PATH = REPO_ROOT / "packages" / "core" / "daimon" / "core" / "daimon_tool_names.txt"
 
 TOOLS_PACKAGE = "daimon.adapters.mcp.tools."
 WRAP_WIDTH = 88
@@ -115,8 +119,8 @@ HUB_NOTE = (
     "`/discord/mcp` and `/slack/mcp` behind that platform's OAuth login, and present "
     "only when the matching `DAIMON_HUB__*` client credentials are set. These tools "
     "carry no visibility tags, so a logged-in caller sees all of them; each takes a "
-    "`daimon_id` from `list_daimons`, because one person reaches several workspaces "
-    "here."
+    "`daimon_id` (the shared tools a `workspace_id`) from `list_daimons`, because one "
+    "person reaches several workspaces here."
 )
 
 # Sentence-final periods that are not sentence ends.
@@ -365,7 +369,8 @@ def _header(total: int, hub_total: int) -> list[str]:
     ]
 
 
-def render_catalogue() -> str:
+def render_files() -> dict[Path, str]:
+    """Each generated file and its text."""
     with _isolated_env():
         main_tools, hub_tools = asyncio.run(_collect_surfaces())
 
@@ -396,7 +401,12 @@ def render_catalogue() -> str:
                 note=HUB_NOTE,
             )
         )
-    return "\n".join(lines).rstrip("\n") + "\n"
+    names = "".join(f"{name}\n" for name in sorted({tool.name for tool in main_tools}))
+    return {CATALOGUE_PATH: "\n".join(lines).rstrip("\n") + "\n", NAMES_PATH: names}
+
+
+def render_catalogue() -> str:
+    return render_files()[CATALOGUE_PATH]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -404,7 +414,8 @@ def main(argv: list[str] | None = None) -> int:
     argparse.ArgumentParser(
         description="Generate docs/mcp-tools.md from the live MCP tool registry."
     ).parse_args(argv)
-    CATALOGUE_PATH.write_text(render_catalogue())
+    for path, text in render_files().items():
+        path.write_text(text)
     return 0
 
 

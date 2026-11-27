@@ -292,6 +292,8 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
                 "change_data_links",
                 "change_data_source",
                 "change_setting",
+                "change_shared_connection",
+                "change_shared_connection_tool",
                 "change_workspace_settings",
                 "compute_extend_session",
                 "compute_launch_session",

@@ -19,6 +19,7 @@ from daimon.adapters.web.avatars import avatars_router
 from daimon.adapters.web.channel_settings import channel_settings_router
 from daimon.adapters.web.channels import channels_router
 from daimon.adapters.web.chat import chat_router
+from daimon.adapters.web.connections import connections_router
 from daimon.adapters.web.credits import credits_router
 from daimon.adapters.web.data_pages import data_pages_router
 from daimon.adapters.web.features import features_router
@@ -132,6 +133,7 @@ def create_app(runtime: WebRuntime) -> FastAPI:
     app.include_router(chat_router(runtime))
     app.include_router(routines_router(runtime))
     app.include_router(credits_router(runtime))
+    app.include_router(connections_router(runtime))
     app.include_router(integrations_router(runtime))
     app.include_router(integrations_data_router(runtime))
     app.include_router(data_pages_router(runtime))

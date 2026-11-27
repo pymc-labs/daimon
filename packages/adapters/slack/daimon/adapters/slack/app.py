@@ -265,6 +265,7 @@ from daimon.core.continuity.messages import (
     render_responder_changed_without_handoff,
 )
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller
+from daimon.core.credential_requests import DATA_FORM_KINDS
 from daimon.core.credential_requests import SLACK_ACTION_ID as SLACK_CREDENTIAL_ACTION_ID
 from daimon.core.defaults.provisioning import teardown_slack_install
 from daimon.core.errors import DaimonError, UserFacingError
@@ -717,7 +718,7 @@ class SlackApp:
                 await run_repo_bind_credential_submission(
                     self.runtime, value=decision.value, **common
                 )
-            elif decision.kind == "data_source":
+            elif decision.kind in DATA_FORM_KINDS:
                 await run_data_source_credential_submission(
                     self.runtime, value=decision.value, **common
                 )

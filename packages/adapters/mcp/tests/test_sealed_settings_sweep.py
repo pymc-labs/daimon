@@ -304,6 +304,8 @@ EXEMPT: dict[str, str] = {
     "change_data_access": _TENANT,
     "change_data_links": _TENANT,
     "change_data_source": _TENANT,
+    "change_shared_connection": _TENANT,
+    "change_shared_connection_tool": _TENANT,
     "check_my_data_connection": _OWN,
     "connect_my_data": _OWN,
     "dismiss_data_notices": _OWN,
@@ -312,6 +314,7 @@ EXEMPT: dict[str, str] = {
     "list_data_links": _READS,
     "list_data_rule_sets": _READS,
     "list_data_sources": _READS,
+    "list_shared_connections": _READS,
     "data_file": _READS,
     "data_get": _READS,
     "data_search": _READS,
@@ -483,16 +486,20 @@ EXEMPT: dict[str, str] = {
 }
 
 #: The hub mount's tools. It forwards turns to a Daimon and lists sessions; it changes no setting.
-_HUB = "forwards a turn or reads a session of a Daimon; changes no channel or agent setting"
+_HUB = (
+    "forwards a turn, reads a session or calls a shared tool; changes no channel or agent setting"
+)
 HUB_EXEMPT: dict[str, str] = {
     "ask": _HUB,
     "await_turn": _HUB,
+    "call_shared_tool": _HUB,
     "continue_turn": _HUB,
     "describe_daimon": _HUB,
     "get_session": _HUB,
     "list_daimons": _HUB,
     "list_events": _HUB,
     "list_my_sessions": _HUB,
+    "list_shared_tools": _HUB,
     "start_turn": _HUB,
 }
 

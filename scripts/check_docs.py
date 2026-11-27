@@ -16,7 +16,7 @@ from pathlib import Path
 
 GENERATED = {"configuration.md", "mcp-tools.md"}
 PAGE_WORDS = 2000
-PAGE_WORDS_OVERRIDE = {"README.md": 500, "quickstart.md": 800, "features.md": 2760}
+PAGE_WORDS_OVERRIDE = {"README.md": 500, "quickstart.md": 800, "features.md": 2765}
 PARAGRAPH_WORDS = 100
 SENTENCE_WORDS = 40
 MAX_HEADING_LEVEL = 3

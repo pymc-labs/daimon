@@ -48,6 +48,7 @@ from daimon.adapters.mcp.oauth_microsoft import build_oauth_microsoft_routes
 from daimon.adapters.mcp.oauth_slack import build_oauth_slack_routes
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.search_transform import AgentChatAwareBM25SearchTransform
+from daimon.adapters.mcp.shared_connections import SharedConnectionProvider, register_scopes
 from daimon.adapters.mcp.slack_http import SlackHttpSession
 from daimon.adapters.mcp.tools import (
     agent_chat,
@@ -112,6 +113,9 @@ from daimon.adapters.mcp.tools.secret_shares import register_secret_share_tools
 from daimon.adapters.mcp.tools.self_knowledge import register_self_knowledge_tools
 from daimon.adapters.mcp.tools.server_skills import register_server_skill_tools
 from daimon.adapters.mcp.tools.setup_target import register_setup_target_tools
+from daimon.adapters.mcp.tools.shared_connection_admin import (
+    register_shared_connection_admin_tools,
+)
 from daimon.adapters.mcp.tools.skill_library_edits import register_skill_library_edit_tools
 from daimon.adapters.mcp.tools.skill_uploads import register_skill_upload_tools
 from daimon.adapters.mcp.tools.support import register_support_tools
@@ -565,6 +569,8 @@ def create_mcp_app(
     identity_middleware.attach_host_call_gate(
         HostCallGate(runtime, public_url=str(effective_settings.mcp.public_url or ""))
     )
+    mcp.add_provider(SharedConnectionProvider(runtime))  # `<connection>_<tool>`, per caller
+    register_scopes(runtime)  # scoped ones follow the data store's grants
     mcp.add_middleware(CallOriginMiddleware(runtime))  # where the call's turn started
     mcp.add_middleware(CapabilityGateMiddleware(runtime))  # innermost: reads the identity
     agents.register_agent_tools(mcp, runtime)
@@ -605,6 +611,7 @@ def create_mcp_app(
     register_data_tools(mcp, runtime)  # data_* reads, behind data_reads
     register_data_admin_tools(mcp, runtime)  # the data pages' admin, from chat
     register_data_connect_tools(mcp, runtime)  # a person's own data sign-ins
+    register_shared_connection_admin_tools(mcp, runtime)  # the shared connections page
     from daimon.adapters.mcp.tools.watches import register_watch_tools
 
     register_watch_tools(mcp, runtime)
