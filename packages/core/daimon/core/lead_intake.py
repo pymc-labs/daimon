@@ -6,14 +6,30 @@ import re
 from datetime import datetime
 from email.utils import getaddresses
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Final
 from uuid import UUID
 
 from daimon.core.access_policy import TenantAccessPolicy, is_invoker_allowed
 from daimon.core.membership import Membership
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
-NonEmptyStr = Annotated[str, Field(min_length=1, max_length=100_000)]
+#: The longest string a record field holds. Stored records are read back
+#: against it, and the tools return whole records, so it bounds those too.
+TEXT_LIMIT: Final[int] = 100_000
+NonEmptyStr = Annotated[str, Field(min_length=1, max_length=TEXT_LIMIT)]
+
+
+def rejected_text(text: str) -> str:
+    """The text a record keeps of a source classified `other`.
+
+    An email's headers, plain text and HTML together pass `TEXT_LIMIT` for an
+    ordinary HTML newsletter. A source that cannot be recorded stays
+    discovered and comes back on every scan. A rejected source has no
+    delivery, no CRM write and no quote that anything relies on, and it was
+    classified from its whole text, so its record keeps the start of it. A
+    lead is never cut: its quotes and its sender are checked on the whole text.
+    """
+    return text[:TEXT_LIMIT]
 
 
 class LeadSourceKind(StrEnum):

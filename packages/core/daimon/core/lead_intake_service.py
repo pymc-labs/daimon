@@ -20,6 +20,7 @@ from daimon.core.lead_intake import (
     LeadSourceKind,
     LeadSubmission,
     captured_here,
+    rejected_text,
     split_dossier,
     verify_lead_evidence,
 )
@@ -120,7 +121,9 @@ class IntakeService:
         ):
             raise ValueError("recipient_mismatch")
         evidence = LeadEvidence(
-            original_text=verified.text,
+            original_text=(
+                rejected_text(verified.text) if draft.classification == "other" else verified.text
+            ),
             raw_source=verified.raw,
             **draft.model_dump(
                 exclude={
