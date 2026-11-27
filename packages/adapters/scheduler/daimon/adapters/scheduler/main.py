@@ -1566,7 +1566,16 @@ async def run(
         markup=settings.billing.markup,
     )
     stop_event = asyncio.Event()
-    lane_turn = workflows.HeadlessLaneTurn(client, sm, settings, deployment_default, resolver_cache)
+    lane_turn = workflows.HeadlessLaneTurn(
+        client,
+        sm,
+        settings,
+        deployment_default,
+        resolver_cache,
+        DiscordRestMembershipResolver(settings.discord.bot_token.get_secret_value())
+        if settings.discord is not None
+        else None,
+    )
     tool_client = McpToolClient(client, sm, settings, lane_turn.targets)
     workflow_engine = workflows.WorkflowEngine(
         sm,

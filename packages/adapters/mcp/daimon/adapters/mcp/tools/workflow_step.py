@@ -45,7 +45,7 @@ def register_workflow_step_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def complete_step(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         step: uuid.UUID,
-        summary: Annotated[str, Field(min_length=1, max_length=4000)],
+        summary: Annotated[str, Field(min_length=1, max_length=step_tools.SUMMARY_MAX)],
         output: dict[str, JsonValue] | None = None,
         route: str | None = None,
         reason: Annotated[str | None, Field(max_length=1000)] = None,
@@ -88,7 +88,7 @@ def register_workflow_step_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def finish_early(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
         step: uuid.UUID,
-        summary: Annotated[str, Field(min_length=1, max_length=4000)],
+        summary: Annotated[str, Field(min_length=1, max_length=step_tools.SUMMARY_MAX)],
     ) -> str:
         """End the whole workflow run early as done, because there is nothing to do.
 

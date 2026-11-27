@@ -191,6 +191,9 @@ class RelayBinding:
     execution: uuid.UUID | None = None
     revision: str | None = None
     dm_channel: str | None = None
+    #: The workflow run an agent step's session serves, with its run-as person as `owner`
+    #: and, for a private step on Discord, their DM as `dm_channel`; never beside a routine.
+    workflow_run_id: uuid.UUID | None = None
 
     def claim(self) -> dict[str, str]:
         value = {"agent_name": self.agent_name}
@@ -202,6 +205,8 @@ class RelayBinding:
             value["routine"] = str(self.routine_id)
         if self.watch_id is not None:
             value["watch"] = str(self.watch_id)
+        if self.workflow_run_id is not None:
+            value["workflow_run"] = str(self.workflow_run_id)
         if self.owner is not None:
             value["owner"] = self.owner
         if self.agent_chat is not None:
@@ -257,10 +262,11 @@ def parse_relay_claim(raw: object) -> RelayBinding:
         claim.get("revision"),
         claim.get("dm_channel"),
     )
-    unattended = routine is not None or watch is not None
+    run = claim.get("workflow_run")
+    unattended = routine is not None or watch is not None or run is not None
     # A routine in its owner's DM turn: the session, its grant and the routine together,
     # with every field the relay checks it by; any of them alone is a wrong shape.
-    dm = execution is not None or revision is not None or dm_channel is not None
+    dm = run is None and (execution is not None or revision is not None or dm_channel is not None)
     if (
         not set(claim)
         <= {
@@ -275,8 +281,10 @@ def parse_relay_claim(raw: object) -> RelayBinding:
             "execution",
             "revision",
             "dm_channel",
+            "workflow_run",
         }
         or (dm and not _dm_routine_shape(claim))
+        or (run is not None and not _workflow_run_shape(claim))
         or not (destination is None or (isinstance(destination, str) and routine is not None))
         or not (owner is None or (isinstance(owner, str) and owner and unattended))
         or not (grant is None or (isinstance(grant, str) and grant and key is not None))
@@ -285,7 +293,7 @@ def parse_relay_claim(raw: object) -> RelayBinding:
         or not (key is None or isinstance(key, str))
         or not (routine is None or isinstance(routine, str))
         or not (watch is None or isinstance(watch, str))
-        or (sum(value is not None for value in (key, routine, watch)) > 1 and not dm)
+        or (sum(value is not None for value in (key, routine, watch, run)) > 1 and not dm)
         or not (
             agent_chat is None
             or (
@@ -308,6 +316,24 @@ def parse_relay_claim(raw: object) -> RelayBinding:
         execution=None if execution is None else uuid.UUID(cast("str", execution)),
         revision=cast("str | None", revision),
         dm_channel=cast("str | None", dm_channel),
+        workflow_run_id=None if run is None else uuid.UUID(cast("str", run)),
+    )
+
+
+def _workflow_run_shape(claim: Mapping[str, object]) -> bool:
+    """Whether a relay claim is whole as an agent step's: the run, its run-as person and,
+    only beside them, a Discord DM channel id."""
+    run, owner, channel = claim.get("workflow_run"), claim.get("owner"), claim.get("dm_channel")
+    if not (isinstance(run, str) and isinstance(owner, str) and owner):
+        return False
+    if not set(claim) <= {"agent_name", "workflow_run", "owner", "dm_channel"}:
+        return False
+    try:
+        uuid.UUID(run)
+    except ValueError:
+        return False
+    return channel is None or (
+        isinstance(channel, str) and channel.isascii() and channel.isdecimal()
     )
 
 
@@ -364,6 +390,10 @@ class IdentityClaims:
     #: (`routine_revision`), and its name, for the server's own pages.
     rev: str | None = None
     routine_name: str | None = None
+    #: An agent step's workflow, signed as `routine` is, with its revision and name.
+    workflow: str | None = None
+    workflow_rev: str | None = None
+    workflow_name: str | None = None
 
     def payload(self, *, now: datetime, ttl: timedelta = TOKEN_TTL) -> dict[str, str | int]:
         issued = int(now.timestamp())
@@ -385,6 +415,9 @@ class IdentityClaims:
             ("wake", self.wake),
             ("rev", self.rev),
             ("routine_name", self.routine_name),
+            ("workflow", self.workflow),
+            ("workflow_rev", self.workflow_rev),
+            ("workflow_name", self.workflow_name),
         ):
             if value:
                 claims[name] = value
@@ -406,6 +439,9 @@ def caller_claims(
     wake: WakeReason | None = None,
     rev: str | None = None,
     routine_name: str | None = None,
+    workflow: str | None = None,
+    workflow_rev: str | None = None,
+    workflow_name: str | None = None,
 ) -> IdentityClaims:
     """Claims for one relayed request.
 
@@ -426,8 +462,17 @@ def caller_claims(
     and keeps its `sub` and `msg`; any other reason is a continuation posting to `place`,
     signed like a routine with that room's kind and no person or message.
 
-    `rev` and `routine_name` come only with `routine` (`routine_revision`).
+    `rev` and `routine_name` come only with `routine` (`routine_revision`). `workflow`,
+    `workflow_rev` and `workflow_name` name an agent step's workflow by the same rules.
     """
+    if routine is not None and workflow is not None:
+        raise ValueError("a run posts for a routine or a workflow, never both")
+    if workflow is None and (workflow_rev is not None or workflow_name is not None):
+        raise ValueError("a workflow's revision and name come only with its workflow")
+    if workflow_rev is not None and not re.fullmatch(r"[0-9a-f]{64}", workflow_rev):
+        raise ValueError("a workflow's revision is a SHA-256 hex digest")
+    if workflow is not None:
+        rev, routine_name, routine = workflow_rev, workflow_name, workflow
     owned = routine is not None and room == "dm"
     if routine is None and (rev is not None or routine_name is not None):
         raise ValueError("a routine's revision and name come only with its routine")
@@ -468,10 +513,20 @@ def caller_claims(
         channel=channel,
         msg=place.message_id if person and place is not None else None,
         room=room if channel else None,
-        routine=routine,
         wake=wake,
-        rev=rev,
-        routine_name=routine_name[:ROUTINE_CLAIM_MAX] if routine_name else None,
+        **(
+            {
+                "workflow": workflow,
+                "workflow_rev": workflow_rev,
+                "workflow_name": workflow_name[:ROUTINE_CLAIM_MAX] if workflow_name else None,
+            }
+            if workflow is not None
+            else {
+                "routine": routine,
+                "rev": rev,
+                "routine_name": routine_name[:ROUTINE_CLAIM_MAX] if routine_name else None,
+            }
+        ),
     )
 
 

@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 from cryptography.fernet import MultiFernet
 from daimon.core._models import (
@@ -777,14 +777,28 @@ async def workflow_execution(
     *,
     lifetime_s: float,
 ) -> AsyncIterator[UUID]:
-    """`routine_execution` for a workflow run's step; yields the grant's id. Deleting
-    the run (or its workflow) deletes the grant."""
-    async with _grant(sessions, tenant_id, lifetime_s, workflow_run_id=run_id) as identity:
-        token = current_intake_execution.set(WorkflowExecution(run_id, identity))
-        try:
-            yield identity
-        finally:
-            current_intake_execution.reset(token)
+    """`routine_execution` for a workflow run's step; yields the grant's id.
+
+    One grant per run, so a lane's session keeps one execution across its steps: each step
+    extends it by `lifetime_s` and leaves it. Deleting the run (or its workflow) deletes it,
+    and an expired one is purged.
+    """
+    identity = uuid5(run_id, "workflow_execution")
+    expires = datetime.now(UTC) + timedelta(seconds=lifetime_s)
+    async with sessions() as session, session.begin():
+        await session.execute(
+            insert(LeadIntakeExecution)
+            .values(tenant_id=tenant_id, id=identity, expires_at=expires, workflow_run_id=run_id)
+            .on_conflict_do_update(
+                index_elements=[LeadIntakeExecution.tenant_id, LeadIntakeExecution.id],
+                set_={"expires_at": func.greatest(LeadIntakeExecution.expires_at, expires)},
+            )
+        )
+    token = current_intake_execution.set(WorkflowExecution(run_id, identity))
+    try:
+        yield identity
+    finally:
+        current_intake_execution.reset(token)
 
 
 async def execution_is_active(

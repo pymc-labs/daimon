@@ -29,10 +29,13 @@ from daimon.core.workflows.access import Who
 from daimon.core.workflows.agent_step import (
     AgentStepExecutor,
     CollectFiles,
+    LaneReply,
     Writes,
     step_decider,
     step_policy,
 )
+from daimon.core.workflows.engine import Failed
+from daimon.core.workflows.place import StepPlace
 from daimon.core.workflows.runs import StepWork
 from daimon.core.workflows.service import Env
 from daimon.core.workflows.spec import AgentNode, SchemaField, WriteScope, parse_spec
@@ -56,16 +59,23 @@ class Lane:
     attempt: uuid.UUID | None = None
     step: StepTurn | None = None
     steps: list[StepTurn] = field(default_factory=list[StepTurn])
+    #: The turn's final reply and where it posted by itself, as a script leaves them.
+    reply: LaneReply = field(default_factory=LaneReply)
+    place: StepPlace = field(default_factory=StepPlace)
+
+    async def admit(self, work: StepWork) -> StepPlace | Failed:
+        return self.place
 
     async def __call__(
         self,
         work: StepWork,
         *,
+        place: StepPlace,
         message: str,
         session_id: str | None,
         step: StepTurn,
         policy: ToolSafetyPolicy,
-    ) -> None:
+    ) -> LaneReply:
         self.sessions.append(session_id)
         self.resumes.append(step.resume)
         self.step = step
@@ -77,6 +87,7 @@ class Lane:
         assert work.step.started_at is not None
         await self.bill(sid, f"evt_{len(self.sessions)}", work.step.started_at)
         await self.scripts.pop(0)(self, work, message)
+        return self.reply
 
     async def bill(self, sid: str, event_id: str, at: datetime) -> None:
         assert self.step is not None

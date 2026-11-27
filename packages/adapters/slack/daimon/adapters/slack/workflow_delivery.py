@@ -17,6 +17,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, cast
 
+from daimon.adapters.slack.agent_post import post_as_agent
 from daimon.adapters.slack.blockkit import error_blocks
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.mrkdwn import escape_mrkdwn_preserving_mentions
@@ -27,7 +28,7 @@ from daimon.adapters.slack.workflow_asks import ask_blocks
 from daimon.adapters.slack.workflow_cards import permalink, web_at
 from daimon.core.delivery import DeliveryOutcome, WorkflowPoster, files_envelope, job_payload
 from daimon.core.message_split import split_fenced
-from daimon.core.routine_delivery import DeliveryTarget
+from daimon.core.routine_delivery import DeliveryTarget, resolve_post_identity
 from daimon.core.routine_files import deliver_routine_files
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.workflow_deliveries import DeliveryRow
@@ -125,11 +126,26 @@ def make_slack_workflow_poster(runtime: SlackRuntime) -> WorkflowPoster:
             )
             return DeliveryOutcome(status="delivered")
         ask = asks.ask_of(row.payload) if row.kind == "ask" else None
+        identity = (
+            None
+            if post.as_agent is None or ask is not None
+            else await resolve_post_identity(
+                runtime.sessionmaker,
+                runtime.anthropic,
+                runtime.settings,
+                tenant_id=row.tenant_id,
+                agent_name=post.as_agent,
+                agent_id=None,
+                platform="slack",
+                workspace_id=tenant.external_id,
+                default_agent_name=runtime.deployment_default.agent_name,
+            )
+        )
         chunks = split_fenced(text, 3000 if ask else 11800, word_boundary=True)
         first: str | None = None
         for index, chunk in enumerate(chunks):
             if ask is None or index < len(chunks) - 1:
-                sent = await client.chat_postMessage(text=chunk, **place)  # pyright: ignore[reportUnknownMemberType]
+                sent = await post_as_agent(client, identity, text=chunk, **place)
                 first = first or str(sent.get("ts"))  # pyright: ignore[reportUnknownMemberType]
                 continue
             sent = await client.chat_postMessage(text=chunk, blocks=ask_blocks(chunk, ask), **place)  # pyright: ignore[reportUnknownMemberType]

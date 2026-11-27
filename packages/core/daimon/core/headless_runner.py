@@ -53,7 +53,7 @@ import functools
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -280,6 +280,7 @@ async def run_turn(
     session_id: str | None = None,
     step: StepTurn | None = None,
     routine_destination: str | None = None,
+    step_dm_channel: str | None = None,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -323,6 +324,7 @@ async def run_turn(
             session_id=session_id,
             step=step,
             routine_destination=routine_destination,
+            step_dm_channel=step_dm_channel,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -366,6 +368,7 @@ async def run_turn(
                 session_id=session_id,
                 step=step,
                 routine_destination=routine_destination,
+                step_dm_channel=step_dm_channel,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -437,6 +440,7 @@ async def run_turn_impl(
     session_id: str | None = None,
     step: StepTurn | None = None,
     routine_destination: str | None = None,
+    step_dm_channel: str | None = None,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its complete final reply.
 
@@ -726,7 +730,8 @@ async def run_turn_impl(
             model_override=model_override,
             system_override=identity.system(agent.system, platform),
             relay_routine_id=routine_id if relay_routine else None,
-            relay_owner=runs_as_user if relay_routine and routine_id else None,
+            relay_owner=runs_as_user if relay_routine and (routine_id or step) else None,
+            relay_dm_channel=step_dm_channel if relay_routine and step else None,
             relay_destination=relay_destination,
             identity=identity,
             workflow_run_id=step.workflow_run_id if step is not None else None,
@@ -803,6 +808,10 @@ async def run_turn_impl(
             ):
                 log.info("headless.sandbox_tools_off", session_id=session.id)
                 sandbox_tools = False
+        step_tools = step.tools if step is not None else None
+        if step_tools is not None and sandbox is not None and not sandbox_tools:
+            # A step's built-ins hold only while the run matches its grant's pin.
+            step_tools = replace(step_tools, builtins=frozenset())
 
         billing: BillingPosture
         if usage_record is not None:
@@ -876,7 +885,7 @@ async def run_turn_impl(
             channel_id=origin_place.channel_id if origin_place is not None else None,
             entry_point=entry_point,
             routine_sandbox_tools=sandbox_tools,
-            step_tools=step.tools if step is not None else None,
+            step_tools=step_tools,
         )
         with (
             structlog.contextvars.bound_contextvars(
@@ -897,7 +906,7 @@ async def run_turn_impl(
                     entry_point=entry_point,
                     routine_sandbox_tools=sandbox_tools,
                     principal_check=principal_check,
-                    step_tools=step.tools if step is not None else None,
+                    step_tools=step_tools,
                 )
             ),
         ):

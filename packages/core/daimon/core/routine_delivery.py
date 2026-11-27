@@ -82,7 +82,7 @@ from daimon.core.routine_files import decode_payload, payload_for
 from daimon.core.self_knowledge import controls_hint
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
-from daimon.core.stores.agent_posts import posted_under
+from daimon.core.stores.agent_posts import parents_of
 from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import CHAT_PLATFORMS, Role, RoutineRow
 from daimon.core.stores.identity import find_platform_principal
@@ -145,6 +145,7 @@ log = structlog.get_logger(__name__)
 #: the agent delivering the result itself.
 _POST_TOOL: Final[str] = "send_message"
 _THREAD_TOOL: Final[str] = "create_thread"
+_DM_TOOL: Final[str] = "send_direct_message"
 
 _SLACK_CHANNEL: Final[re.Pattern[str]] = re.compile(r"[CG][A-Z0-9]{2,}")
 _SLACK_THREAD: Final[re.Pattern[str]] = re.compile(r"[CG][A-Z0-9]{2,}:[0-9]+\.[0-9]+")
@@ -391,11 +392,14 @@ class _OwnPosts:
     sent: frozenset[str]
     #: Every channel `create_thread` opened a thread in.
     opened_in: frozenset[str]
+    #: Everyone `send_direct_message` messaged.
+    messaged: frozenset[str]
 
 
 def _own_posts(state: TurnState) -> _OwnPosts:
     sent: set[str] = set()
     opened_in: set[str] = set()
+    messaged: set[str] = set()
     for block in state.content:
         if not isinstance(block, ToolUseBlock):
             continue
@@ -412,28 +416,59 @@ def _own_posts(state: TurnState) -> _OwnPosts:
             channel_id = arguments.get("channel_id")
             if isinstance(channel_id, str):
                 opened_in.add(channel_id)
-    return _OwnPosts(sent=frozenset(sent), opened_in=frozenset(opened_in))
+        elif (arguments := daimon_tool_arguments(block, _DM_TOOL)) is not None:
+            recipient = arguments.get("recipient_id")
+            if isinstance(recipient, str):
+                messaged.add(recipient)
+    return _OwnPosts(frozenset(sent), frozenset(opened_in), frozenset(messaged))
 
 
-def _thread_of(place: str, channel_id: str) -> bool:
-    """Whether `place` names a thread of `channel_id` by a composite id.
+def _composite_parent(place: str) -> str | None:
+    """The channel a composite thread id names: Slack `<channel>:<ts>`, Teams
+    `<channel>;messageid=<root>`. A Discord thread has an id of its own."""
+    for separator in (";messageid=", ":"):
+        channel, found, rest = place.partition(separator)
+        if found and channel and rest and not (separator == ":" and channel.isdigit()):
+            return channel
+    return None
 
-    Slack addresses a thread as `<channel>:<ts>` and Teams as
-    `<channel>;messageid=<root>`. A Discord thread has an id of its own.
+
+async def posted_places(
+    sessions: async_sessionmaker[AsyncSession],
+    state: TurnState,
+    *,
+    tenant_id: uuid.UUID,
+    home: str | None = None,
+    run_as: str | None = None,
+) -> frozenset[str]:
+    """Where the agent posted by itself during the turn, in a Post's `to` grammar.
+
+    Each place `send_message` named; a thread adds its parent: one opened with
+    `create_thread`, one named by a composite id, or a Discord thread the record of the
+    agent's own posts sits under. `home` adds `home` when it was posted to, and a DM to
+    `run_as` adds `run_as`. The one rule for "posts for itself or Daimon posts, never both".
     """
-    return place.startswith((f"{channel_id}:", f"{channel_id};messageid="))
+    posts = _own_posts(state)
+    places = set(posts.sent | posts.opened_in)
+    places.update(p for p in map(_composite_parent, posts.sent) if p is not None)
+    if posts.sent:
+        async with sessions() as session:
+            places |= await parents_of(session, tenant_id=tenant_id, channel_ids=posts.sent)
+    if home is not None and home in places:
+        places.add("home")
+    if run_as is not None and run_as in posts.messaged:
+        places.add("run_as")
+    return frozenset(places)
 
 
 def agent_posted_to(state: TurnState, row: RoutineFacts) -> bool:
     """Whether the turn's own tool calls show the agent posted to the destination.
 
-    A `send_message` counts on the full destination as it names it: a channel
-    id, a Discord thread id, or a Slack thread's `<channel>:<ts>`. A post to
-    the bare channel of a thread destination is not the thread, and does not
-    count. Under a channel destination a thread counts too: one the agent
-    opened there with `create_thread`, or one addressed by its composite id.
-    A Discord thread that was already there has only its own id:
-    `agent_delivered_itself` looks its parent up.
+    A `send_message` counts on the full destination as it names it. A post to the bare
+    channel of a thread destination is not the thread. Under a channel destination a
+    thread counts too: one opened there, or one addressed by its composite id. A Discord
+    thread that was already there has only its own id: `agent_delivered_itself` looks
+    its parent up.
     """
     if row.destination_kind == "dm" or row.destination_id is None:
         return False
@@ -442,35 +477,21 @@ def agent_posted_to(state: TurnState, row: RoutineFacts) -> bool:
         return True
     if row.destination_kind != "channel":
         return False
-    return row.destination_id in posts.opened_in or any(
-        _thread_of(place, row.destination_id) for place in posts.sent
-    )
+    return row.destination_id in posts.opened_in or row.destination_id in {
+        _composite_parent(p) for p in posts.sent
+    }
 
 
 async def agent_delivered_itself(
     sessions: async_sessionmaker[AsyncSession], state: TurnState, row: RoutineFacts
 ) -> bool:
-    """Whether the agent posted to the destination, or to a thread under it, during the turn.
-
-    The one rule for the fallback post: the routine posts for itself or daimon
-    posts its final reply, never both. `agent_posted_to` answers from the tool
-    calls alone. What is left is a post into a Discord thread the turn did not
-    open: the record of the agent's own posts names that thread's parent.
-    """
-    if agent_posted_to(state, row):
-        return True
-    if row.destination_kind != "channel" or row.destination_id is None:
+    """Whether the agent posted to the destination, or to a thread under it, during the turn
+    (`posted_places`); a thread destination counts only itself."""
+    if row.destination_kind in (None, "dm") or row.destination_id is None:
         return False
-    sent = _own_posts(state).sent
-    if not sent:
-        return False
-    async with sessions() as session:
-        return await posted_under(
-            session,
-            tenant_id=row.tenant_id,
-            parent_channel_id=row.destination_id,
-            channel_ids=sent,
-        )
+    if row.destination_kind != "channel":
+        return agent_posted_to(state, row)
+    return row.destination_id in await posted_places(sessions, state, tenant_id=row.tenant_id)
 
 
 def destination_shape_error(platform: str, kind: str, destination_id: str) -> str | None:
@@ -716,28 +737,62 @@ async def resolve_routine_identity(
     workspace_id: str,
     default_agent_name: str | None,
 ) -> AgentIdentity:
-    """The identity a routine's result is posted under.
+    """The identity a routine's result is posted under (`resolve_post_identity`)."""
+    return await resolve_post_identity(
+        sessionmaker,
+        client,
+        settings,
+        tenant_id=row.tenant_id,
+        agent_name=row.agent_name,
+        agent_id=row.agent_id,
+        platform=platform,
+        workspace_id=workspace_id,
+        default_agent_name=default_agent_name,
+    )
+
+
+async def resolve_post_identity(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    client: AsyncAnthropic,
+    settings: Settings,
+    *,
+    tenant_id: uuid.UUID,
+    agent_name: str,
+    agent_id: str | None,
+    platform: Literal["discord", "slack"],
+    workspace_id: str,
+    default_agent_name: str | None,
+) -> AgentIdentity:
+    """The identity an unattended post (a routine's result, a workflow Post) goes out under.
 
     The built-in agent, identity switched off, or a failed lookup all come back
     built-in, so the post reads exactly as it did before agent identity. Any
-    error is caught here: a lookup that fails must not cost the result its post.
+    error is caught here: a lookup that fails must not cost the post.
     The poller is off any interaction deadline, so a new agent's face is waited for.
     """
-    plain = AgentIdentity(name=row.agent_name, avatar_url=None, builtin=True)
+    plain = AgentIdentity(name=agent_name, avatar_url=None, builtin=True)
     if not identity_enabled_for(settings, platform, workspace_id):
         return plain
     try:
         agent = await find_agent_by_daimon_tag(
-            client, tenant_id=row.tenant_id, name=row.agent_name, records=sessionmaker
+            client, tenant_id=tenant_id, name=agent_name, records=sessionmaker
+        )
+        shown_id = agent_id or (agent.id if agent is not None else None)
+        display = (
+            await agent_display_name(
+                sessionmaker, tenant_id=tenant_id, agent_id=shown_id, fallback=agent_name
+            )
+            if shown_id
+            else agent_name
         )
         async with sessionmaker.begin() as session:
             return await resolve_agent_identity(
                 session,
-                tenant_id=row.tenant_id,
-                agent_name=row.agent_name,
-                display_name=await routine_agent_name(sessionmaker, row),
+                tenant_id=tenant_id,
+                agent_name=agent_name,
+                display_name=display,
                 is_builtin=is_builtin_agent(
-                    name=row.agent_name,
+                    name=agent_name,
                     metadata=agent.metadata if agent is not None else None,
                     default_agent_name=default_agent_name,
                 ),
@@ -746,10 +801,10 @@ async def resolve_routine_identity(
                 background_sessionmaker=sessionmaker,
                 wait_for_face=True,
             )
-    except Exception as exc:  # identity is cosmetic: never lose the result over it
+    except Exception as exc:  # identity is cosmetic: never lose the post over it
         log.warning(
             "routine.identity_lookup_failed",
-            routine_id=str(row.id),
+            agent_name=agent_name,
             error_type=type(exc).__name__,
         )
         return plain

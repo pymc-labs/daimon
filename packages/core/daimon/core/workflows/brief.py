@@ -12,9 +12,11 @@ from datetime import datetime
 from typing import Final
 from xml.sax.saxutils import quoteattr
 
+from daimon.core.routine_delivery import QUIET_RUN_SENTENCE
 from daimon.core.untrusted import render_untrusted
 from daimon.core.workflows.expressions import render
 from daimon.core.workflows.graph import edges_of
+from daimon.core.workflows.place import StepPlace
 from daimon.core.workflows.spec import AgentNode, SchemaField, Spec
 from pydantic import JsonValue
 
@@ -78,16 +80,30 @@ def _contract(node: AgentNode) -> str:
     return "\n".join(lines)
 
 
-def _rules(node: AgentNode, attempt_id: uuid.UUID) -> str:
+def _posting(place: StepPlace | None) -> str:
+    if place is None or place.where is None:
+        return "Do not post results unless the instructions say so."
+    if not place.may_post:
+        return f"You work in {place.where}. Do not post there yourself."
+    return (
+        f"You work in {place.where}. You may post there yourself when the instructions say"
+        " so; then Daimon does not post your result again."
+    )
+
+
+def _rules(node: AgentNode, attempt_id: uuid.UUID, place: StepPlace | None) -> str:
     finish = "output, summary and route" if node.routes else "output and summary"
     rules = [
         f"Nobody is watching. Finish by calling complete_step with {finish}, or fail_step"
         " with a reason.",
         f'Pass step="{attempt_id}" to every step tool.',
-        "Do not post results unless the instructions say so.",
+        _posting(place),
     ]
+    if not node.output:
+        rules.insert(1, "A plain final reply also completes this step: it becomes the summary.")
     if node.can_finish_early:
         rules.insert(1, "If there is nothing to do, call finish_early with a summary instead.")
+        rules.append(QUIET_RUN_SENTENCE.strip())
     return "\n".join(rules)
 
 
@@ -102,8 +118,11 @@ def render_brief(
     context: Mapping[str, JsonValue],
     inputs: JsonValue,
     untrusted_source: str | None,
+    place: StepPlace | None = None,
 ) -> str:
-    """The XML brief; inputs go inside the untrusted envelope when any came from outside."""
+    """The XML brief; inputs go inside the untrusted envelope when any came from outside.
+
+    `place` is where admission let the step work and whether its agent may post there."""
     data = json.dumps(inputs, ensure_ascii=False, default=str)
     attrs = " ".join(
         f"{k}={quoteattr(v)}"
@@ -124,7 +143,7 @@ def render_brief(
         if untrusted_source is not None
         else f"<inputs>{_text(data)}</inputs>",
         f"<contract>{_text(_contract(node))}</contract>",
-        f"<rules>{_text(_rules(node, attempt_id))}</rules>",
+        f"<rules>{_text(_rules(node, attempt_id, place))}</rules>",
         "</workflow_step>",
     ]
     return "\n".join(parts)

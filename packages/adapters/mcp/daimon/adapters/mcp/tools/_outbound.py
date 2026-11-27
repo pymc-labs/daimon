@@ -51,6 +51,7 @@ from daimon.core.stores.host_call_cards import get_card
 from daimon.core.stores.reach_tallies import lock_tally, save_tally
 from daimon.core.stores.routines import get_routine
 from daimon.core.turn_origin import origin_place
+from daimon.core.workflows.place import bound_step
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -227,6 +228,16 @@ async def turn_scope(runtime: McpRuntime, auth: AuthIdentity) -> TurnScope:
             own_places=frozenset(),
             requester_id=routine.created_by_user_id if routine else None,
             routine_name=(routine.name or routine.agent_name) if routine else None,
+        )
+    if auth.workflow_run_id is not None:
+        async with runtime.session_factory() as session:
+            step = await bound_step(session, tenant_id=auth.tenant_id, run_id=auth.workflow_run_id)
+        return TurnScope(
+            key=f"workflow:{auth.execution_id or auth.workflow_run_id}",
+            kind="unattended",
+            own_places=frozenset(),
+            requester_id=step.subject.created_by_user_id if step else None,
+            routine_name=step.workflow.name if step else None,
         )
     if auth.chat_session_id is not None:
         running = await list_running_origins(runtime, auth)

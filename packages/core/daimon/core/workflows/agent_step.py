@@ -30,6 +30,7 @@ from daimon.core.checkpoint_prompt import HANDOFF_FILENAME_PREFIX
 from daimon.core.config import Settings
 from daimon.core.headless_runner import StepTurn
 from daimon.core.output_delivery import MAX_BYTES_CEILING, poll_output_files
+from daimon.core.routine_delivery import split_run_text
 from daimon.core.routine_files import MAX_FILES, RoutineFile
 from daimon.core.stores import workflow_proposals, workflow_runs
 from daimon.core.stores.workflow_run_events import NewEvent, append_events
@@ -62,6 +63,7 @@ from daimon.core.workflows.action_step import (
 from daimon.core.workflows.brief import NUDGE, render_brief, step_inputs
 from daimon.core.workflows.expressions import ExpressionError
 from daimon.core.workflows.lanes import FRESH, agent_of, lane_key, lane_skills
+from daimon.core.workflows.place import StepPlace
 from daimon.core.workflows.preflight import Refusal, check
 from daimon.core.workflows.runs import ENGINE, Park, Sessions, StepWork, key_of
 from daimon.core.workflows.spec import AgentNode, WriteScope
@@ -130,18 +132,43 @@ def _earlier_file_ids(context: Mapping[str, JsonValue]) -> set[str]:
     return ids
 
 
+@dataclass(frozen=True)
+class LaneReply:
+    """How one turn ended: its final reply, and where the agent posted by itself."""
+
+    text: str = ""
+    posted: frozenset[str] = frozenset()
+
+
 class LaneTurn(Protocol):
-    """Drive one turn of a step in `session_id` (None: a new session), sending `message`."""
+    """Admit a step at its place, then drive one turn of it in `session_id` (None: a new
+    session), sending `message`."""
+
+    async def admit(self, work: StepWork) -> StepPlace | engine.Failed: ...
 
     async def __call__(
         self,
         work: StepWork,
         *,
+        place: StepPlace,
         message: str,
         session_id: str | None,
         step: StepTurn,
         policy: ToolSafetyPolicy,
-    ) -> None: ...
+    ) -> LaneReply: ...
+
+
+def replied(node: AgentNode, text: str) -> engine.Succeeded | None:
+    """A plain final reply settles a step that recorded nothing: a `NO_POST` line finishes
+    it early where it may, and a step with no output fields takes the reply as its summary."""
+    if not text.strip():
+        return None
+    run_text = split_run_text(text)
+    if node.can_finish_early and not run_text.post:
+        return engine.Succeeded(summary=run_text.record, early=True)
+    if node.output:
+        return None
+    return engine.Succeeded(summary=text[: step_tools.SUMMARY_MAX])
 
 
 #: The M8 seam: buffer a third-party write as a proposal and answer the paused call.
@@ -395,6 +422,9 @@ class AgentStepExecutor:
             inputs = step_inputs(node, work.context, self.clock())
         except ExpressionError as err:
             return engine.Failed("fatal", str(err))
+        place = await self.turn.admit(work)
+        if isinstance(place, engine.Failed):
+            return place
         brief = render_brief(
             work.spec,
             work.step.node_id,
@@ -405,6 +435,7 @@ class AgentStepExecutor:
             context=work.context,
             inputs=inputs,
             untrusted_source=work.run.trigger_kind if work.run.untrusted_inputs else None,
+            place=place,
         )
         resume = attempt.session_id is not None
         asked = await self._asked(work, attempt.id) if resume else None
@@ -459,10 +490,13 @@ class AgentStepExecutor:
             skills=pinned_skills(work, node),
         )
         result: step_tools.Recorded | None = None
+        posted: set[str] = set()
+        reply = LaneReply()
         for _ in range(waits.MAX_QUESTIONS + 1):
-            failed = await self._drive(work, lane, message, session_id, step, policy)
-            if failed is not None:
-                return failed
+            reply = await self._drive(work, lane, place, message, session_id, step, policy)
+            if isinstance(reply, engine.Failed):
+                return reply
+            posted |= reply.posted
             result = await self._recorded(work, attempt.id)
             asked = None if result else await self._asked(work, attempt.id)
             if asked is None:
@@ -473,7 +507,8 @@ class AgentStepExecutor:
             async with self.sm() as s:
                 session_id = await workflow_runs.get_lane(s, run_id=work.run.id, lane=lane)
             step = replace(step, resume=False)
-        if result is None:
+        outcome = step_tools.outcome(result) if result is not None else replied(node, reply.text)
+        if outcome is None:
             refused = await self._recheck(work)
             if refused is not None:
                 return refused
@@ -481,11 +516,16 @@ class AgentStepExecutor:
                 await self._event(s, work, key, "step.nudged", {"attempt": str(attempt.id)})
                 lane_session = await workflow_runs.get_lane(s, run_id=work.run.id, lane=lane)
             nudge = replace(step, resume=False)
-            failed = await self._drive(work, lane, NUDGE, lane_session, nudge, policy)
-            if failed is not None:
-                return failed
+            reply = await self._drive(work, lane, place, NUDGE, lane_session, nudge, policy)
+            if isinstance(reply, engine.Failed):
+                return reply
+            posted |= reply.posted
             result = await self._recorded(work, attempt.id)
-        outcome = None if result is None else step_tools.outcome(result)
+            outcome = (
+                step_tools.outcome(result) if result is not None else replied(node, reply.text)
+            )
+        if isinstance(outcome, engine.Succeeded):
+            outcome = replace(outcome, posted=tuple(sorted(posted)))
         if isinstance(outcome, engine.Succeeded) and self.collect_files is not None:
             async with self.sm() as s:
                 made_in = await workflow_runs.get_lane(s, run_id=work.run.id, lane=lane)
@@ -544,17 +584,24 @@ class AgentStepExecutor:
         self,
         work: StepWork,
         lane: str,
+        place: StepPlace,
         message: str,
         session_id: str | None,
         step: StepTurn,
         policy: ToolSafetyPolicy,
-    ) -> engine.Failed | None:
+    ) -> engine.Failed | LaneReply:
         try:
-            await self.turn(work, message=message, session_id=session_id, step=step, policy=policy)
+            return await self.turn(
+                work,
+                place=place,
+                message=message,
+                session_id=session_id,
+                step=step,
+                policy=policy,
+            )
         except Exception as err:  # a stopped turn's pending calls are never answered
             await self._close_lane(work, lane)
             return engine.Failed("retryable", f"{type(err).__name__}: {err}"[:500])
-        return None
 
     async def _recheck(self, work: StepWork) -> engine.Failed | None:
         """Preflight again before the nudge spends, against what the run has spent so far."""

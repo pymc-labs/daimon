@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 import structlog
 from daimon.core import scheduler
-from daimon.core.fire import run
+from daimon.core.fire import admit, run
 from daimon.core.ops_events import OpsEvent
 from daimon.core.scheduler import drain_owner_notices, record_refusal
 from daimon.core.stores.domain import RoutineRow
@@ -18,12 +18,13 @@ from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _MAIN = Path(run.__file__).read_text()
+_ADMIT = Path(admit.__file__).read_text()
 
 
-def _calls(name: str) -> list[ast.Call]:
+def _calls(name: str, source: str = _MAIN) -> list[ast.Call]:
     return [
         node
-        for node in ast.walk(ast.parse(_MAIN))
+        for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name | ast.Attribute)
         and (node.func.id if isinstance(node.func, ast.Name) else node.func.attr) == name
@@ -49,24 +50,26 @@ def test_no_fire_records_an_error_without_the_refusal_helper() -> None:
 
 
 # Every refusal site in the fire, by the reason it records; a new one fails until listed.
-REFUSALS = {
+REFUSALS = {"verdict.reason", "'routine_changed'", "'source_provenance_unknown'", "error.reason"}
+# Every refusal admission decides, recorded through `verdict.reason` above.
+ADMIT_REFUSALS = {
     "'no_owner'",
     "'tenant_not_found'",
     "'tenant_archived'",
     "'routine_dms_closed' if granted else 'owner_not_allowed'",
     "'routine_destination_parent_unknown'",
     "'routines_unsupported'",
-    "'restricted_source' if policy_error == RESTRICTED_SOURCE_ERROR else policy_error",
-    "refusal",
-    "'routine_changed'",
-    "'source_provenance_unknown'",
-    "error.reason",
+    "error",
+    "reason",
+    "OWNER_LACKS_ROLE_ERROR",
+    "decision.reason",
 }
 
 
 def test_every_refusal_site_is_listed() -> None:
     sites = {_reason(call) for call in _calls("refuse")}
     assert sites == REFUSALS, sites
+    assert {_reason(call) for call in _calls("Refused", _ADMIT)} == ADMIT_REFUSALS
     # Every refusal goes through the store (`FireStore.refuse`), never around it.
     assert _calls("record_refusal") == [], "record_refusal called outside the store"
 

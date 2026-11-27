@@ -48,6 +48,7 @@ from daimon.core.stores.selfhosted_resources import SelfHostedAgents
 from daimon.core.stores.session_settle_state import AgentChatSession, find_agent_chat_session
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.tool_safety import RENAMED_DAIMON_TOOLS
+from daimon.core.workflows.place import bound_step
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools.base import Tool, ToolResult
@@ -118,6 +119,16 @@ async def caller_places(
         if routine is not None and tenant is not None:
             # As its session's toolset reads it (`headless_runner.py`).
             return [routine_feature_place(routine, platform=tenant.platform)]
+    if auth.workflow_run_id is not None:
+        derived = auth.chat_agent_id
+        agent = None if derived is None else await _key_agent_id(runtime, auth, derived)
+        async with runtime.session_factory() as session:
+            step = await bound_step(
+                session, tenant_id=auth.tenant_id, run_id=auth.workflow_run_id, agent_id=agent or ""
+            )
+            tenant = await get_tenant(session, auth.tenant_id)
+        if step is not None and tenant is not None:
+            return [routine_feature_place(step.subject, platform=tenant.platform)]
     if (chat := await _agent_chat_session(runtime, auth)) is not None:
         found, derived = chat
         # As its session's tools were chosen (`agent_chat.py`, `place_session`).
@@ -137,7 +148,12 @@ async def _agent_chat_session(
     session whose recorded grant is the credential's, created by its account
     (`find_agent_chat_session`). None for every other caller, a chat thread's credential
     after its turn ended included, and for a session no send recorded yet."""
-    own = auth.agent_id is None and auth.routine_id is None and auth.execution_id is None
+    own = (
+        auth.agent_id is None
+        and auth.routine_id is None
+        and auth.execution_id is None
+        and auth.workflow_run_id is None
+    )
     derived = auth.chat_agent_id
     if not (auth.is_chat_execution and own and derived is not None and auth.chat_session_id):
         return None

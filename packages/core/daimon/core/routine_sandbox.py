@@ -139,25 +139,54 @@ async def current_pin(
     """
     if row.destination_kind == "dm":
         raise ChannelChangeRefused(DM_SANDBOX_REFUSAL, kind="invalid", reason="dm_routine")
-    scope = resource_scope(tenant_id=str(row.tenant_id))
     try:
-        agent = await retrieve_agent(client, row.agent_id, scope=scope, records=session_factory)
         async with session_factory() as session:
-            scoped = await resolve(
-                session,
-                context=ScopeContext(
-                    tenant_id=row.tenant_id,
-                    channel_id=routine_destination_channel(row) or row.channel_id,
-                ),
-                default=default,
-            )
             tenant = await get_tenant(session, row.tenant_id)
             if tenant is None:
                 raise _unavailable("routine's agent", "no workspace")
             provider = await routine_provider(session, row, platform=tenant.platform)
+    except ChannelChangeRefused:
+        raise
+    except Exception as exc:  # any read failure refuses the opt-in
+        raise _unavailable("routine's agent", str(exc)) from exc
+    return await pin_at(
+        client,
+        session_factory,
+        tenant_id=row.tenant_id,
+        agent_id=row.agent_id,
+        channel_id=routine_destination_channel(row) or row.channel_id,
+        provider=provider,
+        default=default,
+    )
+
+
+async def pin_at(
+    client: AsyncAnthropic,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: str,
+    channel_id: str | None,
+    provider: str,
+    default: DeploymentDefault,
+) -> SandboxPin:
+    """What an opt-in for `agent_id` at `channel_id` pins now: the agent's version and the
+    environment the channel resolves to. A routine's On and a step's `builtins` grant.
+
+    Raises `ChannelChangeRefused` when either is archived, missing or unreadable.
+    """
+    scope = resource_scope(tenant_id=str(tenant_id))
+    try:
+        agent = await retrieve_agent(client, agent_id, scope=scope, records=session_factory)
+        async with session_factory() as session:
+            scoped = await resolve(
+                session,
+                context=ScopeContext(tenant_id=tenant_id, channel_id=channel_id),
+                default=default,
+            )
         environment = await find_environment_by_daimon_tag(
             client,
-            tenant_id=row.tenant_id,
+            tenant_id=tenant_id,
             name=scoped.environment_name or "default",
             records=session_factory,
         )

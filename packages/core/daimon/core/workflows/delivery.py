@@ -58,7 +58,7 @@ from daimon.core.stores.workflows import WorkflowRow
 from daimon.core.web_links import WebAt
 from daimon.core.workflows.engine import Event, RunEnd, RunFacts, StepView, expression_context
 from daimon.core.workflows.expressions import ExpressionError, expressions_in, render
-from daimon.core.workflows.spec import Deliver, FinishNode, Spec
+from daimon.core.workflows.spec import Deliver, FinishNode, PostNode, Spec
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -332,6 +332,7 @@ async def queue_deliver(
         speaker=run.run_as_account_id,
         mention=mention[:10],
         step_id=step_id,
+        extra={"as_agent": deliver.as_agent} if isinstance(deliver, PostNode) else None,
     )
 
 
@@ -448,6 +449,12 @@ class WorkflowPost:
     @property
     def home(self) -> bool:
         return self.row.target.get("home") is True
+
+    @property
+    def as_agent(self) -> str | None:
+        """The agent a Post goes out as, where agent identity is on (`resolve_post_identity`)."""
+        agent = self.row.payload.get("as_agent")
+        return agent if isinstance(agent, str) and self.dm_to is None else None
 
     @property
     def placed(self) -> bool:

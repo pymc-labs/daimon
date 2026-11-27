@@ -27,8 +27,8 @@ from daimon.core._models import (
 )
 from daimon.core.workflows.engine import ErrorClass, StepStatus
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import and_, delete, func, select, true, update
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import and_, delete, func, literal, select, true, update
+from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 ACTIVE_RUN_STATES = ("queued", "running", "waiting")
@@ -1068,6 +1068,7 @@ async def delete_runs(session: AsyncSession, run_ids: Sequence[uuid.UUID]) -> No
 
 
 class GrantRow(_Row):
+    id: uuid.UUID
     kind: str
     node_id: str | None
     pins: dict[str, Any] | None
@@ -1087,3 +1088,22 @@ async def live_grants(
         )
     )
     return [GrantRow.model_validate(orm) for orm in rows]
+
+
+async def pin_grant(
+    session: AsyncSession, grant_id: uuid.UUID, key: str, pin: dict[str, Any]
+) -> None:
+    """Record what a live grant covers under `pins[key]`, once: a pin already set stays."""
+    await session.execute(
+        update(WorkflowGrant)
+        .where(WorkflowGrant.id == grant_id, ~WorkflowGrant.pins.has_key(key))
+        .values(pins=WorkflowGrant.pins.op("||")(literal({key: pin}, JSONB)))
+    )
+
+
+async def revoke_grant(session: AsyncSession, grant_id: uuid.UUID, reason: str) -> None:
+    await session.execute(
+        update(WorkflowGrant)
+        .where(WorkflowGrant.id == grant_id, WorkflowGrant.revoked_at.is_(None))
+        .values(revoked_at=func.now(), revoked_reason=reason)
+    )

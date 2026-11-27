@@ -30,6 +30,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 STEP_TOOLS: Final = WORKFLOW_STEP_TOOLS
 MAX_REJECTIONS: Final = 3
 BRIEF_SENT: Final = "step.brief_sent"
+#: The longest summary a step keeps: a routine's whole final reply fits, as it posted.
+SUMMARY_MAX: Final = 40_000
 RECORDED: Final = "step.output_recorded"
 REJECTED: Final = "step.contract_rejected"
 FailKind = Literal["missing_tool", "missing_data", "blocked", "other"]

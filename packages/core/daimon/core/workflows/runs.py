@@ -17,6 +17,7 @@ from decimal import Decimal
 from typing import Any, Final, Literal, Protocol
 
 from daimon.core.config import Settings
+from daimon.core.fire.failure import report_failure
 from daimon.core.stores import (
     security_audit,
     workflow_deliveries,
@@ -50,6 +51,7 @@ from daimon.core.workflows.spec import (
 from daimon.core.workflows.state import STATE_LIMIT, reads_of
 from daimon.core.workflows.taint import Catalog, SkillPin, catalog_of
 from pydantic import JsonValue
+from sqlalchemy import event as sa_event
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -265,6 +267,11 @@ async def _version_of(
     return parse_spec(version.spec), version.agent_tools or {}, version.skills or {}
 
 
+async def run_spec(session: AsyncSession, run: RunRow) -> Spec:
+    """The spec a run runs: its test spec, else its version's."""
+    return (await _version_of(session, run))[0]
+
+
 def _max_steps(spec: Spec, settings: Settings) -> int:
     asked = spec.limits.max_steps if spec.limits and spec.limits.max_steps else None
     return min(asked or engine.DEFAULT_MAX_STEPS, settings.workflows.max_steps)
@@ -431,6 +438,8 @@ async def _apply(
         events += await _queue_posts(session, loaded, end, [_view(r) for r in rows])
         if run.mode == "live":
             await _offer_finished(session, loaded, rows, end, now)
+            if end.status in ("failed", "timed_out"):
+                _report_after_commit(session, run, end.reason or end.status)
     else:
         projected = engine.project_status([_view(r) for r in rows])
         status, reason = projected or ("running", None)
@@ -706,6 +715,23 @@ async def _write_step(
     if write.get("status") == "ready":
         await _notify(session, READY_CHANNEL, str(step.run_id))
     await _apply(session, loaded, Transition((), tuple(events), None), now=now)
+
+
+def _report_after_commit(session: AsyncSession, run: RunRow, reason: str) -> None:
+    """A failed live run's log line and ops event, as a routine fire's (`report_failure`),
+    once the run's end is committed; its owner's notice is `queue_failure_notice`."""
+    bind = session.bind
+
+    def report(_: object) -> None:
+        report_failure(
+            async_sessionmaker(bind=bind),
+            run.tenant_id,
+            reason,
+            workflow_id=run.workflow_id,
+            workflow_run_id=run.id,
+        )
+
+    sa_event.listen(session.sync_session, "after_commit", report, once=True)
 
 
 async def _queue_posts(
@@ -1139,9 +1165,8 @@ async def claim(
 
 async def _take_lane(session: AsyncSession, run: RunRow, step: StepRow, lane: str) -> str:
     """A step whose lane is busy gets one of its own: a session runs one turn at a time."""
-    if (
-        "@" in lane
-        or not await workflow_runs.lane_busy(session, run_id=run.id, lane=lane, step_id=step.id)
+    if "@" in lane or not await workflow_runs.lane_busy(
+        session, run_id=run.id, lane=lane, step_id=step.id
     ):
         return lane
     lane = f"{lane}@{key_of(step)}"

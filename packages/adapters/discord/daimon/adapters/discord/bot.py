@@ -1357,6 +1357,8 @@ class DaimonBot(commands.Bot):
                         open_dm=self.open_member_dm,
                         membership_resolver=self.membership_resolver,
                         output_client=self.runtime.anthropic,
+                        client=self,
+                        default_agent_name=self.runtime.deployment_default.agent_name,
                     ),
                     run_cards=chat_cards.follower(
                         self.runtime.sessionmaker,

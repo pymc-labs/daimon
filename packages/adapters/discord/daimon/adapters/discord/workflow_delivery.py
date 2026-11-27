@@ -20,6 +20,7 @@ from typing import cast
 from anthropic import AsyncAnthropic
 from daimon.adapters.discord.notice_card import build_notice_embed
 from daimon.adapters.discord.output_delivery import upload_limit, upload_output_file
+from daimon.adapters.discord.post_transport import DiscordPostTransport
 from daimon.adapters.discord.routine_delivery import (
     ChannelFetcher,
     DmOpener,
@@ -32,6 +33,7 @@ from daimon.core.delivery import DeliveryOutcome, WorkflowPoster, files_envelope
 from daimon.core.membership import MembershipResolver
 from daimon.core.message_split import split_fenced
 from daimon.core.output_delivery import DeliverableFile
+from daimon.core.routine_delivery import resolve_post_identity
 from daimon.core.routine_files import deliver_routine_files
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.workflow_deliveries import DeliveryRow
@@ -94,7 +96,39 @@ def make_discord_workflow_poster(
     open_dm: DmOpener,
     membership_resolver: MembershipResolver | None = None,
     output_client: AsyncAnthropic | None = None,
+    client: discord.Client | None = None,
+    default_agent_name: str | None = None,
 ) -> WorkflowPoster:
+    async def speaker(post: WorkflowPost, channel: _Placed) -> _Placed | DiscordPostTransport:
+        """The bot, or the Post's `as_agent` under its own name and face where identity is on."""
+        if post.as_agent is None or client is None or output_client is None:
+            return channel
+        async with sessionmaker() as session:
+            tenant = await get_tenant(session, post.row.tenant_id)
+        if tenant is None:
+            return channel
+        identity = await resolve_post_identity(
+            sessionmaker,
+            output_client,
+            settings,
+            tenant_id=post.row.tenant_id,
+            agent_name=post.as_agent,
+            agent_id=None,
+            platform="discord",
+            workspace_id=tenant.external_id,
+            default_agent_name=default_agent_name,
+        )
+        if identity.builtin:
+            return channel
+        return DiscordPostTransport(
+            client,
+            channel,
+            name=identity.name,
+            avatar_url=identity.avatar_url,
+            builtin=False,
+            identity_enabled=True,
+        )
+
     async def placed_refusal(post: WorkflowPost, mentioned: tuple[str, ...]) -> str | None:
         """Where the post goes and why it may not, rechecked before each send."""
         async with sessionmaker() as session:
@@ -223,6 +257,7 @@ def make_discord_workflow_poster(
             )
             return DeliveryOutcome(status="delivered")
         ask = asks.ask_of(row.payload) if row.kind == "ask" else None
+        voice = channel if ask is not None else await speaker(post, cast("_Placed", channel))
         chunks = split_fenced(rendered.text, _DISCORD_MAX_CHARS, word_boundary=True)
         first: discord.Message | None = None
         for index, chunk in enumerate(chunks):
@@ -233,7 +268,7 @@ def make_discord_workflow_poster(
                 sent = await channel.send(content=chunk, allowed_mentions=pings, view=ask_view(ask))
                 await recorded(row, post, sent, ask)
             else:
-                sent = await channel.send(content=chunk, allowed_mentions=pings)
+                sent = await voice.send(content=chunk, allowed_mentions=pings)
             first = first or sent
         done = DeliveryOutcome(
             status="delivered", placed=None if first is None else _placed(first, opened)
