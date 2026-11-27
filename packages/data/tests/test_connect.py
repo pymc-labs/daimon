@@ -151,6 +151,8 @@ async def test_a_code_sign_in_links_who_signed_in_and_refuses_an_identity_of_som
     rig: Rig,
 ) -> None:
     me, you, src = uuid.uuid4(), uuid.uuid4(), await rig.source("acme")
+    clients = f"delete from {rig.connector.schemas.data}.connect_clients where provider = 'acme'"
+    await rig.conn.execute(clients.encode())  # another test on this worker may have registered
     rig.fake.users.update({"c-me": "u-me", "c-you": "u-me"})
     done = await rig.sign_in(me, src, "c-me")
     assert done.made_link and await rig.owner("acme", "u-me") == (me, "oauth")
