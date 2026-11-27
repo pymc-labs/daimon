@@ -89,8 +89,13 @@ RELAY_AGENT_NAME_METADATA_KEY = "daimon_relay_agent_name"
 RELAY_SESSION_METADATA_KEY = "daimon_relay_session"
 RELAY_ROUTINE_METADATA_KEY = "daimon_relay_routine"
 RELAY_OWNER_METADATA_KEY = "daimon_relay_owner"
+RELAY_DESTINATION_METADATA_KEY = "daimon_relay_destination"
 RELAY_GRANT_METADATA_KEY = "daimon_relay_grant"
 RELAY_AGENT_CHAT_METADATA_KEY = "daimon_relay_agent_chat"
+#: A DM routine's fire, its routine's revision and the owner's DM (`RelayBinding`).
+RELAY_EXECUTION_METADATA_KEY = "daimon_relay_execution"
+RELAY_REVISION_METADATA_KEY = "daimon_relay_revision"
+RELAY_DM_CHANNEL_METADATA_KEY = "daimon_relay_dm_channel"
 #: Display-name prefix of a session's own relay vault.
 RELAY_VAULT_PREFIX = "daimon-relay:"
 
@@ -255,10 +260,18 @@ async def chat_mcp_credential(
             metadata[RELAY_ROUTINE_METADATA_KEY] = str(relay.routine_id)
         if relay.owner is not None:
             metadata[RELAY_OWNER_METADATA_KEY] = relay.owner
+        if relay.destination is not None:
+            metadata[RELAY_DESTINATION_METADATA_KEY] = relay.destination
         if relay.grant is not None:
             metadata[RELAY_GRANT_METADATA_KEY] = relay.grant
         if relay.agent_chat is not None:
             metadata[RELAY_AGENT_CHAT_METADATA_KEY] = relay.agent_chat
+        if relay.execution is not None:
+            metadata[RELAY_EXECUTION_METADATA_KEY] = str(relay.execution)
+        if relay.revision is not None:
+            metadata[RELAY_REVISION_METADATA_KEY] = relay.revision
+        if relay.dm_channel is not None:
+            metadata[RELAY_DM_CHANNEL_METADATA_KEY] = relay.dm_channel
     return {
         "metadata": metadata,
         "auth": {"type": "static_bearer", "mcp_server_url": public_url, "token": token},
@@ -662,13 +675,23 @@ async def refresh_relay_vault(
     expires_at = next(iter(expiries)) if len(expiries) == 1 else None
     raw_key = metadata.get(RELAY_SESSION_METADATA_KEY)
     raw_routine = metadata.get(RELAY_ROUTINE_METADATA_KEY)
+    # A DM routine's turn: its session and routine together, with the fire it was bound to.
+    raw_execution = (
+        metadata.get(RELAY_EXECUTION_METADATA_KEY)
+        if raw_key is not None and raw_routine is not None
+        else None
+    )
     bound = metadata.get(RELAY_AGENT_CHAT_METADATA_KEY)
     # Only a binding naming no chat session, routine or watch may name an agent chat.
     names_other = {
         RELAY_SESSION_METADATA_KEY,
         RELAY_ROUTINE_METADATA_KEY,
         RELAY_OWNER_METADATA_KEY,
+        RELAY_DESTINATION_METADATA_KEY,
         RELAY_GRANT_METADATA_KEY,
+        RELAY_EXECUTION_METADATA_KEY,
+        RELAY_REVISION_METADATA_KEY,
+        RELAY_DM_CHANNEL_METADATA_KEY,
     } & set(metadata)
     rebind = agent_chat is not None and agent_chat != bound and not names_other
     if (
@@ -696,8 +719,18 @@ async def refresh_relay_vault(
                 session_key=None if raw_key is None else uuid.UUID(raw_key),
                 routine_id=None if raw_routine is None else uuid.UUID(raw_routine),
                 owner=metadata.get(RELAY_OWNER_METADATA_KEY),
+                destination=metadata.get(RELAY_DESTINATION_METADATA_KEY)
+                if raw_routine is not None
+                else None,
                 grant=metadata.get(RELAY_GRANT_METADATA_KEY) if raw_key is not None else None,
                 agent_chat=agent_chat if rebind else bound,
+                execution=None if raw_execution is None else uuid.UUID(raw_execution),
+                revision=metadata.get(RELAY_REVISION_METADATA_KEY)
+                if raw_execution is not None
+                else None,
+                dm_channel=metadata.get(RELAY_DM_CHANNEL_METADATA_KEY)
+                if raw_execution is not None
+                else None,
             ),
         )
     # Registered before the provider write, as for the shared vault.

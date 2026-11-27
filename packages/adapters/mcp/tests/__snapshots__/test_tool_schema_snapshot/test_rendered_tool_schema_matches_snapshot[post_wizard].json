@@ -1,0 +1,205 @@
+{
+  "description": [
+    "Post a multi-step form in the channel instead of asking in prose.",
+    "",
+    "``plan`` counts everything this turn posts outside this conversation: threads,",
+    "places and people tagged; posts here need none. Past the limit the call is",
+    "refused until approve_reach returns approved.",
+    "",
+    "Each entry in ``steps`` carries ``question`` (the text shown to the",
+    "user), ``kind`` (``choice``, ``multi`` or ``text``), and ``options``",
+    "for the two choice kinds. A step may carry one finished image by",
+    "passing the file-store handle returned by the image-generation tool —",
+    "never a URL, never a diagram source. Post it in a channel or thread you",
+    "are in; where a place takes no forms or no step images, the call is refused",
+    "and says so. A form that exceeds a limit (too many steps, too many",
+    "options, too long a question) raises an error naming the offending",
+    "step — split the form into a shorter follow-up and retry.",
+    "",
+    "AFTER CALLING THIS TOOL YOU MUST END YOUR TURN IMMEDIATELY. Do not",
+    "narrate the form, do not continue the conversation, and do not call",
+    "another tool. The user's answers arrive later as a brand-new message."
+  ],
+  "parameters": {
+    "$defs": {
+      "Option": {
+        "description": "One selectable option on a `choice` or `multi` step.",
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional secondary text shown alongside the option label."
+          },
+          "label": {
+            "description": "Human-readable button/select-option text shown to the user.",
+            "type": "string"
+          },
+          "value": {
+            "description": "Stable machine value recorded in the answer when this option is chosen.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "label",
+          "value"
+        ],
+        "type": "object"
+      },
+      "ReachPlan": {
+        "description": "Totals for a whole request: new threads, outside places, people tagged.",
+        "properties": {
+          "people": {
+            "default": 0,
+            "maximum": 10000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "places": {
+            "default": 0,
+            "maximum": 1000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "threads": {
+            "default": 0,
+            "maximum": 1000,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "Step": {
+        "description": "One screen of the wizard: a question plus how it is answered.\n\nAccepts the shape a model actually writes as well as the canonical one.\nAuthored by an LLM at a tool boundary, and the canonical field names lose\nevery coin-flip against the prior set by other form APIs: `type` for\n`kind`, `title`/`label` for `question`, plain strings for `options`, and\n`single_choice`/`multi_select`/`free_text` for the enum's\n`choice`/`multi`/`text`. A real session sent exactly that, collected 28\nvalidation errors, retried with the same shape, and abandoned the form.\nRejecting it was defensible per-field and useless in aggregate, so the\naliases and coercions below absorb the difference instead.",
+        "properties": {
+          "allow_custom": {
+            "default": true,
+            "description": "Whether the user may add a free-text option alongside the listed options.",
+            "type": "boolean"
+          },
+          "image_handle": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "File-store handle id previously returned by the image-generation tool -- a finished PNG, never a URL and never a diagram source. Anything that produces an image does so upstream, before the handle is attached here."
+          },
+          "image_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Server-populated; ignored when supplied by the caller."
+          },
+          "key": {
+            "default": "",
+            "description": "Stable identifier for this step's answer; must be unique across the form. Omit it and a slug of the question is used.",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/StepKind",
+            "description": "Whether this step is a single choice, a multi-select, or free text."
+          },
+          "max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Maximum number of selections allowed on a `multi` step."
+          },
+          "min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Minimum number of selections required on a `multi` step."
+          },
+          "options": {
+            "description": "The selectable options for a `choice` or `multi` step. Unused for `text`. A plain string is accepted and becomes both the label and the value.",
+            "items": {
+              "$ref": "#/$defs/Option"
+            },
+            "type": "array"
+          },
+          "question": {
+            "description": "The question text shown to the user on this step.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "StepKind": {
+        "description": "The three step shapes a wizard form can author.",
+        "enum": [
+          "choice",
+          "multi",
+          "text"
+        ],
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "properties": {
+      "channel_id": {
+        "type": "string"
+      },
+      "plan": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/ReachPlan"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "prompt": {
+        "type": "string"
+      },
+      "steps": {
+        "items": {
+          "$ref": "#/$defs/Step"
+        },
+        "type": "array"
+      }
+    },
+    "required": [
+      "prompt",
+      "steps",
+      "channel_id"
+    ],
+    "type": "object"
+  }
+}

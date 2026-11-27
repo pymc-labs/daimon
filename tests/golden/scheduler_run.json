@@ -58,6 +58,7 @@
           },
           "personal_memory": false,
           "platform": "discord",
+          "routine_destination": "none",
           "routine_id": "00000000-0000-0000-0000-000000000003",
           "runs_as_user": "u1",
           "sandbox": null,

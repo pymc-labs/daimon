@@ -1,0 +1,23 @@
+{
+  "description": [
+    "Turn on or off Daimon reading your own Google Drive (My Drive) as you in this",
+    "workspace; it stays on until you turn it off. Asks you on a card first. Returns each",
+    "part this workspace offers, and whether it is on."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "on": {
+        "type": "boolean"
+      },
+      "origin_context_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "on",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

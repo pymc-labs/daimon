@@ -105,6 +105,7 @@ from mux.testing.drivers.anthropic.ma import (
     json_body,
     list_response,
     send_events_response,
+    sse_response,
 )
 from mux.testing.drivers.anthropic.ma_models import (
     EMPTY_CLOUD_CONFIG,
@@ -117,7 +118,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp
 
-from ..harness import auth_identity, production_identity_middleware
+from ..harness import QuietFeed, auth_identity, production_identity_middleware
 
 _BUNDLE_SECRET = "test-bundle-handle-secret"
 _TENANT_ID = uuid.uuid4()
@@ -384,6 +385,7 @@ async def test_narrowing_agent_id_claim_returns_only_agent_chat_tools(sessionmak
 
     expected = {
         "ask",
+        "await_turn",
         "describe_agent",
         "list_my_sessions",
         "start_turn",
@@ -466,6 +468,7 @@ async def test_narrowing_lists_agent_chat_tools_through_bm25_search_transform(se
 
     expected = {
         "ask",
+        "await_turn",
         "describe_agent",
         "list_my_sessions",
         "start_turn",
@@ -875,7 +878,7 @@ async def test_ask_delivers_embedded_charts_without_artifact_settings() -> None:
             runtime,
             auth,
             "Question",
-            sleep=AsyncMock(),
+            feed=QuietFeed(),  # type: ignore[arg-type]
             clock=lambda: 0.0,
             now=lambda: turn_started_at,
         )
@@ -939,9 +942,8 @@ async def test_ask_timeout_preserves_the_resumable_handle(db_session, db_engine)
             auth,
             "Slow question",
             timeout_seconds=120.0,
-            poll_interval_seconds=60.0,
             clock=lambda: elapsed,
-            sleep=advance,
+            feed=QuietFeed(lambda: advance(60.0)),  # type: ignore[arg-type]
         )
 
     assert get_session.await_count == 3
@@ -969,7 +971,7 @@ async def test_ask_surfaces_terminal_non_idle_status_without_waiting(db_session,
     await db_session.commit()
     runtime.session_factory = async_sessionmaker(db_engine)
     auth = replace(_auth(), tenant_id=tenant.id)
-    sleep = AsyncMock()
+    feed = QuietFeed()
 
     with (
         patch(
@@ -986,9 +988,9 @@ async def test_ask_surfaces_terminal_non_idle_status_without_waiting(db_session,
         ) as list_events,
         pytest.raises(ToolError, match=r"final status 'terminated'.*ses_terminated001"),
     ):
-        await _ask_impl(runtime, auth, "Question", sleep=sleep)
+        await _ask_impl(runtime, auth, "Question", feed=feed)  # type: ignore[arg-type]
 
-    sleep.assert_not_awaited()
+    assert feed.waits == 0
     list_events.assert_not_awaited()
 
     await drain_outcomes()
@@ -1056,14 +1058,13 @@ async def test_ask_ends_a_refused_turn_without_waiting(
             runtime,
             auth,
             "Question",
-            poll_interval_seconds=60.0,
             clock=lambda: elapsed,
-            sleep=advance,
+            feed=QuietFeed(lambda: advance(60.0)),  # type: ignore[arg-type]
         )
 
     refused = reason == "refused"
     assert elapsed == (0.0 if refused else 120.0), "a refusal must not wait out the timeout"
-    assert list_events.await_count == (1 if refused else 3), "one read per idle poll"
+    assert list_events.await_count == (1 if refused else 3), "one read per wake"
     kwargs = list_events.await_args.kwargs
     assert kwargs["types"] == ["agent.message", "session.status_idle"], kwargs
     assert kwargs["created_at_gte"] == _started("ses_refused001")["turn_started_at"], kwargs
@@ -1138,7 +1139,7 @@ async def test_ask_tool_result_keeps_prose_shape_without_charts() -> None:
     assert result.structured_content["handle"] == "ses_plain001"
 
 
-async def test_ask_keeps_polling_through_an_unmodeled_transient_status() -> None:
+async def test_ask_keeps_waiting_through_an_unmodeled_transient_status() -> None:
     runtime = MagicMock()
     runtime.settings.artifacts = None
     runtime.artifact_store = None
@@ -1175,7 +1176,7 @@ async def test_ask_keeps_polling_through_an_unmodeled_transient_status() -> None
             runtime,
             auth,
             "Question",
-            sleep=AsyncMock(),
+            feed=QuietFeed(),  # type: ignore[arg-type]
             clock=lambda: 0.0,
         )
 
@@ -1719,6 +1720,7 @@ async def test_agent_chat_tools_have_no_agent_id_parameter() -> None:
 
     agent_chat_names = {
         "ask",
+        "await_turn",
         "describe_agent",
         "list_my_sessions",
         "start_turn",
@@ -1968,6 +1970,11 @@ async def test_turn_tools_refuse_over_balance_tenant_before_creating_session(
 # Task 3: turn boundary (start_turn/continue_turn), list_events passthrough,
 # archive_my_session
 # ---------------------------------------------------------------------------
+
+
+def _no_news_stream(_r: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+    """The session's event stream, closing with no event: the worker's subscription."""
+    return sse_response([])
 
 
 def _agent_and_env_router(*extra_envs: dict[str, Any]) -> MARouter:
@@ -2555,6 +2562,7 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         )
 
     router.add("POST", r"/v1/sessions/([^/]+)/events", on_send)
+    router.add("GET", r"/v1/sessions/([^/]+)/events/stream", _no_news_stream)
     client = build_fake_anthropic(router.dispatch)
     runtime = _runtime(client, session_factory=db_session_factory, environment_name=_ENV_NAME)
     auth = _auth()
@@ -2698,6 +2706,7 @@ async def test_continue_turn_returns_boundary_from_its_own_send(
     router = MARouter()
     router.add_agent(ma_agent(id=_MA_AGENT_ID, tenant_id=_TENANT_ID))
     router.add("GET", r"/v1/sessions/([^/]+)/events", lambda _r, _m: list_response([]))
+    router.add("GET", r"/v1/sessions/([^/]+)/events/stream", _no_news_stream)
     router.add(
         "GET",
         r"/v1/sessions/([^/]+)",

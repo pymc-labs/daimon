@@ -1,0 +1,28 @@
+{
+  "description": [
+    "Stop a running turn immediately.",
+    "",
+    "Sends an interrupt regardless of the session's current status —",
+    "sending one to an already-idle session is harmless. Returns",
+    "``{\"handle\": \"<session_id>\", \"status\": \"<observed_status>\"}``",
+    "immediately; it does not wait for the interrupt to take effect:",
+    "``await_turn`` returns once the session reaches ``idle`` or",
+    "``terminated``. An interrupted turn is still billed for what it",
+    "already consumed before the interrupt landed: the model work already",
+    "done is real work and is not refunded.",
+    "Use a handle opened through agent chat. Platform conversations and",
+    "older sessions without headless creation provenance cannot be driven here."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "handle": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "handle"
+    ],
+    "type": "object"
+  }
+}

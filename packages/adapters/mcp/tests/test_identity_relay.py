@@ -32,7 +32,7 @@ from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_auth import mint_chat_mcp_token
 from daimon.core.mcp_identity import (
-    IdentityTokenCache,
+    IdentitySigner,
     RelayBinding,
     SigningKey,
     generate_signing_key,
@@ -40,7 +40,7 @@ from daimon.core.mcp_identity import (
 from daimon.core.ops_events import OpsEvent
 from daimon.core.stores import watches
 from daimon.core.stores.domain import Role
-from daimon.core.stores.routines import create_routine
+from daimon.core.stores.routines import create_routine, get_routine
 from daimon.core.stores.session_settle_state import SessionProvenance
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import create_thread_session, mark_dead
@@ -193,6 +193,74 @@ async def _chat_session(
     return token, mapping_id
 
 
+#: A routine's DM owner is a Discord id.
+OWNER = "1234"
+
+
+async def _owner(factory: async_sessionmaker[AsyncSession]) -> _Person:
+    """A Discord person in guild-1, with a numeric id, who talks to agent_a."""
+    async with factory() as db, db.begin():
+        tenant = await make_tenant(db, platform="discord", workspace_id="guild-1")
+        principal = await make_platform_principal(
+            db, platform="discord", external_id=OWNER, tenant=tenant
+        )
+    return _Person(
+        tenant.id,
+        principal.account_id,
+        derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_a"),
+    )
+
+
+async def _dm_fire(
+    factory: async_sessionmaker[AsyncSession], person: _Person, *, combined: bool = True
+) -> tuple[uuid.UUID, str, str]:
+    """A live fire of the owner's DM routine: its execution, and its unattended turn in a
+    fresh `dm:` scope holding the session's grant, with no message and no channel.
+    Returns the routine id, the turn's combined relay credential (or with `combined`
+    False the one a session gets today) and the credential a session gets today."""
+    now = dt.datetime.now(dt.UTC)
+    routine_id = await _routine(factory, person, destination_kind="dm", owner=OWNER)
+    scope, mapping_id, execution = f"dm:{uuid.uuid4()}", uuid.uuid4(), uuid.uuid4()
+    async with factory() as db, db.begin():
+        row = await get_routine(db, routine_id, tenant_id=person.tenant_id)
+        assert row is not None
+        await db.execute(
+            text(
+                "INSERT INTO lead_intake_executions (tenant_id, id, routine_id, expires_at)"
+                " VALUES (:tenant, :id, :routine, :expires)"
+            ),
+            {"tenant": person.tenant_id, "id": execution, "routine": routine_id,
+             "expires": now + dt.timedelta(minutes=5)},
+        )  # fmt: skip
+        await create_thread_session(
+            db, id=mapping_id, tenant_id=person.tenant_id, platform="discord",
+            thread_id=scope, account_id=person.account_id, ma_session_id="sess_dm",
+            ma_agent_id="agent_a",
+        )  # fmt: skip
+        origin = await create_origin(
+            db, tenant_id=person.tenant_id, account_id=person.account_id, platform="discord",
+            parent_channel_id=scope, thread_id=scope, responder_ma_agent_id="agent_a",
+            responder_name="Helper", configuration_target_ma_agent_id=None,
+            configuration_target_name=None, role=Role.USER,
+            expires_at=now + dt.timedelta(hours=1), now=now, sender_foreign=False,
+            shared_channel=False, attended=False, own_dm_reach=True,
+        )  # fmt: skip
+        await bind_origin_session(
+            db, origin_id=origin.id, chat_session_id="g-dm", human_invocation=False
+        )
+    today = RelayBinding("Agent A", mapping_id, grant="g-dm")
+    binding = RelayBinding(
+        "Agent A", mapping_id, grant="g-dm", routine_id=routine_id, owner=OWNER,
+        destination="dm::", execution=execution, revision=row.updated_at.isoformat(),
+        dm_channel="555",
+    )  # fmt: skip
+    return (
+        routine_id,
+        await _token(factory, person, binding if combined else today),
+        await _token(factory, person, today),
+    )
+
+
 def _relay(
     factory: async_sessionmaker[AsyncSession],
     upstream: _Upstream,
@@ -208,7 +276,7 @@ def _relay(
             servers={server.name: server},
             auth=DaimonJWTVerifier(secret=SECRET, sessionmaker=factory),
             sessionmaker=factory,
-            tokens=IdentityTokenCache(key) if key is not None else None,
+            tokens=IdentitySigner(key) if key is not None else None,
             bearers=bearers,
             anthropic=anthropic,
             clients={
@@ -295,7 +363,7 @@ async def test_person_turn_is_signed_and_forwarded(
     assert token not in json.dumps(dict(sent.headers)), "Daimon's own credential stays here"
 
 
-async def test_two_live_turns_of_one_person_each_get_their_own_message(
+async def test_two_live_turns_each_get_their_own_message_and_each_call_its_own_jti(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     person = await _person(db_session_factory)
@@ -305,8 +373,11 @@ async def test_two_live_turns_of_one_person_each_get_their_own_message(
     async with _relay(db_session_factory, upstream, key) as client:
         await _call(client, second)
         await _call(client, first)
+        await _call(client, first)
     named = [_identity(request, key)["msg"] for request in upstream.requests]
-    assert named == ["msg-thread-2", "msg-thread-1"], "each session names its own turn"
+    assert named == ["msg-thread-2", "msg-thread-1", "msg-thread-1"], "each session, its turn"
+    ids = {_identity(request, key)["jti"] for request in upstream.requests}
+    assert len(ids) == 3, "every request gets its own token, even the same turn's next call"
 
 
 async def test_routine_beside_a_live_turn_names_no_person(
@@ -828,6 +899,41 @@ async def test_an_unattended_turn_is_stamped_as_a_routine_not_a_person(
         if dm
         else {"place_type": "thread", "channel_id": "thread-1", "parent_channel_id": "chan-1"}
     )
+
+
+async def test_a_dm_routines_credential_stamps_its_owner_as_today_and_nobody_once_its_turn_ends(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The routine a DM fire binds beside its session never names a requester by itself:
+    with its turn gone the call stamps nothing, as a session's call does today."""
+    person = await _owner(db_session_factory)
+    _, combined, today = await _dm_fire(db_session_factory, person)
+    body = _tool_call(requester_platform_user_id="666", requester_kind="person")
+    upstream = _Upstream()
+    async with _relay(
+        db_session_factory, upstream, None, BEARER_SERVER, bearers=_BEARERS
+    ) as client:
+        for token in (combined, today):
+            await _post(client, token, body)
+        async with db_session_factory() as db, db.begin():
+            await db.execute(text("DELETE FROM turn_origins"))
+        for token in (combined, today):
+            await _post(client, token, body)
+    live, live_today, ended, ended_today = (_sent_meta(r) for r in upstream.requests)
+    assert (
+        live
+        == live_today
+        == {
+            "requester_platform_user_id": OWNER,
+            "requester_conversation": {
+                "place_type": "dm",
+                "channel_id": None,
+                "parent_channel_id": None,
+            },
+            "requester_kind": "routine",
+        }
+    ), "the owner, in the DM not yet opened, as a routine: unchanged"
+    assert ended == ended_today == {}, "no turn, no requester, whatever the routine"
 
 
 async def test_two_live_turns_and_a_replaced_session_stamp_no_requester(

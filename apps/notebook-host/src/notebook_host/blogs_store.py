@@ -42,6 +42,9 @@ class BlogRecord(BaseModel):
     # Unix epoch seconds after which the sweep deletes the notebook. None for a
     # blog, which is kept until someone deletes it.
     expires_at: float | None = None
+    # The tenant that published it, when the publisher said so (an upload
+    # token names one). Lets an operator delete everything a tenant published.
+    tenant: str | None = None
 
 
 def is_expired(record: BlogRecord, *, now: float) -> bool:

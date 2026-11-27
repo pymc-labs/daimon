@@ -54,7 +54,7 @@ reads need application permissions, covered below.
 2. Select **Create a resource**, search for **Azure Bot** and select **Create**.
    Choose pricing tier F0 (Free), type Single Tenant and creation type **Use
    existing app registration**. Paste the client ID and tenant ID.
-3. Leave the messaging endpoint empty for now.
+3. Leave the messaging endpoint empty until step 4.
 4. Open the bot > **Channels**. Under *Available channels*, select the name
    **Microsoft Teams**. It is a link, not a button. Accept the terms, choose
    **Microsoft Teams Commercial** and select **Apply**. Teams should show as

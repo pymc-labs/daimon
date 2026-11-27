@@ -1,0 +1,29 @@
+{
+  "description": [
+    "Look up a visible skill by name, including version count. Pass",
+    "turn_controls.origin_context_id for skills of local responders."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "name": {
+        "type": "string"
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "name"
+    ],
+    "type": "object"
+  }
+}

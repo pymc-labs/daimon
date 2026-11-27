@@ -15,7 +15,11 @@ An allowance names one of these:
 It can name one agent too, and then limits spend on that agent alone. It counts
 either the current UTC calendar month or everything since it started.
 
-Admins add, change and remove allowances under **Credits** in the web app.
+Admins add, change and remove allowances with the `daimon` CLI or in chat.
+
+<!-- knowledge: web -->
+The web app has the same controls under **Credits**.
+<!-- /knowledge -->
 
 ## Which allowance governs
 

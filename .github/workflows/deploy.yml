@@ -38,6 +38,10 @@ on:
         description: "Prebuilt staging report-host image digest from this CI run"
         required: false
         type: string
+      source_registry:
+        description: "Staging registry the digests soaked in; production copies them from it (promote.yml)"
+        required: false
+        type: string
       selective:
         description: "Refresh only what changed since the last staging deploy (main CI)"
         required: false
@@ -93,18 +97,21 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.sha }}
+          fetch-depth: 0
 
       # A main CI run that main has already moved past must not deploy: an older run
       # that reached the deploy after a newer one rolled staging back mid-smoke. The
       # newer run deploys a superset. Checked once this job holds the environment's
       # concurrency slot: a queued older run starts only after the newer one finishes.
       # Skips only when the SHA is not main's head and is provably its ancestor; the
-      # head, a commit off main, or an unreadable history always deploy.
+      # head, a commit off main, or a history neither git nor the API can read always deploy.
       - name: Skip a deploy main has already superseded
         id: fresh
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           SHA: ${{ inputs.sha }}
+          # The API answers when git cannot (scripts/ci/deploy_superseded.sh).
+          GH_TOKEN: ${{ github.token }}
         run: |
           result="$(bash scripts/ci/deploy_superseded.sh "$SHA")"
           echo "$result" | tee -a "$GITHUB_OUTPUT"
@@ -112,6 +119,25 @@ jobs:
             head="$(echo "$result" | sed -n 's/^head=//p')"
             echo "::notice::Deploy of $SHA skipped: superseded by $head (main's newer run deploys it)."
             echo "superseded by $head"
+          fi
+
+      # The migrate gate runs against a shared database, so a SHA that carries a migration
+      # main never added (a branch dispatch) must never reach it. Compared by tree, not
+      # history: a branch commit main reached through a merge can still hold a migration
+      # that was rechained before the merge. Main's first-parent history keeps the names
+      # of migrations it later renamed, so older main SHAs still deploy.
+      - name: Refuse migrations that are not on main
+        if: steps.fresh.outputs.superseded != 'true'
+        env:
+          SHA: ${{ inputs.sha }}
+        run: |
+          versions=packages/core/alembic/versions
+          extra="$(comm -23 <(git ls-tree -r --name-only "$SHA" -- "$versions" | sort -u) \
+            <(git log --first-parent --no-renames --diff-filter=A --name-only --format= origin/main -- "$versions" | sort -u))"
+          if [ -n "$extra" ]; then
+            echo "::error::$SHA holds migrations main never added; deploy the main SHA that has them instead:"
+            echo "$extra"
+            exit 1
           fi
 
       - id: auth
@@ -131,15 +157,19 @@ jobs:
         if: steps.fresh.outputs.superseded != 'true'
         run: gcloud auth configure-docker ${{ env.AR_HOST }} --quiet
 
+      # Copies the soaked staging images into this registry (promote.yml).
+      - uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+        if: (inputs.environment == 'production' && inputs.source_registry != '') && steps.fresh.outputs.superseded != 'true'
+        with:
+          version: v0.22.1
+
       - name: Compute image tags
         if: steps.fresh.outputs.superseded != 'true'
         id: tags
         run: |
-          # Deterministic 7-char truncation, NOT `git rev-parse --short`:
-          # --short honors core.abbrev=auto and grows with the object count,
-          # which would silently change the tag scheme and break promote.yml's
-          # image-exists check (it truncates the input SHA to 7 chars).
-          SHA=$(git rev-parse HEAD | cut -c1-7)
+          # The full SHA: the staging tag promote.yml trusts, written only by the
+          # post-gate step below (never by a build), and the tag a promote copies to.
+          SHA=$(git rev-parse HEAD)
           BASE=${{ env.AR_HOST }}/${{ vars.GCP_PROJECT_ID }}/${{ env.REPO }}
           echo "daimon=$BASE/daimon:$SHA" >> "$GITHUB_OUTPUT"
           echo "notebook=$BASE/notebook-host:$SHA" >> "$GITHUB_OUTPUT"
@@ -184,33 +214,61 @@ jobs:
           DAIMON_DIGEST: ${{ inputs.daimon_digest }}
           NOTEBOOK_DIGEST: ${{ inputs.notebook_digest }}
           REPORT_DIGEST: ${{ inputs.report_digest }}
+          SOURCE_REGISTRY: ${{ inputs.source_registry }}
           DAIMON_CHANGED: ${{ steps.plan.outputs.daimon_image }}
           NOTEBOOK_CHANGED: ${{ steps.plan.outputs.notebook_image }}
           REPORT_CHANGED: ${{ steps.plan.outputs.report_image }}
           VM_PREFIX: ${{ vars.GCP_AR_REPO }}
           RUN_TAG: deploy-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
+          BASE="$AR_HOST/${{ vars.GCP_PROJECT_ID }}/$REPO"
+          # A promote ships the exact images that soaked on staging: each is copied
+          # under this SHA's tag, and only a digest this registry then serves is used.
+          promote_image() {
+            local name="$1" package="$2" digest="$3" tag="$4" served
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Malformed $name digest" >&2; return 1; }
+            crane copy "$SOURCE_REGISTRY/$package@$digest" "$tag"
+            served="$(gcloud artifacts docker images describe "$BASE/$package@$digest" \
+              --format='value(image_summary.digest)')"
+            [ "$served" = "$digest" ] || { echo "$BASE/$package@$digest is not served" >&2; return 1; }
+            echo "build_$name=false" >> "$GITHUB_OUTPUT"
+            echo "$name=$BASE/$package@$digest" >> "$GITHUB_OUTPUT"
+          }
+          if [ "$SELECTIVE" != true ] && [ -n "$SOURCE_REGISTRY" ]; then
+            if [ "${{ inputs.environment }}" != production ]; then
+              echo "Soaked digests are promoted only to production" >&2
+              exit 1
+            fi
+            [[ "$SOURCE_REGISTRY" =~ ^[a-z0-9.-]+/[a-z0-9-]+/[a-z0-9_-]+$ ]] \
+              || { echo "Malformed source registry" >&2; exit 1; }
+            gcloud auth configure-docker "${SOURCE_REGISTRY%%/*}" --quiet
+            promote_image daimon daimon "$DAIMON_DIGEST" "${{ steps.tags.outputs.daimon }}"
+            promote_image notebook notebook-host "$NOTEBOOK_DIGEST" "${{ steps.tags.outputs.notebook }}"
+            promote_image report report-host "$REPORT_DIGEST" "${{ steps.tags.outputs.report }}"
+            echo "prebuilt=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "$SELECTIVE" != true ]; then
             if [ -n "$DAIMON_DIGEST$NOTEBOOK_DIGEST$REPORT_DIGEST" ]; then
               echo "Prebuilt digests need the selective main CI path" >&2
               exit 1
             fi
+            # A run tag, never the SHA tag: these builds pass no gate before they push.
             echo "prebuilt=false" >> "$GITHUB_OUTPUT"
-            for image in daimon notebook report; do echo "build_$image=true" >> "$GITHUB_OUTPUT"; done
-            echo "daimon=${{ steps.tags.outputs.daimon }}" >> "$GITHUB_OUTPUT"
-            echo "notebook=${{ steps.tags.outputs.notebook }}" >> "$GITHUB_OUTPUT"
-            echo "report=${{ steps.tags.outputs.report }}" >> "$GITHUB_OUTPUT"
+            for image in daimon:daimon notebook:notebook-host report:report-host; do
+              echo "build_${image%%:*}=true" >> "$GITHUB_OUTPUT"
+              echo "${image%%:*}=$BASE/${image#*:}:$RUN_TAG" >> "$GITHUB_OUTPUT"
+            done
             exit 0
           fi
           if [ "${{ inputs.environment }}" != staging ]; then
             echo "Prebuilt digests are restricted to staging" >&2
             exit 1
           fi
-          BASE="$AR_HOST/${{ vars.GCP_PROJECT_ID }}/$REPO"
           # This run's candidate; else, unchanged since the last deploy, the image
           # the VM boots; else a build from source below. A malformed or missing
           # candidate fails rather than falling back to a build. A build here gets
-          # a run tag: the short-SHA tag promote.yml trusts comes only after the gates.
+          # a run tag: the SHA tag promote.yml trusts comes only after the gates.
           select_image() {
             local name="$1" package="$2" digest="$3" changed="$4" vm="$5" key="$6" ref=""
             if [ -n "$digest" ]; then
@@ -250,7 +308,7 @@ jobs:
           scripts/ci/iap-ssh-key.sh run "$IAP_SSH_STATE" 180 "$REPO_NAME" "$ZONE" \
             >"$IAP_SSH_STATE/launcher.log" 2>&1 < /dev/null &
 
-      # Manual staging and production deploys still build from the pinned SHA.
+      # Manual staging deploys and rebuild promotes still build from the pinned SHA.
       # Main CI passes the images it built and reuses the deployed ones that did
       # not change, so it builds here only an image neither covers. No provenance
       # or SBOM attestations: they would turn the push into an image index, while
@@ -791,13 +849,14 @@ jobs:
           echo "mcp did not become healthy" >&2; exit 1
 
       - name: Post-deploy smoke turn
-        if: (inputs.environment == 'staging' && (steps.plan.outputs.smoke == 'true' || steps.refresh.outputs.smoke == 'true')) && steps.fresh.outputs.superseded != 'true'
+        if: (steps.plan.outputs.smoke == 'true' || steps.refresh.outputs.smoke == 'true') && steps.fresh.outputs.superseded != 'true'
         timeout-minutes: 5
         run: |
           # Deliberately no VM-status precheck and no error-suppressing fallback
-          # here (unlike the worker refresh step above): a staging deploy that
-          # could not be smoke-verified must fail loudly, not read green. If the
-          # workers VM is stopped, the SSH command below fails and so does this step.
+          # here (unlike the worker refresh step above): a deploy that could not
+          # be smoke-verified must fail loudly, not read green. Production runs
+          # one billed turn on its dedicated smoke tenant. If the workers VM is
+          # stopped, the SSH command below fails and so does this step.
           gcloud compute ssh ${{ vars.GCP_AR_REPO }}-workers --zone "$ZONE" \
             --tunnel-through-iap --command '
               export DAIMON_IMAGE="${{ steps.images.outputs.daimon }}"
@@ -910,7 +969,7 @@ jobs:
         if: ((steps.refresh.outputs.reconcile || steps.plan.outputs.reconcile) != '') && steps.fresh.outputs.superseded != 'true'
         # No environment gate, deliberately: this runs on every staging deploy
         # that restarts an adapter that reconciles installs, AND every production
-        # promote — unlike the smoke turn above, which is scoped to staging only.
+        # promote, like the smoke turn above.
         # A production install drifting from the shipped spec is exactly the
         # failure mode this step exists to catch.
         #
@@ -1024,8 +1083,8 @@ jobs:
         env:
           PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
         run: |
-          # promote.yml recognizes only the canonical short-SHA daimon tag.
-          # Publish that tag last, after all three images and deploy gates pass.
+          # promote.yml trusts only these full-SHA tags, and nothing else in any
+          # workflow writes them. Published last, daimon's last of all, after every gate.
           lookup_tag() {
             local package="$1" tag="$2"
             gcloud artifacts tags list --package="$package" --repository="$REPO" \

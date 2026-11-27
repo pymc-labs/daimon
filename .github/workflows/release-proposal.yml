@@ -1,0 +1,65 @@
+name: Release proposal
+
+# After a staging deploy, refreshes the one open issue labelled `release-proposal`
+# with what promoting that SHA would ship (scripts/release/proposal.py): the span since
+# production, migration classes, changelog fragments, signals and a risk tier. It only
+# reads runs and writes that issue; it never dispatches a workflow and has no
+# environment. A run whose staging deploy did not mark its images promotable (superseded
+# by a newer main run, or failed) proposes nothing; the newer run proposes instead.
+# Needs the repository label `release-proposal`.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "CI run id to propose from (default: the newest successful push run on main)"
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+
+concurrency:
+  group: release-proposal
+  cancel-in-progress: false
+
+jobs:
+  propose:
+    name: Refresh the release proposal
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.event == 'push'
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+
+      - name: Build the proposal
+        env:
+          RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+        run: |
+          if [ -z "$RUN_ID" ]; then
+            RUN_ID=$(gh run list --workflow ci.yml --branch main --event push --status success \
+              --limit 1 --json databaseId --jq '.[0].databaseId')
+          fi
+          python3 scripts/release/proposal.py --repo "$GH_REPO" --run "$RUN_ID" > "$RUNNER_TEMP/proposal.md"
+          [ -s "$RUNNER_TEMP/proposal.md" ] || echo "Run $RUN_ID marked no images promotable; nothing to propose."
+
+      - name: Update the issue
+        run: |
+          [ -s "$RUNNER_TEMP/proposal.md" ] || exit 0
+          n=$(gh issue list --label release-proposal --state open --limit 1 --json number --jq '.[0].number // empty')
+          if [ -n "$n" ]; then
+            gh issue edit "$n" --body-file "$RUNNER_TEMP/proposal.md"
+          else
+            gh issue create --title "Release proposal" --label release-proposal \
+              --body-file "$RUNNER_TEMP/proposal.md"
+          fi

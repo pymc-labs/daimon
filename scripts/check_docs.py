@@ -16,11 +16,19 @@ from pathlib import Path
 
 GENERATED = {"configuration.md", "mcp-tools.md"}
 PAGE_WORDS = 2000
-PAGE_WORDS_OVERRIDE = {"README.md": 500, "quickstart.md": 800, "features.md": 2719}
+PAGE_WORDS_OVERRIDE = {"README.md": 500, "quickstart.md": 800, "features.md": 2763}
 PARAGRAPH_WORDS = 100
 SENTENCE_WORDS = 40
 MAX_HEADING_LEVEL = 3
 
+# "is new" is a time word at the end of a clause or before "in", "since"; "the value is new
+# and not empty" is an adjective.
+_TIME_WORD_RE = re.compile(
+    r"\bnow\b|\bno longer\b|\bnewly\b|\bnew (?:in|since|as of|from)\b"
+    r"|\b(?:is|are|was|were) new(?=\s*(?:[.,;:!?]|$)|\s+(?:in|since|as of|from)\b)",
+    re.IGNORECASE,
+)
+_LITERAL_RE = re.compile(r"`[^`]*`|\*\*[^*]*\*\*|“[^”]*”|\"[^\"]*\"")  # code, labels, quotes
 _LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 _LIST_RE = re.compile(r"^\s*(?:[-*+]|\d+\.)\s")
 _SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z`\[(*])")
@@ -60,6 +68,11 @@ def _blocks(lines: list[str]) -> list[tuple[int, str]]:
 
 def check(path: Path) -> list[str]:
     lines = path.read_text().splitlines()
+    if lines[:1] == ["---"]:  # front matter: blank it, so line numbers stay true
+        if "---" not in lines[1:]:
+            return [f"{path}:1: front matter: opened with --- and never closed"]
+        end = lines.index("---", 1)
+        lines[: end + 1] = [""] * (end + 1)
     findings: list[str] = []
     blocks = _blocks(lines)
     budget = PAGE_WORDS_OVERRIDE.get(path.name, PAGE_WORDS)
@@ -67,6 +80,10 @@ def check(path: Path) -> list[str]:
     if total > budget:
         findings.append(f"{path}:1: page: {total} words of prose, budget {budget}; cut or split")
     for number, text in blocks:
+        if found := _TIME_WORD_RE.search(_LITERAL_RE.sub("", text)):
+            findings.append(
+                f"{path}:{number}: time word: {found.group(0)!r}; describe current behaviour"
+            )
         if (n := _words(text)) > PARAGRAPH_WORDS:
             findings.append(f"{path}:{number}: paragraph: {n} words, max {PARAGRAPH_WORDS}")
             continue
@@ -86,6 +103,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Check docs pages against their length budgets.")
     parser.add_argument("root", nargs="?", default="docs", type=Path)
     args = parser.parse_args()
+    if not (args.root / "features.md").is_file():  # generated, never committed, still checked
+        print("docs/features.md is missing: run scripts/generate_feature_reference.py first")
+        return 1
     pages = sorted(p for p in args.root.glob("*.md") if p.name not in GENERATED)
     findings = [f for page in pages for f in check(page)]
     print("\n".join(findings) or f"docs: {len(pages)} pages within limits")

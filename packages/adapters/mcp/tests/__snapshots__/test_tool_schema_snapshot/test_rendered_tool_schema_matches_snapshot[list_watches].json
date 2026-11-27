@@ -1,0 +1,25 @@
+{
+  "description": [
+    "List your watches in this workspace; admins may list every owner's with scope \"all\".",
+    "",
+    "Includes paused imports and expiry. `scope=\"all\"` stays within this workspace and",
+    "rechecks admin live, like admin show, pause and delete; anyone else is refused. Each entry",
+    "names its owner, status and pause reason, source and destination kind, expiry, fires",
+    "in the past day, last firing and consecutive errors. Never instructions, signing",
+    "secrets or source evidence."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "scope": {
+        "default": "mine",
+        "enum": [
+          "mine",
+          "all"
+        ],
+        "type": "string"
+      }
+    },
+    "type": "object"
+  }
+}

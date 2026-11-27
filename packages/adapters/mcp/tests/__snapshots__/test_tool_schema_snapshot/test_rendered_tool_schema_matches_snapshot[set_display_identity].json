@@ -1,0 +1,56 @@
+{
+  "description": [
+    "Change how Daimon appears in this Discord server: its display name,",
+    "its avatar, or both.",
+    "",
+    "Use when the user asks you to rename yourself or change your profile",
+    "picture. ``display_name`` is the new nickname (1-32 characters).",
+    "``avatar_url`` is the URL of an image the user attached to a message",
+    "(a cdn.discordapp.com or media.discordapp.net link); png, jpeg, gif",
+    "and webp work. Both apply to the whole server: Discord has no",
+    "per-channel identity, so tell the user when they asked for one",
+    "channel. There is no reset yet: an empty ``display_name`` is treated",
+    "as omitted, so a name cannot be cleared back to the default. Needs a",
+    "server admin. Pass this turn's origin_context_id: a pinned agent, or a",
+    "turn in a confidential channel, can't change it. Discord-only."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "avatar_url": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "display_name": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "origin_context_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

@@ -173,6 +173,24 @@ async def test_resolve_privacy_account_returns_none_and_creates_no_principal_on_
     )
 
 
+def test_terms_link_sits_beside_policy_only_when_given() -> None:
+    """Terms is a url button after Policy; without a terms page the row is unchanged."""
+    with_terms = build_privacy_main_container(
+        is_slack_connected=False,
+        slack_connect_url=None,
+        policy_url=_POLICY_URL,
+        terms_url="https://example.com/terms",
+    )
+    without = build_privacy_main_container(
+        is_slack_connected=False, slack_connect_url=None, policy_url=_POLICY_URL
+    )
+    row = next(b for b in with_terms["blocks"] if b["type"] == "actions")["elements"]
+    assert [el["text"]["text"] for el in row[:3]] == ["📄 Policy", "📜 Terms", "📤 Export"]
+    assert row[1]["url"] == "https://example.com/terms", "Terms must link the terms page"
+    plain = next(b for b in without["blocks"] if b["type"] == "actions")["elements"]
+    assert "privacy_terms" not in [el["action_id"] for el in plain], "no Terms while unset"
+
+
 def test_build_privacy_main_container_renders_who_stores_what_and_the_buttons() -> None:
     """The panel says who stores what in two lines, then Policy, Export, Delete, Disconnect."""
     view = build_privacy_main_container(

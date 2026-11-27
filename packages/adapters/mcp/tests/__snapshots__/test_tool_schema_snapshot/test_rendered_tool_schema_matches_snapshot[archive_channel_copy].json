@@ -1,0 +1,48 @@
+{
+  "description": [
+    "Archive the agent copied as a channel's own, when that channel closes. For",
+    "example, retire #client-acme's agent once the engagement ends. Requires an",
+    "admin.",
+    "",
+    "Only an agent ``set_channel_rule`` copied for a channel can be archived here,",
+    "never a built-in agent or a default. Pass ``channel_id``, the channel it was made",
+    "for, to drop its rule and default there with it; while its rule or a default",
+    "names anywhere else, the call is refused. The channel keeps its rule, so nothing",
+    "answers there afterwards. ``expected_ma_agent_id`` guards against a namesake",
+    "made since the agent was listed."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "channel_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "expected_ma_agent_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "name": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "name"
+    ],
+    "type": "object"
+  }
+}

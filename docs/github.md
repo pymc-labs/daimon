@@ -8,10 +8,20 @@ administer an agent's repositories.
 
 Register one GitHub App for the deployment. `<root>` below is
 [`DAIMON_MCP__PUBLIC_URL`](configuration.md#daimon_mcp__public_url) without the
-trailing `/mcp`. Set the App's user authorization callback to
-`<root>/oauth/github/callback` and its setup URL to
-`<root>/oauth/github/setup`. GitHub must reach both, so `localhost` works only
-through a tunnel.
+trailing `/mcp`. GitHub must reach it, so `localhost` works only through a tunnel.
+
+By default the connect pages open at `<root>`: set the App's callback and setup
+URLs to `<root>/oauth/github/callback` and `<root>/oauth/github/setup`.
+
+<!-- knowledge: web -->
+With the web app, the pages open on `<web>`,
+[`DAIMON_WEB__PUBLIC_URL`](configuration.md#daimon_web__public_url). Set it on
+every service, the MCP server included, and give the web app the App values and
+crypto keys below. Add `<web>/oauth/github/callback` to the callback URLs, keep
+`<root>/oauth/github/callback` for personal account links, and set the setup URL
+to `<web>/oauth/github/setup`. The MCP host then sends old links and its setup
+URL on to the web app.
+<!-- /knowledge -->
 
 1. Copy the App's values into `.env`: `DAIMON_GITHUB_APP__APP_ID`, `APP_SLUG`,
    `PRIVATE_KEY`, `CLIENT_ID` and `CLIENT_SECRET`. See
@@ -24,8 +34,8 @@ through a tunnel.
    [`DAIMON_GITHUB_APP__WEBHOOK_SECRET`](configuration.md#daimon_github_app__webhook_secret).
    The route mounts only when it is set, and boot fails without the App ID,
    private key and `DAIMON_CRYPTO__KEYS`.
-4. Restart the services. The connect routes mount only when these values and the
-   public URL are present.
+4. Restart the services. The MCP connect routes mount only when these values and
+   its public URL are present.
 5. Keep the scheduler running. It removes expired connection flows and their
    encrypted tokens.
 
@@ -45,7 +55,7 @@ server admin, or an owner of that agent, gets a private link bound to that
 agent. An owner is not made an admin and can connect repos only to their own
 agent. Members can request setup, and their request is recorded for an admin.
 
-On the web page, the person signs in to GitHub and picks repositories. None is
+On the connect page, the person signs in to GitHub and picks repositories. None is
 preselected. The page lists repositories the App installation covers and the
 signed-in person can see, and says how many it hides. Each selection is checked
 again against GitHub at confirmation, and the grants go live then. A repository
@@ -181,7 +191,7 @@ then starts another pass.
 
 The GitHub panel in the agent editor shows the agent's repos, how many skills each
 holds and whether the latest sync failed. Its **Resync** button syncs the repo skills
-now, unless a sync is already running. Each skill's panel shows where it came from.
+at once, unless a sync is already running. Each skill's panel shows where it came from.
 A pipeline that publishes the agent can set three metadata keys for the Skills panel
 to show: `source_release` (the release name), `source_release_at` (ISO 8601 with an
 offset) and `source_release_url` (an https page). Daimon ignores a bad time or URL.

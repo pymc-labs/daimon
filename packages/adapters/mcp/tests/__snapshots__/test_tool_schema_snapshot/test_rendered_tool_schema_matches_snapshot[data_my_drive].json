@@ -1,0 +1,28 @@
+{
+  "description": [
+    "Search your own Google Drive (My Drive) as you for `query`, with the text of Docs,",
+    "Slides and Sheets; never stored. Each call asks you on a card first, and everyone who",
+    "can see this conversation, people outside the team included, sees what it finds. Not on",
+    "another agent's request. Shared drives are in `data_search`."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "limit": {
+        "default": 10,
+        "type": "integer"
+      },
+      "origin_context_id": {
+        "type": "string"
+      },
+      "query": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "query",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

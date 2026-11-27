@@ -1,0 +1,24 @@
+{
+  "description": [
+    "Start your own sign-in at a data source; source_id is one list_my_data offers.",
+    "Runs on your Approve card. In a shared conversation (a channel or group) the link and code",
+    "are [[private:...]] placeholders: send them with send_private_details and say here",
+    "that they went by direct message. Once signed in, check_my_data_connection finishes it."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "origin_context_id": {
+        "type": "string"
+      },
+      "source_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "source_id",
+      "origin_context_id"
+    ],
+    "type": "object"
+  }
+}

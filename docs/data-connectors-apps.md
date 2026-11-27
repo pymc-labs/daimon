@@ -46,7 +46,7 @@ A source of kind `linkedin` reads an organization's published, public posts, rea
 the whole tenant (create the source with the `public` scope). The credential is
 `{"token": "..."}`, an access token that can read the organization's posts
 (`r_organization_social`). The config is `{"organization": "urn:li:organization:12345"}`.
-Every run reads all posts, so a post deleted on LinkedIn, or no longer public, disappears.
+Every run reads all posts, so a post deleted on LinkedIn, or made non-public, disappears.
 Drafts, connection-only and sponsored posts are never stored. A run that finds no posts for
 an organization that had some fails and removes nothing.
 

@@ -440,6 +440,37 @@ async def cancel_wake_row(
     return cancelled is not None
 
 
+async def get_running_wake_row(
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    platform: str,
+    thread_id: str,
+    owner: str,
+    now: datetime,
+) -> TaskContinuationRow | None:
+    """The row whose turn `owner` is running in this thread now, or None: claimed under
+    that owner, started, and inside its lease. A release, a takeover or a settled row has
+    another owner or none, so an old attempt finds nothing. Reads only."""
+    rows = list(
+        await session.scalars(
+            select(TaskContinuation)
+            .where(
+                _READABLE_REASON,
+                TaskContinuation.tenant_id == tenant_id,
+                TaskContinuation.platform == platform,
+                TaskContinuation.thread_id == thread_id,
+                TaskContinuation.status == "claimed",
+                TaskContinuation.lease_owner == owner,
+                TaskContinuation.started_at.is_not(None),
+                TaskContinuation.lease_expires_at > now,
+            )
+            .limit(2)
+        )
+    )
+    return TaskContinuationRow.model_validate(rows[0]) if len(rows) == 1 else None
+
+
 async def list_dispatchable_continuations(
     session: AsyncSession,
     *,

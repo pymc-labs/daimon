@@ -466,8 +466,7 @@ class HubSettings(BaseModel):
         description=(
             "Slack OAuth app client ID for the /slack/mcp login mount. Register "
             "<hub origin>/slack/auth/callback as a redirect URL on the Slack app "
-            "(see public_url). Web app sign-in with Slack uses this app too: "
-            "also register <web public url>/auth/slack/callback."
+            "(see public_url)."
         ),
     )
     slack_client_secret: SecretStr | None = Field(
@@ -479,8 +478,7 @@ class HubSettings(BaseModel):
         description=(
             "Discord OAuth app client ID for the /discord/mcp login mount. "
             "Register <hub origin>/discord/auth/callback as a redirect URI on the "
-            "Discord app (see public_url). Web app sign-in with Discord uses this app too: "
-            "also register <web public url>/auth/discord/callback."
+            "Discord app (see public_url)."
         ),
     )
     discord_client_secret: SecretStr | None = Field(
@@ -1399,8 +1397,7 @@ class MicrosoftAccountsSettings(BaseModel):
         description=(
             "Application (client) ID of the Entra app registration people sign in to "
             "with Connect Microsoft. Its Web redirect URI is "
-            "`<public root>/oauth/microsoft/callback`; web app sign-in with Microsoft "
-            "also needs `<web public url>/auth/microsoft/callback`."
+            "`<public root>/oauth/microsoft/callback`."
         ),
     )
     client_secret: SecretStr | None = Field(
@@ -2363,6 +2360,20 @@ class SignedIdentityServer(BaseModel):
     # requester kind `agent_chat`. Off by default: a server that does not know the kind
     # may refuse every call that carries it.
     agent_chat_requester: bool = False
+    # Sign a routine run that posts to a Discord room with its routine, that room and the
+    # room's kind (`daimon.core.signed_room.routine_room`). Off by default: a server that
+    # does not know the `routine` claim would read such a call as a person's.
+    routine_claims: bool = False
+    # Sign a call with no fresh message with why it runs (`wake`): a person's turn still
+    # running, or a queued continuation posting to its own thread, as a routine there would
+    # (`daimon.adapters.mcp.identity_relay`). Off by default, independent of routine_claims.
+    wake_claims: bool = False
+    # Also sign a routine posting to its owner's DM: its routine, the owner as the
+    # person, the owner's DM and room `dm`, only for a live fire of that routine,
+    # enabled and unedited since the fire began (`identity_relay._dm_routine_run`). The
+    # server then reads for the owner with nobody watching, from a stored prompt the
+    # model or an admin may have written. Off by default; needs routine_claims.
+    dm_routine_claims: bool = False
 
     @model_validator(mode="after")
     def _wake_needs_requester(self) -> SignedIdentityServer:
@@ -2370,6 +2381,12 @@ class SignedIdentityServer(BaseModel):
             raise ValueError("wake_tools needs requester_meta")
         if self.agent_chat_requester and not self.requester_meta:
             raise ValueError("agent_chat_requester needs requester_meta")
+        if self.routine_claims and self.auth != "signed":
+            raise ValueError("routine_claims needs a signed server")
+        if self.wake_claims and self.auth != "signed":
+            raise ValueError("wake_claims needs a signed server")
+        if self.dm_routine_claims and not self.routine_claims:
+            raise ValueError("dm_routine_claims needs routine_claims")
         return self
 
     @model_validator(mode="after")
@@ -2423,8 +2440,8 @@ class McpIdentitySettings(BaseModel):
             "Ed25519 private key that signs caller identities for the servers in "
             "DAIMON_MCP_IDENTITY__SERVERS: an unencrypted PKCS#8 PEM or a base64url 32-byte "
             "seed. Generate one with `daimon mcp identity-keygen`, which also prints the "
-            "public key to register with each server. Read by the mcp service, and by the "
-            "web service when a DAIMON_WEB__NODES__* node names a server."
+            "public key to register with each server. Read by the mcp service and "
+            "by any service that connects to those servers."
         ),
     )
     servers: Annotated[list[SignedIdentityServer], NoDecode] = Field(
@@ -2453,6 +2470,14 @@ class McpIdentitySettings(BaseModel):
             'requester_kind "agent_chat": a turn a person started through the MCP hub, '
             "signed in with their platform login, then names that person with no place. "
             "Turns started with an agent, coding or CLI key name nobody. "
+            "Set routine_claims to true for a signed server that accepts the routine claim: "
+            "a routine run that posts to a Discord room then names its routine, that room "
+            "and the room's kind, and no person. "
+            "Set wake_claims to true for a signed server that accepts the wake claim: a "
+            "person's turn still running signs wake turn, and a continuation that runs in its "
+            "own Discord thread signs its reason, that thread and its kind, and no person. "
+            "The two settings are independent: with wake_claims on, the server can answer a "
+            "call that has no fresh message even with routine_claims off. "
             "An agent using a server stays in its channel with no long-term memory, a fresh "
             "session per channel turn and no handoffs, because the server answers with what "
             "the channel's readers can read. Set channel_scoped to false for a server that "
@@ -2537,6 +2562,16 @@ class McpIdentitySettings(BaseModel):
     def names_requester(self) -> bool:
         """Whether any server is sent the requester's identity (`requester_meta`)."""
         return any(server.requester_meta for server in self.servers)
+
+    @property
+    def names_routine(self) -> bool:
+        """Whether any server is sent routine claims (`routine_claims`)."""
+        return any(server.routine_claims for server in self.servers)
+
+    @property
+    def names_dm_routine(self) -> bool:
+        """Whether any server is sent a DM routine's claims (`dm_routine_claims`)."""
+        return any(server.dm_routine_claims for server in self.servers)
 
     @property
     def names_agent_chat_requester(self) -> bool:
@@ -3235,6 +3270,31 @@ class DataSettings(BaseModel):
         return name
 
 
+class SelfKnowledgeSettings(BaseModel):
+    """Where the `self_knowledge` tools read this release's docs and source, and the public
+    addresses their results name."""
+
+    docs_url: str = Field(
+        default="https://pymc-labs.github.io/daimon/",
+        description="The public docs site that results name as the place to read more.",
+    )
+    repo_url: str = Field(
+        default="https://github.com/pymc-labs/daimon",
+        description="The source repository that results name, to clone for tests and history.",
+    )
+    docs_root: Path = Field(
+        default_factory=lambda: Path("docs"),
+        description="The docs/ directory in the image, relative to the working directory.",
+    )
+    source_root: Path = Field(
+        default_factory=lambda: Path("."),
+        description=(
+            "The directory holding packages/, relative to the working directory. Only "
+            "packages/ is read."
+        ),
+    )
+
+
 class RepoMemorySettings(BaseModel):
     enabled: bool = Field(
         default=False,
@@ -3273,19 +3333,83 @@ def get_repo_memory_settings(settings: object) -> RepoMemorySettings:
     return value if isinstance(value, RepoMemorySettings) else RepoMemorySettings()
 
 
+class RetentionSettings(BaseModel):
+    """How long the scheduler keeps operational records, in days. 0 keeps them forever.
+
+    Conversation history (thread sessions, private chats, web threads, turn records
+    and Daimon's journal copy) is the `conversation_retention` feature instead, so a
+    workspace can shorten it. It is on at 1 year; `DAIMON_FEATURES__CONVERSATION_RETENTION=0`
+    turns it off.
+    """
+
+    security_audit_days: int = Field(
+        default=90,
+        ge=0,
+        description=(
+            "Days to keep security audit events, secret share records past their expiry and "
+            "the record of messages the agent posted. "
+            "The scheduler deletes older ones; `daimon audit prune` does the same for one "
+            "tenant's audit events. Privacy erasure and tenant deletion still apply when this is 0."
+        ),
+    )
+    admin_history_days: int = Field(
+        default=90, ge=0, description="Days to keep the admin page audit and channel changes."
+    )
+    task_continuations_days: int = Field(
+        default=30,
+        ge=0,
+        description="Days to keep a delivered, skipped or cancelled task continuation.",
+    )
+    job_output_days: int = Field(
+        default=90,
+        ge=0,
+        description=(
+            "Days to keep finished long jobs, and the output tails of finished background "
+            "commands and routine runs."
+        ),
+    )
+    access_requests_days: int = Field(
+        default=90,
+        ge=0,
+        description="Days to keep credential and GitHub access requests once resolved or expired.",
+    )
+    deleted_threads_days: int = Field(
+        default=30,
+        ge=0,
+        description="Days before a web thread the user deleted is removed for good.",
+    )
+    feedback_days: int = Field(
+        default=365, ge=0, description="Days to keep message feedback and support request notes."
+    )
+    channel_names_days: int = Field(
+        default=365,
+        ge=0,
+        description="Days to keep a channel's last known name after it was last seen.",
+    )
+    archived_tenants_days: int = Field(
+        default=30,
+        ge=0,
+        description=(
+            "Days after a tenant is archived (its app uninstalled) before it is retired: its "
+            "data, provider sessions, memory, vaults, skills, reports and notebooks are "
+            "deleted, and only billing records and the balance stay. Reinstalling before "
+            "then keeps everything."
+        ),
+    )
+
+
 class Settings(BaseSettings):
     compute: ComputeSettings = Field(default_factory=ComputeSettings)
     long_jobs: LongJobsSettings = Field(default_factory=LongJobsSettings)
     monitoring: MonitoringSettings = Field(default_factory=MonitoringSettings)
     ops_events: OpsEventsSettings = Field(default_factory=OpsEventsSettings)
-    security_audit_retention_days: int = Field(
-        default=90,
+    retention: RetentionSettings = Field(default_factory=RetentionSettings)
+    security_audit_retention_days: int | None = Field(
+        default=None,
         ge=0,
         description=(
-            "Security audit retention age in days, default 90. Operators must schedule "
-            "`daimon audit prune TENANT_UUID` for each tenant (for example daily). "
-            "The command deletes older events. Set 0 to explicitly retain events forever; "
-            "privacy erasure and tenant deletion still apply."
+            "Deprecated: use `DAIMON_RETENTION__SECURITY_AUDIT_DAYS`. When set, and that "
+            "variable is not, it is used as the security audit retention."
         ),
     )
     completion_pings: dict[uuid.UUID, bool] = Field(
@@ -3336,8 +3460,17 @@ class Settings(BaseSettings):
     privacy_policy_url: HttpUrl = Field(
         default=HttpUrl("https://github.com/pymc-labs/daimon/blob/main/PRIVACY.md"),
         description=(
-            "URL rendered on the privacy panels' Policy button. "
+            "URL of the privacy policy, linked from the browser pages and the privacy "
+            "panels' Policy button. "
             "Override via DAIMON_PRIVACY_POLICY_URL if you host your own policy page."
+        ),
+    )
+    terms_url: HttpUrl | None = Field(
+        default=None,
+        description=(
+            "URL of the terms page. Set DAIMON_TERMS_URL to show a Terms link beside "
+            "the privacy policy in the browser pages and the privacy panels; unset, no "
+            "Terms link appears."
         ),
     )
     privacy: PrivacySettings = Field(default_factory=PrivacySettings)
@@ -3358,7 +3491,7 @@ class Settings(BaseSettings):
             "Deployment defaults for features, one variable each: "
             "DAIMON_FEATURES__PROGRESS_PLANS=on. A value may end in :locked so no "
             "workspace, agent, channel or thread can change it; disabled is off:locked. "
-            "An unknown feature stops startup. docs/features.md lists them."
+            "An unknown feature stops startup. The docs site's features page lists them."
         ),
     )
     thread_participation: ThreadParticipationSettings = Field(
@@ -3380,6 +3513,7 @@ class Settings(BaseSettings):
     github_app: GithubAppSettings = Field(default_factory=GithubAppSettings)
     repo_memory: RepoMemorySettings = Field(default_factory=RepoMemorySettings)
     data: DataSettings = Field(default_factory=DataSettings)
+    self_knowledge: SelfKnowledgeSettings = Field(default_factory=SelfKnowledgeSettings)
     microsoft_accounts: MicrosoftAccountsSettings = Field(default_factory=MicrosoftAccountsSettings)
     crypto: CryptoSettings = Field(default_factory=CryptoSettings)
     credentials: CredentialsSettings = Field(default_factory=CredentialsSettings)
@@ -3481,6 +3615,14 @@ class Settings(BaseSettings):
             if isinstance(values, dict)
             else values
         )
+
+    @model_validator(mode="after")
+    def _legacy_audit_retention(self) -> Settings:
+        """`DAIMON_SECURITY_AUDIT_RETENTION_DAYS` still sets the audit retention."""
+        legacy = self.security_audit_retention_days
+        if legacy is not None and "security_audit_days" not in self.retention.model_fields_set:
+            self.retention = self.retention.model_copy(update={"security_audit_days": legacy})
+        return self
 
     @model_validator(mode="after")
     def _tool_safety_feature(self) -> Settings:

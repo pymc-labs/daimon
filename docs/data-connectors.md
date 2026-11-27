@@ -49,7 +49,7 @@ roles and permission overwrites. A private thread is readable by its members who
 the channel, and by those who manage threads. The bot lists every human member as an account,
 without email addresses. Attachments are listed on the record and fetched on demand.
 
-A channel the bot can no longer read is hidden at once. Readable again within 30 days, it
+A channel the bot cannot read is hidden at once. Readable again within 30 days, it
 shows again without a re-read; after that its records are deleted. A channel the config
 leaves out is deleted at once. Slack channels follow the same rule.
 
@@ -122,7 +122,7 @@ group, or another one, never uses another source's membership.
 Changes arrive through each shared drive's change feed. Everything is listed again every
 `relist_hours`, which is also how soon a new share on a folder reaches the files below it.
 
-A person's read is checked in Drive again when a record is shown: a file Drive no longer opens
+A person's read is checked in Drive again when a record is shown: a file Drive does not open
 to them is left out, even before the next sync. Each request checks a limited number of files
 and shows only those that pass.
 
@@ -173,7 +173,7 @@ Google link (their Google sign-in).
 
 With several readers an event shows only if every one of their calendars has it. If the
 connection cannot act as every reader (not linked, suspended), no calendar is searched.
-Events within 90 days either side of now are searched, and those nearest to now come first.
+Events within 90 days either side of today are searched, and those nearest to today come first.
 
 ## GitHub
 
@@ -200,8 +200,8 @@ plus every organization member while the repository is public or internal.
 The list is read again every run and each record is checked
 against it when shown, so a repository made private or a person removed takes effect at once.
 A repository whose collaborators cannot be listed publishes nobody, and its records go dark
-within three hours. A repository taken out of `repos` is deleted at once. One the token no
-longer sees is hidden at once; seen again within 30 days its records show again without a
+within three hours. A repository taken out of `repos` is deleted at once. One the token cannot
+see is hidden at once; seen again within 30 days its records show again without a
 re-read, after that they are deleted.
 
 GitHub verifies no address: a person who signs in with GitHub is linked in every

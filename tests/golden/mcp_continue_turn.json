@@ -228,6 +228,18 @@
           [
             "types[]",
             "session.status_idle"
+          ],
+          [
+            "types[]",
+            "session.status_running"
+          ],
+          [
+            "types[]",
+            "session.status_rescheduled"
+          ],
+          [
+            "types[]",
+            "session.status_terminated"
           ]
         ]
       },
@@ -296,6 +308,35 @@
             }
           ]
         },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/<id:1>/events/stream",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": "",
         "status": 200
       }
     },
@@ -793,6 +834,18 @@
           [
             "types[]",
             "session.status_idle"
+          ],
+          [
+            "types[]",
+            "session.status_running"
+          ],
+          [
+            "types[]",
+            "session.status_rescheduled"
+          ],
+          [
+            "types[]",
+            "session.status_terminated"
           ]
         ]
       },
@@ -837,6 +890,18 @@
           [
             "types[]",
             "session.status_idle"
+          ],
+          [
+            "types[]",
+            "session.status_running"
+          ],
+          [
+            "types[]",
+            "session.status_rescheduled"
+          ],
+          [
+            "types[]",
+            "session.status_terminated"
           ]
         ]
       },
@@ -964,6 +1029,64 @@
             }
           ]
         },
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/<id:1>/events/stream",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": "",
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
+        "body": null,
+        "method": "GET",
+        "path": "/v1/sessions/<id:1>/events/stream",
+        "protocol_headers": [
+          [
+            "anthropic-beta",
+            "managed-agents-2026-04-01"
+          ],
+          [
+            "anthropic-version",
+            "2023-06-01"
+          ]
+        ],
+        "query": [
+          [
+            "beta",
+            "true"
+          ]
+        ]
+      },
+      "platform": "ma_http",
+      "result": {
+        "body": "",
         "status": 200
       }
     },

@@ -1,0 +1,17 @@
+{
+  "description": [
+    "Cancel a pending timer by id (from `create_timer` or `list_timers`). A cancelled timer never fires."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "timer_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "timer_id"
+    ],
+    "type": "object"
+  }
+}

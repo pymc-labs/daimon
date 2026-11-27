@@ -266,6 +266,7 @@ EXEMPT: dict[str, str] = {
     "archive_thread": _LIVE,
     "ask": _TURN,
     "ask_helper": _TURN,
+    "await_turn": _TURN,
     "cancel_long_job": _SCHEDULED,
     "cancel_timer": _SCHEDULED,
     "cancel_turn": _TURN,
@@ -419,6 +420,8 @@ EXEMPT: dict[str, str] = {
     "preview_watch_edit": _READS,
     "publish_report": _LIVE,
     "read_channel": _READS,
+    "read_daimon_docs": _READS,
+    "read_daimon_source": _READS,
     "read_thread": _READS,
     "redeem_promo_code": _TENANT,
     "remove_my_data": _OWN,
@@ -443,6 +446,8 @@ EXEMPT: dict[str, str] = {
     "rotate_watch_key": _SCHEDULED,
     "run_routine": _SCHEDULED,
     "save_library_skill_files": _NEW,
+    "search_daimon_docs": _READS,
+    "search_daimon_source": _READS,
     "search_messages": _READS,
     "self_delete_file": _MEMORY,
     "self_list_files": _READS,
@@ -484,6 +489,7 @@ EXEMPT: dict[str, str] = {
 _HUB = "forwards a turn or reads a session of a Daimon; changes no channel or agent setting"
 HUB_EXEMPT: dict[str, str] = {
     "ask": _HUB,
+    "await_turn": _HUB,
     "continue_turn": _HUB,
     "describe_daimon": _HUB,
     "get_session": _HUB,

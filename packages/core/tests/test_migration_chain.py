@@ -1,9 +1,9 @@
 """Exercise the canonical migration chain through real Alembic and PostgreSQL.
 
 Main's branch (0132..0158) and the preview branch (0134..0167) both descend from
-0131_usage_obs_tenant_idx; 0168 joins them and the last of the linear tail 0169..0179 is the
-single head. The ORM describes the head, so below the merge the preview branch is compared
-without the objects main's branch changes.
+0131_usage_obs_tenant_idx; 0168 joins them and the last of the linear tail 0169.. is the
+single head, read from the files. The ORM describes the head, so below the merge the
+preview branch is compared without the objects main's branch changes.
 """
 
 from __future__ import annotations
@@ -128,83 +128,10 @@ PREVIEW_HEAD = "0167_cost_footer"
 MERGE = "0168_merge_main_preview"
 
 
-# Linear, oldest first; the first sits on MERGE and the last is the single head.
-TAIL = (
-    "0169_continuation_reasons",
-    "0170_helpers",
-    "0171_channel_changes",
-    "0172_fold_caps_into_allowances",
-    "0173_channel_settings",
-    "0174_drop_channel_admins",
-    "0174a_github_router_sessions",
-    "0175_channel_name_status",
-    "0176_routine_names",
-    "0177_invite_files",
-    "0178_web_logins",
-    "0179_reach_tallies",
-    "0180_tag_opt_outs",
-    "0181_reach_own_threads",
-    "0182_server_skills",
-    "0183_helper_files",
-    "0184_coding_key_claims",
-    "0185_agent_post_role",
-    "0186_github_router_sessions",
-    "0187_feature_values",
-    "0188_eval_key",
-    "0189_workspace_feature_values",
-    "0190_long_job_features",
-    "0191_drop_dev_toggle_values",
-    "0192_reset_allow_writes",
-    "0193_deployment_identity",
-    "0194_host_call_cards",
-    "0195_agent_record_versions",
-    "0196_connector_tokens",
-    "0197_thread_model_consents",
-    "0198_agent_backend_effort",
-    "0199_self_helpers",
-    "0200_skill_copies",
-    "0202_agent_backend_environment",
-    "0203_pending_carry_overs",
-    "0204_shared_agent_copies",
-    "0205_web_search_usage",
-    "0206_support_plans",
-    "0207_skill_manifest_bytes",
-    "0208_active_turn_deadline",
-    "0209_thread_model_effort",
-    "0210_dm_access",
-    "0211_callback_watch_imports",
-    "0212_sandbox_tools_feature",
-    "0213_outbox_attribution",
-    "0214_provider_key_gate",
-    "0215_gemini_records",
-    "0216_usage_obs_observed_at",
-    "0217_monitored_events",
-    "0218_support_menu_channel",
-    "0219_channel_budget_alerts",
-    "0220_discord_audience_facts",
-    "0221_routine_delivery_hold",
-    "0222_secret_shares",
-    "0223_dm_watch_delivery",
-    "0224_ops_events",
-    "0225_agent_github_grant_removals",
-    "0226_compute_tool_names",
-    "0227_turn_origin_own_dm_reach",
-    "0228_compute_task_wait_until",
-    "0229_compute_started_by_wake",
-    "0230_agent_chat_signed_in",
-    "0231_agent_chat_send_count",
-    "0232_agent_chat_session_grant",
-    "0233_data_store",
-    "0234_data_store_tables",
-    "0235_data_sync",
-    "0236_data_search",
-    "0240_discord_room_viewers",
-    "0241_data_identity",
-    "0242_data_ops",
-    "0243_data_redaction",
-    "0244_data_memory",
-    "0245_data_groups",
-)
+# Linear, oldest first, read from the files so a rechain never edits this test; the first
+# sits on MERGE and the last is the single head.
+SCRIPT = ScriptDirectory(str(SCRIPTS))
+TAIL = tuple(r.revision for r in reversed(list(SCRIPT.iterate_revisions("heads", MERGE))))
 HEAD = TAIL[-1]
 
 
@@ -251,6 +178,8 @@ MAIN_BRANCH_COLUMNS = {
 
 # Columns added after the continuation migration; heads below HEAD skip them.
 AFTER_MERGE_COLUMNS = {
+    ("watches", "last_fired_at"),
+    ("direct_message_conversations", "updated_at"),
     ("turn_origins", "helper_of"),
     ("turn_origins", "serves_helpers"),
     ("mcp_tokens", "client"),
@@ -263,8 +192,32 @@ AFTER_MERGE_COLUMNS = {
     ("routines", "owner_notice"),
     ("compute_tasks", "wait_until"),
     ("compute_sessions", "wake_turns"),
+    ("repo_memory", "data_refs"),
 }
-AFTER_MERGE_OBJECTS = {"ix_usage_observation_provider_observed_at"}
+AFTER_MERGE_OBJECTS = {
+    "ix_usage_observation_provider_observed_at",
+    "ix_thread_sessions_tenant_last_turn",
+    "ix_thread_sessions_tenant_session",
+    "ix_credential_requests_closed_at",
+    "ix_agent_posted_messages_tenant_posted",
+    "ix_message_feedback_created_at",
+    "ix_support_escalations_created_at",
+    "ix_task_continuations_closed_at",
+    "ix_long_job_finished_at",
+    "ix_compute_tasks_finished_at",
+    "ix_routines_last_finished_at",
+    "ix_github_access_requests_updated_at",
+    "ix_platform_channel_names_seen",
+    "ix_channel_changes_at",
+    "ix_web_audit_at",
+    "ix_web_logins_created_at",
+    "ix_web_threads_deleted_at",
+    "ix_web_threads_tenant_updated",
+    "ix_secret_shares_expires_at",
+    "ix_long_job_cancel_audit_requested_at",
+    "ix_dm_conversations_tenant_updated",
+    "long_job_cancel_audit_id_fkey",
+}
 
 
 MAIN_BRANCH_OBJECTS = {"ix_platform_principals_account_id", "usage_observation_binding_id_fkey"}
@@ -504,14 +457,6 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             )
         ):
             return False
-        # Added by the data memory migration (0244), the head.
-        if (
-            expected != HEAD
-            and kind == "column"
-            and name == "data_refs"
-            and getattr(getattr(obj, "table", None), "name", None) == "repo_memory"
-        ):
-            return False
         # Added by the invite files migration (0177).
         if (
             expected != HEAD
@@ -555,7 +500,8 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
             return False
         if (
             kind == "column"
-            and name in {"self_helpers", "helper_key", "own_dm_reach", "reach_read"}
+            and name
+            in {"self_helpers", "helper_key", "own_dm_reach", "reach_read", "public_thread"}
             and getattr(getattr(obj, "table", None), "name", None) == "turn_origins"
             and expected != HEAD
         ):
@@ -592,27 +538,26 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
 
 
 def test_authoritative_chain() -> None:
-    config = Config(str(ROOT / "alembic.ini"))
-    script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == [HEAD]
+    assert SCRIPT.get_heads() == [HEAD]
+    assert (SCRIPTS / "head.txt").read_text().strip() == HEAD, "head.txt names the head"
     for start, branch in ((FORK, CHAIN), (MAIN_HEAD, MAIN_BRANCH)):
         parent = start
         for revision in branch:
-            node = script.get_revision(revision)
+            node = SCRIPT.get_revision(revision)
             assert node is not None and node.down_revision == parent
             assert Path(node.path).stem == revision
             parent = revision
     parent = MERGE
     for revision in TAIL:
-        node = script.get_revision(revision)
+        node = SCRIPT.get_revision(revision)
         assert node is not None and node.down_revision == parent
         assert Path(node.path).stem == revision
         parent = revision
-    merge = script.get_revision(MERGE)
+    merge = SCRIPT.get_revision(MERGE)
     assert merge is not None
     assert set(merge.down_revision or ()) == {MAIN_BRANCH[-1], PREVIEW_HEAD}
     # Both branches are whole and nothing else joins them.
-    below = {revision.revision for revision in script.iterate_revisions(MERGE, MAIN_HEAD)}
+    below = {revision.revision for revision in SCRIPT.iterate_revisions(MERGE, MAIN_HEAD)}
     preview = CHAIN[CHAIN.index(MAIN_HEAD) + 1 :]
     assert below == {MERGE, *MAIN_BRANCH, *preview}
 
