@@ -5,14 +5,19 @@ from __future__ import annotations
 import time
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from daimon.adapters.slack import workflow_delivery
 from daimon.adapters.slack.runtime import SlackRuntime
+from daimon.core import routine_delivery
+from daimon.core.agent_identity import AgentIdentity
+from daimon.core.config import AgentIdentitySettings
 from daimon.core.delivery import DeliveryOutcome, JobPoster, poll_once
 from daimon.core.stores import accounts, tenants, workflow_deliveries
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.workflows import runs
+from daimon.core.workflows.post_step import PostStepExecutor
 from daimon.testing.factories import make_platform_principal
 from daimon.testing.platform_surface import SurfaceRecorder
 from daimon.testing.slack_surface import OfflineSlackClient
@@ -148,3 +153,45 @@ async def test_a_titled_post_goes_under_one_title_post_and_says_where(
         assert await workflow_deliveries.opened_threads(s, run.id) == {
             f"C0HOME:{title.message_id}"
         }, "the post says which thread it went to"
+
+
+#: A Post under an agent, and the face agent identity gives it.
+AS_AGENT: dict[str, Any] = {
+    "p": {"kind": "post", "to": "home", "message": "Hi", "as_agent": "deal-desk", "next": "f"},
+    "f": {"kind": "finish"},
+}
+FACE = AgentIdentity(name="Deal Desk", avatar_url="https://faces.example/d.png", builtin=False)
+
+
+def faced(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The agent's records, as agent identity reads them for a post."""
+    agent = SimpleNamespace(id="agent_d", metadata={})
+    monkeypatch.setattr(routine_delivery, "find_agent_by_daimon_tag", AsyncMock(return_value=agent))
+    monkeypatch.setattr(routine_delivery, "agent_display_name", AsyncMock(return_value="Deal Desk"))
+    monkeypatch.setattr(routine_delivery, "resolve_agent_identity", AsyncMock(return_value=FACE))
+
+
+@pytest.mark.parametrize("on", [True, False], ids=["identity-on", "identity-off"])
+async def test_a_post_as_an_agent_goes_out_under_its_name_and_face_where_identity_is_on(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, on: bool
+) -> None:
+    faced(monkeypatch)
+    real = workflow_delivery.post_as_agent
+    seen: list[AgentIdentity | None] = []
+
+    async def post(client: Any, identity: AgentIdentity | None, **kw: Any) -> Any:
+        seen.append(identity)
+        return await real(client, identity, **kw)
+
+    monkeypatch.setattr(workflow_delivery, "post_as_agent", post)
+    world = await _world(db_session, AS_AGENT)
+    world.settings = world.settings.model_copy(
+        update={"agent_identity": AgentIdentitySettings(enabled=on)}
+    )
+    claimed = await world.claim((await world.run()).id, "p")
+    posts = {"post": PostStepExecutor(world.sm)}
+    await runs.execute(world.sm, world.settings, posts, claimed, clock=lambda: NOW)
+    [message] = (await _deliver(world, monkeypatch)).surviving_messages()
+    assert message.body_texts[0].startswith("Hi"), message
+    face = [(i.name, i.avatar_url) for i in seen if i is not None and not i.builtin]
+    assert face == ([("Deal Desk", FACE.avatar_url)] if on else []), (on, seen)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -13,28 +14,42 @@ from unittest.mock import AsyncMock
 import pytest
 from daimon.adapters.scheduler.workflows import (
     HeadlessLaneTurn,
+    ProviderLaneTurn,
     WorkflowEngine,
     lane_turn,
     run_once,
 )
 from daimon.core.access_policy import AgentRule, TenantAccessPolicy
+from daimon.core.channel_backend import channel_ref
 from daimon.core.fire import admit, run
 from daimon.core.fire.run import FireDeps, fire_turn
 from daimon.core.fire.store import FireStore
 from daimon.core.fire.subject import routine_subject
+from daimon.core.headless_runner import StepTurn
+from daimon.core.lead_intake_execution import WorkflowExecution, current_intake_execution
 from daimon.core.membership import CachedMembershipResolver, Membership
+from daimon.core.provider_routine import (
+    STEP_SHELL_NEEDS_GRANT,
+    ProviderRoutineRun,
+    workflow_scope_thread,
+)
 from daimon.core.routine_delivery import QUIET_RUN_SENTENCE
 from daimon.core.stores import identity, tenants, workflow_deliveries, workflow_runs, workflows
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.routines import create_routine
 from daimon.core.stores.workflow_deliveries import DeliveryRow
 from daimon.core.tool_safety import DAIMON_SERVER_NAME, ToolCall, ToolSafetyPolicy
+from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.posture import PolicyApproval, ToolConfirmationResult
+from daimon.core.turn.state import TurnState
 from daimon.core.workflows import agent_step, engine, runs
 from daimon.core.workflows.agent_step import AUTHORING_TOOLS, AgentStepExecutor, step_decider
 from daimon.core.workflows.brief import render_brief
+from daimon.core.workflows.lanes import lane_key
 from daimon.core.workflows.spec import AgentNode
 from daimon.testing.workflows import NOW, World, make_world
+from mux.contracts.config import ConfigRevision
+from mux.profiles import backend_selection
 from sqlalchemy.ext.asyncio import AsyncSession
 
 #: The checks `fire.admit.admit_place` owns: access, hold and origin.
@@ -298,3 +313,130 @@ async def test_a_routine_and_an_agent_step_at_its_place_get_one_verdict(
     assert isinstance(got, engine.Failed), got
     assert (got.error_class, got.reason) == (expected.error_class, expected.reason), (kind, got)
     assert said == reason or kind == "lapsed" and reason == "owner_lacks_agent_role", said
+
+
+@dataclass(frozen=True)
+class _Admission:
+    """The fields a provider step's turn reads of its admission."""
+
+    agent: Any
+    backend_revision: ConfigRevision
+    channel_skills: tuple[Any, ...] = ()
+    backend: Any = None
+
+
+class _Outputs:
+    """A provider session's workspace holding one file."""
+
+    session_id = "prov_ses"
+
+    async def list_outputs(self) -> list[Any]:
+        meta = SimpleNamespace(
+            id="o1", filename="a.csv", mime_type="text/csv", size_bytes=3, max_read_bytes=None
+        )
+        return [meta]
+
+    async def read_output(self, _id: str) -> bytes:
+        return b"a,b"
+
+
+async def _provider_step(
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    *,
+    resume: bool = False,
+    refused: AdmissionDenied | None = None,
+) -> tuple[Any, dict[str, Any], dict[str, Any], runs.StepWork]:
+    """Step `a` admitted at a place on `provider`, then one turn of it: what the turn returned,
+    what its admission and its run were given, and the step."""
+    world = await _world(db_session, {"a": STEP["a"] | {"model": "m-step"}, "f": STEP["f"]})
+    monkeypatch.setattr(admit, "place_provider", AsyncMock(return_value=provider))
+    lane = _lane(world, monkeypatch, None)
+    work = await _work(world)
+    place = await lane.admit(work)
+    assert not isinstance(place, engine.Failed) and place.admitted is not None, place
+    assert place.admitted.native == provider, "the place's provider runs the step"
+    revision = ConfigRevision.create(
+        channel_ref(world.tenant_id, "discord", HOME), 1, backend_selection(provider)
+    )
+    agent = SimpleNamespace(id="agent_a", name="helper", metadata={})
+    admitted, ran, sessions = {}, {}, []
+
+    async def admit_turn(_deps: object, row: Any, **kw: Any) -> _Admission:
+        admitted.update(kw, row=row)
+        if refused is not None:
+            raise refused
+        return _Admission(agent, revision)
+
+    async def run_turn(_deps: object, admission: _Admission, **kw: Any) -> ProviderRoutineRun:
+        ran.update(kw, admission=admission, execution=current_intake_execution.get())
+        await kw["on_session"]("prov_ses")
+        return ProviderRoutineRun("Done.", TurnState(content=[]), cast("Any", _Outputs()))
+
+    async def on_session(sid: str) -> None:
+        sessions.append(sid)
+
+    deps = cast("Any", SimpleNamespace(sessionmaker=world.sm))
+    provider_turn = ProviderLaneTurn(deps, admit=admit_turn, run=run_turn)
+    lane = HeadlessLaneTurn(lane.client, lane.sm, lane.settings, lane.deployment_default,
+                            lane.resolver_cache, provider=provider_turn)  # fmt: skip
+    step = StepTurn(
+        tools=cast("Any", None), decide=lambda p: p, workflow_run_id=work.run.id,
+        workflow_step_id=work.step.id, on_session=on_session, resume=resume, skills=("s1",),  # type: ignore[arg-type]
+    )  # fmt: skip
+    reply = await lane(
+        work, place=place, message="brief", session_id=None, step=step, policy=ToolSafetyPolicy()
+    )
+    ran_turn = not resume and refused is None
+    assert sessions == (["prov_ses"] if ran_turn else []), "the attempt and lane keep the session"
+    return reply, admitted, ran, work
+
+
+@pytest.mark.parametrize("provider", ["openai", "gemini"])
+async def test_provider_step_runs_in_its_lane_on_the_places_provider(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, provider: str
+) -> None:
+    """Admitted as a provider routine at the step's place, run in its lane's own scope with
+    the step's model and skills, under the run's credential; its files are staged."""
+    reply, admitted, ran, work = await _provider_step(db_session, monkeypatch, provider)
+    assert (admitted["owner"], admitted["refusal"]) == (OWNER, STEP_SHELL_NEEDS_GRANT), admitted
+    assert admitted["row"].channel_id == HOME, "billed to and configured by the step's place"
+    node = work.node
+    assert isinstance(node, AgentNode)
+    lane = lane_key(work.spec, work.step.node_id, node, work.step.visit)
+    assert ran["scope_id"] == workflow_scope_thread(work.run.id, lane), ran
+    assert (ran["prompt"], ran["reuse_existing"]) == ("brief", False), ran
+    execution = ran["execution"]
+    assert isinstance(execution, WorkflowExecution) and execution.run_id == work.run.id, (
+        "the turn's Daimon credential carries the run, so its step tools and decider apply"
+    )
+    admission = ran["admission"]
+    assert admission.backend_revision.model == "m-step", "the step's model runs"
+    assert admission.backend_revision.backend == provider
+    assert admission.channel_skills == ("s1",), "the step's pinned skills ride along"
+    assert not isinstance(reply, engine.Failed) and reply.text == "Done.", reply
+    assert reply.files is not None and [(f["filename"], f["staged"]) for f in reply.files] == [
+        ("a.csv", True)
+    ], "the file is staged while the provider session is live: `steps.<id>.files`"
+
+
+async def test_provider_step_does_not_reattach_after_a_lost_worker(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deliberate difference: Managed Agents reattaches to a lost worker's turn; a provider
+    turn can't be, so the attempt fails `retryable` (the executor's `_drive`) and the next
+    attempt starts afresh."""
+    with pytest.raises(RuntimeError, match=lane_turn.NO_REATTACH):
+        await _provider_step(db_session, monkeypatch, "gemini", resume=True)
+
+
+async def test_provider_step_refused_at_admission_fails_at_its_gate(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """OpenAI's shell without the step's built-ins grant: the step fails with the fix."""
+    refused = AdmissionDenied(reason="backend_unsupported", detail=STEP_SHELL_NEEDS_GRANT)
+    reply, *_ = await _provider_step(db_session, monkeypatch, "openai", refused=refused)
+    assert isinstance(reply, engine.Failed), reply
+    assert (reply.error_class, reply.reason) == ("gate", "backend_unsupported"), reply
+    assert "Turn on built-in tools" in reply.message, reply

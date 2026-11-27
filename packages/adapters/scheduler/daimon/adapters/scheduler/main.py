@@ -1575,6 +1575,7 @@ async def run(
         DiscordRestMembershipResolver(settings.discord.bot_token.get_secret_value())
         if settings.discord is not None
         else None,
+        workflows.ProviderLaneTurn(dm_turn_deps),
     )
     tool_client = McpToolClient(client, sm, settings, lane_turn.targets)
     workflow_engine = workflows.WorkflowEngine(

@@ -68,8 +68,12 @@ works in no place, so only a Post to that person can use the result.
 
 `writes: policy` lets a step write exactly as the server's rules for unattended
 runs allow. A step with no output fields completes with its plain reply as its
-summary. A step runs on the provider its agent uses in the place it works in. A step that can finish early ends the run quietly when its reply starts
+summary. A step that can finish early ends the run quietly when its reply starts
 or ends with `NO_POST`.
+
+An Agent step runs on the model provider of the place it works in. Its `model`
+must be one that provider offers. OpenAI always gives an agent a shell, so a step
+there needs built-in tools on.
 
 ## Triggers
 
@@ -168,7 +172,7 @@ The web app can move one too.
 
 The routine's message becomes an Agent step with `writes: policy`. The step works
 where the routine posted. If it did not post for itself, a Post step sends its
-result there under the routine's agent. A routine that posts to its owner's
+result there under the routine's agent. If it did, the Post sends only the files it made. A routine that posts to its owner's
 direct messages becomes a private step with personal memory, then a Post to its
 owner. The preview lists what the admin approves by moving it, which is nothing.
 

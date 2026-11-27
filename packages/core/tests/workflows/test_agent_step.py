@@ -7,7 +7,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
@@ -17,6 +17,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_text_block import (
     BetaManagedAgentsTextBlock,
 )
 from daimon.core import usage_recording
+from daimon.core.connector_relay import Connector, relay_verdict
 from daimon.core.headless_runner import StepTurn
 from daimon.core.pricing import MODEL_PRICING
 from daimon.core.stores import workflow_deliveries, workflow_runs, workflow_waits
@@ -498,6 +499,64 @@ async def test_a_scoped_call_goes_out_unwatched_only_when_its_arguments_fit() ->
     assert await sends("update_page", page_id="p1", text="hi"), "a page this turn created"
     assert not await sends("update_page", page_id="p1", text="hi", title="x"), "an extra arg"
     assert not await sends("create_page", title="x"), "an unscoped write stays refused"
+
+
+@pytest.mark.parametrize("writes", ["refuse", "propose", "allow", "policy", "scoped"])
+async def test_a_relayed_step_call_is_decided_as_on_managed_agents(writes: str) -> None:
+    """One decider: a provider step's connector call (`relay_verdict`) gets the verdict its
+    Managed Agents session gives. Deliberate: with no proposer, a relayed proposal is
+    refused, as its runner decides proposals at the relay."""
+    scopes = (
+        [
+            WriteScope.model_validate(
+                {
+                    "tool": "notes/update_page",
+                    "where": {
+                        "page_id": {"created_by": {"tool": "notes/create_page", "id": ".id"}}
+                    },
+                    "free": ["text"],
+                }
+            )
+        ]
+        if writes == "scoped"
+        else []
+    )
+    mode: Writes = "refuse" if writes == "scoped" else cast(Writes, writes)
+    policy = step_policy(ToolSafetyPolicy(enabled=True), mode, scopes)
+    node = AgentNode.model_validate({"kind": "agent", "instructions": "x"})
+
+    async def propose(call: ToolCall, reason: str) -> ToolConfirmationResult:
+        return ToolConfirmationResult(allow=False, deny_message="proposed")
+
+    def decider(proposer: object) -> Callable[[PolicyApproval], PolicyApproval]:
+        return step_decider(
+            node,
+            attempt_id=uuid.uuid4(),
+            policy=policy,
+            writes=mode,
+            propose=cast(Any, proposer),
+            scopes=scopes,
+            created={"notes/create_page": {"p"}},
+        )
+
+    connector = Connector("notes", "https://tools.example.com/mcp", "auto")
+    for tool, args in [("update_page", {"page_id": "p", "text": "t"}), ("search", {})]:
+        call = ToolCall(tool_use_id="t", server_name="notes", tool_name=tool, input=args)
+        managed = await decider(propose)(PolicyApproval(decide=unattended_decider(policy))).decide(
+            call
+        )
+        relayed = await relay_verdict(
+            policy, connector, call, attended=False, step=(policy, decider(propose))
+        )
+        assert (relayed.verdict == "run") is managed.allow, tool
+        if tool == "update_page" and writes in ("allow", "scoped"):
+            assert managed.allow, "a write the step may make goes out on both"
+    if writes == "propose":
+        call = ToolCall(tool_use_id="t", server_name="notes", tool_name="update_page", input={})
+        bare = await relay_verdict(
+            policy, connector, call, attended=False, step=(policy, decider(None))
+        )
+        assert bare.verdict == "refuse", "no proposer at the relay"
 
 
 async def test_a_step_loads_its_skills_as_published_until_republished(

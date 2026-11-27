@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -42,12 +43,18 @@ SHELL_NEEDS_SANDBOX = (
     "This routine's agent is on OpenAI, which always runs it with a shell. "
     "Ask a server admin to turn on sandbox tools for this routine."
 )
+STEP_SHELL_NEEDS_GRANT = (
+    "This step's agent is on OpenAI, which always runs it with a shell. "
+    "Turn on built-in tools for the step."
+)
 TIMER_NEEDS_NO_SHELL = (
     "This timer's agent is on OpenAI, which always runs it with a shell, "
     "and a timer cannot run with one."
 )
 #: Refusal details written for the routine's owner; any other detail stays in the logs.
-_PERSON_FACING: frozenset[str] = frozenset({SHELL_NEEDS_SANDBOX, TIMER_NEEDS_NO_SHELL})
+_PERSON_FACING: frozenset[str] = frozenset(
+    {SHELL_NEEDS_SANDBOX, STEP_SHELL_NEEDS_GRANT, TIMER_NEEDS_NO_SHELL}
+)
 
 
 def refusal_text(error: AdmissionDenied) -> str | None:
@@ -59,10 +66,15 @@ _ROUTINE_SCOPE = f"{CHANNEL_SCOPE_PREFIX}routine:"
 
 
 class _Unrendered(TurnLifecycle):
-    """Nothing renders a routine turn: the scheduler delivers its final text."""
+    """Nothing renders a routine turn: the scheduler delivers its final text. A workflow
+    step's turn shows each render as its activity (`on_render`)."""
+
+    def __init__(self, on_render: Callable[[TurnState], Awaitable[None]] | None = None) -> None:
+        self._on_render = on_render
 
     async def on_render(self, state: TurnState) -> None:
-        return None
+        if self._on_render is not None:
+            await self._on_render(state)
 
     async def on_terminal_success(self, state: TurnState) -> None:
         return None
@@ -90,6 +102,24 @@ def routine_scope_thread(routine_id: uuid.UUID) -> str:
     return f"{_ROUTINE_SCOPE}{routine_id}"
 
 
+_WORKFLOW_SCOPE = f"{CHANNEL_SCOPE_PREFIX}workflow:"
+
+
+def workflow_scope_thread(run_id: uuid.UUID, lane: str) -> str:
+    """The thread a workflow lane's provider turns bind: one session per run and lane."""
+    return f"{_WORKFLOW_SCOPE}{run_id}:{lane}"
+
+
+def workflow_of_scope(thread_id: str) -> uuid.UUID | None:
+    """The workflow run whose provider step runs in this scope (`workflow_scope_thread`)."""
+    if not thread_id.startswith(_WORKFLOW_SCOPE):
+        return None
+    try:
+        return uuid.UUID(thread_id.removeprefix(_WORKFLOW_SCOPE).split(":", 1)[0])
+    except ValueError:
+        return None
+
+
 def routine_of_scope(thread_id: str) -> uuid.UUID | None:
     """The routine whose provider fire runs in this scope (`routine_scope_thread`), if any."""
     if not thread_id.startswith(_ROUTINE_SCOPE):
@@ -110,6 +140,7 @@ async def admit_provider_routine(
     sandbox: RoutineSandbox | None,
     hold: TurnHold | None = None,
     origin_place: RoutineOrigin | None = None,
+    refusal: str = SHELL_NEEDS_SANDBOX,
 ) -> Admission:
     """Admit the fire as its owner, for the routine's agent, on the place's provider:
     a thread destination's kept one, else its channel's or agent's.
@@ -134,14 +165,14 @@ async def admit_provider_routine(
         attended=False,
         surface=Surface.ROUTINE,
         routine_agent_name=row.agent_name,
-        # A thread destination keeps its own provider, as `routine_provider` routes it.
+        # A thread destination keeps its own provider, as `place_provider` routes it.
         routine_thread_id=routine_thread_id(row, platform=platform),
     )
     if not is_provider_turn(admission):
         raise AdmissionDenied(reason="backend_unsupported")
     admission = at_fire_place(admission, hold=hold, origin_place=origin_place)
     return await with_routine_sandbox(
-        deps, admission, sandbox, tenant_id=row.tenant_id, platform=platform
+        deps, admission, sandbox, tenant_id=row.tenant_id, platform=platform, refusal=refusal
     )
 
 
@@ -206,13 +237,19 @@ async def run_provider_routine(
     platform: str,
     owner: str,
     prompt: str,
+    scope_id: str | None = None,
+    reuse_existing: bool = False,
+    on_session: Callable[[str], Awaitable[None]] | None = None,
+    on_render: Callable[[TurnState], Awaitable[None]] | None = None,
 ) -> ProviderRoutineRun:
     """Run the admitted fire once, unattended, in the routine's own scope.
 
     Each fire replaces that scope's session, so a run starts fresh, as a Managed
     Agents fire does, and a routine keeps one binding. A failed turn raises its error.
+    A workflow step runs in its lane's scope (`scope_id`), continued with
+    `reuse_existing`; `on_session` gets the provider session before the turn sends.
     """
-    scope_id = routine_scope_thread(routine_id)
+    scope_id = scope_id or routine_scope_thread(routine_id)
     deadline = turn_deadline(now=datetime.now(UTC), ceiling_s=admission.turn_ceiling_s)
     prepared = await bind_session(
         deps,
@@ -222,9 +259,12 @@ async def run_provider_routine(
         external_user_id=owner,
         thread_id=scope_id,
         session_account_id=admission.account_id,
-        reuse_existing=False,
+        reuse_existing=reuse_existing,
         deadline=deadline,
     )
+    if on_session is not None:
+        ref = prepared.session_ref
+        await on_session(ref.id if ref is not None else prepared.ma_session_id)
 
     async def reseed() -> str:
         return prompt
@@ -237,10 +277,10 @@ async def run_provider_routine(
         thread_id=scope_id,
         external_user_id=owner,
         user_message=prompt,
-        lifecycle=_Unrendered(),
+        lifecycle=_Unrendered(on_render),
         cancel=asyncio.Event(),
         reseed_user_message=reseed,
-        recovery_lifecycle=lambda _: _Unrendered(),
+        recovery_lifecycle=lambda _: _Unrendered(on_render),
         origin="routine",
         attended=False,
         deadline=deadline,

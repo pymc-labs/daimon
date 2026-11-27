@@ -52,10 +52,24 @@ _PLACE = (
     _W + "test_validate.py::test_an_agent_works_in_a_channel_or_thread_and_a_personal_one_nowhere"
 )
 _PRIVATE = _W + "test_validate.py::test_only_a_post_to_the_person_reads_a_personal_steps_result"
-_IDENTITY = (
-    "packages/core/tests/test_agent_identity_scope.py::test_identity_defaults_and_global_switch"
+_IDENTITY = tuple(
+    f"packages/adapters/{p}/tests/test_workflow_delivery.py::{t}"
+    for p, t in [
+        ("teams", "test_a_post_as_an_agent_carries_its_name_where_identity_is_on"),
+        ("slack", "test_a_post_as_an_agent_goes_out_under_its_name_and_face_where_identity_is_on"),
+        (
+            "discord",
+            "test_a_post_as_an_agent_goes_out_under_its_name_and_face_where_identity_is_on",
+        ),
+    ]
 )
-_QUIET = _W + "test_agent_step.py::test_finish_early_ends_the_run_with_nothing_to_do"
+_SCHED = "packages/adapters/scheduler/tests/"
+_PARITY = _SCHED + "test_moved_routine_parity.py::test_a_moved_routine_posts_what_its_fire_posted"
+_PROVIDER = (
+    _SCHED + "test_agent_place.py::test_provider_step_runs_in_its_lane_on_the_places_provider",
+    _W + "test_runs.py::test_an_agent_step_on_gemini_runs_with_a_model_gemini_has",
+)
+_SHELL = _W + "test_runs.py::test_an_agent_step_on_openai_needs_its_built_ins_before_the_run"
 _DEFAULTS = _W + "test_features.py::test_workflow_features_defaults"
 _EDIT = _MCP + "test_edit_workflow_draft_when_edits_add_and_connect_nodes_then_the_revision_moves"
 _INBOX = _W + "test_waits.py::test_the_inbox_lists_and_decides_for_the_addressee"
@@ -227,12 +241,17 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
     "becomes an Agent step with `writes: policy`": _ROUTINE,
     "The step works where the routine posted.": _MOVED,
     "If it did not post for itself": _MOVED,
+    "the Post sends only the files it made": (_MOVED, _PARITY),
     "takes an agent in `as_agent`": _MOVED,
     "the post goes out under that agent's name and picture": _IDENTITY,
     "Otherwise it comes from Daimon.": _IDENTITY,
     "can work in a place": (_PLACE, f"{_V}[an agent works at home]"),
-    "The place's access rules apply": "packages/adapters/scheduler/tests/test_agent_place.py::"
-    "test_only_admit_place_runs_the_access_hold_and_origin_checks",
+    "The place's access rules apply": (
+        _SCHED
+        + "test_agent_place.py::test_a_routine_and_an_agent_step_at_its_place_get_one_verdict",
+        _SCHED
+        + "test_moved_routine_parity.py::test_a_moved_routine_is_admitted_where_its_fire_was",
+    ),
     "reads where it posted in `steps.<id>.posted`": f"{_V}[a personal step still shows where it posted]",
     "With personal memory, the step reads": _PRIVATE,
     "so only a Post to that person can use the result": (
@@ -241,10 +260,11 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
         f"{_V}[an agent with personal memory works nowhere]",
     ),
     "`writes: policy` lets a step write": _ROUTINE,
-    "completes with its plain reply as its": _QUIET,
-    "runs on the provider its agent uses": _LANES
-    + "test_agent_then_finish_runs_metered_through_the_loops",
-    "ends the run quietly when its reply": _QUIET,
+    "completes with its plain reply as its": _PARITY,
+    "ends the run quietly when its reply": _PARITY,
+    "runs on the model provider of the place it works in": _PROVIDER,
+    "must be one that provider offers": _PROVIDER[1],
+    "a step there needs built-in tools on": _SHELL,
     "ask the agent to build or change a workflow": _EDIT,
     "links the workflow's page in the web app": _W
     + "test_chat_cards.py::test_a_card_links_the_web_only_where_web_awareness_is_on_at_its_place",

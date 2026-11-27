@@ -156,19 +156,32 @@ async def stage_routine_files(
     tenant_id: uuid.UUID,
     text: str,
 ) -> str:
-    """Read a provider fire's files while its runtime is live and stage them for delivery.
+    """A provider fire's reply with its staged files (`stage_files`), in the same envelope
+    as `collect_routine_files`."""
+    files, notices = await stage_files(sessions, outputs, tenant_id=tenant_id)
+    return _envelope(text, files, notices)
 
-    The same envelope, cap of ten files and notices as `collect_routine_files`; a file
-    over what a staged row holds stays in the workspace and is named in text.
+
+async def stage_files(
+    sessions: async_sessionmaker[AsyncSession],
+    outputs: OutputRuntime | None,
+    *,
+    tenant_id: uuid.UUID,
+) -> tuple[list[RoutineFile], list[str]]:
+    """Read a provider turn's files while its runtime is live and stage them for delivery: a
+    routine fire's, or a workflow step's `steps.<id>.files`.
+
+    At most ten files; a file over what a staged row holds stays in the workspace and is
+    named in a notice.
     """
-    if outputs is None:
-        return plain_payload(text) or ""
     files: list[RoutineFile] = []
     notices: list[str] = []
+    if outputs is None:
+        return files, notices
     try:
         listed = await outputs.list_outputs()
     except UnsupportedCapability:  # a backend with no workspace listing has nothing to send
-        return plain_payload(text) or ""
+        return files, notices
     except MuxError as error:
         listed = ()
         log.exception(
@@ -224,7 +237,7 @@ async def stage_routine_files(
             causes=backend_refusal_causes(error),
         )
         notices.append("Generated files could not be attached.")
-    return _envelope(text, files, notices)
+    return files, notices
 
 
 async def deliver_routine_files(

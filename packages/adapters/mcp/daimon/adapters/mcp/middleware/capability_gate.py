@@ -18,10 +18,10 @@ settings, so that catalogue, stay fixed while it runs.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Final
+from typing import Any, Final
 
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
@@ -47,7 +47,9 @@ from daimon.core.stores.routines import get_routine
 from daimon.core.stores.selfhosted_resources import SelfHostedAgents
 from daimon.core.stores.session_settle_state import AgentChatSession, find_agent_chat_session
 from daimon.core.stores.tenants import get_tenant
-from daimon.core.tool_safety import RENAMED_DAIMON_TOOLS
+from daimon.core.tool_safety import DAIMON_SERVER_NAME, RENAMED_DAIMON_TOOLS, ToolCall
+from daimon.core.turn.posture import PolicyApproval, ToolConfirmationResult
+from daimon.core.workflows.agent_step import running_step_decider
 from daimon.core.workflows.place import bound_step
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
@@ -238,6 +240,41 @@ def _lists_everything(auth: AuthIdentity) -> bool:
     return auth.chat_agent_id is not None and auth.agent_id is None
 
 
+_NO_STEP: Final = "This workflow step isn't running, so Daimon's tools can't run for it."
+
+
+async def step_refusal(
+    runtime: McpRuntime, auth: AuthIdentity, tool: str, args: Mapping[str, Any] | None
+) -> str | None:
+    """Why a provider step's own Daimon call is refused, by its step's decider
+    (`agent_step.work_decider`) as its Managed Agents session refuses it: another step's id,
+    editing automations, a tool its list leaves out, a write it may not make. None: allowed.
+    Managed Agents decides in the session, so only a provider credential is decided here."""
+    if auth.workflow_run_id is None or not auth.anthropic_disabled:
+        return None
+    step = await running_step_decider(
+        runtime.session_factory,
+        runtime.settings,
+        tenant_id=auth.tenant_id,
+        run_id=auth.workflow_run_id,
+        url=None,
+    )
+    if step is None:
+        return _NO_STEP
+
+    async def allow(_: ToolCall) -> ToolConfirmationResult:
+        return ToolConfirmationResult(allow=True)
+
+    call = ToolCall(
+        tool_use_id=f"step-{uuid.uuid4()}",
+        server_name=DAIMON_SERVER_NAME,
+        tool_name=tool,
+        input=dict(args or {}),
+    )
+    result = await step[1](PolicyApproval(decide=allow)).decide(call)
+    return None if result.allow else result.deny_message or _NO_STEP
+
+
 class CapabilityGateMiddleware(Middleware):
     """Refuses a call to a tool whose capability is Off at the caller's place or not set up."""
 
@@ -255,6 +292,12 @@ class CapabilityGateMiddleware(Middleware):
             # A conversation that began before the rename can still ask for the old
             # name. Say where the tool went instead of "unknown tool".
             raise ToolError(f"{tool} is now called {renamed}. Call {renamed} instead.")
+        ctx = context.fastmcp_context
+        auth = await ctx.get_state("auth") if ctx is not None else None
+        if isinstance(auth, AuthIdentity) and (
+            refused := await step_refusal(self._runtime, auth, tool, context.message.arguments)
+        ):
+            raise ToolError(refused)
         if tool == _SEARCH_TOOL:
             token = _SEARCHING.set(True)
             try:
@@ -262,8 +305,6 @@ class CapabilityGateMiddleware(Middleware):
             finally:
                 _SEARCHING.reset(token)
         key = server_gate_key(tool)
-        ctx = context.fastmcp_context
-        auth = await ctx.get_state("auth") if key is not None and ctx is not None else None
         if key is None or not isinstance(auth, AuthIdentity):
             return await call_next(context)
         if not server_setup_met(FEATURES[key], self._runtime.settings):

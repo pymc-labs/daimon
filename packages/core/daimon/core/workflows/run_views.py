@@ -383,9 +383,7 @@ _FAILURES: Final = {
 }
 
 
-async def hides_output(
-    session: AsyncSession, run: RunRow, reader: uuid.UUID | None
-) -> bool:
+async def hides_output(session: AsyncSession, run: RunRow, reader: uuid.UUID | None) -> bool:
     """Whether `reader` misses the run's private output (`memory: personal` steps): anyone but
     the person it runs as."""
     if reader is not None and reader == run.run_as_account_id:

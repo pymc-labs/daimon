@@ -72,6 +72,8 @@ class Subject:
     revision: str | None = None
     #: Whether the routine is enabled. A paused one signs no `rev`.
     enabled: bool = True
+    #: An agent step's workflow home: whose pin a step with no place runs on.
+    home_channel_id: str | None = None
 
 
 def routine_subject(row: RoutineRow) -> Subject:

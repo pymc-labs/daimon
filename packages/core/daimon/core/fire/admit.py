@@ -30,7 +30,7 @@ from daimon.core.routine_delivery import (
     placement_unknown_is_unsafe,
 )
 from daimon.core.routine_hold import routine_hold
-from daimon.core.routine_provider import routine_provider
+from daimon.core.routine_provider import place_provider
 from daimon.core.rule_views import (
     RoutineOrigin,
     is_routine_parent_unknown,
@@ -208,7 +208,7 @@ async def admit_place(facts: Subject, reads: AdmitReads) -> Verdict:
         # resolved at Anthropic: one on OpenAI or Gemini runs through the chat path.
         if is_routine_parent_unknown(facts):
             return Refused("routine_destination_parent_unknown", fault=True)
-        provider = await routine_provider(s, facts, platform=platform)
+        provider = await place_provider(s, facts, platform=platform, home=facts.home_channel_id)
         native = provider if provider != DEFAULT_BACKEND else None
         if native == "selfhosted":
             return Refused("routines_unsupported", error=SELFHOSTED_ROUTINES_UNSUPPORTED)

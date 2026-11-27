@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.routine_provider import routine_provider
+from daimon.core.routine_provider import place_provider
 from daimon.core.stores import agent_backends, mux_state
 from daimon.testing.factories import make_platform_principal, make_routine, make_tenant
 from mux.contracts.config import DEFAULT_BACKEND
@@ -54,5 +54,5 @@ async def test_a_thread_that_kept_claude_keeps_its_routine_on_claude(
         ),
         expected_generation=0,
     )
-    provider = await routine_provider(db_session, row, platform="discord")
+    provider = await place_provider(db_session, row, platform="discord")
     assert provider == DEFAULT_BACKEND, f"the thread's kept Claude wins: {provider}"

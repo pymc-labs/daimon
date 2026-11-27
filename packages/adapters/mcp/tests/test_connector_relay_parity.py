@@ -340,10 +340,14 @@ async def test_relay_verdict_cards_ask_and_refuses_it_unattended() -> None:
     policy = _settings().tool_safety
     connector = Connector(_KEY, _UP, "ask", {"off": "disabled"})
     call = ToolCall(tool_use_id="t", server_name=_KEY, tool_name="write", input={})
-    assert await relay_verdict(policy, connector, call, attended=True) == "ask", "a card"
-    assert await relay_verdict(policy, connector, call, attended=False) == "refuse", "unattended"
+    assert (await relay_verdict(policy, connector, call, attended=True)).verdict == "ask", "a card"
+    assert (await relay_verdict(policy, connector, call, attended=False)).verdict == "refuse", (
+        "unattended"
+    )
     off = ToolCall(tool_use_id="t", server_name=_KEY, tool_name="off", input={})
-    assert await relay_verdict(policy, connector, off, attended=True) == "refuse", "disabled"
+    assert (await relay_verdict(policy, connector, off, attended=True)).verdict == "refuse", (
+        "disabled"
+    )
 
 
 def test_tools_cache_is_keyed_by_requester_and_token() -> None:

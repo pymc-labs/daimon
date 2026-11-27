@@ -145,6 +145,20 @@ def without_builtins(spec: AgentSpec) -> AgentSpec:
     return spec.model_copy(update={"tools": tuple(t for t in spec.tools if t.kind != "builtin")})
 
 
+#: Why a provider whose shell is always on can't run unattended without a built-ins grant.
+SHELL_UNATTENDED = "Automatic sandbox or custom tools cannot run without someone watching."
+
+
+def require_explicit_execution(profile_id: str, *, sandbox: bool) -> None:
+    """Refuse a provider whose hosted shell is implicit (OpenAI) unless built-ins are granted.
+
+    Its empty agent.tools readback does not prove execution is off. Preflight reads the same
+    rule, so a workflow step is refused before its run starts.
+    """
+    if get_profile(profile_id).implicit_execution and not sandbox:
+        raise AdmissionDenied(reason="backend_unsupported", detail=SHELL_UNATTENDED)
+
+
 def require_native_unattended_capabilities(
     spec: AgentSpec | None, *, profile_id: str, gated: bool = False, sandbox: bool = False
 ) -> None:
@@ -159,13 +173,7 @@ def require_native_unattended_capabilities(
     (`capability_policy`), the only way hosted execution runs unattended.
     """
     profile = get_profile(profile_id)
-    if profile.implicit_execution and not sandbox:
-        # Hosted OpenAI bash is implicit in its environment, so an empty
-        # agent.tools readback does not prove that execution is disabled.
-        raise AdmissionDenied(
-            reason="backend_unsupported",
-            detail="Automatic sandbox or custom tools cannot run without someone watching.",
-        )
+    require_explicit_execution(profile_id, sandbox=sandbox)
     if spec is None:
         raise AdmissionDenied(
             reason="backend_unsupported",
@@ -180,10 +188,7 @@ def require_native_unattended_capabilities(
         )
         for tool in spec.tools or ()
     ):
-        raise AdmissionDenied(
-            reason="backend_unsupported",
-            detail="Automatic sandbox or custom tools cannot run without someone watching.",
-        )
+        raise AdmissionDenied(reason="backend_unsupported", detail=SHELL_UNATTENDED)
     if profile.undeclared_model_options(spec.model.options) or (
         not gated
         and (

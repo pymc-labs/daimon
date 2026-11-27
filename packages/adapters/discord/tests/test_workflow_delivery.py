@@ -5,15 +5,21 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, ClassVar, cast
+from unittest.mock import AsyncMock
 
 import discord
 import pytest
 from daimon.adapters.discord import workflow_delivery
+from daimon.core import routine_delivery
+from daimon.core.agent_identity import AgentIdentity
+from daimon.core.config import AgentIdentitySettings
 from daimon.core.delivery import DeliveryOutcome, JobPoster, poll_once
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.stores import accounts, tenants
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.workflows import runs
+from daimon.core.workflows.post_step import PostStepExecutor
 from daimon.testing.discord_surface import DiscordMessageCapture, DiscordSurfaceHarness
 from daimon.testing.factories import make_platform_principal
 from daimon.testing.workflows import NOW, make_world
@@ -21,8 +27,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 
 async def _delivered(
-    db_session: AsyncSession, nodes: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+    db_session: AsyncSession,
+    nodes: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    identity: bool | None = None,
 ) -> DiscordMessageCapture:
+    """The one post the run sent; with `identity`, its Post step `p` posts first, with agent
+    identity on or off."""
     harness = DiscordSurfaceHarness(evidence_id="wf", session_id="s", root_turn_id="r")
     thread = harness.thread
     world = await make_world(
@@ -39,7 +50,14 @@ async def _delivered(
         db_session, platform="discord", external_id="103", tenant=tenant, account=owner
     )
     await db_session.commit()
-    await world.run()
+    run = await world.run()
+    if identity is not None:
+        world.settings = world.settings.model_copy(
+            update={"agent_identity": AgentIdentitySettings(enabled=identity)}
+        )
+        posts = {"post": PostStepExecutor(world.sm)}
+        claimed = await world.claim(run.id, "p")
+        await runs.execute(world.sm, world.settings, posts, claimed, clock=lambda: NOW)
 
     async def fetch(channel_id: int) -> object:
         assert channel_id == thread.id, "only the home thread is fetched"
@@ -68,6 +86,8 @@ async def _delivered(
         fetch_channel=fetch,
         open_dm=no_dm,
         membership_resolver=CachedMembershipResolver(membership),
+        output_client=cast("Any", SimpleNamespace()),
+        client=cast("Any", SimpleNamespace()),
     )
     assert await poll_once(
         world.sm, platform="discord", post=JobPoster(no_routine, poster), now=NOW
@@ -129,3 +149,38 @@ async def test_a_titled_post_finds_its_thread_active_or_archived(
     assert await find(as_channel, "Week 8") == "9", "then the archived ones"
     assert await find(as_channel, "week 8") is None, "the name must match exactly"
     assert await find(as_channel, "Secret") is None, "a private thread is never adopted"
+
+
+class _Face:
+    """Records the name and face a post goes out under, then sends it as the channel."""
+
+    made: ClassVar[list[tuple[str, str | None]]] = []
+
+    def __init__(
+        self, _client: object, channel: Any, *, name: str, avatar_url: str | None, **_kw: object
+    ) -> None:
+        self.channel = channel
+        _Face.made.append((name, avatar_url))
+
+    async def send(self, **kw: Any) -> Any:
+        return await self.channel.send(**kw)
+
+
+@pytest.mark.parametrize("on", [True, False], ids=["identity-on", "identity-off"])
+async def test_a_post_as_an_agent_goes_out_under_its_name_and_face_where_identity_is_on(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, on: bool
+) -> None:
+    face = AgentIdentity(name="Deal Desk", avatar_url="https://faces.example/d.png", builtin=False)
+    agent = SimpleNamespace(id="agent_d", metadata={})
+    monkeypatch.setattr(routine_delivery, "find_agent_by_daimon_tag", AsyncMock(return_value=agent))
+    monkeypatch.setattr(routine_delivery, "agent_display_name", AsyncMock(return_value="Deal Desk"))
+    monkeypatch.setattr(routine_delivery, "resolve_agent_identity", AsyncMock(return_value=face))
+    monkeypatch.setattr(workflow_delivery, "DiscordPostTransport", _Face)
+    nodes = {
+        "p": {"kind": "post", "to": "home", "message": "Hi", "as_agent": "deal-desk", "next": "f"},
+        "f": {"kind": "finish"},
+    }
+    _Face.made.clear()
+    posted = await _delivered(db_session, nodes, monkeypatch, identity=on)
+    assert posted.content.startswith("Hi"), posted
+    assert _Face.made == ([("Deal Desk", face.avatar_url)] if on else []), on

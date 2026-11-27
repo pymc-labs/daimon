@@ -40,7 +40,7 @@ from daimon.core.features.snapshot import FeaturePlace, place_guardrail, resolve
 from daimon.core.fire.subject import RoutineFacts
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent, retrieve_environment
-from daimon.core.routine_provider import routine_provider
+from daimon.core.routine_provider import place_provider
 from daimon.core.rule_views import routine_destination_channel
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.stores.domain import (
@@ -144,7 +144,7 @@ async def current_pin(
             tenant = await get_tenant(session, row.tenant_id)
             if tenant is None:
                 raise _unavailable("routine's agent", "no workspace")
-            provider = await routine_provider(session, row, platform=tenant.platform)
+            provider = await place_provider(session, row, platform=tenant.platform)
     except ChannelChangeRefused:
         raise
     except Exception as exc:  # any read failure refuses the opt-in

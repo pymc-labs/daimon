@@ -1,5 +1,5 @@
-"""What must hold before a run starts or a step spends: feature, backend, run-as, grants,
-budget and the spend gate. A refusal names its reason; nothing is created or spent.
+"""What must hold before a run starts or a step spends: feature, each step's provider,
+run-as, grants, budget and the spend gate. A refusal names its reason; nothing is created or spent.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ from decimal import Decimal
 from typing import Final, Literal
 
 import httpx
-from daimon.core.channel_backend import channel_provider
 from daimon.core.channel_member_check import fetch_member_reads
 from daimon.core.config import Settings
 from daimon.core.features.snapshot import FeaturePlace, resolve_features
@@ -28,6 +27,8 @@ from daimon.core.stores import accounts, identity, tenants, workflow_runs, workf
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.workflows import WorkflowRow
 from daimon.core.tool_safety import ToolSafetyPolicy
+from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.unattended import require_explicit_execution
 from daimon.core.workflows.delivery import target_for
 from daimon.core.workflows.expressions import expressions_in
 from daimon.core.workflows.features import KEYS, workflow_features
@@ -45,6 +46,7 @@ from daimon.core.workflows.spec import (
 from daimon.core.workflows.taint import catalog_of
 from daimon.core.workflows.validate import validate_spec
 from mux.contracts.config import DEFAULT_BACKEND
+from mux.profiles import PROVIDER_LABELS, backend_selection, selectable_models
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 GATE_REASONS: Final = frozenset(
@@ -145,15 +147,10 @@ async def check(
             return Refusal(
                 "mentions_off", "Mention triggers are off here. Ask an admin to turn them on."
             )
-        if channel is not None:
-            provider = await channel_provider(
-                session, tenant_id=tenant.id, platform=tenant.platform, channel_id=channel
-            )
-            if provider not in (None, DEFAULT_BACKEND):
-                return Refusal(
-                    "backend_unsupported",
-                    "Workflows run only on Anthropic. Switch the home channel back to Anthropic.",
-                )
+        if (
+            refused := await _provider_refusal(session, settings, place, tenant.platform)
+        ) is not None:
+            return refused
         account_id = place.run_as_account_id
         account = None if account_id is None else await accounts.get_account(session, account_id)
         if account_id is None or account is None or account.tenant_id != tenant.id:
@@ -194,6 +191,57 @@ async def check(
             now=now,
         )
         return Cleared(default) if block is None else Refusal(block, _GATE_MESSAGES[block])
+
+
+async def _provider_refusal(
+    session: AsyncSession, settings: Settings, place: Place, platform: str
+) -> Refusal | None:
+    """A step its provider can't run: Code with no Managed Agents sandbox (Code always runs
+    there), a model the provider lacks, or OpenAI's always-on shell without a built-ins grant
+    (`require_explicit_execution`, the rule the turn applies)."""
+    from daimon.core.defaults.metadata import BUILTIN_AGENT_NAME
+    from daimon.core.routine_provider import place_provider
+    from daimon.core.workflows.lanes import agent_of
+    from daimon.core.workflows.place import workflow_subject
+
+    if has_code(place.spec) and settings.anthropic.api_key is None:
+        return Refusal(
+            "code_unavailable", "Code steps can't run on this server. Ask whoever runs Daimon."
+        )
+    home = place.workflow.home_channel_id
+    for node_id, node in place.spec.nodes.items():
+        inner = node.do if isinstance(node, ForEachNode) else node
+        if not isinstance(inner, AgentNode):
+            continue
+        facts = workflow_subject(
+            place.workflow,
+            inner,
+            home=home,
+            run_as=None,
+            agent_name=agent_of(place.spec, inner) or BUILTIN_AGENT_NAME,
+            agent_id="",
+            platform=platform,
+        )
+        provider = await place_provider(session, facts, platform=platform, home=home)
+        if provider == DEFAULT_BACKEND:
+            continue
+        name = PROVIDER_LABELS.get(provider, provider)
+        if inner.model is not None and inner.model not in selectable_models(provider):
+            return Refusal(
+                "model_unavailable",
+                f"Step {node_id} asks for {inner.model}, which {name} doesn't run. "
+                "Pick one of its models.",
+            )
+        granted = place.mode == "live" and inner.builtins not in (None, "none")
+        try:
+            require_explicit_execution(backend_selection(provider).profile, sandbox=granted)
+        except AdmissionDenied:
+            return Refusal(
+                "backend_unsupported",
+                f"Step {node_id} runs on {name}, which always gives its agent a shell. "
+                "Turn on built-in tools for it, or move it to a channel on Anthropic.",
+            )
+    return None
 
 
 def _reached(spec: Spec, home_channel_id: str | None) -> tuple[list[str], set[str]]:

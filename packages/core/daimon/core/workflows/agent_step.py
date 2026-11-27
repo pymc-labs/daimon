@@ -65,7 +65,7 @@ from daimon.core.workflows.expressions import ExpressionError
 from daimon.core.workflows.lanes import FRESH, agent_of, lane_key, lane_skills
 from daimon.core.workflows.place import StepPlace
 from daimon.core.workflows.preflight import Refusal, check
-from daimon.core.workflows.runs import ENGINE, Park, Sessions, StepWork, key_of
+from daimon.core.workflows.runs import ENGINE, Park, Sessions, StepWork, key_of, running_agent_work
 from daimon.core.workflows.spec import AgentNode, WriteScope
 from daimon.core.workflows.unattended import (
     CREATED,
@@ -120,6 +120,13 @@ async def session_files(client: AsyncAnthropic, session_id: str) -> list[dict[st
     ][:MAX_FILES]
 
 
+def _staged(
+    staged: list[dict[str, JsonValue]] | None, reply: LaneReply
+) -> list[dict[str, JsonValue]] | None:
+    """The files a step's provider turns staged so far; None while listed from its session."""
+    return staged if reply.files is None else [*(staged or []), *reply.files]
+
+
 def _earlier_file_ids(context: Mapping[str, JsonValue]) -> set[str]:
     """Files earlier steps already hold: a shared lane's session lists them again."""
     steps = context.get("steps")
@@ -134,10 +141,12 @@ def _earlier_file_ids(context: Mapping[str, JsonValue]) -> set[str]:
 
 @dataclass(frozen=True)
 class LaneReply:
-    """How one turn ended: its final reply, and where the agent posted by itself."""
+    """How one turn ended: its final reply, where the agent posted by itself, and the files a
+    provider turn staged while its runtime was live (None: listed from the lane's session)."""
 
     text: str = ""
     posted: frozenset[str] = frozenset()
+    files: tuple[dict[str, JsonValue], ...] | None = None
 
 
 class LaneTurn(Protocol):
@@ -155,7 +164,7 @@ class LaneTurn(Protocol):
         session_id: str | None,
         step: StepTurn,
         policy: ToolSafetyPolicy,
-    ) -> LaneReply: ...
+    ) -> LaneReply | engine.Failed: ...
 
 
 def replied(node: AgentNode, text: str) -> engine.Succeeded | None:
@@ -327,6 +336,87 @@ def step_decider(
     return wrap
 
 
+Decider = Callable[[PolicyApproval], PolicyApproval]
+
+
+def proposer(
+    sm: Sessions, work: StepWork, url_of: Callable[[ToolCall], Awaitable[str | None]]
+) -> Propose:
+    """Record a third-party write as the step's proposal, sent after review to `url_of`'s
+    server; on every provider (`work_decider`)."""
+
+    async def propose(call: ToolCall, reason: str | None) -> ToolConfirmationResult:
+        url = await url_of(call)
+        if url is None:
+            return _deny(f"Refused {call.key}: the agent does not connect it.")
+        async with sm.begin() as s:
+            added = await workflow_proposals.add_proposal(
+                s,
+                tenant_id=work.run.tenant_id,
+                step_id=work.step.id,
+                server_url=url,
+                tool=call.key,
+                arguments=dict(call.input),
+                reason=reason,
+            )
+        if added is None:
+            return _deny(f"Refused {call.key}: this step has proposed all it may.")
+        return ToolConfirmationResult(
+            allow=False,
+            deny_message=f"Recorded as proposal {added[0]}. Daimon sends it after review; "
+            "carry on as if it will be sent.",
+        )
+
+    return propose
+
+
+async def work_decider(
+    sm: Sessions,
+    settings: Settings,
+    work: StepWork,
+    attempt_id: uuid.UUID,
+    propose: Propose | None,
+) -> tuple[ToolSafetyPolicy, Decider]:
+    """The tool policy and decider one step attempt runs under, on every provider: Managed
+    Agents decides its calls in the session, another provider's at the server
+    (`running_step_decider`)."""
+    node = work.node
+    assert isinstance(node, AgentNode)
+    writes = writes_of(work)
+    scopes = await step_scopes(sm, settings, work, node)
+    policy = step_policy(settings.tool_safety, writes, scopes)
+    decide = step_decider(
+        node,
+        attempt_id=attempt_id,
+        policy=policy,
+        writes=writes,
+        propose=propose,
+        exposed=exposed(work),
+        test=work.run.mode == "test",
+        scopes=scopes,
+        paths=created_paths(work.spec) if work.run.mode == "live" else {},
+        created=await created_so_far(sm, work.run.id) if scopes else None,
+    )
+    return policy, decide
+
+
+async def running_step_decider(
+    sm: Sessions, settings: Settings, *, tenant_id: uuid.UUID, run_id: uuid.UUID, url: str | None
+) -> tuple[ToolSafetyPolicy, Decider] | None:
+    """`work_decider` of the one agent step `run_id` runs now, for a provider turn's call that
+    reaches the server; a proposal records `url`. None unless exactly one runs."""
+    async with sm() as s:
+        found = await running_agent_work(s, settings, tenant_id=tenant_id, run_id=run_id)
+    if found is None:
+        return None
+    work, attempt_id = found
+
+    async def url_of(_: ToolCall) -> str | None:
+        return url
+
+    return await work_decider(sm, settings, work, attempt_id, proposer(sm, work, url_of))
+
+
 def _tool_name(block: ToolUseBlock) -> str:
     inner = block.input.get("name") if block.name == PROXY_TOOL_NAME else None
     return inner if isinstance(inner, str) else block.name
@@ -464,24 +554,13 @@ class AgentStepExecutor:
                     }
                     await self._event(s, work, key, step_tools.BRIEF_SENT, data)
 
-        writes = writes_of(work)
-        scopes = await step_scopes(self.sm, self.settings, work, node)
-        policy = step_policy(self.settings.tool_safety, writes, scopes)
+        policy, decide = await work_decider(
+            self.sm, self.settings, work, attempt.id, self._proposer(work)
+        )
         paths = created_paths(work.spec) if work.run.mode == "live" else {}
         step = StepTurn(
             tools=tools_of(node),
-            decide=step_decider(
-                node,
-                attempt_id=attempt.id,
-                policy=policy,
-                writes=writes,
-                propose=self._proposer(work),
-                exposed=exposed(work),
-                test=work.run.mode == "test",
-                scopes=scopes,
-                paths=paths,
-                created=await created_so_far(self.sm, work.run.id) if scopes else None,
-            ),
+            decide=decide,
             workflow_run_id=work.run.id,
             workflow_step_id=work.step.id,
             on_session=on_session,
@@ -491,12 +570,14 @@ class AgentStepExecutor:
         )
         result: step_tools.Recorded | None = None
         posted: set[str] = set()
+        staged: list[dict[str, JsonValue]] | None = None
         reply = LaneReply()
         for _ in range(waits.MAX_QUESTIONS + 1):
             reply = await self._drive(work, lane, place, message, session_id, step, policy)
             if isinstance(reply, engine.Failed):
                 return reply
             posted |= reply.posted
+            staged = _staged(staged, reply)
             result = await self._recorded(work, attempt.id)
             asked = None if result else await self._asked(work, attempt.id)
             if asked is None:
@@ -520,13 +601,16 @@ class AgentStepExecutor:
             if isinstance(reply, engine.Failed):
                 return reply
             posted |= reply.posted
+            staged = _staged(staged, reply)
             result = await self._recorded(work, attempt.id)
             outcome = (
                 step_tools.outcome(result) if result is not None else replied(node, reply.text)
             )
         if isinstance(outcome, engine.Succeeded):
             outcome = replace(outcome, posted=tuple(sorted(posted)))
-        if isinstance(outcome, engine.Succeeded) and self.collect_files is not None:
+        if isinstance(outcome, engine.Succeeded) and staged is not None:
+            outcome = replace(outcome, files=tuple(staged[:MAX_FILES]))
+        elif isinstance(outcome, engine.Succeeded) and self.collect_files is not None:
             async with self.sm() as s:
                 made_in = await workflow_runs.get_lane(s, run_id=work.run.id, lane=lane)
             if made_in is not None:
@@ -556,29 +640,10 @@ class AgentStepExecutor:
         if tools is None:
             return None
 
-        async def propose(call: ToolCall, reason: str | None) -> ToolConfirmationResult:
-            url = await tools.server_url(work, call.server_name or "")
-            if url is None:
-                return _deny(f"Refused {call.key}: the agent does not connect it.")
-            async with self.sm.begin() as s:
-                added = await workflow_proposals.add_proposal(
-                    s,
-                    tenant_id=work.run.tenant_id,
-                    step_id=work.step.id,
-                    server_url=url,
-                    tool=call.key,
-                    arguments=dict(call.input),
-                    reason=reason,
-                )
-            if added is None:
-                return _deny(f"Refused {call.key}: this step has proposed all it may.")
-            return ToolConfirmationResult(
-                allow=False,
-                deny_message=f"Recorded as proposal {added[0]}. Daimon sends it after review; "
-                "carry on as if it will be sent.",
-            )
+        async def url_of(call: ToolCall) -> str | None:
+            return await tools.server_url(work, call.server_name or "")
 
-        return propose
+        return proposer(self.sm, work, url_of)
 
     async def _drive(
         self,

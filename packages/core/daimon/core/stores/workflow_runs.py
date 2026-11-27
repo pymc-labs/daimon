@@ -344,6 +344,28 @@ async def attempt_of_session(
     return None if row is None else (row[0], row[1])
 
 
+async def work_of_session(
+    session: AsyncSession, *, tenant_id: uuid.UUID, session_id: str, at: datetime
+) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID] | None:
+    """`(run id, step id, attempt id)` a provider lane's session was working on at `at`: what
+    its usage, which carries no run, is stamped with (`attempt_of_session`'s rule)."""
+    row = (
+        await session.execute(
+            select(WorkflowStep.run_id, WorkflowAttempt.step_id, WorkflowAttempt.id)
+            .join(WorkflowStep, WorkflowStep.id == WorkflowAttempt.step_id)
+            .join(WorkflowRun, WorkflowRun.id == WorkflowStep.run_id)
+            .where(
+                WorkflowRun.tenant_id == tenant_id,
+                WorkflowAttempt.session_id == session_id,
+                WorkflowAttempt.started_at <= at,
+            )
+            .order_by(WorkflowAttempt.started_at.desc())
+            .limit(1)
+        )
+    ).first()
+    return None if row is None else (row[0], row[1], row[2])
+
+
 async def list_steps(session: AsyncSession, run_id: uuid.UUID) -> list[StepRow]:
     """The run's node visits; For each items are `list_items`."""
     rows = await session.scalars(

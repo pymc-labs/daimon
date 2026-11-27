@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import uuid
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
@@ -12,17 +13,21 @@ from unittest.mock import AsyncMock
 import pytest
 from daimon.adapters.scheduler.workflows import (
     HeadlessLaneTurn,
+    ProviderLaneTurn,
     WorkflowEngine,
     lane_turn,
     run_once,
 )
-from daimon.core import routine_files
+from daimon.core import routine_files, routine_provider
+from daimon.core.channel_backend import channel_ref
 from daimon.core.delivery import job_payload
 from daimon.core.direct_messages import DmRoutineReply
+from daimon.core.fire import admit
 from daimon.core.fire.run import FireDeps, fire_turn
 from daimon.core.fire.store import FireResult, FireStore
 from daimon.core.fire.subject import routine_subject
 from daimon.core.membership import CachedMembershipResolver, Membership
+from daimon.core.provider_routine import ProviderRoutineRun
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import identity, tenants, workflow_deliveries, workflows
 from daimon.core.stores.domain import RoutineRow
@@ -37,6 +42,8 @@ from daimon.core.workflows.service import Env
 from daimon.core.workflows.spec import AgentNode, parse_spec
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.workflows import NOW, World, agents_with, make_settings
+from mux.contracts.config import ConfigRevision
+from mux.profiles import backend_selection
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 OWNER, HOME, THREAD = "111", "555", "666"
@@ -57,10 +64,6 @@ REPLIES = {
     "agent posted": ("Posted it.", False, True),
     "agent posted files": ("Posted it.", True, True),
 }
-#: Where the moved routine deliberately differs, and why.
-#: "Posts for itself or Daimon posts, never both": the agent's own post is the result, so
-#: its files go with that post; a routine sent them again on their own.
-DIFFERENT = {(s, "agent posted files") for s in SHAPES if s.startswith("A")}
 
 
 async def _member(*_a: object) -> Membership:
@@ -73,8 +76,58 @@ MEMBER = CachedMembershipResolver(_member)
 STRICTER = {"C channel only"}
 FILE = SimpleNamespace(id="f1", filename="a.csv", mime_type="text/csv", size_bytes=3)
 Posted = tuple[str, str, tuple[str, ...]] | None
+#: The Managed Agents path, then a provider fake: the routine fire and the step run on it.
+PROVIDERS = [None, "gemini"]
 #: Each fake turn's usage stamps, routine fire first.
 USAGE: list[dict[str, Any]] = []
+
+
+@dataclass(frozen=True)
+class _Admission:
+    """A provider admission, as a fire and a step's turn read it."""
+
+    agent: Any
+    backend_revision: ConfigRevision
+    channel_skills: tuple[Any, ...] = ()
+    backend: Any = None
+
+
+class _Outputs:
+    """A provider session's workspace: `FILE` when the turn made files."""
+
+    session_id = "ses_p"
+
+    def __init__(self, files: bool) -> None:
+        self.files = files
+
+    async def list_outputs(self) -> list[Any]:
+        return [SimpleNamespace(**vars(FILE), max_read_bytes=None)] if self.files else []
+
+    async def read_output(self, _id: str) -> bytes:
+        return b"a,b"
+
+
+def _provider(row: Any, reply: str, posts_to: str | None, files: bool) -> dict[str, Any]:
+    """The provider fake: admits on Gemini and runs one turn that replies `reply`."""
+    revision = ConfigRevision.create(
+        channel_ref(row.tenant_id, "discord", HOME), 1, backend_selection("gemini")
+    )
+    agent = SimpleNamespace(id="agent_a", name="daimon", metadata={})
+
+    async def admit_turn(*_a: object, **_kw: object) -> _Admission:
+        return _Admission(agent, revision)
+
+    async def run_turn(*_a: object, **kw: Any) -> ProviderRoutineRun:
+        if (on_session := kw.get("on_session")) is not None:
+            await on_session("ses_p")
+        return ProviderRoutineRun(reply, _state(posts_to), cast("Any", _Outputs(files)))
+
+    return {"admit": admit_turn, "run": run_turn}
+
+
+def _files(files: Any) -> tuple[str, ...]:
+    """A post's files: a staged file by name, its handle being new on each staging."""
+    return tuple(f.filename if f.staged else f.file_id for f in files)
 
 
 def _state(posts_to: str | None) -> TurnState:
@@ -111,7 +164,12 @@ class _Store:
 
 
 async def _routine_posted(
-    sm: async_sessionmaker[AsyncSession], settings: Any, row: Any, reply: str, posts_to: str | None
+    sm: async_sessionmaker[AsyncSession],
+    settings: Any,
+    row: Any,
+    reply: str,
+    posts_to: str | None,
+    native: dict[str, Any] | None = None,
 ) -> Posted:
     state = _state(posts_to)
 
@@ -122,7 +180,12 @@ async def _routine_posted(
         return reply
 
     async def dm_turn(*_a: object, **_kw: object) -> DmRoutineReply:
-        return DmRoutineReply(reply, "ses_r", "agent_a", on_managed_agents=True)
+        if native is None:
+            return DmRoutineReply(reply, "ses_r", "agent_a", on_managed_agents=True)
+        run: ProviderRoutineRun = await native["run"]()
+        return DmRoutineReply(
+            reply, "ses_p", "agent_a", on_managed_agents=False, outputs=run.outputs
+        )
 
     agent = SimpleNamespace(name="daimon", metadata={}, mcp_servers=[], tools=[])
     deps = FireDeps(
@@ -138,6 +201,10 @@ async def _routine_posted(
         retrieve_agent=AsyncMock(return_value=agent), retrieve_agent_cached=AsyncMock(return_value=agent),
         open_discord_dm=AsyncMock(return_value="777"),
     )  # fmt: skip
+    if native is not None:
+        deps = replace(
+            deps, admit_provider_routine=native["admit"], run_provider_routine=native["run"]
+        )
     store = _Store()
     await fire_turn(routine_subject(row), cast("FireStore", store), deps)
     result = store.result
@@ -146,11 +213,15 @@ async def _routine_posted(
     if result.delivery != "pending" or not (payload.text or payload.files):
         return None
     place = "dm" if row.destination_kind == "dm" else row.destination_id
-    return place, payload.text, tuple(f.file_id for f in payload.files)
+    return place, payload.text, _files(payload.files)
 
 
 async def _workflow_posted(
-    world: World, monkeypatch: pytest.MonkeyPatch, reply: str, posts_to: str | None
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+    reply: str,
+    posts_to: str | None,
+    native: dict[str, Any] | None = None,
 ) -> Posted:
     async def turn(*, step: Any, session_id: str | None, **kw: Any) -> str:
         USAGE.append(kw["usage_record_factory"]("ses_w", "m").keywords)
@@ -173,6 +244,9 @@ async def _workflow_posted(
         DeploymentDefault(),
         {},  # type: ignore[arg-type]
         membership_resolver=MEMBER,
+        provider=None if native is None else ProviderLaneTurn(
+            cast("Any", SimpleNamespace(sessionmaker=world.sm)), **native
+        ),
     )  # fmt: skip
     ticks = iter(range(1000))
 
@@ -205,7 +279,7 @@ async def _workflow_posted(
     [row] = rows
     target, payload = row.target, job_payload(row)
     place = "dm" if target["kind"] == "dm" else target.get("thread_id") or target["channel_id"]
-    return place, payload.text, tuple(f.file_id for f in payload.files)
+    return place, payload.text, _files(payload.files)
 
 
 async def _routine(
@@ -232,9 +306,14 @@ async def _routine(
 
 
 async def _both(
-    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, shape: str, reply: str
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+    reply: str,
+    provider: str | None = None,
 ) -> tuple[Posted, Posted, World, uuid.UUID]:
-    """What the routine's fire posted, then what the workflow it moved to posted."""
+    """What the routine's fire posted, then what the workflow it moved to posted, both on
+    `provider` (Managed Agents for None)."""
     USAGE.clear()
     kind, destination, channel = SHAPES[shape]
     text, files, posts_itself = REPLIES[reply]
@@ -247,28 +326,38 @@ async def _both(
     row, env = await _routine(db_session, kind, destination, channel)
     sm, settings = env.sm, env.settings
     posts_to = (destination if kind in ("channel", "thread") else HOME) if posts_itself else None
-    fired = await _routine_posted(sm, settings, row, text, posts_to)
+    native = None
+    if provider is not None:
+        on = AsyncMock(return_value=provider)
+        monkeypatch.setattr(admit, "place_provider", on)
+        monkeypatch.setattr(routine_provider, "place_provider", on)
+        native = _provider(row, text, posts_to, files)
+    fired = await _routine_posted(sm, settings, row, text, posts_to, native)
 
     flow = await convert.from_routine(env, row.id)
     world = World(sm, settings, env.who.tenant_id, env.who.account_id, flow)
-    return fired, await _workflow_posted(world, monkeypatch, text, posts_to), world, row.id
+    moved = await _workflow_posted(world, monkeypatch, text, posts_to, native)
+    return fired, moved, world, row.id
 
 
+@pytest.mark.parametrize("provider", PROVIDERS, ids=["managed-agents", "gemini"])
 @pytest.mark.parametrize("reply", list(REPLIES))
 @pytest.mark.parametrize("shape", list(SHAPES))
 async def test_a_moved_routine_posts_what_its_fire_posted(
-    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, shape: str, reply: str
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+    reply: str,
+    provider: str | None,
 ) -> None:
-    fired, moved, *_ = await _both(db_session, monkeypatch, shape, reply)
+    fired, moved, *_ = await _both(db_session, monkeypatch, shape, reply, provider)
     kind, destination, _ = SHAPES[shape]
     posts_to = (
         (destination if kind in ("channel", "thread") else HOME) if REPLIES[reply][2] else None
     )
-    if (shape, reply) in DIFFERENT:
-        assert fired is not None and moved is None, (fired, moved)
-        return
     assert moved == fired, f"{shape}, {reply}"
-    assert (fired is None) == (kind is None or reply == "no post" or posts_to == destination), fired
+    alone = posts_to == destination and not REPLIES[reply][1]
+    assert (fired is None) == (kind is None or reply == "no post" or alone), fired
 
 
 @pytest.mark.parametrize("shape", ["A channel", "A thread", "C channel only", "D nothing"])

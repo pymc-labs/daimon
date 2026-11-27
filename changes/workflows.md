@@ -13,11 +13,13 @@
   write with nobody watching when its arguments fit a stated scope. Workflows,
   their pages, mentions (`workflow_mentions`) and polls (`workflow_polls`) are
   on; webhooks, code steps and scoped writes (`workflow_scoped_writes`) stay off
-  until an admin turns them on. Workflows run on every provider, and Discord,
-  Slack and Teams can build one with the agent. An agent step can work in a
+  until an admin turns them on. Agent steps run on OpenAI and Gemini as well as
+  Anthropic; on OpenAI a step needs built-in tools on. Discord, Slack and Teams
+  can build a workflow with the agent. An agent step can work in a
   channel or thread, take the run's person's personal memory, write as the
   server allows (`writes: policy`) and end quietly. A post can go out as an
-  agent. Routines still work but are marked Legacy, and every routines list
+  agent, and on Teams it starts with the agent's name when agent identity is
+  on. Routines still work but are marked Legacy, and every routines list
   offers an admin "Move to a workflow". A moved routine becomes an agent step,
   with a post for its result, its pending post, owner notice, settings and
   intake binding; `daimon routines translate --dry-run` checks every routine.

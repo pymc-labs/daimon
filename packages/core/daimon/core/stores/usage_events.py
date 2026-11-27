@@ -122,8 +122,12 @@ async def project_revision(
     projected_tokens: UsageTokens | None = None,
     agent_id: str | None = None,
     searches: SearchTally | None = None,
+    workflow_run_id: uuid.UUID | None = None,
+    workflow_step_id: uuid.UUID | None = None,
 ) -> None:
     """Project complete effective counts, preserving the original row identity.
+
+    `workflow_run_id`/`workflow_step_id` tag a provider workflow lane's first revision.
 
     The row also keeps `searches`, which `web_search_tally` reads back. An older
     revision still records the searches it counted against the allowance.
@@ -200,6 +204,8 @@ async def project_revision(
             event_id=observation.id,
             channel_id=channel_id,
             agent_id=agent_id,
+            workflow_run_id=workflow_run_id,
+            workflow_step_id=workflow_step_id,
             **values,
         )
         .on_conflict_do_nothing(index_elements=["managed_session_id", "event_id"])

@@ -1,6 +1,7 @@
 """An agent step's turn in its lane: a headless turn as the run's run-as person, metered.
 
-`admit` decides the step's place as a routine fire's (`fire.admit.admit_place`). The spend
+`admit` decides the step's place as a routine fire's (`fire.admit.admit_place`); a place on
+OpenAI or Gemini runs its turns through `ProviderLaneTurn`. The spend
 is that person's, as for any turn of theirs: usage rows carry their id, so their allowance
 counts it, and preflight gates each step on that same allowance.
 """
@@ -38,7 +39,16 @@ from daimon.core.membership import MembershipResolver
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.pricing import MODEL_PRICING
+from daimon.core.provider_routine import (
+    STEP_SHELL_NEEDS_GRANT,
+    ProviderRoutineRun,
+    admit_provider_routine,
+    refusal_text,
+    run_provider_routine,
+    workflow_scope_thread,
+)
 from daimon.core.routine_delivery import posted_places
+from daimon.core.routine_files import stage_files
 from daimon.core.routine_sandbox import RoutineSandbox, pin_at
 from daimon.core.routines import mounts_personal_memory
 from daimon.core.scope import DeploymentDefault, ScopeContext
@@ -48,16 +58,18 @@ from daimon.core.stores.domain import SandboxPin, pin_json
 from daimon.core.stores.lead_intake import workflow_execution
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.tool_safety import ToolSafetyPolicy
+from daimon.core.turn.admission import Admission, AdmissionDenied
+from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.state import TurnState
 from daimon.core.usage_recording import record_turn_usage
 from daimon.core.workflows import engine
 from daimon.core.workflows.agent_step import LaneReply
-from daimon.core.workflows.lanes import agent_of
+from daimon.core.workflows.lanes import agent_of, lane_key
 from daimon.core.workflows.place import StepPlace, step_place, workflow_subject
 from daimon.core.workflows.preflight import spend_user_id
 from daimon.core.workflows.runs import StepWork
 from daimon.core.workflows.spec import AgentNode, CodeNode, Deliver, FinishNode
-from mux.contracts.config import DEFAULT_BACKEND
+from mux.contracts.config import DEFAULT_BACKEND, ConfigRevision, ResolvedBackend
 from pydantic import TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -66,6 +78,109 @@ _PIN: Final = TypeAdapter(SandboxPin)
 #: The `pins` key a `builtins` grant keeps what it covers under.
 SANDBOX_PIN: Final = "sandbox"
 _NO_PIN: Final = "Can't read the step's agent or its environment, so its built-in tools can't run."
+_NO_TURN: Final = "The step's agent can't start a turn on its model provider here."
+#: A deliberate difference from Managed Agents: a provider turn a lost worker left can't be
+#: reattached, so its attempt fails `retryable` and the next one starts afresh.
+NO_REATTACH: Final = "A provider turn can't be reattached after a lost worker."
+
+
+@dataclass(frozen=True)
+class ProviderLaneTurn:
+    """An agent step's turn on OpenAI or Gemini: admitted as an unattended provider routine
+    at the step's place, in its lane's own scope (`workflow_scope_thread`), which later steps
+    of the lane continue. Step tools come through Daimon MCP, whose credential carries the
+    run; the relay and the MCP server apply the step's decider (`running_step_decider`)."""
+
+    deps: TurnDeps
+    admit: Callable[..., Awaitable[Admission]] = admit_provider_routine
+    run: Callable[..., Awaitable[ProviderRoutineRun]] = run_provider_routine
+
+    async def __call__(
+        self,
+        work: StepWork,
+        *,
+        place: StepPlace,
+        message: str,
+        session_id: str | None,
+        step: StepTurn,
+    ) -> LaneReply | engine.Failed:
+        node, run, sm = work.node, work.run, self.deps.sessionmaker
+        subject, admitted = place.subject, place.admitted
+        assert isinstance(node, AgentNode) and subject is not None and admitted is not None
+        assert subject.created_by_user_id is not None, "admission refused an unlinked run-as"
+        if step.resume:
+            raise RuntimeError(NO_REATTACH)
+        owner = subject.created_by_user_id
+        try:
+            admission = await self.admit(
+                self.deps,
+                # A private step is billed to and configured by its workflow's home.
+                replace(subject, channel_id=subject.channel_id or subject.home_channel_id),
+                platform=admitted.platform,
+                owner=owner,
+                subject=admitted.invoker,
+                sandbox=place.sandbox,
+                hold=admitted.hold,
+                origin_place=admitted.origin_place,
+                refusal=STEP_SHELL_NEEDS_GRANT,
+            )
+        except AdmissionDenied as error:
+            return engine.Failed("gate", refusal_text(error) or _NO_TURN, error.reason)
+        ran = admission.agent
+        if checks_ran_agent(admitted) and (
+            refused := ran_agent_refusal(
+                admitted, subject, build_agent_ref(ran.name, ran.metadata, subject.agent_name)
+            )
+        ):
+            return engine.Failed("gate", refused.error or refused.reason, refused.reason)
+        admission = _with_step(admission, node.model, step)
+        lane = work.step.lane or lane_key(work.spec, work.step.node_id, node, work.step.visit)
+        lifetime = DispatchTimeoutSettings().dispatch_timeout_s
+        async with workflow_execution(sm, run.tenant_id, run.id, lifetime_s=lifetime):
+            ran_turn = await self.run(
+                self.deps,
+                admission,
+                routine_id=subject.id,
+                tenant_id=run.tenant_id,
+                platform=admitted.platform,
+                owner=owner,
+                prompt=message,
+                scope_id=workflow_scope_thread(run.id, lane),
+                reuse_existing=session_id is not None,
+                on_session=step.on_session,
+                on_render=step.on_render,
+            )
+        files, _ = await stage_files(sm, ran_turn.outputs, tenant_id=run.tenant_id)
+        posted = await posted_places(
+            sm,
+            ran_turn.state,
+            tenant_id=run.tenant_id,
+            home=subject.home_channel_id,
+            run_as=owner,
+        )
+        return LaneReply(ran_turn.text, posted, tuple(f.model_dump() for f in files))
+
+
+def _with_step(admission: Admission, model: str | None, step: StepTurn) -> Admission:
+    """The admission with the step's model (preflight checked it is the provider's) and its
+    pinned skills."""
+    skills = (*admission.channel_skills, *step.skills)
+    revision = admission.backend_revision
+    if model is None or revision is None or model == revision.model:
+        return replace(admission, channel_skills=skills)
+    fields = revision.model_dump(include=set(ResolvedBackend.model_fields)) | {"model": model}
+    picked = ConfigRevision.create(
+        revision.channel, revision.local, ResolvedBackend.model_validate(fields)
+    )
+    backend = admission.backend
+    return replace(
+        admission,
+        channel_skills=skills,
+        backend_revision=picked,
+        backend=backend.model_copy(update={"model": model, "config_digest": picked.digest})
+        if backend is not None
+        else None,
+    )
 
 
 @dataclass(frozen=True)
@@ -77,6 +192,8 @@ class HeadlessLaneTurn:
     resolver_cache: ResolverCache
 
     membership_resolver: MembershipResolver | None = None
+    #: Runs the steps whose place is on another provider; None runs every step here.
+    provider: ProviderLaneTurn | None = None
 
     async def admit(self, work: StepWork) -> StepPlace | engine.Failed:
         """The step's place as the run-as person, decided as a routine fire's is.
@@ -222,9 +339,15 @@ class HeadlessLaneTurn:
         session_id: str | None,
         step: StepTurn,
         policy: ToolSafetyPolicy,
-    ) -> LaneReply:
+    ) -> LaneReply | engine.Failed:
         node, run, settings = work.node, work.run, self.settings
         assert isinstance(node, AgentNode), "a lane runs agent steps"
+        if place.admitted is not None and place.admitted.native is not None:
+            if self.provider is None:
+                return engine.Failed("gate", _NO_TURN, "backend_unsupported")
+            return await self.provider(
+                work, place=place, message=message, session_id=session_id, step=step
+            )
         channel = work.place.workflow.home_channel_id if work.place else None
         agent_id, environment_id = place.agent_id, place.environment_id
         spender = None

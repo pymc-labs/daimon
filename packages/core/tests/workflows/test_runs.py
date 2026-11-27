@@ -32,6 +32,7 @@ from daimon.core.workflows.service import Env
 from daimon.core.workflows.spec import parse_spec
 from daimon.testing.workflows import NOW, World, make_settings, make_world
 from mux.contracts.config import BackendConfig
+from mux.profiles import selectable_models
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from sqlalchemy import delete, select, update
 from sqlalchemy.exc import DBAPIError
@@ -136,8 +137,10 @@ async def test_preflight_refuses_before_anything_is_created(db_session: AsyncSes
     assert isinstance(bad, Refusal) and bad.reason == "run_as_not_allowed", f"unknown run-as: {bad}"
 
 
-async def test_a_home_channel_on_another_backend_refuses_the_run(db_session: AsyncSession) -> None:
-    world = await make_world(db_session, INLINE, "b", home="c1")
+async def test_an_agent_step_on_openai_needs_its_built_ins_before_the_run(
+    db_session: AsyncSession,
+) -> None:
+    world = await make_world(db_session, AGENT, "a", home="c1")
     openai = BackendConfig(backend="openai", profile="openai.persistent_workspace", model="gpt-5")
     await set_channel_backend(db_session, channel_ref(world.tenant_id, "discord", "c1"), openai)
     await db_session.commit()
@@ -145,6 +148,29 @@ async def test_a_home_channel_on_another_backend_refuses_the_run(db_session: Asy
         world.sm, world.settings, tenant_id=world.tenant_id, start=world.start(), now=NOW
     )
     assert isinstance(refused, Refusal) and refused.reason == "backend_unsupported", refused
+    assert "always gives its agent a shell" in refused.message, "OpenAI's shell refuses up front"
+
+
+async def test_an_agent_step_on_gemini_runs_with_a_model_gemini_has(
+    db_session: AsyncSession,
+) -> None:
+    wrong = {**AGENT, "a": {**AGENT["a"], "model": "gpt-5"}}
+    world = await make_world(db_session, wrong, "a", home="c1")
+    model = selectable_models("gemini")[0]
+    gemini = BackendConfig(backend="gemini", profile="gemini.inline_reuse", model=model)
+    await set_channel_backend(db_session, channel_ref(world.tenant_id, "discord", "c1"), gemini)
+    await db_session.commit()
+    refused = await runs.start_run(
+        world.sm, world.settings, tenant_id=world.tenant_id, start=world.start(), now=NOW
+    )
+    assert isinstance(refused, Refusal) and refused.reason == "model_unavailable", refused
+    world = await make_world(db_session, AGENT, "a", home="c1")
+    await set_channel_backend(db_session, channel_ref(world.tenant_id, "discord", "c1"), gemini)
+    await db_session.commit()
+    started = await runs.start_run(
+        world.sm, world.settings, tenant_id=world.tenant_id, start=world.start(), now=NOW
+    )
+    assert not isinstance(started, Refusal), f"a step on Gemini runs: {started}"
 
 
 async def test_executor_seam_retries_then_succeeds(db_session: AsyncSession) -> None:

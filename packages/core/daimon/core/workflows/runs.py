@@ -310,6 +310,37 @@ async def _load(session: AsyncSession, settings: Settings, run: RunRow, now: dat
     return Loaded(run, workflow, spec, steps, facts, catalog)
 
 
+async def running_agent_work(
+    session: AsyncSession, settings: Settings, *, tenant_id: uuid.UUID, run_id: uuid.UUID
+) -> tuple[StepWork, uuid.UUID] | None:
+    """The one agent step attempt `run_id` runs now, as its executor got it but with no
+    expression context, and the attempt's id. None unless exactly one runs."""
+    run = await workflow_runs.get_run(session, run_id, tenant_id=tenant_id)
+    if run is None or run.status != "running":
+        return None
+    loaded = await _load(session, settings, run, datetime.now(UTC))
+    running = [
+        s
+        for s in loaded.steps
+        if s.status == "running" and isinstance(node_of(loaded.spec, s), AgentNode)
+    ]
+    attempt = await workflow_runs.running_attempt(session, running[0].id) if running else None
+    if len(running) != 1 or attempt is None:
+        return None
+    step = running[0]
+    work = StepWork(
+        run,
+        step,
+        node_of(loaded.spec, step),
+        loaded.spec,
+        attempt.number,
+        {},
+        loaded.place(),
+        loaded.catalog,
+    )
+    return work, attempt.id
+
+
 async def _workflow_facts(
     session: AsyncSession, workflow: workflows.WorkflowRow, spec: Spec
 ) -> dict[str, JsonValue]:

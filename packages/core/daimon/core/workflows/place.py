@@ -98,6 +98,7 @@ def workflow_subject(
         source_channel_id=made["channel_id"] if made is not None else None,
         source_thread_id=made["thread_id"] if made is not None else None,
         revision=workflow.updated_at.isoformat(),
+        home_channel_id=home,
     )
 
 
@@ -122,6 +123,8 @@ class BoundStep:
     subject: Subject
     #: The step's `at`; None for a private step.
     at: str | None
+    #: Whether the step reads its run-as person's personal memory (`memory: personal`).
+    personal: bool = False
 
 
 async def bound_step(
@@ -168,4 +171,4 @@ async def bound_step(
         platform=tenant.platform,
         origin=run.origin,
     )
-    return BoundStep(flow, subject, nodes[0].at)
+    return BoundStep(flow, subject, nodes[0].at, nodes[0].memory == "personal")
