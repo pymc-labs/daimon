@@ -1240,6 +1240,7 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         tiers=("deployment", "workspace"),
         default="off",
         authority=_ADMIN,
+        page="evals.md#turn-it-on",
     ),
     _capability(
         "watches",
