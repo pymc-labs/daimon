@@ -4,8 +4,11 @@ A web watch reports into a web thread but runs as the owner's linked chat princi
 `watches.principal_platform` names the principal's platform (NULL: the watch's own). The
 page and poll ports join the principal on it. A page watch may be permanent (it still ends
 with its page) and may report into a new thread per firing, which needs no live session.
+Contract for the replaced checks and ports, which still accept every row and call the
+previous release makes.
 
 downgrade: destructive
+schema: contract
 """
 
 import importlib.util
@@ -14,8 +17,8 @@ from pathlib import Path
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0229_page_watch_platforms"
-down_revision: str | None = "0228_artifacts"
+revision: str = "0240_page_watch_platforms"
+down_revision: str | None = "0239_artifacts"
 branch_labels: str | None = None
 depends_on: str | None = None
 

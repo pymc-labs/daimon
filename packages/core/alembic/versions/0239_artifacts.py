@@ -7,17 +7,19 @@ marks a viewer's ask thread for a page, one per person and page. A version's thu
 and a viewer's consent to a page's asks are rows of their own. `artifacts.imported_from`
 is the address a page had elsewhere, unique per workspace: a re-import finds the page by
 it and a legacy host redirects by it. `imported_state` is a digest of the page as its
-import left it: a re-import replaces it only while it still matches.
+import left it: a re-import replaces it only while it still matches. Contract only for
+the unique index on `web_threads.artifact_id`, which the previous release never writes.
 
 downgrade: destructive
+schema: contract
 """
 
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0228_artifacts"
-down_revision: str | None = "0227_turn_origin_own_dm_reach"
+revision: str = "0239_artifacts"
+down_revision: str | None = "0238_dm_activity"
 branch_labels: str | None = None
 depends_on: str | None = None
 
