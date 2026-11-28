@@ -17,6 +17,7 @@ from typing import Final
 import anthropic
 import httpx
 import structlog
+from daimon.core.channel_backend import backend_refusal_causes
 from daimon.core.fire.failure import report_failure
 from daimon.core.stores import security_audit, workflow_runs, workflow_waits
 from daimon.core.stores.workflow_run_events import NewEvent, append_events
@@ -143,9 +144,19 @@ async def contained(
     try:
         yield
     except TRANSIENT as err:
-        log.warning("workflows.item.deferred", run_id=str(run_id), error=type(err).__name__)
+        log.warning(
+            "workflows.item.deferred",
+            run_id=str(run_id),
+            error=type(err).__name__,
+            causes=backend_refusal_causes(err),
+        )
     except Exception as err:  # named boundary: one run's error never stops the shared loops
-        log.exception("workflows.item.failed", run_id=str(run_id), step_id=str(step_id))
+        log.exception(
+            "workflows.item.failed",
+            run_id=str(run_id),
+            step_id=str(step_id),
+            causes=backend_refusal_causes(err),
+        )
         if run_id is None and step_id is not None:
             async with sm() as session:
                 run_id = await workflow_runs.run_of_step(session, step_id)

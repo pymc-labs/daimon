@@ -243,8 +243,8 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
     "active limit queue": _W + "test_runs.py::test_runs_over_the_active_limit_queue",
     "passes its deadline or spends its budget": _W
     + "test_runs.py::test_deadline_and_budget_end_the_run",
-    "cannot get past fails on its own": "packages/adapters/scheduler/tests/test_workflow_loops.py::"
-    "test_a_run_whose_spec_no_longer_reads_fails_alone",
+    "left for a later check": "packages/adapters/scheduler/tests/test_workflow_loops.py::"
+    "test_a_run_whose_spec_no_longer_reads_is_left_and_the_others_go_on",
     "Each step's spend counts": _LANES
     + "test_step_spend_counts_against_the_run_as_persons_allowance_and_gates_them",
     "move a routine to a workflow and back": _CLI
