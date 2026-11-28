@@ -445,6 +445,7 @@ async def _workflow_step_run(
             session,
             tenant_id=tenant_id,
             run_id=binding.workflow_run_id,
+            execution_id=binding.execution,
             agent_name=binding.agent_name,
         )
     return step if step is not None and step.subject.created_by_user_id == binding.owner else None
@@ -1026,10 +1027,9 @@ def build_identity_relay_route(
                 **(_workflow_claims(signed_step, platform, workspace) if signed_step else {}),
                 # A channel or thread routine's owner (a step's run-as person), for what
                 # the run makes for them.
-                routine_owner=(
-                    signed_routine or (signed_step and signed_step.subject)
-                ).created_by_user_id
-                if (signed_routine is not None or signed_step is not None) and room != "dm"
+                routine_owner=owned.created_by_user_id
+                if (owned := signed_routine or (signed_step.subject if signed_step else None))
+                and room != "dm"
                 else None,
             )
             headers["authorization"] = f"Bearer {tokens.token(identity, now=now)}"

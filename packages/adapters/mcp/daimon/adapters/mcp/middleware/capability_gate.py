@@ -126,7 +126,11 @@ async def caller_places(
         agent = None if derived is None else await _key_agent_id(runtime, auth, derived)
         async with runtime.session_factory() as session:
             step = await bound_step(
-                session, tenant_id=auth.tenant_id, run_id=auth.workflow_run_id, agent_id=agent or ""
+                session,
+                tenant_id=auth.tenant_id,
+                run_id=auth.workflow_run_id,
+                execution_id=auth.execution_id,
+                agent_id=agent or "",
             )
             tenant = await get_tenant(session, auth.tenant_id)
         if step is not None and tenant is not None:
@@ -249,14 +253,17 @@ async def step_refusal(
     """Why a provider step's own Daimon call is refused, by its step's decider
     (`agent_step.work_decider`) as its Managed Agents session refuses it: another step's id,
     editing automations, a tool its list leaves out, a write it may not make. None: allowed.
-    Managed Agents decides in the session, so only a provider credential is decided here."""
-    if auth.workflow_run_id is None or not auth.anthropic_disabled:
+    Managed Agents decides in the session, so only a provider turn's credential (its registry
+    row's surface) or a self-hosted harness's is decided here."""
+    provider = auth.no_confirmation_surface or auth.anthropic_disabled
+    if auth.workflow_run_id is None or not provider:
         return None
     step = await running_step_decider(
         runtime.session_factory,
         runtime.settings,
         tenant_id=auth.tenant_id,
         run_id=auth.workflow_run_id,
+        execution_id=auth.execution_id,
         url=None,
     )
     if step is None:

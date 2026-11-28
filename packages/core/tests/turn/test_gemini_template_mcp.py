@@ -433,6 +433,29 @@ async def test_a_template_turn_mints_one_registered_credential_and_revokes_it(te
 
 
 @pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
+async def test_an_agent_steps_credential_signs_its_run_and_lane(template):
+    """A provider step's Daimon credential carries the run and its lane's grant, as MA's chat
+    credential does: the server and the relay then apply that step's decider and claims."""
+    from daimon.core.lead_intake_execution import WorkflowExecution, current_intake_execution
+
+    request, *_ = template
+    selected, runtime = await _prepared(request)
+    connection = _connection(selected)
+    transport = runtime.transport_factory(request.admission.backend_revision, request.scope)
+    grant = WorkflowExecution(uuid.uuid4(), uuid.uuid4())
+    held = current_intake_execution.set(grant)
+    try:
+        token = await transport.mcp_secrets(
+            request.scope, connection.credential_ref, connection.url
+        )
+    finally:
+        current_intake_execution.reset(held)
+    claims = jwt.decode(token, options={"verify_signature": False})
+    assert (claims["workflow_run_id"], claims["execution_id"]) == tuple(map(str, grant)), claims
+    await runtime.end_of_turn()
+
+
+@pytest.mark.parametrize("switched_request", [PARAMS], indirect=True)
 async def test_the_credential_refuses_another_scope_reference_or_destination(template):
     request, *_ = template
     selected, runtime = await _prepared(request)

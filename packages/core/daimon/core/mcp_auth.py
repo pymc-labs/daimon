@@ -446,6 +446,7 @@ async def mint_agent_mcp_token(
     slack_turn_context_id: uuid.UUID | None = None,
     seal_ids: Collection[str] = (),
     host_builtins: bool = False,
+    workflow_execution: WorkflowExecution | None = None,
 ) -> str:
     """Mint a long-lived, revocable, agent-scoped MCP JWT.
 
@@ -491,6 +492,8 @@ async def mint_agent_mcp_token(
     signed as its own claim, and ``seal_ids`` as `SEAL_CLAIM`: the server reads
     sealed sessions inside those ids only. ``host_builtins`` signs
     `HOST_BUILTINS_CLAIM`: an unattended turn may use host built-ins only with it.
+    ``workflow_execution`` signs an agent step's run and lane grant as MA's chat
+    credential does, so the server and relay apply that step's decider and claims.
     Nothing else may carry any of them.
     """
     # Registered chat execution retains the ordinary chat surface. External
@@ -509,7 +512,11 @@ async def mint_agent_mcp_token(
         raise ValueError("a chat-execution or provider-turn credential is internal")
     assert (platform is None) == (channel_id is None), "a channel binding needs both"
     if (
-        hold is not None or slack_turn_context_id is not None or seal_ids or host_builtins
+        hold is not None
+        or slack_turn_context_id is not None
+        or seal_ids
+        or host_builtins
+        or workflow_execution is not None
     ) and surface != "provider_turn":
         raise ValueError("only a provider-turn credential carries turn flags")
     jti = jti or uuid.uuid4()
@@ -551,6 +558,9 @@ async def mint_agent_mcp_token(
         claims[SEAL_CLAIM] = seal_claim(seal_ids)
     if host_builtins:
         claims[HOST_BUILTINS_CLAIM] = True
+    if workflow_execution is not None:
+        claims["workflow_run_id"] = str(workflow_execution.run_id)
+        claims["execution_id"] = str(workflow_execution.execution_id)
     return pyjwt.encode(claims, secret, algorithm="HS256")
 
 
@@ -618,6 +628,9 @@ def registered_agent_claims_match(
             expected.add(SEAL_CLAIM)
         if claims.get(HOST_BUILTINS_CLAIM) is True:
             expected.add(HOST_BUILTINS_CLAIM)
+        # An agent step's run and lane grant: both or neither.
+        if isinstance(claims.get("workflow_run_id"), str):
+            expected |= {"workflow_run_id", "execution_id"}
     if allow_session_grant and chat_execution and isinstance(claims.get("chat_session_id"), str):
         expected.add("chat_session_id")
         if isinstance(claims.get("requester_account_id"), str):

@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
+from daimon.core.lead_intake_execution import WorkflowExecution, current_intake_execution
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn_origin import current_execution_origin_id
@@ -193,6 +194,10 @@ class TemplateMCPCredential:
                 slack_turn_context_id=admission.slack_turn_context_id,
                 seal_ids=admission.origin_seal_ids,
                 host_builtins=host_builtins_allowed(),
+                # An agent step's run and lane, so its decider and claims apply.
+                workflow_execution=execution
+                if isinstance(execution := current_intake_execution.get(), WorkflowExecution)
+                else None,
             )
         self._minted = token, token_jti(token)
         try:

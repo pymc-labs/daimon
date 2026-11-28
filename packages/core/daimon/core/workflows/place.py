@@ -18,7 +18,7 @@ from daimon.core.stores import identity, tenants, workflow_runs, workflows
 from daimon.core.stores.domain import RoutineDestinationKind
 from daimon.core.stores.workflows import WorkflowRow
 from daimon.core.workflows.delivery import target_for
-from daimon.core.workflows.runs import node_of, run_spec
+from daimon.core.workflows.runs import lane_step, node_of, run_spec
 from daimon.core.workflows.spec import AgentNode
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -132,15 +132,17 @@ async def bound_step(
     *,
     tenant_id: uuid.UUID,
     run_id: uuid.UUID,
+    execution_id: uuid.UUID | None,
     agent_name: str = "",
     agent_id: str = "",
 ) -> BoundStep | None:
-    """The one agent step `run_id` runs now, read as a routine-bound relay credential reads its
-    routine row: the run-as person read live, at the step's `at`.
+    """The agent step (or For each item) running in the lane a credential's grant names
+    (`runs.lane_step`), read as a routine-bound relay credential reads its routine row: the
+    run-as person read live, at the step's `at`.
 
     None for a run of another tenant or no longer running, a live run whose workflow
-    publishes another version now, a run-as person with no id here, or not exactly one
-    agent step running: steps in parallel sign nothing rather than guess.
+    publishes another version now, a run-as person with no id here, or no step running in
+    that lane.
     """
     run = await workflow_runs.get_run(session, run_id, tenant_id=tenant_id)
     if run is None or run.status != "running" or run.run_as_account_id is None:
@@ -150,20 +152,17 @@ async def bound_step(
     if flow is None or tenant is None or (run.mode == "live" and flow.live_version != run.version):
         return None
     spec = await run_spec(session, run)
-    nodes = [
-        node
-        for step in await workflow_runs.list_steps(session, run.id)
-        if step.status == "running" and isinstance(node := node_of(spec, step), AgentNode)
-    ]
+    step = await lane_step(session, run, spec, execution_id)
+    node = node_of(spec, step) if step is not None else None
     ids = await identity.platform_external_ids(
         session, tenant_id=tenant_id, platform=tenant.platform, account_ids=[run.run_as_account_id]
     )
     run_as = ids.get(run.run_as_account_id)
-    if len(nodes) != 1 or run_as is None:
+    if not isinstance(node, AgentNode) or run_as is None:
         return None
     subject = workflow_subject(
         flow,
-        nodes[0],
+        node,
         home=flow.home_channel_id,
         run_as=run_as,
         agent_name=agent_name,
@@ -171,4 +170,4 @@ async def bound_step(
         platform=tenant.platform,
         origin=run.origin,
     )
-    return BoundStep(flow, subject, nodes[0].at, nodes[0].memory == "personal")
+    return BoundStep(flow, subject, node.at, node.memory == "personal")

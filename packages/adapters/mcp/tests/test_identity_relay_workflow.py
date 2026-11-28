@@ -9,6 +9,7 @@ import uuid
 from typing import Any
 
 from daimon.core.audience_facts import RoomFacts
+from daimon.core.lead_intake_execution import lane_grant
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_identity import RelayBinding, routine_destination_key, routine_revision
 from daimon.core.stores import identity, workflow_runs
@@ -24,6 +25,7 @@ DM_SERVER = SERVER.model_copy(
     update={"routine_claims": True, "dm_routine_claims": True, "requester_meta": True}
 )
 WS = "discord:guild-1"
+LANE = "main:helper"
 
 
 async def _running(db_session: AsyncSession, step: dict[str, Any]) -> tuple[World, uuid.UUID]:
@@ -41,8 +43,9 @@ async def _running(db_session: AsyncSession, step: dict[str, Any]) -> tuple[Worl
             account_id=world.owner,
         )  # fmt: skip
         await workflow_runs.save_steps(
-            s, tenant_id=world.tenant_id, run_id=run.id, steps={("a", 1): {"status": "running"}}
-        )
+            s, tenant_id=world.tenant_id, run_id=run.id,
+            steps={("a", 1): {"status": "running", "lane": LANE}},
+        )  # fmt: skip
         await workflow_runs.update_run(s, run.id, status="running")
     return world, run.id
 
@@ -77,10 +80,18 @@ async def test_a_step_at_a_channel_signs_its_workflow_as_the_routine_there_would
         execution=fire,
     )  # fmt: skip
     claims, stamp = await _signed(sm, await _token(sm, person, routine), DM_SERVER, body)
-    step = RelayBinding("helper", workflow_run_id=run_id, owner=OWNER)
+    step = RelayBinding(
+        "helper", workflow_run_id=run_id, execution=lane_grant(run_id, LANE), owner=OWNER
+    )
     as_step = await _signed(sm, await _token(sm, person, step), DM_SERVER, body)
     async with sm() as s:
-        bound = await bound_step(s, tenant_id=world.tenant_id, run_id=run_id, agent_name="helper")
+        bound = await bound_step(
+            s,
+            tenant_id=world.tenant_id,
+            run_id=run_id,
+            execution_id=lane_grant(run_id, LANE),
+            agent_name="helper",
+        )
     assert bound is not None
     named = {
         "workflow": str(world.workflow_id),
@@ -97,39 +108,67 @@ async def test_a_private_step_signs_its_run_as_persons_dm(db_session: AsyncSessi
     world, run_id = await _running(db_session, {"memory": "personal"})
     sm, person = world.sm, _person(world)
     body = _tool_call(requester_platform_user_id="666", requester_kind="person")
-    step = RelayBinding("helper", workflow_run_id=run_id, owner=OWNER, dm_channel="777")
+    grant = lane_grant(run_id, LANE)
+    step = RelayBinding(
+        "helper", workflow_run_id=run_id, execution=grant, owner=OWNER, dm_channel="777"
+    )
     claims, _ = await _signed(sm, await _token(sm, person, step), DM_SERVER, body)
     assert (claims["channel"], claims["room"], claims["sub"]) == ("777", "dm", f"discord:{OWNER}")
     assert claims["workflow"] == str(world.workflow_id) and "routine" not in claims, claims
-    other = RelayBinding("helper", workflow_run_id=run_id, owner="999", dm_channel="777")
+    other = RelayBinding(
+        "helper", workflow_run_id=run_id, execution=grant, owner="999", dm_channel="777"
+    )
     unbound, _ = await _signed(sm, await _token(sm, person, other), DM_SERVER, body)
     assert "workflow" not in unbound and "room" not in unbound, "another person signs nothing"
 
 
-async def test_parallel_agent_steps_sign_no_workflow_claims(db_session: AsyncSession) -> None:
-    """Deliberate: a lane's session and relay credential serve its run across steps (lanes
-    continue), so the credential names no step; with two agent steps running, which one
-    called is unknown, and the call signs no workflow rather than guess."""
+async def test_each_running_step_and_item_signs_its_own_lane(db_session: AsyncSession) -> None:
+    """A step beside a For each item running: each lane's credential is bound to the step or
+    item running in it (`lane_grant`), and a lane with nothing running signs nothing."""
     world = await make_world(
         db_session,
-        {"a": {"kind": "agent", "agent": "helper", "instructions": "go", "at": "home", "next": "b"},
-         "b": {"kind": "agent", "agent": "helper", "instructions": "go", "at": "home", "next": "f"},
+        {"a": {"kind": "agent", "agent": "helper", "instructions": "go", "at": "home", "next": "f"},
+         "e": {"kind": "for_each", "items": "${{ [1] }}",
+               "do": {"kind": "agent", "agent": "helper", "instructions": "go"}, "next": "f"},
          "f": {"kind": "finish"}},
         "a", home="555", workspace_id="guild-1",
     )  # fmt: skip
     run = await world.run()
+    item_lane = f"{LANE}@e[0]"
     async with world.sm.begin() as s:
         await identity.create_platform_principal(
             s, tenant_id=world.tenant_id, platform="discord", external_id=OWNER,
             account_id=world.owner,
         )  # fmt: skip
-        running: dict[tuple[str, int], Any] = {("a", 1): {"status": "running"}}
-        running[("b", 1)] = {"status": "running"}
+        running: dict[tuple[str, int], Any] = {
+            ("a", 1): {"status": "running", "lane": LANE},
+            ("e", 1): {"status": "running"},
+        }
         await workflow_runs.save_steps(s, tenant_id=world.tenant_id, run_id=run.id, steps=running)
+        parent = next(x for x in await workflow_runs.list_steps(s, run.id) if x.node_id == "e")
+        await workflow_runs.save_items(
+            s, parent=parent, items={0: {"status": "running", "lane": item_lane}}
+        )
         await workflow_runs.update_run(s, run.id, status="running")
+
+    async def bound(lane: str) -> str | None | bool:
+        async with world.sm() as s:
+            got = await bound_step(
+                s, tenant_id=world.tenant_id, run_id=run.id, execution_id=lane_grant(run.id, lane)
+            )
+        return False if got is None else got.at
+
+    assert await bound(LANE) == "home", "the step's own lane binds the step"
+    assert await bound(item_lane) is None, "the item's lane binds the private item"
+    assert await bound("other:helper") is False, "a lane with nothing running binds nothing"
     body = _tool_call(requester_platform_user_id="666", requester_kind="person")
-    step = RelayBinding("helper", workflow_run_id=run.id, owner=OWNER)
-    claims, _ = await _signed(
-        world.sm, await _token(world.sm, _person(world), step), DM_SERVER, body
-    )
-    assert "workflow" not in claims and "room" not in claims, claims
+    signed = []
+    for lane in (LANE, "other:helper"):
+        step = RelayBinding(
+            "helper", workflow_run_id=run.id, execution=lane_grant(run.id, lane), owner=OWNER
+        )
+        claims, _ = await _signed(
+            world.sm, await _token(world.sm, _person(world), step), DM_SERVER, body
+        )
+        signed.append(claims.get("workflow"))
+    assert signed == [str(world.workflow_id), None], signed

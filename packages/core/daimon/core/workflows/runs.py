@@ -18,6 +18,7 @@ from typing import Any, Final, Literal, Protocol
 
 from daimon.core.config import Settings
 from daimon.core.fire.failure import report_failure
+from daimon.core.lead_intake_execution import lane_grant
 from daimon.core.stores import (
     security_audit,
     workflow_deliveries,
@@ -310,24 +311,53 @@ async def _load(session: AsyncSession, settings: Settings, run: RunRow, now: dat
     return Loaded(run, workflow, spec, steps, facts, catalog)
 
 
+def lane_of(work: StepWork) -> str:
+    """The lane a claimed agent step runs in (`claim` gave a busy lane's step its own)."""
+    node = work.node
+    assert isinstance(node, AgentNode), "only agent steps run in lanes"
+    return work.step.lane or lane_key(work.spec, work.step.node_id, node, work.step.visit)
+
+
+async def lane_step(
+    session: AsyncSession, run: RunRow, spec: Spec, execution_id: uuid.UUID | None
+) -> StepRow | None:
+    """The agent step or For each item running in the lane whose grant (`lane_grant`) a
+    credential carries; a lane runs one at a time. None for no grant or none running."""
+    if execution_id is None:
+        return None
+    rows = [*await workflow_runs.list_steps(session, run.id)]
+    rows += await workflow_runs.list_items(session, run_id=run.id)
+    return next(
+        (
+            s
+            for s in rows
+            if s.status == "running"
+            and s.lane is not None
+            and lane_grant(run.id, s.lane) == execution_id
+            and isinstance(node_of(spec, s), AgentNode)
+        ),
+        None,
+    )
+
+
 async def running_agent_work(
-    session: AsyncSession, settings: Settings, *, tenant_id: uuid.UUID, run_id: uuid.UUID
+    session: AsyncSession,
+    settings: Settings,
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+    execution_id: uuid.UUID | None,
 ) -> tuple[StepWork, uuid.UUID] | None:
-    """The one agent step attempt `run_id` runs now, as its executor got it but with no
-    expression context, and the attempt's id. None unless exactly one runs."""
+    """The agent step attempt running in the lane of `execution_id` (`lane_step`), as its
+    executor got it but with no expression context, and the attempt's id."""
     run = await workflow_runs.get_run(session, run_id, tenant_id=tenant_id)
     if run is None or run.status != "running":
         return None
     loaded = await _load(session, settings, run, datetime.now(UTC))
-    running = [
-        s
-        for s in loaded.steps
-        if s.status == "running" and isinstance(node_of(loaded.spec, s), AgentNode)
-    ]
-    attempt = await workflow_runs.running_attempt(session, running[0].id) if running else None
-    if len(running) != 1 or attempt is None:
+    step = await lane_step(session, run, loaded.spec, execution_id)
+    attempt = await workflow_runs.running_attempt(session, step.id) if step else None
+    if step is None or attempt is None:
         return None
-    step = running[0]
     work = StepWork(
         run,
         step,

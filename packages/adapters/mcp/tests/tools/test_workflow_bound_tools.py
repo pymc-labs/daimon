@@ -64,7 +64,9 @@ async def test_a_step_credential_signs_its_run_and_grant(
         return Membership(is_member=True, is_admin=False)
 
     monkeypatch.setattr(DiscordRestMembershipResolver, "resolve", member)
-    async with workflow_execution(world.sm, world.tenant_id, run.id, lifetime_s=60) as grant:
+    async with workflow_execution(
+        world.sm, world.tenant_id, run.id, lane="main:", lifetime_s=60
+    ) as grant:
         held = current_intake_execution.get()
         async with world.sm.begin() as s:
             token, _, _ = await mint_chat_mcp_token(

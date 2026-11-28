@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import UUID, uuid4, uuid5
+from uuid import UUID, uuid4
 
 from cryptography.fernet import MultiFernet
 from daimon.core._models import (
@@ -34,7 +34,11 @@ from daimon.core.lead_intake import (
     normalize_project,
 )
 from daimon.core.lead_intake_access import LeadReadDenied, LeadReadTarget, read_target
-from daimon.core.lead_intake_execution import WorkflowExecution, current_intake_execution
+from daimon.core.lead_intake_execution import (
+    WorkflowExecution,
+    current_intake_execution,
+    lane_grant,
+)
 from pydantic import BaseModel, Field
 from sqlalchemy import case, delete, func, literal, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
@@ -775,15 +779,16 @@ async def workflow_execution(
     tenant_id: UUID,
     run_id: UUID,
     *,
+    lane: str,
     lifetime_s: float,
 ) -> AsyncIterator[UUID]:
-    """`routine_execution` for a workflow run's step; yields the grant's id.
+    """`routine_execution` for a workflow run's step in `lane`; yields the grant's id.
 
-    One grant per run, so a lane's session keeps one execution across its steps: each step
-    extends it by `lifetime_s` and leaves it. Deleting the run (or its workflow) deletes it,
-    and an expired one is purged.
+    One grant per lane (`lane_grant`), so a lane's session keeps one execution across its
+    steps and names the step it runs now: each step extends it by `lifetime_s` and leaves
+    it. Deleting the run (or its workflow) deletes it, and an expired one is purged.
     """
-    identity = uuid5(run_id, "workflow_execution")
+    identity = lane_grant(run_id, lane)
     expires = datetime.now(UTC) + timedelta(seconds=lifetime_s)
     async with sessions() as session, session.begin():
         await session.execute(

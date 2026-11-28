@@ -194,8 +194,9 @@ class RelayBinding:
     execution: uuid.UUID | None = None
     revision: str | None = None
     dm_channel: str | None = None
-    #: The workflow run an agent step's session serves, with its run-as person as `owner`
-    #: and, for a private step on Discord, their DM as `dm_channel`; never beside a routine.
+    #: The workflow run an agent step's session serves, with its lane's grant as `execution`
+    #: (the step running in that lane is the one bound), its run-as person as `owner` and,
+    #: for a private step on Discord, their DM as `dm_channel`; never beside a routine.
     workflow_run_id: uuid.UUID | None = None
 
     def claim(self) -> dict[str, str]:
@@ -359,16 +360,17 @@ def parse_relay_claim(raw: object) -> RelayBinding:
 
 
 def _workflow_run_shape(claim: Mapping[str, object]) -> bool:
-    """Whether a relay claim is whole as an agent step's: the run, its run-as person and,
-    only beside them, a Discord DM channel id."""
+    """Whether a relay claim is whole as an agent step's: the run, its lane's grant
+    (`lane_grant`), its run-as person and, only beside them, a Discord DM channel id."""
     run, owner, channel = claim.get("workflow_run"), claim.get("owner"), claim.get("dm_channel")
     if not (isinstance(run, str) and isinstance(owner, str) and owner):
         return False
-    if not set(claim) <= {"agent_name", "workflow_run", "owner", "dm_channel"}:
+    if not set(claim) <= {"agent_name", "workflow_run", "execution", "owner", "dm_channel"}:
         return False
     try:
         uuid.UUID(run)
-    except ValueError:
+        uuid.UUID(cast("str", claim.get("execution")))
+    except (TypeError, ValueError):
         return False
     return channel is None or (
         isinstance(channel, str) and channel.isascii() and channel.isdecimal()

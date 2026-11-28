@@ -77,7 +77,7 @@ from daimon.core.features.session_identity import DEFAULT_IDENTITY
 from daimon.core.features.snapshot import FeaturePlace, resolve_features
 from daimon.core.features.toolset import place_session
 from daimon.core.github_app_session import close_headless_app_session
-from daimon.core.lead_intake_execution import current_intake_execution
+from daimon.core.lead_intake_execution import WorkflowExecution, current_intake_execution
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call, sdk_agent, sdk_environment
@@ -617,10 +617,19 @@ async def run_turn_impl(
     )
     # The fire this run belongs to, bound beside its destination: the relay signs the
     # routine's claims only while that fire runs (`routine_execution`).
+    # A step's lane grant names which running step the lane's relay credential serves.
     fire = current_intake_execution.get()
     relay_execution = (
         fire[1]
-        if relay_destination is not None and fire is not None and fire[0] == routine_id
+        if fire is not None
+        and (
+            (relay_destination is not None and fire[0] == routine_id)
+            or (
+                step is not None
+                and isinstance(fire, WorkflowExecution)
+                and fire.run_id == step.workflow_run_id
+            )
+        )
         else None
     )
 

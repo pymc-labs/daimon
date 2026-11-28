@@ -96,6 +96,8 @@ class RelayTurn:
     expires_at: datetime | None = None
     #: The workflow run whose agent step this turn is (`workflow_execution`), if any.
     workflow_run_id: uuid.UUID | None = None
+    #: Its lane's grant (`lane_grant`): which of the run's running steps this turn is.
+    execution_id: uuid.UUID | None = None
 
     @property
     def requester(self) -> uuid.UUID:
@@ -152,6 +154,7 @@ def relay_turn(claims: Mapping[str, object]) -> RelayTurn | None:
                 "confirmed_call",
                 TOKEN_JTI_CLAIM,
                 "workflow_run_id",
+                "execution_id",
             )
         )
     ):
@@ -169,6 +172,7 @@ def relay_turn(claims: Mapping[str, object]) -> RelayTurn | None:
         carded=claims.get("no_confirmation_surface") is True,
         expires_at=datetime.fromtimestamp(exp, UTC) if isinstance(exp, int) else None,
         workflow_run_id=_uuid(claims.get("workflow_run_id")),
+        execution_id=_uuid(claims.get("execution_id")),
     )
 
 
@@ -404,6 +408,7 @@ class ConnectorRelay:
                 self._settings,
                 tenant_id=turn.tenant_id,
                 run_id=turn.workflow_run_id,
+                execution_id=turn.execution_id,
                 url=connector.url,
             )
             if turn.workflow_run_id is not None

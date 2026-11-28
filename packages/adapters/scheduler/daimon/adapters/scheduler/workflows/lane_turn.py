@@ -64,10 +64,10 @@ from daimon.core.turn.state import TurnState
 from daimon.core.usage_recording import record_turn_usage
 from daimon.core.workflows import engine
 from daimon.core.workflows.agent_step import LaneReply
-from daimon.core.workflows.lanes import agent_of, lane_key
+from daimon.core.workflows.lanes import agent_of
 from daimon.core.workflows.place import StepPlace, step_place, workflow_subject
 from daimon.core.workflows.preflight import spend_user_id
-from daimon.core.workflows.runs import StepWork
+from daimon.core.workflows.runs import StepWork, lane_of
 from daimon.core.workflows.spec import AgentNode, CodeNode, Deliver, FinishNode
 from mux.contracts.config import DEFAULT_BACKEND, ConfigRevision, ResolvedBackend
 from pydantic import TypeAdapter
@@ -134,9 +134,9 @@ class ProviderLaneTurn:
         ):
             return engine.Failed("gate", refused.error or refused.reason, refused.reason)
         admission = _with_step(admission, node.model, step)
-        lane = work.step.lane or lane_key(work.spec, work.step.node_id, node, work.step.visit)
+        lane = lane_of(work)
         lifetime = DispatchTimeoutSettings().dispatch_timeout_s
-        async with workflow_execution(sm, run.tenant_id, run.id, lifetime_s=lifetime):
+        async with workflow_execution(sm, run.tenant_id, run.id, lane=lane, lifetime_s=lifetime):
             ran_turn = await self.run(
                 self.deps,
                 admission,
@@ -378,7 +378,9 @@ class HeadlessLaneTurn:
         subject, admitted = place.subject, place.admitted
         states: list[TurnState] = []
         lifetime = DispatchTimeoutSettings().dispatch_timeout_s
-        async with workflow_execution(self.sm, run.tenant_id, run.id, lifetime_s=lifetime):
+        async with workflow_execution(
+            self.sm, run.tenant_id, run.id, lane=lane_of(work), lifetime_s=lifetime
+        ):
             text = await run_turn(
                 anthropic=self.client,
                 agent_id=agent_id,

@@ -62,10 +62,18 @@ from daimon.core.workflows.action_step import (
 )
 from daimon.core.workflows.brief import NUDGE, render_brief, step_inputs
 from daimon.core.workflows.expressions import ExpressionError
-from daimon.core.workflows.lanes import FRESH, agent_of, lane_key, lane_skills
+from daimon.core.workflows.lanes import FRESH, agent_of, lane_skills
 from daimon.core.workflows.place import StepPlace
 from daimon.core.workflows.preflight import Refusal, check
-from daimon.core.workflows.runs import ENGINE, Park, Sessions, StepWork, key_of, running_agent_work
+from daimon.core.workflows.runs import (
+    ENGINE,
+    Park,
+    Sessions,
+    StepWork,
+    key_of,
+    lane_of,
+    running_agent_work,
+)
 from daimon.core.workflows.spec import AgentNode, WriteScope
 from daimon.core.workflows.unattended import (
     CREATED,
@@ -401,12 +409,20 @@ async def work_decider(
 
 
 async def running_step_decider(
-    sm: Sessions, settings: Settings, *, tenant_id: uuid.UUID, run_id: uuid.UUID, url: str | None
+    sm: Sessions,
+    settings: Settings,
+    *,
+    tenant_id: uuid.UUID,
+    run_id: uuid.UUID,
+    execution_id: uuid.UUID | None,
+    url: str | None,
 ) -> tuple[ToolSafetyPolicy, Decider] | None:
-    """`work_decider` of the one agent step `run_id` runs now, for a provider turn's call that
-    reaches the server; a proposal records `url`. None unless exactly one runs."""
+    """`work_decider` of the agent step running in the lane of `execution_id`, for a provider
+    turn's call that reaches the server; a proposal records `url`. None when none runs."""
     async with sm() as s:
-        found = await running_agent_work(s, settings, tenant_id=tenant_id, run_id=run_id)
+        found = await running_agent_work(
+            s, settings, tenant_id=tenant_id, run_id=run_id, execution_id=execution_id
+        )
     if found is None:
         return None
     work, attempt_id = found
@@ -503,8 +519,7 @@ class AgentStepExecutor:
         async with self.sm.begin() as s:
             attempt = await workflow_runs.running_attempt(s, work.step.id)
             assert attempt is not None, "a claimed step has a running attempt"
-            # `runs.claim` gave a busy lane's step a lane of its own.
-            lane = work.step.lane or lane_key(work.spec, work.step.node_id, node, work.step.visit)
+            lane = lane_of(work)
             session_id = attempt.session_id or await workflow_runs.get_lane(
                 s, run_id=work.run.id, lane=lane
             )

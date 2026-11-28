@@ -813,3 +813,30 @@ async def test_each_caller_kind_reads_the_places_it_is_known_by(
     assert set(known) == set(_CALLERS)
     auth, named, place = known[caller]
     assert await caller_places(runtime, auth, named) == [place]
+
+
+@pytest.mark.parametrize(
+    ("surface", "decided"),
+    [({"no_confirmation_surface": True}, True), ({"anthropic_disabled": True}, True), ({}, False)],
+)
+async def test_a_provider_steps_daimon_call_is_decided_by_its_lanes_step(
+    monkeypatch: pytest.MonkeyPatch, surface: dict[str, bool], decided: bool
+) -> None:
+    """A provider turn's credential (its row's surface) or a harness's is decided by the step
+    running in its lane; a Managed Agents credential is decided in its session instead."""
+    from daimon.adapters.mcp.middleware import capability_gate
+
+    asked: list[tuple[uuid.UUID, uuid.UUID | None]] = []
+
+    async def no_step(_sm: object, _s: object, *, run_id: uuid.UUID, **kw: object) -> None:
+        asked.append((run_id, kw["execution_id"]))  # type: ignore[arg-type]
+
+    monkeypatch.setattr(capability_gate, "running_step_decider", no_step)
+    run, grant = uuid.uuid4(), uuid.uuid4()
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.USER,
+        workflow_run_id=run, execution_id=grant, **surface,
+    )  # fmt: skip
+    runtime = SimpleNamespace(session_factory=None, settings=None)
+    refused = await capability_gate.step_refusal(runtime, auth, "remember", {})  # type: ignore[arg-type]
+    assert (refused is not None, asked) == ((True, [(run, grant)]) if decided else (False, []))

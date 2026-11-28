@@ -89,7 +89,9 @@ async def open_host_memory(
     elif personal and (run_id := workflow_of_scope(origin.thread_id)) is not None:
         # A provider step's, as `HeadlessLaneTurn` mounts it: `memory: personal`, unposted.
         async with runtime.session_factory() as session:
-            bound = await bound_step(session, tenant_id=auth.tenant_id, run_id=run_id)
+            bound = await bound_step(
+                session, tenant_id=auth.tenant_id, run_id=run_id, execution_id=auth.execution_id
+            )
         routine_posts = bound is None or not (
             bound.personal and mounts_personal_memory(bound.subject)
         )

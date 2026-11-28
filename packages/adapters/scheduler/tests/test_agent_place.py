@@ -26,7 +26,11 @@ from daimon.core.fire.run import FireDeps, fire_turn
 from daimon.core.fire.store import FireStore
 from daimon.core.fire.subject import routine_subject
 from daimon.core.headless_runner import StepTurn
-from daimon.core.lead_intake_execution import WorkflowExecution, current_intake_execution
+from daimon.core.lead_intake_execution import (
+    WorkflowExecution,
+    current_intake_execution,
+    lane_grant,
+)
 from daimon.core.membership import CachedMembershipResolver, Membership
 from daimon.core.provider_routine import (
     STEP_SHELL_NEEDS_GRANT,
@@ -408,9 +412,10 @@ async def test_provider_step_runs_in_its_lane_on_the_places_provider(
     assert ran["scope_id"] == workflow_scope_thread(work.run.id, lane), ran
     assert (ran["prompt"], ran["reuse_existing"]) == ("brief", False), ran
     execution = ran["execution"]
-    assert isinstance(execution, WorkflowExecution) and execution.run_id == work.run.id, (
-        "the turn's Daimon credential carries the run, so its step tools and decider apply"
-    )
+    assert isinstance(execution, WorkflowExecution) and execution == (
+        work.run.id,
+        lane_grant(work.run.id, lane),
+    ), "the turn's Daimon credential carries the run and lane: its step's tools and decider"
     admission = ran["admission"]
     assert admission.backend_revision.model == "m-step", "the step's model runs"
     assert admission.backend_revision.backend == provider

@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from contextvars import ContextVar
 from typing import NamedTuple
-from uuid import UUID
+from uuid import UUID, uuid5
 
 
 class WorkflowExecution(NamedTuple):
@@ -12,6 +12,12 @@ class WorkflowExecution(NamedTuple):
 
     run_id: UUID
     execution_id: UUID
+
+
+def lane_grant(run_id: UUID, lane: str) -> UUID:
+    """The execution grant of one lane of a run: a credential bound to it serves the agent
+    step running in that lane (one at a time), whichever runs beside it."""
+    return uuid5(run_id, f"workflow_execution:{lane}")
 
 
 current_intake_execution: ContextVar[tuple[UUID, UUID] | None] = ContextVar(

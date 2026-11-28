@@ -231,7 +231,12 @@ async def turn_scope(runtime: McpRuntime, auth: AuthIdentity) -> TurnScope:
         )
     if auth.workflow_run_id is not None:
         async with runtime.session_factory() as session:
-            step = await bound_step(session, tenant_id=auth.tenant_id, run_id=auth.workflow_run_id)
+            step = await bound_step(
+                session,
+                tenant_id=auth.tenant_id,
+                run_id=auth.workflow_run_id,
+                execution_id=auth.execution_id,
+            )
         return TurnScope(
             key=f"workflow:{auth.execution_id or auth.workflow_run_id}",
             kind="unattended",
