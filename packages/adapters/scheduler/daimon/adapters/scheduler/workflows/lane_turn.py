@@ -69,7 +69,7 @@ from daimon.core.workflows.lanes import agent_of
 from daimon.core.workflows.place import StepPlace, step_place, workflow_subject
 from daimon.core.workflows.preflight import spend_user_id
 from daimon.core.workflows.runs import StepWork, lane_of
-from daimon.core.workflows.spec import AgentNode, CodeNode, Deliver, FinishNode
+from daimon.core.workflows.spec import AgentNode, CodeNode, Deliver, FinishNode, slug
 from mux.contracts.config import DEFAULT_BACKEND, ConfigRevision, ResolvedBackend
 from pydantic import TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -438,13 +438,16 @@ class HeadlessLaneTurn:
     async def agent_id(self, tenant_id: uuid.UUID, agent: str | None) -> str:
         """A workspace agent's id by its spec key (the default agent for None).
 
-        Only the default agent is healed by a defaults apply. A named agent that is gone
-        was renamed or archived: applying would recreate a seeded one under its old name.
+        Only the default agent is healed by a defaults apply, named or not: a moved routine
+        on the default names it by key, as the routine path heals it. Any other named agent
+        that is gone was renamed or archived: applying would recreate a seeded one under
+        its old name.
         """
+        default = self.deployment_default.agent_name or BUILTIN_AGENT_NAME
         public_url = str(self.settings.mcp.public_url) if self.settings.mcp.public_url else None
 
         async def apply() -> None:
-            if agent is None:
+            if agent is None or slug(agent) == slug(default):
                 await reconcile_tenant_defaults(
                     self.client,
                     self.sm,
@@ -456,7 +459,7 @@ class HeadlessLaneTurn:
         return await resolve_agent(
             self.client,
             tenant_id=tenant_id,
-            daimon_tag=agent or self.deployment_default.agent_name or BUILTIN_AGENT_NAME,
+            daimon_tag=agent or default,
             cached_id=None,
             apply_callable=apply,
             cache=self.resolver_cache,

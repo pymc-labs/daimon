@@ -1,4 +1,4 @@
-"""A step's agent lookup heals only the default agent, never a renamed-away seeded one."""
+"""A step's agent lookup heals only the default agent, named or not, never a renamed-away seeded one."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from daimon.adapters.scheduler.workflows import HeadlessLaneTurn, lane_turn
 from daimon.testing.workflows import make_settings
 
 
-@pytest.mark.parametrize(("agent", "healed"), [("aria", False), (None, True)])
+@pytest.mark.parametrize(("agent", "healed"), [("aria", False), (None, True), ("default", True)])
 async def test_agent_id_when_agent_is_missing_then_applies_defaults_only_for_the_default_agent(
     agent: str | None, healed: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -32,7 +32,7 @@ async def test_agent_id_when_agent_is_missing_then_applies_defaults_only_for_the
         SimpleNamespace(),  # type: ignore[arg-type]
         SimpleNamespace(),  # type: ignore[arg-type]
         make_settings(),
-        SimpleNamespace(agent_name=None),  # type: ignore[arg-type]
+        SimpleNamespace(agent_name="Default"),  # type: ignore[arg-type]
         {},  # type: ignore[arg-type]
     )
 
