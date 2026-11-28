@@ -14,12 +14,14 @@ settles too, because it may have landed.
 from __future__ import annotations
 
 import asyncio
+import errno
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final, Literal
 
+import httpx
 import structlog
 from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.routine_files import (
@@ -93,15 +95,33 @@ _POST_FAILURE_NOTES: Final[frozenset[str]] = frozenset(
 
 
 class NothingPosted(Exception):
-    """A post's first send failed, so none of it landed (`sent_first`)."""
+    """A post's first send failed in a way that shows none of it landed (`sent_first`)."""
+
+
+_UNREACHABLE: Final = (errno.ECONNREFUSED, errno.ENETUNREACH, errno.EHOSTUNREACH)
+
+
+def _unsent(err: Exception) -> bool:
+    """Whether the error shows the platform took nothing: the connection never opened, or
+    the platform answered with an explicit rejection (a 4xx status, Slack's `ok: false`).
+    A timeout or a dropped connection may come after the platform took the post."""
+    if isinstance(err, httpx.ConnectError) or getattr(err, "errno", None) in _UNREACHABLE:
+        return True
+    response = getattr(err, "response", None)
+    status = getattr(response, "status_code", None) or getattr(err, "status", None)
+    if isinstance(status, int) and 400 <= status < 500:
+        return True
+    get: object = getattr(response, "get", None)
+    return callable(get) and get("ok") is False
 
 
 async def sent_first[T](send: Awaitable[T], *, first: bool) -> T:
-    """Await one send of a post; when it is the post's first, a failure is `NothingPosted`."""
+    """Await one send of a post; when it is the post's first, a failure that shows nothing
+    was accepted is `NothingPosted`, and any other (a timeout, a 5xx) is raised as it is."""
     try:
         return await send
     except Exception as err:  # re-raised: only which failure it is changes
-        if first:
+        if first and _unsent(err):
             raise NothingPosted(type(err).__name__) from err
         raise
 

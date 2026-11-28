@@ -7,11 +7,13 @@ import uuid
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
+import httpx
 import pytest
 from daimon.core._models import WorkflowDelivery
-from daimon.core.delivery import DeliveryOutcome, JobPoster, poll_once, sent_first
+from daimon.core.delivery import DeliveryOutcome, JobPoster, NothingPosted, poll_once, sent_first
 from daimon.core.stores import accounts, tenants
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.workflow_deliveries import DeliveryRow
@@ -241,8 +243,8 @@ def test_every_workflow_post_goes_through_queue_post() -> None:
 async def test_a_post_none_of_which_went_retries_and_goes_on_the_next_attempt(
     db_session: AsyncSession,
 ) -> None:
-    """A failed first send (a chat API's 5xx) sent nothing, so the step's `retry` sends the
-    same post again."""
+    """A first send that never connected sent nothing, so the step's `retry` sends the same
+    post again."""
     nodes = _post("home")
     nodes["p"]["retry"] = {"attempts": 2}
     world = await _world(db_session, nodes, "p")
@@ -255,7 +257,7 @@ async def test_a_post_none_of_which_went_retries_and_goes_on_the_next_attempt(
 
     async def flaky(row: DeliveryRow) -> DeliveryOutcome:
         async def send() -> str:
-            raise RuntimeError("503")
+            raise httpx.ConnectError("refused")
 
         tries.append(row.id)
         if len(tries) == 1:
@@ -276,3 +278,32 @@ async def test_a_post_none_of_which_went_retries_and_goes_on_the_next_attempt(
     assert len(tries) == 2 and tries[0] == tries[1], f"the same post goes again: {tries}"
     assert (await world.get(run.id)).status == "succeeded", "the second attempt posts"
     await world.verified(run.id)
+
+
+def _error(**attrs: object) -> Exception:
+    """A platform client's error carrying `attrs` (`status`, `response`)."""
+    err = Exception("send failed")
+    err.__dict__.update(attrs)
+    return err
+
+
+@pytest.mark.parametrize(
+    ("error", "unsent"),
+    [
+        (httpx.ConnectError("refused"), True),
+        (_error(response=SimpleNamespace(status_code=429)), True),
+        (_error(status=403), True),
+        (_error(response={"ok": False}), True),
+        (httpx.ReadTimeout("slow"), False),
+        (TimeoutError(), False),
+        (_error(response=SimpleNamespace(status_code=503)), False),
+    ],
+)
+async def test_sent_first_when_the_error_shows_nothing_was_accepted_then_it_is_nothing_posted(
+    error: Exception, unsent: bool
+) -> None:
+    async def send() -> None:
+        raise error
+
+    with pytest.raises(NothingPosted if unsent else type(error)):
+        await sent_first(send(), first=True)
