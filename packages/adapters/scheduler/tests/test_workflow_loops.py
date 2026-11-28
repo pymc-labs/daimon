@@ -2,20 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
+import pytest
+from daimon.adapters.scheduler import main
+from daimon.adapters.scheduler import workflows as loops_module
 from daimon.adapters.scheduler.workflows import WorkflowEngine, run_once
 from daimon.adapters.scheduler.workflows.loops import polls_step, steps_step
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.stores import tenants, workflow_runs, workflows
 from daimon.core.stores.workflow_run_events import list_events
-from daimon.core.workflows import engine, gate, polls, runs
+from daimon.core.workflows import endings, engine, gate, polls, runs
 from daimon.core.workflows.ledger import verify
 from daimon.core.workflows.preflight import Refusal
 from daimon.testing.factories import make_account, make_tenant
-from pydantic import JsonValue, PostgresDsn, SecretStr
+from pydantic import BaseModel, JsonValue, PostgresDsn, SecretStr, ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -188,9 +192,11 @@ async def test_a_crashing_poll_does_not_stop_the_other_loops(db_session: AsyncSe
     assert steps["a"] == "succeeded", "the loops went on past it"
 
 
-async def test_a_run_whose_spec_no_longer_reads_fails_alone(db_session: AsyncSession) -> None:
-    """A version published by a later release (a field this server does not know) fails its
-    run with a plain reason; the loops go on and finish the other runs."""
+async def test_a_run_whose_spec_no_longer_reads_is_left_and_the_others_go_on(
+    db_session: AsyncSession,
+) -> None:
+    """A version published by a later release (a field this server does not know) leaves its
+    run for a scheduler that reads it; the loops go on and finish the other runs."""
     sm, settings, broken = await _started(db_session)
     _, _, healthy = await _started(db_session)
     await db_session.execute(
@@ -209,12 +215,7 @@ async def test_a_run_whose_spec_no_longer_reads_fails_alone(db_session: AsyncSes
     async with sm() as session:
         failed = await workflow_runs.get_run(session, broken)
         done = await workflow_runs.get_run(session, healthy)
-        steps = await workflow_runs.list_steps(session, broken)
-        events = await list_events(session, broken)
-    assert failed is not None and failed.status == "failed", failed
-    assert failed.failure_reason == "engine_error", "the run says why it stopped"
-    assert all(s.status == "cancelled" for s in steps), "its steps end with it"
-    assert verify(broken, events).ok, "its ledger still verifies"
+    assert failed is not None and failed.status == "running", "the run is not failed for it"
     assert done is not None and done.status == "succeeded", "the other run finished"
 
 
@@ -258,3 +259,36 @@ async def test_a_workspace_at_its_cap_does_not_hold_up_another_workspaces_steps(
     await steps_step(loops)
     await loops.drain()
     assert seen == [other], f"workspace B's step runs past A's backlog: {seen}"
+
+
+async def test_workflow_loops_when_they_end_on_an_error_then_start_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    starts: list[int] = []
+    stop = asyncio.Event()
+
+    async def run_loops(*_a: object, **_kw: object) -> None:
+        starts.append(1)
+        if len(starts) == 1:
+            raise RuntimeError("an unlisted error")
+        stop.set()
+
+    monkeypatch.setattr(loops_module, "run_loops", run_loops)
+    monkeypatch.setattr(main, "_WORKFLOW_RESTART_S", 0.01)
+
+    await main._workflow_loops(  # pyright: ignore[reportPrivateUsage]
+        cast(Any, None), stop_event=stop, db=cast(Any, None)
+    )
+
+    assert len(starts) == 2, "the loops came back after the error"
+
+
+async def test_contained_when_a_spec_cannot_be_read_then_the_run_is_left_for_a_later_tick() -> None:
+    class Spec(BaseModel):
+        name: str
+
+    with pytest.raises(ValidationError) as unreadable:
+        Spec.model_validate({})
+
+    async with endings.contained(cast(Any, None), now=NOW, run_id=uuid.uuid4()):
+        raise unreadable.value  # a failed run would open a session on the missing sessionmaker

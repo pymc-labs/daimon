@@ -1367,15 +1367,23 @@ async def _usage_sweep_once(*, enabled: bool, sweep: Callable[[], Awaitable[None
     await sweep()
 
 
+_WORKFLOW_RESTART_S = 5.0
+
+
 @scheduler_step
 async def _workflow_loops(
     engine: workflows.WorkflowEngine, *, stop_event: asyncio.Event, db: AsyncEngine
 ) -> None:
-    """The workflow engine's own loops (`scheduler.workflows`), each step guarded there."""
-    try:
-        await workflows.run_loops(engine, stop_event=stop_event, db=db)
-    except Exception:  # named boundary: the workflow engine never ends routine dispatch
-        log.exception("scheduler.workflows.stopped")
+    """The workflow engine's own loops (`scheduler.workflows`), each step guarded there.
+
+    An error that ends them restarts them after a pause, so they never stay off until restart."""
+    while not stop_event.is_set():
+        try:
+            await workflows.run_loops(engine, stop_event=stop_event, db=db)
+        except Exception:  # named boundary: the workflow engine never ends routine dispatch
+            log.exception("scheduler.workflows.stopped")
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stop_event.wait(), _WORKFLOW_RESTART_S)
 
 
 @scheduler_step

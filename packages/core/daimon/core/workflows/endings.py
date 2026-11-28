@@ -22,6 +22,7 @@ from daimon.core.stores import security_audit, workflow_runs, workflow_waits
 from daimon.core.stores.workflow_run_events import NewEvent, append_events
 from daimon.core.stores.workflow_runs import RunRow
 from daimon.core.workflows import asks
+from pydantic import ValidationError
 from sqlalchemy import event as sa_event
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
@@ -38,7 +39,10 @@ ASK_CLOSED: Final = {
 }
 ASK_ENDED: Final = "Closed: the run ended."
 #: Errors the next tick may not meet again: the item is left for it, its run untouched.
-TRANSIENT: Final = (SQLAlchemyError, anthropic.APIError, httpx.HTTPError)
+#: A stored spec this version cannot read is one: specs are validated at publish, so it was
+#: written by another version (a rolling deploy or a rollback), and a scheduler of that
+#: version will read it.
+TRANSIENT: Final = (SQLAlchemyError, anthropic.APIError, httpx.HTTPError, ValidationError)
 BROKEN: Final = "engine_error"
 
 
