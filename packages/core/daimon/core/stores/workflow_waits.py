@@ -8,18 +8,21 @@ asks were posted on chat, and events held for event waits. Lock order stays run,
 from __future__ import annotations
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import datetime
 from typing import Any
 
 from daimon.core._models import (
     WorkflowEventBuffer,
+    WorkflowRun,
     WorkflowWait,
     WorkflowWaitAnswer,
     WorkflowWaitPost,
 )
+from daimon.core.cursor import Cursor
+from daimon.core.stores.workflow_reads import RunScope
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -182,18 +185,49 @@ async def set_remind_at(
 
 
 async def inbox_waits(
-    session: AsyncSession, *, tenant_id: uuid.UUID, closed_since: datetime, limit: int = 200
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    admin: bool,
+    groups: Collection[str],
+    scope: RunScope,
+    closed_since: datetime | None,
+    before: Cursor | None = None,
+    limit: int = 100,
 ) -> list[Wait]:
-    """Approvals and questions still open, or closed since `closed_since`, newest first."""
-    rows = await session.scalars(
-        select(WorkflowWait)
-        .where(
-            WorkflowWait.tenant_id == tenant_id,
-            WorkflowWait.kind.in_(("approval", "question")),
-            or_(WorkflowWait.status == "waiting", WorkflowWait.closed_at >= closed_since),
+    """The approvals and questions one person may answer (`workflows.waits.may_answer`, in
+    SQL), newest first, after the cursor `before`: those still open, and with `closed_since`
+    those answered since."""
+    approvers = WorkflowWait.shown["approvers"]
+    asked = [WorkflowWait.addressees.contains([str(account_id)])]
+    if admin:
+        asked.append(approvers.contains(["admins"]))
+    asked += [approvers.contains([f"role:{g}"]) for g in groups]
+    # A thread's ask goes to anyone who may see the run.
+    seen = select(WorkflowRun.id).where(WorkflowRun.tenant_id == tenant_id, scope.clause())
+    asked.append(and_(approvers.contains(["thread"]), WorkflowWait.run_id.in_(seen)))
+    still = WorkflowWait.status == "waiting"
+    query = select(WorkflowWait).where(
+        WorkflowWait.tenant_id == tenant_id,
+        WorkflowWait.kind.in_(("approval", "question")),
+        or_(*asked),
+        still
+        if closed_since is None
+        else or_(
+            still, and_(WorkflowWait.status == "completed", WorkflowWait.closed_at >= closed_since)
+        ),
+    )
+    if before is not None:
+        at, key = before
+        query = query.where(
+            or_(
+                WorkflowWait.opened_at < at,
+                and_(WorkflowWait.opened_at == at, WorkflowWait.id < key),
+            )
         )
-        .order_by(WorkflowWait.opened_at.desc())
-        .limit(limit)
+    rows = await session.scalars(
+        query.order_by(WorkflowWait.opened_at.desc(), WorkflowWait.id.desc()).limit(limit)
     )
     return [Wait.model_validate(r) for r in rows]
 

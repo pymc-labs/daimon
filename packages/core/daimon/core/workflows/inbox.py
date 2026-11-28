@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any, Final, Literal, cast
 
+from daimon.core.cursor import Cursor, Page
 from daimon.core.stores import workflow_proposals as proposals_store
 from daimon.core.stores import workflow_publish_requests as publish_requests
 from daimon.core.stores import workflow_runs as runs_store
@@ -27,6 +28,8 @@ from pydantic import BaseModel, JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
 
 KEPT: Final = timedelta(days=7)
+#: The most open asks the attention list reads for one person.
+_OPEN_ASKS: Final = 1000
 #: Who asks when no agent is named. An agent step names its agent and any other step the
 #: workflow's default agent, by key; the web shows the agent's name.
 ASKED_BY: Final = "Daimon"
@@ -348,19 +351,41 @@ def _item(detail: InboxDetail) -> InboxItem:
     return InboxItem.model_validate(detail.model_dump(include=set(InboxItem.model_fields)))
 
 
-async def list_items(env: Env) -> list[InboxItem]:
-    since = env.now - KEPT
+async def items_page(
+    env: Env, *, limit: int = 100, before: Cursor | None = None, open_only: bool = False
+) -> Page[InboxItem]:
+    """The approvals and questions this person may answer, newest first, and the publish
+    requests an admin may decide (with the first page only: they are few)."""
+    since = None if open_only else env.now - KEPT
     async with env.sm() as session:
-        found = await waits_store.inbox_waits(
-            session, tenant_id=env.who.tenant_id, closed_since=since
+        scope, _ = await service.run_scope(session, env)
+        found = (
+            []
+            if env.who.external
+            else await waits_store.inbox_waits(
+                session,
+                tenant_id=env.who.tenant_id,
+                account_id=env.who.account_id,
+                admin=env.who.admin,
+                groups=env.who.groups,
+                scope=scope,
+                closed_since=since,
+                before=before,
+                limit=limit + 1,
+            )
         )
-        found = [w for w in found if w.status in ("waiting", "completed")]
-        requests = await _requests(session, env, since)
-        names = await _names(session, env, found, requests)
+        kept = found[:limit]
+        more = (kept[-1].opened_at, kept[-1].id) if len(found) > limit else None
+        requests = [] if before or open_only else await _requests(session, env, env.now - KEPT)
+        names = await _names(session, env, kept, requests)
         seen = _Seen(session)
-        out = [d for w in found if (d := await _wait_detail(seen, env, w, names))]
+        out = [d for w in kept if (d := await _wait_detail(seen, env, w, names))]
         out += [d for r in requests if (d := await _request_detail(seen, r, names))]
-    return sorted((_item(d) for d in out), key=lambda i: i.since, reverse=True)
+    return Page(sorted((_item(d) for d in out), key=lambda i: i.since, reverse=True), more)
+
+
+async def list_items(env: Env) -> list[InboxItem]:
+    return (await items_page(env)).rows
 
 
 async def _detail(session: AsyncSession, env: Env, item_id: uuid.UUID) -> InboxDetail:
@@ -441,7 +466,6 @@ async def attention(env: Env) -> list[service.Attention]:
             expires_at=i.expires_at,
             detail=i.title,
         )
-        for i in await list_items(env)
-        if i.decision is None and i.kind != "publish"
+        for i in (await items_page(env, limit=_OPEN_ASKS, open_only=True)).rows
     ]
     return sorted(out, key=lambda a: a.since, reverse=True)

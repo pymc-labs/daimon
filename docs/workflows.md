@@ -162,7 +162,8 @@ carries over to later versions.
 
 You can cancel a run, retry it from the step that failed, or rerun it from any
 step with the earlier results reused. Runs past a workflow's active limit queue.
-A run ends when it passes its deadline or spends its budget.
+A run ends when it passes its deadline or spends its budget. The web app lists runs and
+inbox items a page at a time, newest first, and shows each person only their own.
 
 Each step's spend counts against the allowance of the person the run is for.
 

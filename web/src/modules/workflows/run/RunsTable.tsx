@@ -5,7 +5,7 @@ import { useLocation, useNavigate } from "react-router"
 import { Ago, Money } from "@/components/common"
 import { FilterBar, SearchInput } from "@/components/filters"
 import { Tag } from "@/components/panel"
-import { QueryState } from "@/components/QueryState"
+import { LoadMore, QueryState } from "@/components/QueryState"
 import { Page } from "@/components/shell/Page"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
@@ -88,7 +88,7 @@ export function RunsTab({ wf }: { wf: Workflow }) {
       )}
       {shown === "board" ? <BoardView id={wf.id} />
         : shown === "calendar" ? <CalendarView id={wf.id} month={month || today} onMonth={(m) => setMonth(m === today ? null : m)} />
-        : <QueryState query={query} className="px-6 pt-6" isEmpty={(r) => !r.length} empty="No runs">{(runs) => <RunsTable runs={runs} />}</QueryState>}
+        : <QueryState query={query} className="px-6 pt-6" isEmpty={(r) => !r.length} empty="No runs">{(runs) => <><RunsTable runs={runs} /><LoadMore list={query} /></>}</QueryState>}
     </>
   )
 }
@@ -125,7 +125,7 @@ function AllRuns() {
         </Select>
         <span className="ml-auto text-xs text-muted-foreground tabular">{plural(rows.length, "run")}</span>
       </FilterBar>
-      <QueryState query={query} className="px-6" isEmpty={() => !rows.length} empty="No runs">{() => <RunsTable runs={rows} showWorkflow />}</QueryState>
+      <QueryState query={query} className="px-6" isEmpty={() => !rows.length && !query.hasMore} empty="No runs">{() => <><RunsTable runs={rows} showWorkflow /><LoadMore list={query} /></>}</QueryState>
     </>
   )
 }

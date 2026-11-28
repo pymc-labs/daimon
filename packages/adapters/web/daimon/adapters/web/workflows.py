@@ -25,6 +25,7 @@ from daimon.adapters.web.chat import chattable_agents
 from daimon.adapters.web.chat_json import agent_json
 from daimon.adapters.web.directory import chattable
 from daimon.adapters.web.faces import avatars_of
+from daimon.adapters.web.paging import PageRequest, page_of, send
 from daimon.adapters.web.routines import reachable_channels_of
 from daimon.adapters.web.run_wakeups import RunWakeups
 from daimon.adapters.web.runtime import WebRuntime
@@ -251,8 +252,11 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
 
     @router.get("/runs")
     @speaks
-    async def all_runs(caller: Viewer) -> list[run_views.RunSummary]:  # pyright: ignore[reportUnusedFunction]
-        return await service.list_runs(await env_of(caller))
+    async def all_runs(  # pyright: ignore[reportUnusedFunction]
+        caller: Viewer, response: Response, page: Annotated[PageRequest, Depends(page_of(100))]
+    ) -> list[run_views.RunSummary]:
+        found = await service.runs_page(await env_of(caller), limit=page.limit, before=page.cursor)
+        return send(found, response)
 
     @router.get("/runs/{run_id}")
     @speaks
@@ -360,8 +364,11 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
 
     @router.get("/inbox")
     @speaks
-    async def inbox_list(caller: Viewer) -> list[inbox.InboxItem]:  # pyright: ignore[reportUnusedFunction]
-        return await inbox.list_items(await env_of(caller))
+    async def inbox_list(  # pyright: ignore[reportUnusedFunction]
+        caller: Viewer, response: Response, page: Annotated[PageRequest, Depends(page_of(100))]
+    ) -> list[inbox.InboxItem]:
+        found = await inbox.items_page(await env_of(caller), limit=page.limit, before=page.cursor)
+        return send(found, response)
 
     @router.get("/inbox/{item_id}")
     @speaks
@@ -535,12 +542,15 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
     async def runs(  # pyright: ignore[reportUnusedFunction]
         workflow_id: uuid.UUID,
         caller: Viewer,
+        response: Response,
+        page: Annotated[PageRequest, Depends(page_of(100))],
         view: Literal["list", "board", "calendar"] = "list",
         month: str | None = None,
     ) -> list[run_views.RunSummary] | run_views.Board | run_views.Calendar:
         env = await env_of(caller)
         if view == "list":
-            return await service.list_runs(env, workflow_id)
+            found = await service.runs_page(env, workflow_id, limit=page.limit, before=page.cursor)
+            return send(found, response)
         return await service.runs_view(env, workflow_id, view, month)
 
     @router.post("/{workflow_id}/runs", status_code=201)

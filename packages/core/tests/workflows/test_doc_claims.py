@@ -117,6 +117,8 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
     "test_unsigned_requests_cannot_use_up_the_senders_allowance",
     "A delivery over it is dropped": _W + "test_ingress.py::"
     "test_a_rate_limited_delivery_leaves_one_row_a_minute_and_one_owner_notice",
+    "lists runs and": _W + "test_list_paging.py::"
+    "test_runs_page_when_newer_runs_are_others_then_a_runner_pages_to_their_own",
     "Renaming an agent renames it": _W + "test_agent_rename.py::"
     "test_rename_agent_references_when_workflows_name_it_then_specs_tools_and_grants_follow",
     "A step whose named agent is gone fails": _SCHED + "test_workflow_agent_lookup.py::"

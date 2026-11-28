@@ -195,6 +195,23 @@ async def test_a_blank_workflow_is_drafted_published_and_run_to_the_end(rig: Rig
         assert [w["ticks"][0]["status"] for w in listed] == ["succeeded"], "the list shows ticks"
 
 
+async def test_the_run_lists_page_with_a_cursor_header(rig: Rig) -> None:
+    async with rig.open() as r:
+        made = await r.make()
+        await r.client.post(f"/api/workflows/{made['id']}/draft/publish", json={})
+        for _ in range(3):
+            await r.client.post(f"/api/workflows/{made['id']}/runs", json={"inputs": {}})
+        for path in (f"/api/workflows/{made['id']}/runs", "/api/workflows/runs"):
+            first = await r.client.get(path, params={"limit": 2})
+            assert len(first.json()) == 2, "the page holds what was asked"
+            cursor = first.headers.get("X-Next-Cursor")
+            assert cursor, f"more follow {path}"
+            last = await r.client.get(path, params={"limit": 2, "cursor": cursor})
+            assert len(last.json()) == 1 and "X-Next-Cursor" not in last.headers, path
+        inbox = await r.client.get("/api/workflows/inbox", params={"limit": 1})
+        assert inbox.status_code == 200 and inbox.json() == [], "nothing waits"
+
+
 async def test_the_saved_state_is_read_and_cleared_through_the_routes(rig: Rig) -> None:
     async with rig.open() as r:
         made = await r.make()

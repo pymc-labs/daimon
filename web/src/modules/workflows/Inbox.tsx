@@ -6,7 +6,7 @@ import { Ago, Prose } from "@/components/common"
 import { Drawer } from "@/components/Drawer"
 import { FilterBar } from "@/components/filters"
 import { Facts, PanelHead, PanelSection, Tag } from "@/components/panel"
-import { QueryState } from "@/components/QueryState"
+import { LoadMore, QueryState } from "@/components/QueryState"
 import { Page } from "@/components/shell/Page"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -91,6 +91,7 @@ export function InboxPage() {
           </TableBody>
         </Table>
       )}</QueryState>
+      <LoadMore list={query} />
       <Drawer param="item" title="Inbox" ids={rows.map((i) => i.id)} wide>{(id) => <ItemSheet id={id} />}</Drawer>
     </Page>
   )

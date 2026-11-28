@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from daimon.core.config import Settings
+from daimon.core.cursor import Cursor, Page
 from daimon.core.routine_files import RoutineFile
 from daimon.core.routines import PRIVATE_FAILED
 from daimon.core.stores import security_audit, workflow_waits
@@ -866,29 +867,60 @@ async def _run(
     return run, workflow, rights
 
 
+async def run_scope(
+    session: AsyncSession, env: Env, workflow_id: uuid.UUID | None = None
+) -> tuple[reads.RunScope, dict[uuid.UUID, str]]:
+    """Whose runs the caller may list, and the names of those workflows. One workflow's
+    rights when `workflow_id` is given (not found if unseen), else every workflow's."""
+    found: list[tuple[WorkflowRow, Rights]] = []
+    if workflow_id is not None:
+        workflow, _, rights = await _load(session, env, workflow_id)
+        found.append((workflow, rights))
+    else:
+        for workflow in await store.list_workflows(session, tenant_id=env.who.tenant_id):
+            access = await store.list_access(
+                session, tenant_id=workflow.tenant_id, workflow_id=workflow.id
+            )
+            rights = rights_of(workflow, access, env.who)
+            if rights.view:
+                found.append((workflow, rights))
+    return _scope_of(env, found), {w.id: w.name for w, _ in found}
+
+
+def _scope_of(env: Env, found: Sequence[tuple[WorkflowRow, Rights]]) -> reads.RunScope:
+    whole = frozenset(w.id for w, r in found if r.sees_run(own=False))
+    own_only = frozenset(w.id for w, r in found if r.view and w.id not in whole)
+    return reads.RunScope(env.who.account_id, whole, own_only)
+
+
+async def runs_page(
+    env: Env,
+    workflow_id: uuid.UUID | None = None,
+    *,
+    limit: int = 100,
+    before: Cursor | None = None,
+) -> Page[run_views.RunSummary]:
+    """The runs the caller may see, newest first: `limit` of them after the cursor `before`,
+    and the cursor of the next page when more follow."""
+    async with env.sm() as session:
+        scope, names = await run_scope(session, env, workflow_id)
+        found = await reads.list_runs(
+            session,
+            tenant_id=env.who.tenant_id,
+            scope=scope,
+            workflow_id=workflow_id,
+            before=before,
+            limit=limit + 1,
+        )
+        kept = found[:limit]
+        more = (kept[-1].created_at, kept[-1].id) if len(found) > limit else None
+        return Page(await run_views.summaries(session, kept, names), more)
+
+
 async def list_runs(
     env: Env, workflow_id: uuid.UUID | None = None, *, limit: int = 100
 ) -> list[run_views.RunSummary]:
-    async with env.sm() as session:
-        if workflow_id is not None:
-            _, _, _ = await _load(session, env, workflow_id)
-        found = await reads.list_runs(
-            session, tenant_id=env.who.tenant_id, workflow_id=workflow_id, limit=limit
-        )
-        known: dict[uuid.UUID, tuple[WorkflowRow, Rights]] = {}
-        kept: list[RunRow] = []
-        for run in found:
-            if run.workflow_id not in known:
-                try:
-                    workflow, _, rights = await _load(session, env, run.workflow_id)
-                except NotFound:
-                    continue
-                known[run.workflow_id] = (workflow, rights)
-            if known[run.workflow_id][1].sees_run(
-                own=run_views.started_by_me(run, env.who.account_id)
-            ):
-                kept.append(run)
-        return await run_views.summaries(session, kept, {i: w.name for i, (w, _) in known.items()})
+    return (await runs_page(env, workflow_id, limit=limit)).rows
 
 
 async def runs_view(
@@ -922,14 +954,12 @@ async def runs_view(
                 session,
                 tenant_id=workflow.tenant_id,
                 workflow_id=workflow.id,
+                scope=_scope_of(env, [(workflow, rights)]),
                 month=month if view == "calendar" else None,
                 date_field=date_field,
             )
         )
-        kept = [
-            r for r in found if rights.sees_run(own=run_views.started_by_me(r, env.who.account_id))
-        ]
-        cards = await run_views.run_cards(session, kept, {workflow.id: workflow.name}, date_field)
+        cards = await run_views.run_cards(session, found, {workflow.id: workflow.name}, date_field)
         if view == "board":
             return run_views.board_of(cards, board.stages_of(live) if live else [])
         return run_views.Calendar(month=month, cards=cards)
