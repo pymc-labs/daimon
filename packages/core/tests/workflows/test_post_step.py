@@ -5,12 +5,13 @@ from __future__ import annotations
 import ast
 import uuid
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from daimon.core._models import WorkflowDelivery
-from daimon.core.delivery import DeliveryOutcome, JobPoster, poll_once
+from daimon.core.delivery import DeliveryOutcome, JobPoster, poll_once, sent_first
 from daimon.core.stores import accounts, tenants
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.workflow_deliveries import DeliveryRow
@@ -235,3 +236,43 @@ def test_every_workflow_post_goes_through_queue_post() -> None:
     assert writers == _WRITERS, "a workflow post written outside queue_post"
     for key in _VIA_QUEUE_POST:
         assert _calls(funcs[key]) & {"queue_post", "queue_deliver"}, key
+
+
+async def test_a_post_none_of_which_went_retries_and_goes_on_the_next_attempt(
+    db_session: AsyncSession,
+) -> None:
+    """A failed first send (a chat API's 5xx) sent nothing, so the step's `retry` sends the
+    same post again."""
+    nodes = _post("home")
+    nodes["p"]["retry"] = {"attempts": 2}
+    world = await _world(db_session, nodes, "p")
+    run = await world.run(inputs={"n": 3})
+    await _post_step(world, run.id, "p")
+    tries: list[uuid.UUID] = []
+
+    async def routine(row: RoutineRow) -> DeliveryOutcome:
+        raise AssertionError("no routine is due")
+
+    async def flaky(row: DeliveryRow) -> DeliveryOutcome:
+        async def send() -> str:
+            raise RuntimeError("503")
+
+        tries.append(row.id)
+        if len(tries) == 1:
+            await sent_first(send(), first=True)
+        return DeliveryOutcome(status="delivered", placed={"channel": "C0HOME", "message": "1"})
+
+    poster = JobPoster(routine, flaky)
+    await poll_once(world.sm, platform="slack", post=poster, now=NOW)
+    await runs.sync_children(world.sm, world.settings, now=NOW)
+    step = (await world.steps(run.id))["p"]
+    assert (step.status, step.error_message) == ("ready", "The post did not go."), step
+    later = NOW + timedelta(minutes=1)
+    claimed = await world.claim(run.id, "p", later)
+    executors: dict[str, runs.StepExecutor] = {"post": PostStepExecutor(world.sm, lambda: later)}
+    await runs.execute(world.sm, world.settings, executors, claimed, clock=lambda: later)
+    await poll_once(world.sm, platform="slack", post=poster, now=later)
+    await runs.sync_children(world.sm, world.settings, now=later)
+    assert len(tries) == 2 and tries[0] == tries[1], f"the same post goes again: {tries}"
+    assert (await world.get(run.id)).status == "succeeded", "the second attempt posts"
+    await world.verified(run.id)

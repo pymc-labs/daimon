@@ -3,7 +3,8 @@
 The post goes through `delivery.queue_deliver`, as a Finish's does, so a test run posts to
 its tester only. The step waits as `event` until `runs.sync_children` settles it from the
 post: where it landed (`{status, channel, thread, message, link}`), or a failure naming why
-it did not go. A step claimed again (a lost worker) waits on the post it already queued.
+it did not go. A step claimed again (a lost worker) waits on the post it already queued; a
+retry after a post none of which landed sends that post again.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from daimon.core.delivery import NOT_SENT
 from daimon.core.stores import workflow_deliveries, workflows
 from daimon.core.workflows import delivery, engine
 from daimon.core.workflows.expressions import ExpressionError
@@ -30,6 +32,8 @@ class PostStepExecutor:
         async with self.sm.begin() as session:
             queued = await workflow_deliveries.post_of_step(session, work.step.id)
             if queued is not None:
+                # A retry after a post none of which went sends it again.
+                await workflow_deliveries.requeue_delivery(session, queued.id, note=NOT_SENT)
                 return Posted(queued.id)
             workflow = await workflows.get_workflow(
                 session, tenant_id=work.run.tenant_id, workflow_id=work.run.workflow_id

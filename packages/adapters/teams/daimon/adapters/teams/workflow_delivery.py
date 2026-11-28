@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from typing import Final
 
 import httpx
 from anthropic import AsyncAnthropic
@@ -30,7 +31,14 @@ from daimon.adapters.teams.direct_chats import DirectChats
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS
 from daimon.adapters.teams.workflow_asks import ask_card
 from daimon.core.config import Settings
-from daimon.core.delivery import DeliveryOutcome, WorkflowPoster, files_envelope, job_payload
+from daimon.core.delivery import (
+    DeliveryOutcome,
+    NothingPosted,
+    WorkflowPoster,
+    files_envelope,
+    job_payload,
+    sent_first,
+)
 from daimon.core.message_split import split_fenced
 from daimon.core.routine_delivery import resolve_post_identity
 from daimon.core.routine_files import unsupported_files_note
@@ -51,6 +59,9 @@ from microsoft_teams.api import MessageActivityInput
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = ["make_teams_workflow_poster"]
+
+#: Statuses that mean the conversation refuses the post, not that it failed for now.
+_GONE: Final = (400, 403, 404)
 
 
 def _skipped(note: str) -> DeliveryOutcome:
@@ -169,9 +180,9 @@ def make_teams_workflow_poster(
                 conversation = await titled_thread(
                     sessionmaker, cleared, platform="teams", create=create
                 )
-            posted = [
-                await teams.post(conversation, chunk) for chunk in (chunks[:-1] if ask else chunks)
-            ]
+            posted: list[str] = []
+            for chunk in chunks[:-1] if ask else chunks:
+                posted.append(await sent_first(teams.post(conversation, chunk), first=not posted))
             if ask is None and posted:
                 channel, _, thread = conversation.partition(";messageid=")
                 return DeliveryOutcome(
@@ -186,7 +197,7 @@ def make_teams_workflow_poster(
                 )
             if ask is not None:
                 card = MessageActivityInput().add_card(ask_card(chunks[-1], ask))
-                sent = await teams.post_card(conversation, card)
+                sent = await sent_first(teams.post_card(conversation, card), first=not posted)
                 root = ";messageid=" not in conversation and cleared.dm_to is None
                 thread = f"{conversation};messageid={sent}" if root else None
                 async with sessionmaker.begin() as session:
@@ -200,8 +211,9 @@ def make_teams_workflow_poster(
                         message_id=sent,
                         at=datetime.now(UTC),
                     )
-        except httpx.HTTPStatusError as err:
-            if err.response.status_code in (400, 403, 404):
+        except (httpx.HTTPStatusError, NothingPosted) as err:
+            cause = err.__cause__ if isinstance(err, NothingPosted) else err
+            if isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code in _GONE:
                 return _skipped("destination_unavailable")
             raise
         return DeliveryOutcome(status="delivered")

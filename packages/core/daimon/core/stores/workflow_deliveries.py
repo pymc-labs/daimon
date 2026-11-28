@@ -169,6 +169,21 @@ async def settle_delivery(
     return None if orm is None else DeliveryRow.model_validate(orm)
 
 
+async def requeue_delivery(session: AsyncSession, delivery_id: uuid.UUID, *, note: str) -> bool:
+    """A failed delivery whose `note` says none of it went is pending again; False otherwise."""
+    done = await session.scalar(
+        update(WorkflowDelivery)
+        .where(
+            WorkflowDelivery.id == delivery_id,
+            WorkflowDelivery.status == "failed",
+            WorkflowDelivery.note == note,
+        )
+        .values(status="pending", note=None)
+        .returning(WorkflowDelivery.id)
+    )
+    return done is not None
+
+
 async def deliveries_of_wait(session: AsyncSession, wait_id: uuid.UUID) -> list[DeliveryRow]:
     """A wait's asks, reminders, updates and notice, oldest first."""
     found = await session.scalars(

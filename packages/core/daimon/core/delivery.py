@@ -44,12 +44,14 @@ __all__ = [
     "DELIVERY_POLL_INTERVAL_S",
     "DeliveryOutcome",
     "JobPoster",
+    "NothingPosted",
     "RoutinePoster",
     "WorkflowPoster",
     "files_envelope",
     "job_payload",
     "poll_once",
     "run_poller",
+    "sent_first",
 ]
 
 log = structlog.get_logger(__name__)
@@ -59,6 +61,8 @@ DELIVERY_POLL_INTERVAL_S: Final[float] = 15.0
 #: How often run cards are looked at; each is edited at most every `chat_cards.EDIT_EVERY`.
 RUN_CARD_INTERVAL_S: Final[float] = 3.0
 FILES_FAILED: Final[str] = "File delivery failed or was interrupted; it will not be retried."
+#: The note of a post whose first send failed: none of it landed, so a post step may retry.
+NOT_SENT: Final[str] = "post_not_sent"
 
 #: Skip notes that mean a rule refused the post, recorded `refused` on a workflow post.
 REFUSALS: Final[frozenset[str]] = frozenset(
@@ -86,6 +90,20 @@ _POST_FAILURE_NOTES: Final[frozenset[str]] = frozenset(
         "The server access settings could not be read.",
     }
 )
+
+
+class NothingPosted(Exception):
+    """A post's first send failed, so none of it landed (`sent_first`)."""
+
+
+async def sent_first[T](send: Awaitable[T], *, first: bool) -> T:
+    """Await one send of a post; when it is the post's first, a failure is `NothingPosted`."""
+    try:
+        return await send
+    except Exception as err:  # re-raised: only which failure it is changes
+        if first:
+            raise NothingPosted(type(err).__name__) from err
+        raise
 
 
 @dataclass(frozen=True)
@@ -177,7 +195,7 @@ def _settled_status(outcome: DeliveryOutcome) -> SettledStatus:
         return "sent"
     if outcome.note in REFUSALS:
         return "refused"
-    return "failed" if outcome.note in ("post_failed", FILES_FAILED) else "skipped"
+    return "failed" if outcome.note in ("post_failed", FILES_FAILED, NOT_SENT) else "skipped"
 
 
 async def _settle(
@@ -273,9 +291,10 @@ async def poll_once(
                 )
                 if job.routine_result:
                     _report_routine_failed(sessionmaker, job, platform, type(err).__name__)
-                outcome = DeliveryOutcome(
-                    status="skipped", note=FILES_FAILED if payload.files else "post_failed"
-                )
+                note = FILES_FAILED if payload.files else "post_failed"
+                if isinstance(err, NothingPosted):
+                    note = NOT_SENT
+                outcome = DeliveryOutcome(status="skipped", note=note)
         async with sessionmaker() as session, session.begin():
             settled = await _settle(
                 session,

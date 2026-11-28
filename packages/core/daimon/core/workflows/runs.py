@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Final, Literal, Protocol
 
+from daimon.core import delivery as delivery_loop
 from daimon.core.config import Settings
 from daimon.core.lead_intake_execution import lane_grant
 from daimon.core.stores import (
@@ -1370,19 +1371,21 @@ async def _retry_later(
     delay: timedelta,
     message: str,
     error_class: str | None = None,
+    before: Sequence[Event] = (),
 ) -> None:
     write: StepWrite = {
         "status": "ready",
         "ready_at": now + delay,
         "lease_owner": None,
         "lease_expires_at": None,
+        "waiting_reason": None,
         "error_message": _cut(message),
     }
     data: dict[str, JsonValue] = {"after_s": int(delay.total_seconds()), "message": _cut(message)}
     if error_class:
         data["error_class"] = error_class
     event = Event("step.retry_scheduled", key_of(step), data)
-    await _write_step(session, loaded, step, write, [event], now=now)
+    await _write_step(session, loaded, step, write, [*before, event], now=now)
 
 
 async def _block(
@@ -1748,19 +1751,36 @@ async def settle_from_post(
             outcome = engine.Succeeded({"status": "skipped"}, summary="Nothing to post")
         else:
             why = _NOT_POSTED.get(post.note or "", "The post did not go.")
-            outcome = engine.Failed("fatal", why, reason=post.note or post.status)
-        failed = isinstance(outcome, engine.Failed)
+            # Nothing of it landed: the step's retry may send it again.
+            kind = "retryable" if post.note == delivery_loop.NOT_SENT else "fatal"
+            outcome = engine.Failed(kind, why, reason=post.note or post.status)
+        failed = outcome if isinstance(outcome, engine.Failed) else None
         await workflow_runs.finish_attempt(
             session,
             step_id=step_id,
             status="failed" if failed else "succeeded",
             now=now,
-            error_class="fatal" if failed else None,
-            error_message=outcome.message if isinstance(outcome, engine.Failed) else None,
+            error_class=failed and failed.error_class,
+            error_message=failed and failed.message,
         )
         data: dict[str, JsonValue] = {"decision": post.status, "post": str(post.id)}
         event = Event("wait.decided", key_of(step), data)
         loaded = await _load(session, settings, run, now)
+        attempts = await workflow_runs.list_attempts(session, step_id)
+        number = attempts[-1].number if attempts else 1
+        delay = engine.retry_delay_s(node_of(loaded.spec, step), number, outcome)
+        if failed and delay is not None:
+            await _retry_later(
+                session,
+                loaded,
+                step,
+                now=now,
+                delay=timedelta(seconds=delay),
+                message=failed.message,
+                error_class=failed.error_class,
+                before=[event],
+            )
+            return True
         await _resolve(session, loaded, step, outcome, now=now, before=[event])
         return True
 

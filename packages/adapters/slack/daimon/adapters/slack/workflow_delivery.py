@@ -26,7 +26,13 @@ from daimon.adapters.slack.routine_delivery import destination_refusal
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.adapters.slack.workflow_asks import ask_blocks
 from daimon.adapters.slack.workflow_cards import permalink, web_at
-from daimon.core.delivery import DeliveryOutcome, WorkflowPoster, files_envelope, job_payload
+from daimon.core.delivery import (
+    DeliveryOutcome,
+    WorkflowPoster,
+    files_envelope,
+    job_payload,
+    sent_first,
+)
 from daimon.core.message_split import split_fenced
 from daimon.core.routine_delivery import DeliveryTarget, resolve_post_identity
 from daimon.core.routine_files import deliver_routine_files
@@ -145,10 +151,15 @@ def make_slack_workflow_poster(runtime: SlackRuntime) -> WorkflowPoster:
         first: str | None = None
         for index, chunk in enumerate(chunks):
             if ask is None or index < len(chunks) - 1:
-                sent = await post_as_agent(client, identity, text=chunk, **place)
+                sent = await sent_first(
+                    post_as_agent(client, identity, text=chunk, **place), first=not index
+                )
                 first = first or str(sent.get("ts"))  # pyright: ignore[reportUnknownMemberType]
                 continue
-            sent = await client.chat_postMessage(text=chunk, blocks=ask_blocks(chunk, ask), **place)  # pyright: ignore[reportUnknownMemberType]
+            sent = await sent_first(
+                client.chat_postMessage(text=chunk, blocks=ask_blocks(chunk, ask), **place),  # pyright: ignore[reportUnknownMemberType]
+                first=not index,
+            )
             ts = str(sent.get("ts"))  # pyright: ignore[reportUnknownMemberType]
             async with runtime.sessionmaker.begin() as session:
                 await asks.record_post(

@@ -141,6 +141,8 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
     + "test_ingress.py::test_a_signed_delivery_starts_a_run_with_mapped_inputs_once",
     "A repeat is recognised for 30 days": _W
     + "test_ingress.py::test_a_replayed_github_body_is_a_duplicate_even_past_retention",
+    "fails before any of it": _P
+    + "test_a_post_none_of_which_went_retries_and_goes_on_the_next_attempt",
     "test URL": _W
     + "test_ingress.py::test_a_listening_test_url_captures_one_delivery_as_a_test_run",
     "step asks people": (

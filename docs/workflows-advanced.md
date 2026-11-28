@@ -22,7 +22,8 @@ nodes:
 
 A templated target must be one of the spec's `destinations`, a thread under a listed
 channel, the run's `origin`, or a thread this run opened. Anything else is refused and
-the step fails. A test run posts to the tester only.
+the step fails. A test run posts to the tester only. A post that fails before any of it
+lands is sent again under the step's `retry`.
 
 `thread` finds the thread with exactly that title under a channel, or creates it. A
 post step can run inside a For each, once per item. Its output holds the `status`,

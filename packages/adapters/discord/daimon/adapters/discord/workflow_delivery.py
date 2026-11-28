@@ -29,7 +29,13 @@ from daimon.adapters.discord.routine_delivery import (
 )
 from daimon.adapters.discord.workflow_asks import ask_view
 from daimon.core.config import Settings
-from daimon.core.delivery import DeliveryOutcome, WorkflowPoster, files_envelope, job_payload
+from daimon.core.delivery import (
+    DeliveryOutcome,
+    WorkflowPoster,
+    files_envelope,
+    job_payload,
+    sent_first,
+)
 from daimon.core.membership import MembershipResolver
 from daimon.core.message_split import split_fenced
 from daimon.core.output_delivery import DeliverableFile
@@ -265,10 +271,15 @@ def make_discord_workflow_poster(
                 return _skipped(refused)
             last = index == len(chunks) - 1
             if ask is not None and last:
-                sent = await channel.send(content=chunk, allowed_mentions=pings, view=ask_view(ask))
+                sent = await sent_first(
+                    channel.send(content=chunk, allowed_mentions=pings, view=ask_view(ask)),
+                    first=not index,
+                )
                 await recorded(row, post, sent, ask)
             else:
-                sent = await voice.send(content=chunk, allowed_mentions=pings)
+                sent = await sent_first(
+                    voice.send(content=chunk, allowed_mentions=pings), first=not index
+                )
             first = first or sent
         done = DeliveryOutcome(
             status="delivered", placed=None if first is None else _placed(first, opened)
