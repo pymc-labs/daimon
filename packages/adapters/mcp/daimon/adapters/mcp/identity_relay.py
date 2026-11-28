@@ -1024,9 +1024,12 @@ def build_identity_relay_route(
                 ),
                 routine_name=signed_routine.name if signed_routine is not None else None,
                 **(_workflow_claims(signed_step, platform, workspace) if signed_step else {}),
-                # A channel or thread routine's owner, for what the run makes for them.
-                routine_owner=signed_routine.created_by_user_id
-                if signed_routine is not None and room != "dm"
+                # A channel or thread routine's owner (a step's run-as person), for what
+                # the run makes for them.
+                routine_owner=(
+                    signed_routine or (signed_step and signed_step.subject)
+                ).created_by_user_id
+                if (signed_routine is not None or signed_step is not None) and room != "dm"
                 else None,
             )
             headers["authorization"] = f"Bearer {tokens.token(identity, now=now)}"

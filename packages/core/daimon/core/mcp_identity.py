@@ -530,7 +530,8 @@ def caller_claims(
 
     `rev` and `routine_name` come only with `routine` (`routine_revision`). `workflow`,
     `workflow_rev` and `workflow_name` name an agent step's workflow by the same rules.
-    `routine_owner`, a channel or thread routine's owner, is signed as `owner`: who
+    `routine_owner`, a channel or thread routine's owner (a step's run-as person), is
+    signed as `owner`: who
     receives a file the run makes for its owner. It never makes the owner the person
     asking; a DM routine's owner is already `sub`.
     """
@@ -540,8 +541,6 @@ def caller_claims(
         raise ValueError("a workflow's revision and name come only with its workflow")
     if workflow_rev is not None and not re.fullmatch(r"[0-9a-f]{64}", workflow_rev):
         raise ValueError("a workflow's revision is a SHA-256 hex digest")
-    if workflow is not None and routine_owner is not None:
-        raise ValueError("an owner claim comes only with a channel or thread routine")
     if workflow is not None:
         rev, routine_name, routine = workflow_rev, workflow_name, workflow
     # A routine or a watch report posting to its owner's DM: the owner is the person.

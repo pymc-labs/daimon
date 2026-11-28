@@ -18,7 +18,7 @@ from daimon.testing.workflows import World, make_world
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .test_identity_relay import OWNER, SERVER, _Person, _token, _tool_call
-from .test_identity_relay_room import _facts, _signed
+from .test_identity_relay_room import _facts, _signed, _sql
 
 DM_SERVER = SERVER.model_copy(
     update={"routine_claims": True, "dm_routine_claims": True, "requester_meta": True}
@@ -65,9 +65,17 @@ async def test_a_step_at_a_channel_signs_its_workflow_as_the_routine_there_would
         )  # fmt: skip
     await _facts(sm, person, {"555": RoomFacts(contained=False, narrow=False)})
     body = _tool_call(requester_platform_user_id="666", requester_kind="person")
+    fire = uuid.uuid4()
+    await _sql(
+        sm,
+        "INSERT INTO lead_intake_executions (tenant_id, id, routine_id, expires_at)"
+        " VALUES (:tenant, :id, :routine, now() + interval '5 minutes')",
+        tenant=world.tenant_id, id=fire, routine=row.id,
+    )  # fmt: skip
     routine = RelayBinding(
-        "helper", routine_id=row.id, owner=OWNER, destination=routine_destination_key(row)
-    )
+        "helper", routine_id=row.id, owner=OWNER, destination=routine_destination_key(row),
+        execution=fire,
+    )  # fmt: skip
     claims, stamp = await _signed(sm, await _token(sm, person, routine), DM_SERVER, body)
     step = RelayBinding("helper", workflow_run_id=run_id, owner=OWNER)
     as_step = await _signed(sm, await _token(sm, person, step), DM_SERVER, body)
@@ -81,6 +89,7 @@ async def test_a_step_at_a_channel_signs_its_workflow_as_the_routine_there_would
     }
     unnamed = {k: v for k, v in claims.items() if k not in ("routine", "rev", "routine_name")}
     assert claims["room"] == "team" and claims["routine"] == str(row.id), claims
+    assert claims["owner"] == f"discord:{OWNER}", "the run-as person, as a routine's owner"
     assert as_step == ({**unnamed, **named}, stamp), "the routine's room and stamp, its workflow"
 
 
