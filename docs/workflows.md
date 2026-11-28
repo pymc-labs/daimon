@@ -164,7 +164,8 @@ carries over to later versions.
 You can cancel a run, retry it from the step that failed, or rerun it from any
 step with the earlier results reused. Runs past a workflow's active limit queue.
 A run ends when it passes its deadline or spends its budget.
-A run Daimon cannot read is left for a later check, and other runs go on.
+An error Daimon cannot get past fails that run on its own, and other runs go on.
+A run Daimon cannot read is left for a later check.
 <!-- knowledge: web -->
 The web app lists runs and inbox items a page at a time, newest first, and shows each
 person only their own.

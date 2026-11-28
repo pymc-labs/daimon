@@ -13,7 +13,7 @@ from daimon.adapters.scheduler import workflows as loops_module
 from daimon.adapters.scheduler.workflows import WorkflowEngine, run_once
 from daimon.adapters.scheduler.workflows.loops import polls_step, steps_step
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
-from daimon.core.stores import tenants, workflow_runs, workflows
+from daimon.core.stores import tenants, workflow_runs, workflow_waits, workflows
 from daimon.core.stores.workflow_run_events import list_events
 from daimon.core.workflows import endings, engine, gate, polls, runs
 from daimon.core.workflows.ledger import verify
@@ -216,6 +216,54 @@ async def test_a_run_whose_spec_no_longer_reads_is_left_and_the_others_go_on(
         failed = await workflow_runs.get_run(session, broken)
         done = await workflow_runs.get_run(session, healthy)
     assert failed is not None and failed.status == "running", "the run is not failed for it"
+    assert done is not None and done.status == "succeeded", "the other run finished"
+
+
+@pytest.mark.parametrize("error", [RuntimeError("executor bug"), LookupError("gone")])
+async def test_a_run_whose_item_raises_fails_alone_and_closes_its_asks(
+    db_session: AsyncSession, error: Exception, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An error Daimon cannot get past fails that run (`engine_error`), closes its asks and
+    leaves its ledger intact; a healthy run in the same tick still finishes."""
+    sm, settings, broken = await _started(db_session)
+    _, _, healthy = await _started(db_session)
+    async with sm.begin() as session:
+        step = (await workflow_runs.list_steps(session, broken))[0]
+        wait = await workflow_runs.open_wait(
+            session,
+            tenant_id=step.tenant_id,
+            run_id=broken,
+            step_id=step.id,
+            kind="approval",
+            expires_at=NOW + timedelta(days=1),
+            remind_at=None,
+            now=NOW,
+            addressees=["owner"],
+        )
+
+    claim = runs.claim
+
+    async def claim_or_raise(*args: Any, step_id: uuid.UUID, **kwargs: Any) -> runs.Claimed | None:
+        if step_id == step.id:  # outside the executor, whose own errors fail only its step
+            raise error
+        return await claim(*args, step_id=step_id, **kwargs)
+
+    async def agent(work: runs.StepWork) -> engine.Outcome:
+        return engine.Succeeded({"n": 3})
+
+    monkeypatch.setattr(runs, "claim", claim_or_raise)
+    await run_once(WorkflowEngine(sm, settings, {"agent": agent}, owner="w1", clock=lambda: NOW))
+    async with sm() as session:
+        failed = await workflow_runs.get_run(session, broken)
+        done = await workflow_runs.get_run(session, healthy)
+        steps = await workflow_runs.list_steps(session, broken)
+        events = await list_events(session, broken)
+        asked = await workflow_waits.waits_by_id(session, [wait.id])
+    assert failed is not None and failed.status == "failed", failed
+    assert failed.failure_reason == "engine_error", "the run says why it stopped"
+    assert asked[wait.id].status == "cancelled", "its ask is closed"
+    assert all(s.status == "cancelled" for s in steps), "its steps end with it"
+    assert verify(broken, events).ok, "its ledger still verifies"
     assert done is not None and done.status == "succeeded", "the other run finished"
 
 
