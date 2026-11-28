@@ -296,12 +296,14 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
             headers={"Content-Disposition": disposition, "X-Content-Type-Options": "nosniff"},
         )
 
-    wakeups = RunWakeups(runtime.sessionmaker.kw.get("bind"))
+    @functools.cache
+    def wakeups() -> RunWakeups:  # built on first use: the route table is read without a runtime
+        return RunWakeups(runtime.sessionmaker.kw.get("bind"))
 
     async def frames(
         env: Env, run_id: uuid.UUID, after: int, first: list[run_views.RunEvent], ended: bool
     ) -> AsyncIterator[str]:
-        async with wakeups.watch(env.who.tenant_id, run_id) as woke:
+        async with wakeups().watch(env.who.tenant_id, run_id) as woke:
             quiet = 0
             events = first
             while True:
@@ -326,7 +328,7 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
     async def stream(run_id: uuid.UUID, request: Request, caller: Viewer) -> StreamingResponse:  # pyright: ignore[reportUnusedFunction]
         """The ledger after `Last-Event-ID` (a sequence number), then live until the run ends."""
         env = await env_of(caller)
-        if wakeups.full:
+        if wakeups().full:
             raise HTTPException(status_code=429, detail="Too many open run pages.")
         raw = request.headers.get("last-event-id", "0")
         after = int(raw) if raw.isdigit() else 0
