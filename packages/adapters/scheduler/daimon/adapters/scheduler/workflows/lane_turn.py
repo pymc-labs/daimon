@@ -198,9 +198,9 @@ class HeadlessLaneTurn:
     async def admit(self, work: StepWork) -> StepPlace | engine.Failed:
         """The step's place as the run-as person, decided as a routine fire's is.
 
-        A run-as person with no chat identity here has no place to be checked at: their
-        step runs privately, and one with an `at` fails. A test run works there as the
-        tester and never posts itself.
+        A run-as person with no chat identity here can't be checked, so the step fails; a
+        step with no `at` is checked at home. A test run works there as the tester and
+        never posts itself.
         """
         node, run = work.node, work.run
         assert isinstance(node, AgentNode), "a lane runs agent steps"
@@ -211,8 +211,6 @@ class HeadlessLaneTurn:
         bare = StepPlace(where, agent_id=agent_id, environment_id=environment_id)
         person = await self._run_as(work)
         if workflow is None or person is None:
-            if node.at is None:
-                return replace(bare, sandbox=await self._sandbox(work, bare))
             return engine.Failed(
                 "gate", "The person this workflow runs as isn't linked here.", "run_as_unlinked"
             )

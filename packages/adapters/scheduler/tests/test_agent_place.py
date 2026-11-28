@@ -19,7 +19,7 @@ from daimon.adapters.scheduler.workflows import (
     lane_turn,
     run_once,
 )
-from daimon.core.access_policy import AgentRule, TenantAccessPolicy
+from daimon.core.access_policy import AgentRule, ChannelRule, TenantAccessPolicy
 from daimon.core.channel_backend import channel_ref
 from daimon.core.fire import admit, run
 from daimon.core.fire.run import FireDeps, fire_turn
@@ -209,6 +209,32 @@ async def test_dm_routine_runs_headless_private(
     assert not isinstance(place, engine.Failed), place
     assert (place.where, place.may_post, place.dm_channel) == (None, False, "777")
     assert place.admitted is not None and place.admitted.channel_id is None, "admitted unplaced"
+
+
+PRIVATE = {
+    "a": {"kind": "agent", "agent": "helper", "instructions": "go", "memory": "personal",
+          "next": "f"},
+    "f": {"kind": "finish"},
+}  # fmt: skip
+
+
+async def test_a_step_with_no_place_is_admitted_at_home(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checked as a routine at home would be (home sealed since the run started); an
+    unlinked run-as person can't be checked."""
+    world = await _world(db_session, PRIVATE)
+    work = await _work(world)
+    sealed = TenantAccessPolicy(channel_rules={HOME: ChannelRule(readers="own", writers="own")})
+    async with world.sm.begin() as s:
+        await set_access_policy(s, tenant_id=world.tenant_id, policy=sealed)
+    ran = SimpleNamespace(name="helper", metadata={})
+    monkeypatch.setattr(lane_turn, "retrieve_agent", AsyncMock(return_value=ran))
+    got = await _lane(world, monkeypatch, None).admit(work)
+    assert isinstance(got, engine.Failed) and got.error_class == "gate", got
+    unlinked = await make_world(db_session, PRIVATE, "a", home=HOME, workspace_id="guild-2")
+    got = await _lane(unlinked, monkeypatch, None).admit(await _work(unlinked))
+    assert isinstance(got, engine.Failed) and got.reason == "run_as_unlinked", got
 
 
 async def _allow(_call: ToolCall) -> ToolConfirmationResult:

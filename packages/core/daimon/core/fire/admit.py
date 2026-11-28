@@ -281,7 +281,7 @@ async def admit_place(facts: Subject, reads: AdmitReads) -> Verdict:
                 action=Action.RUN_AGENT,
                 surface=Surface.ROUTINE,
                 agent=AgentRef.of(facts.agent_name),
-                place=Place(channel_id=channel_id),
+                place=Place(channel_id=channel_id or facts.home_channel_id),
             )
             if initial.reason in ("runs_elsewhere", "invoker_not_allowed"):
                 error = (
@@ -331,7 +331,10 @@ def ran_agent_refusal(admitted: Admitted, facts: Subject, ran: AgentRef) -> Refu
         agent=ran,
         # A thread sits under its saved parent channel; one saved without it can't be
         # placed and fails closed while anything is isolated.
-        place=routine_destination_place(facts, channel_id=admitted.channel_id),
+        # A step with no place runs at its workflow's home.
+        place=routine_destination_place(
+            facts, channel_id=admitted.channel_id or facts.home_channel_id
+        ),
     )
     if decision.reason is None:
         return None
