@@ -20,6 +20,11 @@ GRANT_CHECKS = frozenset(
     {"sender_admits", "sender_admission", "require_dm_grant", "permits_dm", "lookup_dm_groups"}
 )
 
+WORKFLOW_DM = (
+    "a workflow's own post to the person it names (run-as, owner, an ask's addressee), not a DM "
+    "with an agent; core `clear_post` decides it"
+)
+
 # Modules that open a DM without a grant check of their own, and why.
 NO_GRANT_CHECK: dict[str, str] = {
     "adapters/teams/daimon/adapters/teams/private_replies.py": (
@@ -28,6 +33,9 @@ NO_GRANT_CHECK: dict[str, str] = {
     "adapters/discord/daimon/adapters/discord/commands/direct_messages.py": (
         "the person's own cold DM or `/dm-me`; core `start_cold_dm` and `start_dm` check the grant"
     ),
+    "adapters/discord/daimon/adapters/discord/workflow_delivery.py": WORKFLOW_DM,
+    "adapters/slack/daimon/adapters/slack/workflow_delivery.py": WORKFLOW_DM,
+    "adapters/teams/daimon/adapters/teams/workflow_delivery.py": WORKFLOW_DM,
     "adapters/mcp/daimon/adapters/mcp/tools/secret_shares.py": (
         "a share card, not a conversation: it goes to the asker or to whom an admin names, "
         "behind the Secret sharing feature"

@@ -1,0 +1,28 @@
+- **Workflows.** A workflow is a graph of steps that runs on its own: agents,
+  conditions, code, tool calls, questions to people and waits. Build one on a
+  canvas in the web app, from a starter or with Ask Daimon, then test and
+  publish it. Runs start by hand, on a schedule, from a signed webhook or after
+  another workflow. Approval steps ask people in chat by direct message or in a
+  thread, or in the web app's inbox. `/workflows` on Discord, Slack and Teams
+  lists them, and chat cards publish, run and follow runs. Admins can move
+  routines to workflows and back, and `daimon workflows` lists, exports, imports
+  and controls them. Steps can post to chat in titled threads, and runs can
+  start from a chat mention or from new rows a tool returns. A workflow can save
+  state for later runs, run every few weeks or once at a set time, wait in
+  business days, and show its runs on a board or calendar. A step can make a
+  write with nobody watching when its arguments fit a stated scope. Workflows,
+  their pages, mentions (`workflow_mentions`) and polls (`workflow_polls`) are
+  on; webhooks, code steps and scoped writes (`workflow_scoped_writes`) stay off
+  until an admin turns them on. Agent steps run on OpenAI and Gemini as well as
+  Anthropic; on OpenAI a step needs built-in tools on. Discord, Slack and Teams
+  can build a workflow with the agent. An agent step can work in a
+  channel or thread, take the run's person's personal memory, write as the
+  server allows (`writes: policy`) and end quietly. A post can go out as an
+  agent, and on Teams it starts with the agent's name when agent identity is
+  on. Routines still work but are marked Legacy, and every routines list
+  offers an admin "Move to a workflow". A moved routine becomes an agent step,
+  with a post for its result, its pending post, owner notice, settings and
+  intake binding; `daimon routines translate --dry-run` checks every routine.
+  Servers that approved a routine by its identity claims approve the moved
+  workflow again. See [Workflows](docs/workflows.md) and
+  [Advanced workflows](docs/workflows-advanced.md).

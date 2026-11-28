@@ -146,6 +146,7 @@
                 "agents",
                 "channels",
                 "routines",
+                "workflows",
                 "credits",
                 "integrations"
               ]

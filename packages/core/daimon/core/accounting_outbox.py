@@ -29,6 +29,7 @@ from daimon.core.stores import (
     tenant_ledger,
     usage_events,
     web_search_usage,
+    workflow_runs,
 )
 from daimon.core.tenant_balance import debit_amount
 from daimon.core.usage_recording import TurnLedgerReason
@@ -204,6 +205,10 @@ async def apply_usage_outbox(
         if accounting_mode_for(observation.session.provider).settles_natively
         else current
     )
+    # A workflow step's provider session: its usage and spend belong to the run.
+    work = await workflow_runs.work_of_session(
+        session, tenant_id=tenant_id, session_id=observation.session.id, at=revisions.occurred_at
+    )
     await usage_events.project_revision(
         session,
         tenant_id=tenant_id,
@@ -216,6 +221,8 @@ async def apply_usage_outbox(
         else None,
         agent_id=agent_id,
         searches=searches,
+        workflow_run_id=work[0] if work else None,
+        workflow_step_id=work[1] if work else None,
     )
     amount = (
         exact_amount
@@ -255,6 +262,10 @@ async def apply_usage_outbox(
             and unreported_cache_writes(observation, provider_price)
             else None,
         )
+        if work is not None:
+            await workflow_runs.add_cost(
+                session, run_id=work[0], step_id=work[1], attempt_id=work[2], cost_usd=amount
+            )
     return True
 
 

@@ -1,4 +1,4 @@
-"""Slack's `RoutinePoster`: post a routine's result to its destination.
+"""Slack's `Poster`: post a routine's result (a `DeliveryJob`) to its destination.
 
 Run by the app's delivery poller (`daimon.core.routine_delivery`). The web
 client is built for the routine's own, live workspace (the tenant's team id),
@@ -19,7 +19,6 @@ allowed to invoke the agent gets nothing — no post and no direct message.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
 from typing import Any, cast
 
 import structlog
@@ -34,14 +33,16 @@ from daimon.adapters.slack.user_groups import user_group_lookup
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
 from daimon.core.config import DirectMessagePolicy, env_dm_policy
+from daimon.core.delivery import RoutinePoster
 from daimon.core.dm_access import sender_admits
+from daimon.core.fire.delivery import DeliveryJob, Poster, routine_poster
+from daimon.core.fire.subject import RoutineFacts
 from daimon.core.message_split import split_fenced
 from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.owner_notices import OwnerDm, OwnerNotice
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
     DeliveryTarget,
-    claim_still_current,
     clear_creator,
     delivery_target,
     render_fallback_dm,
@@ -53,17 +54,14 @@ from daimon.core.routine_delivery import (
 )
 from daimon.core.routine_destinations import slack_may_deliver
 from daimon.core.routine_files import deliver_routine_files, payload_for
-from daimon.core.routine_header import routine_header_shown
 from daimon.core.routine_hold import result_is_held
 from daimon.core.rule_views import keeps_routine_inside
-from daimon.core.stores.domain import RoutineRow
-from daimon.core.stores.routines import get_routine
 from daimon.core.stores.tenants import get_tenant
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-__all__ = ["make_slack_owner_dm", "make_slack_routine_poster"]
+__all__ = ["make_slack_owner_dm", "make_slack_poster", "make_slack_routine_poster"]
 
 log = structlog.get_logger(__name__)
 
@@ -78,7 +76,7 @@ _UNREACHABLE = frozenset({"user_not_found", "user_disabled", "account_inactive",
 
 async def _dm_fallback(
     client: AsyncWebClient,
-    row: RoutineRow,
+    job: DeliveryJob,
     reason: str,
     *,
     team_id: str,
@@ -87,7 +85,7 @@ async def _dm_fallback(
     may_post: Callable[[], Awaitable[bool]],
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> DeliveryOutcome:
-    creator = row.created_by_user_id
+    creator = job.created_by_user_id
     if creator is None or not policy.allows(creator):
         return DeliveryOutcome(status="skipped", note=reason)
     try:
@@ -107,9 +105,9 @@ async def _dm_fallback(
         text = escape_mrkdwn_preserving_mentions(
             await untag_opted_out(
                 sessionmaker,
-                tenant_id=row.tenant_id,
+                tenant_id=job.tenant_id,
                 platform="slack",
-                text=render_fallback_dm(row, reason, await routine_agent_name(sessionmaker, row)),
+                text=render_fallback_dm(job, reason, await routine_agent_name(sessionmaker, job)),
             )
         )
         for chunk in split_fenced(text, 11800, word_boundary=True):
@@ -122,18 +120,18 @@ async def _dm_fallback(
 
         await deliver_routine_files(
             output_client,
-            payload_for(row),
+            payload_for(job),
             max_bytes=SLACK_MAX_BYTES_PER_FILE,
             post=build_output_poster(client, channel_id=channel, thread_ts=None),
             notice=notice,
             may_post=may_post,
             sessions=sessionmaker,
-            tenant_id=row.tenant_id,
+            tenant_id=job.tenant_id,
         )
     except SlackApiError as err:
         log.warning(
             "routine.delivery_fallback_failed",
-            routine_id=str(row.id),
+            routine_id=str(job.id),
             error_type=type(err).__name__,
         )
         # A person gone or a DM Slack never allows repeats on every run: a skip, not a page.
@@ -158,8 +156,8 @@ async def _is_member(client: AsyncWebClient, *, channel_id: str, user_id: str) -
             return False
 
 
-async def _destination_refusal(
-    client: AsyncWebClient, row: RoutineRow, target: DeliveryTarget
+async def destination_refusal(
+    client: AsyncWebClient, creator: str | None, target: DeliveryTarget
 ) -> str | None:
     """Why the destination cannot take this post now, or None.
 
@@ -171,7 +169,6 @@ async def _destination_refusal(
     Slack accepts a missing `thread_ts` and posts at the channel root, so the
     ordinary `send_message` checks `conversations.replies` first, and so does this.
     """
-    creator = row.created_by_user_id
     if creator is None:
         return "creator_cannot_post"
     try:
@@ -218,7 +215,7 @@ async def _destination_refusal(
 def make_slack_owner_dm(runtime: SlackRuntime) -> OwnerDm:
     """DM a routine's owner its failure notice, under the rules of the result fallback DM."""
 
-    async def send(row: RoutineRow, notice: OwnerNotice) -> str | None:
+    async def send(row: RoutineFacts, notice: OwnerNotice) -> str | None:
         async with runtime.sessionmaker() as session:
             tenant = await get_tenant(session, row.tenant_id)
         client = (
@@ -267,69 +264,72 @@ def make_slack_owner_dm(runtime: SlackRuntime) -> OwnerDm:
     return send
 
 
-def make_slack_routine_poster(
-    runtime: SlackRuntime,
-) -> Callable[[RoutineRow], Awaitable[DeliveryOutcome]]:
-    async def _post(row: RoutineRow) -> DeliveryOutcome:
-        if row.destination_kind == "dm":
+def make_slack_routine_poster(runtime: SlackRuntime) -> RoutinePoster:
+    """The routine outbox's poster, over `make_slack_poster`."""
+    return routine_poster(
+        runtime.sessionmaker,
+        make_slack_poster(runtime),
+        platform="slack",
+        settings=runtime.settings,
+    )
+
+
+def make_slack_poster(runtime: SlackRuntime) -> Poster:
+    """Post a job to its channel or thread, else by DM to its owner where the rules allow."""
+
+    async def _post(job: DeliveryJob) -> DeliveryOutcome:
+        if job.destination_kind == "dm":
             return DeliveryOutcome(status="skipped", note="DM routines are not supported here.")
         async with runtime.sessionmaker() as session:
-            tenant = await get_tenant(session, row.tenant_id)
+            tenant = await get_tenant(session, job.tenant_id)
         if tenant is None or tenant.archived_at is not None:
             return DeliveryOutcome(status="skipped", note="tenant_archived")
         client = await resolve_web_client(runtime, team_id=tenant.external_id)
         if client is None:
             return DeliveryOutcome(status="skipped", note="tenant_archived")
-        dm_policy = env_dm_policy(runtime.settings.direct_message_policies, row.tenant_id)
+        dm_policy = env_dm_policy(runtime.settings.direct_message_policies, job.tenant_id)
         # Creator first, before resolving or sending anything: a creator who
         # may no longer invoke the agent, or an unreadable policy, gets
         # nothing — no destination post and no direct message.
-        cleared = await clear_creator(runtime.sessionmaker, row, platform="slack")
+        cleared = await clear_creator(runtime.sessionmaker, job, platform="slack")
         if not isinstance(cleared, TenantAccessPolicy):
-            log.info("routine.delivery_refused", routine_id=str(row.id), reason=cleared)
+            log.info("routine.delivery_refused", routine_id=str(job.id), reason=cleared)
             return DeliveryOutcome(status="skipped", note=cleared)
         # An isolated or shared channel's result never leaves it, not even by DM.
-        keep_inside = keeps_routine_inside(cleared, row) or await result_is_held(
-            runtime.sessionmaker, row, platform="slack"
+        keep_inside = keeps_routine_inside(cleared, job) or await result_is_held(
+            runtime.sessionmaker, job, platform="slack"
         )
 
         async def creator_current() -> bool:
-            async with runtime.sessionmaker() as session:
-                current = await get_routine(session, row.id, tenant_id=row.tenant_id)
-            if current is None or (current.destination_kind, current.destination_id) != (
-                row.destination_kind,
-                row.destination_id,
-            ):
-                return False
-            if not claim_still_current(current, row, datetime.now(UTC)):
+            if await job.still_current() is not None:
                 return False
             return isinstance(
-                await clear_creator(runtime.sessionmaker, row, platform="slack"), TenantAccessPolicy
+                await clear_creator(runtime.sessionmaker, job, platform="slack"), TenantAccessPolicy
             )
 
         async def fallback_guard() -> bool:
             if not await creator_current():
                 return False
-            if not await tenant_dm_still_open(runtime.sessionmaker, row, tenant.external_id):
+            if not await tenant_dm_still_open(runtime.sessionmaker, job, tenant.external_id):
                 return False
-            creator = row.created_by_user_id
+            creator = job.created_by_user_id
             current_dm_policy = env_dm_policy(
-                runtime.settings.direct_message_policies, row.tenant_id
+                runtime.settings.direct_message_policies, job.tenant_id
             )
             if creator is None or not current_dm_policy.allows(creator):
                 return False
             # The routine's agent grant must admit the creator; locks don't apply.
             if not await sender_admits(
                 runtime.sessionmaker,
-                tenant_id=row.tenant_id,
-                agent_name=row.agent_name,
+                tenant_id=job.tenant_id,
+                agent_name=job.agent_name,
                 user_id=creator,
                 groups=user_group_lookup(runtime, client, team_id=tenant.external_id),
             ):
                 return False
-            current_policy = await clear_creator(runtime.sessionmaker, row, platform="slack")
+            current_policy = await clear_creator(runtime.sessionmaker, job, platform="slack")
             if not isinstance(current_policy, TenantAccessPolicy) or keeps_routine_inside(
-                current_policy, row
+                current_policy, job
             ):
                 return False
             info = await client.users_info(user=creator)  # pyright: ignore[reportUnknownMemberType]
@@ -346,7 +346,7 @@ def make_slack_routine_poster(
                 return DeliveryOutcome(status="skipped", note=reason)
             return await _dm_fallback(
                 client,
-                row,
+                job,
                 reason,
                 team_id=tenant.external_id,
                 policy=dm_policy,
@@ -355,7 +355,7 @@ def make_slack_routine_poster(
                 sessionmaker=runtime.sessionmaker,
             )
 
-        target = delivery_target(row, platform="slack")
+        target = delivery_target(job, platform="slack")
         if target is None:
             return await fallback("destination_unavailable")
         if not authorize(
@@ -365,17 +365,17 @@ def make_slack_routine_poster(
             surface=Surface.ROUTINE,
             place=Place(channel_id=target.channel_id),
         ):
-            log.info("routine.delivery_refused", routine_id=str(row.id), reason="protected_channel")
+            log.info("routine.delivery_refused", routine_id=str(job.id), reason="protected_channel")
             return await fallback("protected_channel")
-        refusal = await _destination_refusal(client, row, target)
+        refusal = await destination_refusal(client, job.created_by_user_id, target)
         if refusal is not None:
-            log.info("routine.delivery_refused", routine_id=str(row.id), reason=refusal)
+            log.info("routine.delivery_refused", routine_id=str(job.id), reason=refusal)
             return await fallback(refusal)
         identity = await resolve_routine_identity(
             runtime.sessionmaker,
             runtime.anthropic,
             runtime.settings,
-            row=row,
+            row=job,
             platform="slack",
             workspace_id=tenant.external_id,
             default_agent_name=runtime.deployment_default.agent_name,
@@ -392,18 +392,16 @@ def make_slack_routine_poster(
             text = escape_mrkdwn_preserving_mentions(
                 await untag_opted_out(
                     runtime.sessionmaker,
-                    tenant_id=row.tenant_id,
+                    tenant_id=job.tenant_id,
                     platform="slack",
                     text=render_fallback_post(
-                        row,
+                        job,
                         platform="slack",
                         requester_name=await routine_requester_name(
-                            runtime.sessionmaker, row, "slack"
+                            runtime.sessionmaker, job, "slack"
                         ),
-                        agent_name=await routine_agent_name(runtime.sessionmaker, row),
-                        header=await routine_header_shown(
-                            runtime.sessionmaker, row, "slack", runtime.settings
-                        ),
+                        agent_name=await routine_agent_name(runtime.sessionmaker, job),
+                        header=job.header,
                     ),
                 )
             )
@@ -418,7 +416,7 @@ def make_slack_routine_poster(
         async def may_post() -> bool:
             if not await creator_current():
                 return False
-            policy = await clear_creator(runtime.sessionmaker, row, platform="slack")
+            policy = await clear_creator(runtime.sessionmaker, job, platform="slack")
             return bool(
                 isinstance(policy, TenantAccessPolicy)
                 and authorize(
@@ -428,7 +426,7 @@ def make_slack_routine_poster(
                     surface=Surface.ROUTINE,
                     place=Place(channel_id=target.channel_id),
                 )
-                and await _destination_refusal(client, row, target) is None
+                and await destination_refusal(client, job.created_by_user_id, target) is None
             )
 
         async def notice(text: str) -> None:
@@ -438,7 +436,7 @@ def make_slack_routine_poster(
 
         await deliver_routine_files(
             runtime.anthropic,
-            payload_for(row),
+            payload_for(job),
             max_bytes=SLACK_MAX_BYTES_PER_FILE,
             post=build_output_poster(
                 client, channel_id=target.channel_id, thread_ts=target.thread_ts
@@ -446,7 +444,7 @@ def make_slack_routine_poster(
             notice=notice,
             may_post=may_post,
             sessions=runtime.sessionmaker,
-            tenant_id=row.tenant_id,
+            tenant_id=job.tenant_id,
         )
         return DeliveryOutcome(status="delivered")
 

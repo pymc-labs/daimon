@@ -1,0 +1,251 @@
+// Publish and approval: requests for grants, the inbox, and versions you can open, compare and restore.
+import { http, HttpResponse, type HttpHandler } from "msw"
+
+import { project } from "@/modules/workflows/runs"
+import { clone, titleOf } from "@/modules/workflows/spec"
+import type {
+  Decision, Draft, InboxDecide, InboxDetail, InboxItem, InboxRoute, Person, RunWait, Spec, StepRun, Version, VersionSpec,
+} from "@/modules/workflows/types"
+import { forbidden, notFound, unauthorized, wait } from "./util"
+import { me } from "./world"
+import { ago, allRuns, detail, draftOf, find, findRun, mkDraft, P, versionsOf, W, type Stored } from "./workflows"
+import { decideWait, visible as released, type Run } from "./workflows-runs"
+import { publicRequest, requests } from "./workflows-store"
+
+const who = (): Person => ({ id: me()!.id, name: me()!.name })
+
+// ---------- publish ----------
+
+/** Makes a spec the live version: nothing in flight is touched. */
+function publishNow(w: Stored, spec: Spec, by: Person, note: string, approvedBy: Person | null) {
+  w.live = spec
+  w.version = (w.version ?? 0) + 1
+  w.draft = null
+  if (w.status === "draft") w.status = "live"
+  w.published = { version: w.version, by, at: new Date().toISOString(), note, approved_by: approvedBy }
+}
+
+const unknown = (id: unknown) => HttpResponse.json({ detail: `No such ${String(id)}` }, { status: 404 })
+
+// ---------- inbox ----------
+
+type Rec = Omit<InboxItem, "decision"> & {
+  to: string[]; show?: string; bound?: InboxDetail["bound"]; proposals?: InboxDetail["proposals"]; question?: string
+  form?: InboxDetail["form"]; values?: Record<string, unknown>; sent?: InboxDetail["sent"]; attachments?: InboxDetail["attachments"]; answer?: InboxDetail["answer"]; routes: InboxRoute[]; decision: Decision | null; request?: string
+}
+const approve: InboxRoute[] = [{ name: "reject", label: "Reject", primary: false, comment: true }, { name: "approve", label: "Approve", primary: true, comment: false }]
+const run = (wf: string, n: number) => ({ id: `${wf}_run${n}`, number: n })
+
+const LEAD_BODY = "Hi Ana,\n\nThanks for reaching out. Forecasting promotions across 40 stores is what our MMM work is built for, and Brightwave's Q1 calendar is a good fit.\n\nCould we find 30 minutes next week? I can share two example readouts beforehand.\n\nBest,\nMaya"
+const ARTICLE = "Priors are where a media mix model says what you already know. A weak prior on adstock decay lets the data speak, but with 18 months of weekly spend it mostly speaks noise.\n\nWe set decay priors from channel type, then let the likelihood move them. Paid search decays fast, TV slowly, and the posterior shows how far each moved."
+
+const RECS: Rec[] = [
+  { id: "ib_lead", kind: "approval", title: "Approve reply", workflow: { id: "wf_lead", name: "Inbound lead" }, run: run("wf_lead", 128), step: "review", step_title: "Review reply", asked_by: "Sales Desk",
+    since: ago(2.2), expires_at: ago(-46), to: ["p_maya"], decision: null, routes: approve,
+    show: "**Brightwave Telecom** (strong fit)\n" + LEAD_BODY,
+    bound: [{ tool: "gmail/send_message", label: "Send email", step: "Send", args: { to: "ana@brightwave.example", subject: "Forecasting promotions before Q1", body: LEAD_BODY } }],
+    form: { type: "object", required: ["body"], properties: { body: { type: "string", title: "Reply" } } }, values: { body: LEAD_BODY } },
+  { id: "ib_content", kind: "approval", title: "Editor approval", workflow: { id: "wf_content", name: "Content pipeline" }, run: run("wf_content", 126), step: "approve", step_title: "Editor approval", asked_by: "Content Writer",
+    since: ago(7), expires_at: ago(-65), to: ["p_maya", "p_priya"], decision: null, routes: approve, show: "**Priors for media mix**\n" + ARTICLE,
+    bound: [{ tool: "notion/create_page", label: "Create page", step: "Create Notion page", args: { title: "Priors for media mix", parent: "Blog drafts" } }] },
+  { id: "ib_triage", kind: "proposals", title: "Label issues", workflow: { id: "wf_triage", name: "Issue triage" }, run: run("wf_triage", 126), step: "label", step_title: "Label the ticket", asked_by: "Code Reviewer",
+    since: ago(4.5), expires_at: ago(-19), to: ["p_jonas", "p_priya"], decision: null,
+    routes: [{ name: "reject", label: "Reject all", primary: false, comment: true }, { name: "approve", label: "Send selected", primary: true, comment: false }],
+    proposals: [
+      { id: "pr1", tool: "github/create_comment", title: "Adstock decay ignores lag", detail: "Label bug and add: Reproduced on 0.9. The lag term never reaches the decay kernel." },
+      { id: "pr2", tool: "github/create_comment", title: "Docs: install on Windows", detail: "Label docs and add: Thanks, the conda steps on the page are out of date." },
+      { id: "pr3", tool: "github/create_comment", title: "Support Python 3.14", detail: "Label enhancement and add: We test 3.13 today. A PR adding 3.14 to CI is welcome." },
+      { id: "pr4", tool: "github/create_comment", title: "Prior predictive fails", detail: "Label question and add: Could you share the model and seed? It runs on our fixtures." },
+    ] },
+  { id: "ib_onboard", kind: "question", title: "Which channel for the kickoff", workflow: { id: "wf_onboard", name: "Client onboarding" }, run: run("wf_onboard", 124), step: "welcome", step_title: "Welcome call", asked_by: "Sales Desk",
+    since: ago(1.4), expires_at: null, to: ["p_maya", "p_jonas"], decision: null,
+    routes: [{ name: "answer", label: "Send answer", primary: true, comment: false }], question: "Where should the Larkspur Retail kickoff notes go?",
+    form: { type: "object", required: ["channel"], properties: { channel: { type: "string", title: "Channel", enum: ["#delivery", "#clients", "#leads"] }, note: { type: "string", title: "Note" } } },
+    values: { channel: "#delivery" },
+    sent: [{ platform: "discord", where: "Direct message to Maya Lindqvist", link: "https://discord.com/channels/000000000000000000/1/2", at: ago(1.4) }],
+    attachments: [{ name: "kickoff-notes.md", size: 2140, url: "/api/workflows/runs/wf_onboard_run124/files/kickoff-notes.md" }] },
+  { id: "ib_alert", kind: "approval", title: "Page the on-call", workflow: { id: "wf_alert", name: "Alert triage" }, run: run("wf_alert", 128), step: "page", step_title: "Page on-call", asked_by: "Daimon",
+    since: ago(0.4), expires_at: ago(-0.2), to: ["p_jonas"], decision: null, routes: approve,
+    show: "**api-latency-p99** above 900 ms for 12 minutes.\nLikely cause: the new rate limiter on `/v1/score`. Paging the on-call with the graph and the deploy link.",
+    bound: [{ tool: "slack/post_message", label: "Post message", step: "Page", args: { channel: "#oncall", text: "api-latency-p99 above 900 ms for 12 minutes. Likely the rate limiter deploy from 14:10." } }] },
+  { id: "ib_digest", kind: "approval", title: "Check the digest", workflow: { id: "wf_digest", name: "Weekly pipeline digest" }, run: run("wf_digest", 128), step: "review", step_title: "Review reply", asked_by: "Sales Desk",
+    since: ago(30), expires_at: null, to: ["p_maya", "p_jonas"], routes: approve,
+    decision: { route: "approve", label: "Approved", by: P.maya!, at: ago(29), comment: null, selected: null }, show: "**3 risky deals** this week, 2 with a slipped close date.\nNorthwind renewal has had no activity in 21 days.",
+    bound: [{ tool: "slack/post_message", label: "Post message", step: "Post to sales", args: { channel: "#sales", text: "3 risky deals this week." } }] },
+  { id: "ib_kickoff", kind: "question", title: "Kickoff channel for Fernhill", workflow: { id: "wf_onboard", name: "Client onboarding" }, run: run("wf_onboard", 123), step: "welcome", step_title: "Welcome call", asked_by: "Sales Desk",
+    since: ago(52), expires_at: null, to: ["p_maya", "p_jonas"], routes: [{ name: "answer", label: "Send answer", primary: true, comment: false }],
+    question: "Which channel should the Fernhill kickoff notes go to, and who joins?",
+    decision: { route: "answer", label: "Answered", by: P.jonas!, at: ago(50), comment: null, selected: null },
+    sent: [{ platform: "discord", where: "Thread in #delivery", link: "https://discord.com/channels/000000000000000000/1/3", at: ago(52) }],
+    answer: { by: P.jonas!, via: "discord", text: "#delivery, please. Maya and Priya join; I will send the agenda the day before.", values: {}, files: [], at: ago(50) } },
+]
+const VERB: Record<string, string> = { approve: "Approved", reject: "Rejected", answer: "Answered" }
+const live = new Map<string, Rec>(RECS.map((r) => [r.id, r]))
+
+function fromRequest(r: ReturnType<typeof requests.all>[number]): Rec {
+  const grants = r.grants.length
+  return {
+    id: `ib_${r.id}`, kind: "publish", title: `Publish v${r.version} of ${r.workflow.name}`, workflow: r.workflow, run: null, step: null, asked_by: r.by.name, since: r.at, expires_at: null,
+    to: ["admin"], request: r.id, routes: [{ name: "reject", label: "Reject", primary: false, comment: true }, { name: "approve", label: grants ? "Approve and publish" : "Approve", primary: true, comment: false }],
+    decision: r.status === "pending" ? null : { route: r.status === "approved" ? "approve" : "reject", label: r.status === "approved" ? "Approved" : "Rejected", by: r.decided_by!, at: r.decided_at!, comment: r.comment, selected: null },
+  }
+}
+
+/** Every wait of a run is an inbox item named by the wait's id; a seeded item for the same step takes that id. */
+const stepsWaiting = (run: Run) => project(released(run)).steps.filter((s) => s.wait)
+const waitOf = (r: Rec): RunWait | null => {
+  const run = r.run && findRun(r.run.id)
+  return (run && stepsWaiting(run).find((s) => s.key === r.step)?.wait) || null
+}
+function bind(r: Rec): Rec {
+  const w = waitOf(r)
+  if (!w || (w.status !== "waiting" && !w.decider)) return r
+  const d = w.status !== "waiting" && w.decision ? { route: w.decision, label: VERB[w.decision] ?? "Decided", by: w.decider!, at: w.closed_at!, comment: null, selected: null } : null
+  return { ...r, id: w.id, decision: r.decision ?? d, sent: r.sent ?? w.sent, attachments: r.attachments ?? w.attachments }
+}
+
+function fromWait(run: Run, s: StepRun): Rec | null {
+  const n = run.spec.nodes[s.node]
+  const w = s.wait
+  if (n?.kind !== "approval" || w?.status !== "waiting") return null
+  const typed = n.answer === "text" || n.answer === "form"
+  const routes: InboxRoute[] = typed ? [{ name: "answer", label: "Send answer", primary: true, comment: false }]
+    : n.answer === "choice" ? Object.keys(n.routes ?? {}).map((name, i, all) => ({ name, label: name[0]!.toUpperCase() + name.slice(1), primary: i === all.length - 1, comment: false }))
+    : approve
+  return {
+    id: w.id, kind: typed ? "question" : "approval", title: n.title ?? s.key, workflow: run.wf, run: { id: run.id, number: run.number }, step: s.key, step_title: titleOf(s.node, n), asked_by: run.spec.defaults?.agent ?? "Daimon",
+    since: w.opened_at, expires_at: w.expires_at, to: w.addressees.map((p) => p.id), decision: null, routes, sent: w.sent, attachments: w.attachments,
+    ...(!typed && n.form ? { form: { type: "object" as const, properties: n.form } } : {}),
+    ...(typed ? { question: n.title ?? s.key, form: n.answer === "form" ? { type: "object" as const, properties: n.form ?? {} } : { type: "object" as const, properties: { text: { type: "string" as const } } } } : {}),
+  }
+}
+
+function recsFor(): Rec[] {
+  const m = me()!
+  const seeded = RECS.map(bind)
+  const have = new Set(seeded.map((r) => r.id))
+  const waits = allRuns().flatMap((run) => stepsWaiting(run).map((s) => fromWait(run, s))).filter((r): r is Rec => !!r && !have.has(r.id))
+  const mine = [...seeded, ...waits].filter((r) => r.to.includes(m.id))
+  const reqs = m.role === "admin" ? requests.all().map(fromRequest) : []
+  return [...reqs, ...mine].sort((a, b) => b.since.localeCompare(a.since))
+}
+const recOf = (id: string): Rec | undefined => recsFor().find((r) => r.id === id)
+
+const item = ({ to: _to, show: _s, bound: _b, proposals: _p, question: _q, form: _f, values: _v, sent: _sn, attachments: _at, answer: _an, routes: _r, request: _x, ...i }: Rec): InboxItem => i
+
+function detailOf(r: Rec): InboxDetail {
+  const req = r.request ? requests.find(r.request) : undefined
+  return {
+    ...item(r), show: r.show ?? null, bound: r.bound ?? [], proposals: r.proposals ?? [], question: r.question ?? null, form: r.form ?? null, values: r.values ?? {}, sent: r.sent ?? [], attachments: r.attachments ?? [], answer: r.answer ?? null,
+    routes: r.routes, publish: req ? publicRequest(req) : null,
+  }
+}
+
+// ---------- versions ----------
+
+/** Earlier versions: the live spec with its recent edits taken back, one step per version. */
+function specAt(w: Stored, n: number): Spec | null {
+  if (!w.live || !w.version || n < 1 || n > w.version) return null
+  const s = clone(w.live)
+  const back = w.version - n
+  const first = Object.values(s.nodes).find((x) => x.kind === "agent")
+  if (back >= 1 && first?.instructions) first.instructions = first.instructions.split(/(?<=\.)\s/)[0]!.trim() + "\n"
+  if (back >= 2) {
+    const t = s.triggers?.[0]
+    if (t?.kind === "schedule") t.cron = "0 10 * * 1"
+    else if (t?.kind === "webhook") t.respond = "result"
+    else s.goal = (s.goal ?? "").split(". ")[0]
+  }
+  if (back >= 3) s.defaults = { ...s.defaults, budget_usd: 0.5 }
+  if (back >= 4) delete s.limits
+  if (back >= 5) s.visibility = "private"
+  return s
+}
+const versionOf = (w: Stored, n: number): Version | undefined => versionsOf(w).find((v) => v.number === n)
+
+export const workflowsInboxHandlers: HttpHandler[] = [
+  http.post("/api/workflows/:id/draft/publish", async ({ params, request }) => {
+    await wait(600)
+    const w = find(params.id)
+    if (!w?.draft) return notFound()
+    if (w.draft.validation.errors.length) return HttpResponse.json({ detail: "Fix the problems first." }, { status: 422 })
+    const { note } = (await request.json().catch(() => ({ note: "" }))) as { note: string }
+    if (w.draft.new_grants.length && me()!.role !== "admin") return forbidden("New grants need an admin. Request approval instead.")
+    publishNow(w, w.draft.spec, who(), note, null)
+    return HttpResponse.json(detail(w))
+  }),
+  http.post("/api/workflows/:id/draft/request", async ({ params, request }) => {
+    await wait(500)
+    const w = find(params.id)
+    if (!w?.draft) return notFound()
+    if (w.draft.validation.errors.length) return HttpResponse.json({ detail: "Fix the problems first." }, { status: 422 })
+    const { note } = (await request.json().catch(() => ({ note: "" }))) as { note: string }
+    requests.add({ workflow: { id: w.id, name: w.draft.spec.name }, version: (w.version ?? 0) + 1, note, by: who(), revision: w.draft.revision, grants: w.draft.new_grants, spec: clone(w.draft.spec) })
+    return HttpResponse.json(detail(w), { status: 201 })
+  }),
+  http.get("/api/workflows/inbox", async () => {
+    await wait()
+    return me() ? HttpResponse.json(recsFor().map(item)) : unauthorized()
+  }),
+  http.get("/api/workflows/inbox/:id", async ({ params }) => {
+    await wait(120)
+    const r = recOf(String(params.id))
+    return r ? HttpResponse.json(detailOf(r)) : notFound()
+  }),
+  http.post("/api/workflows/inbox/:id/decide", async ({ params, request }) => {
+    await wait(400)
+    const b0 = (await request.clone().json()) as InboxDecide
+    const wr = allRuns().find((x) => String(params.id).startsWith(`wt_${x.id}_`))
+    if (wr) {
+      const key = String(params.id).slice(`wt_${wr.id}_`.length)
+      const text = typeof b0.values?.text === "string" ? b0.values.text : undefined
+      const by = who()
+      if (!decideWait(wr, key, b0.route, by, Date.now(), text)) return HttpResponse.json({ detail: "This step is no longer waiting." }, { status: 409 })
+      return HttpResponse.json({ id: String(params.id), decision: { route: b0.route, label: VERB[b0.route] ?? "Decided", by, at: new Date().toISOString(), comment: null, selected: null } })
+    }
+    const r = recOf(String(params.id))
+    if (!r) return notFound()
+    if (r.decision) return HttpResponse.json({ detail: `Already decided by ${r.decision.by.name}.` }, { status: 409 })
+    const b = (await request.json()) as InboxDecide
+    const route = r.routes.find((x) => x.name === b.route)
+    if (!route) return unknown(b.route)
+    if (route.comment && !b.comment?.trim()) return HttpResponse.json({ detail: "Add a comment." }, { status: 422 })
+    const by = who()
+    if (r.request) {
+      const req = requests.find(r.request)!
+      if (b.route === "approve") {
+        const w = W.find((x) => x.id === req.workflow.id)
+        if (w) publishNow(w, req.spec, req.by, req.note, by)
+      }
+      requests.decide(r.request, b.route === "approve" ? "approved" : "rejected", by, b.comment ?? null)
+      return HttpResponse.json(item(recOf(r.id) ?? r))
+    }
+    const live_ = live.get(r.id)!
+    live_.decision = { route: b.route, label: VERB[b.route] ?? route.label, by, at: new Date().toISOString(), comment: b.comment ?? null, selected: b.selected ?? null }
+    if (r.kind === "question") {
+      // As `waits.decide_wait` and `run_views.answer_view`: text apart, fields under their titles.
+      const { text, ...values } = b.values ?? {}
+      const fields = Object.entries(r.form?.properties ?? {}).filter(([k]) => k !== "text")
+      const labels = fields.length ? { labels: Object.fromEntries(fields.map(([k, f]) => [k, f.title ?? k])) } : {}
+      live_.answer = { by, via: "web", text: typeof text === "string" ? text : null, values, files: [], at: live_.decision.at, ...labels }
+    }
+    const run_ = r.run && findRun(r.run.id)
+    if (run_ && r.step && r.kind === "approval") decideWait(run_, r.step, b.route, by)
+    return HttpResponse.json(item(live_))
+  }),
+  http.get("/api/workflows/:id/versions/:n", async ({ params }) => {
+    await wait()
+    const w = find(params.id)
+    const n = Number(params.n)
+    const spec = w && specAt(w, n), version = w && versionOf(w, n)
+    return spec && version ? HttpResponse.json({ version, spec } satisfies VersionSpec) : notFound()
+  }),
+  http.post("/api/workflows/:id/versions/:n/restore", async ({ params }) => {
+    await wait(300)
+    const w = find(params.id)
+    const spec = w && specAt(w, Number(params.n))
+    if (!w || !spec) return notFound()
+    w.draft = mkDraft(w, spec, draftOf(w).revision + 1, who(), 0)
+    return HttpResponse.json(w.draft satisfies Draft)
+  }),
+]

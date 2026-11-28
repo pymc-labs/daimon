@@ -4,6 +4,31 @@ from __future__ import annotations
 
 from typing import Final
 
+WORKFLOW_AUTHORING_TOOLS: Final = frozenset(
+    {
+        "list_workflows",
+        "get_workflow",
+        "create_workflow",
+        "edit_workflow_draft",
+        "validate_workflow",
+        "publish_workflow",
+        "run_workflow",
+        "list_workflow_runs",
+        "get_workflow_run",
+        "cancel_workflow_run",
+        "retry_workflow_run",
+        "fork_workflow_run",
+        "set_workflow_paused",
+        "clear_workflow_state",
+    }
+)
+"""What a person's chat uses to build and run workflows; a workflow step never calls them."""
+
+WORKFLOW_STEP_TOOLS: Final = frozenset(
+    {"complete_step", "fail_step", "finish_early", "step_context", "ask_human"}
+)
+"""What a running workflow step's agent finishes its step with."""
+
 CAPABILITY_TOOLS: Final[dict[str, frozenset[str]]] = {
     "watches": frozenset(
         {
@@ -32,6 +57,7 @@ CAPABILITY_TOOLS: Final[dict[str, frozenset[str]]] = {
             "report_routine_problem",
         }
     ),
+    "workflows": WORKFLOW_AUTHORING_TOOLS | WORKFLOW_STEP_TOOLS,
     "long_jobs": frozenset({"start_long_job", "get_long_job", "list_long_jobs", "cancel_long_job"}),
     "compute": frozenset(
         {

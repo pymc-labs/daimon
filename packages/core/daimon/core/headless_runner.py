@@ -52,17 +52,19 @@ import asyncio
 import functools
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import structlog
 from anthropic import AsyncAnthropic
-from anthropic.types.beta import BetaManagedAgentsSession
+from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsSession
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
 from cryptography.fernet import MultiFernet
+from daimon.core.channel_skills import skill_room
 from daimon.core.config import (
     GithubAppSettings,
     McpSettings,
@@ -75,13 +77,15 @@ from daimon.core.features.session_identity import DEFAULT_IDENTITY
 from daimon.core.features.snapshot import FeaturePlace, resolve_features
 from daimon.core.features.toolset import place_session
 from daimon.core.github_app_session import close_headless_app_session
-from daimon.core.lead_intake_execution import current_intake_execution
+from daimon.core.lead_intake_execution import WorkflowExecution, current_intake_execution
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call, sdk_agent, sdk_environment
 from daimon.core.routine_sandbox import RoutineSandbox, run_matches_pin
 from daimon.core.routine_sandbox import builtins_allowed as _routine_builtins_allowed
 from daimon.core.rule_views import RoutineOrigin
+from daimon.core.session_ports_compat import retrieve_session_record
+from daimon.core.session_snapshot import MaSkill
 from daimon.core.sessions import create_session
 from daimon.core.stores import access_policy as policy_store
 from daimon.core.tool_safety import ToolSafetyPolicy
@@ -98,7 +102,13 @@ from daimon.core.turn.driver import unattended_sends
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn.persistence import MutationRetry, TurnPersistence, current_persistence
-from daimon.core.turn.posture import Billed, BillingExempt, BillingPosture, ExemptReason
+from daimon.core.turn.posture import (
+    Billed,
+    BillingExempt,
+    BillingPosture,
+    ExemptReason,
+    PolicyApproval,
+)
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn.unattended import (
@@ -106,7 +116,11 @@ from daimon.core.turn.unattended import (
     session_gate,
     unattended_posture,
 )
-from daimon.core.turn.unattended_capabilities import protected_tools
+from daimon.core.turn.unattended_capabilities import (
+    StepTools,
+    UnattendedEntryPoint,
+    protected_tools,
+)
 from daimon.core.turn.web_search_sources import claude_searches, sources_prefix
 from daimon.core.turn_hold import TurnHold
 from daimon.core.usage_recording import WebSearchCall
@@ -127,6 +141,31 @@ if TYPE_CHECKING:
 log = structlog.get_logger(__name__)
 
 
+@dataclass(frozen=True)
+class StepTurn:
+    """A workflow step's turn (`daimon.core.workflows.agent_step`)."""
+
+    tools: StepTools
+    #: Wraps the unattended decider with the step's grant, tools and writes.
+    decide: Callable[[PolicyApproval], PolicyApproval]
+    workflow_run_id: uuid.UUID
+    workflow_step_id: uuid.UUID
+    #: Called with the session id before the first send, so a crash can reattach.
+    on_session: Callable[[str], Awaitable[None]]
+    #: Reattach to the session's turn in flight (a lost worker's) instead of sending.
+    resume: bool = False
+    #: The turn so far, every render and at the end: the step's live activity.
+    on_render: Callable[[TurnState], Awaitable[None]] | None = None
+    #: Library skills the step pins; a new session adds those its agent lacks.
+    skills: Sequence[MaSkill] = ()
+
+
+def _step_skills(agent: BetaManagedAgentsAgent, pinned: Sequence[MaSkill]) -> list[MaSkill]:
+    """A step's pinned skills its agent does not hold, as many as the session has room for."""
+    held = {s.skill_id for s in agent.skills}
+    return [s for s in pinned if s.skill_id not in held][: skill_room(agent)]
+
+
 class _NoOpLifecycle(TurnLifecycle):
     """A headless turn has no surface to render to, so every delivery hook
     is a no-op. Inherits `TurnLifecycle`'s own default no-op bodies for the
@@ -141,18 +180,26 @@ class _NoOpLifecycle(TurnLifecycle):
     driver's own pump.
     """
 
-    def __init__(self, *, on_result: Callable[[TurnState], Awaitable[None]] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        on_result: Callable[[TurnState], Awaitable[None]] | None = None,
+        on_render: Callable[[TurnState], Awaitable[None]] | None = None,
+    ) -> None:
         self._on_result = on_result
+        self._on_render = on_render
 
     async def on_render(self, state: TurnState) -> None:
-        return None
+        if self._on_render is not None:
+            await self._on_render(state)
 
     async def on_terminal_success(self, state: TurnState) -> None:
+        await self.on_render(state)
         if self._on_result is not None and state.termination == TerminationReason.COMPLETED:
             await self._on_result(state)
 
     async def on_terminal_failure(self, state: TurnState, err: Exception) -> None:
-        return None
+        await self.on_render(state)
 
 
 def _assert_satisfies_turn_lifecycle(lifecycle: TurnLifecycle) -> None:
@@ -231,7 +278,10 @@ async def run_turn(
     runs_as_user: str | None = None,
     membership_resolver: MembershipResolver | None = None,
     routine_id: uuid.UUID | None = None,
+    session_id: str | None = None,
+    step: StepTurn | None = None,
     routine_destination: str | None = None,
+    step_dm_channel: str | None = None,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -272,7 +322,10 @@ async def run_turn(
             runs_as_user=runs_as_user,
             membership_resolver=membership_resolver,
             routine_id=routine_id,
+            session_id=session_id,
+            step=step,
             routine_destination=routine_destination,
+            step_dm_channel=step_dm_channel,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -313,7 +366,10 @@ async def run_turn(
                 runs_as_user=runs_as_user,
                 membership_resolver=membership_resolver,
                 routine_id=routine_id,
+                session_id=session_id,
+                step=step,
                 routine_destination=routine_destination,
+                step_dm_channel=step_dm_channel,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -382,7 +438,10 @@ async def run_turn_impl(
     runs_as_user: str | None = None,
     membership_resolver: MembershipResolver | None = None,
     routine_id: uuid.UUID | None = None,
+    session_id: str | None = None,
+    step: StepTurn | None = None,
     routine_destination: str | None = None,
+    step_dm_channel: str | None = None,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its complete final reply.
 
@@ -470,6 +529,12 @@ async def run_turn_impl(
     called once. Without it they are off, as for every other unattended run
     (`unattended_capabilities.capability_policy`).
 
+    ``session_id`` continues that session instead of opening one: nothing is
+    assembled, and the gate and decider read it as it is now. ``step`` runs the
+    turn as a workflow step (`StepTurn`): the `workflow_step` entry point with the
+    step's tools, its decider, its stamps on a new session, and its brief sent as
+    is, without the routine framing.
+
     ``hold`` runs the turn held to a shared channel (`routine_hold.routine_hold`):
     the channel's own store replaces the agent-wide and personal ones, and the
     Daimon credential is the held one.
@@ -552,10 +617,19 @@ async def run_turn_impl(
     )
     # The fire this run belongs to, bound beside its destination: the relay signs the
     # routine's claims only while that fire runs (`routine_execution`).
+    # A step's lane grant names which running step the lane's relay credential serves.
     fire = current_intake_execution.get()
     relay_execution = (
         fire[1]
-        if relay_destination is not None and fire is not None and fire[0] == routine_id
+        if fire is not None
+        and (
+            (relay_destination is not None and fire[0] == routine_id)
+            or (
+                step is not None
+                and isinstance(fire, WorkflowExecution)
+                and fire.run_id == step.workflow_run_id
+            )
+        )
         else None
     )
 
@@ -674,15 +748,22 @@ async def run_turn_impl(
             model_override=model_override,
             system_override=identity.system(agent.system, platform),
             relay_routine_id=routine_id if relay_routine else None,
-            relay_owner=runs_as_user if relay_routine and routine_id else None,
+            relay_owner=runs_as_user if relay_routine and (routine_id or step) else None,
+            relay_dm_channel=step_dm_channel if relay_routine and step else None,
             relay_destination=relay_destination,
             relay_execution=relay_execution,
             identity=identity,
+            workflow_run_id=step.workflow_run_id if step is not None else None,
+            workflow_step_id=step.workflow_step_id if step is not None else None,
+            channel_skills=_step_skills(agent, step.skills) if step is not None else (),
         )
 
+    entry_point: UnattendedEntryPoint = "routine" if step is None else "workflow_step"
     try:
         session = await asyncio.wait_for(
-            _assemble_session(),
+            _assemble_session()
+            if session_id is None
+            else retrieve_session_record(anthropic, session_id, scope=turn_scope),
             timeout=remaining_s(effective_deadline, now=datetime.now(UTC)),
         )
     except TimeoutError as err:
@@ -696,9 +777,12 @@ async def run_turn_impl(
         raise ceiling_error() from err
 
     try:
+        if step is not None:
+            await step.on_session(session.id)
         routine_memory = ""
         if (
-            repo_memory is not None
+            session_id is None
+            and repo_memory is not None
             and repo_memory.enabled  # a caller without feature settings cannot see the setup
             and memory_on
             and origin == "routine"
@@ -743,6 +827,10 @@ async def run_turn_impl(
             ):
                 log.info("headless.sandbox_tools_off", session_id=session.id)
                 sandbox_tools = False
+        step_tools = step.tools if step is not None else None
+        if step_tools is not None and sandbox is not None and not sandbox_tools:
+            # A step's built-ins hold only while the run matches its grant's pin.
+            step_tools = replace(step_tools, builtins=frozenset())
 
         billing: BillingPosture
         if usage_record is not None:
@@ -805,6 +893,19 @@ async def run_turn_impl(
         # bespoke loop) is fully delegated below.
         # A routine turn runs on Managed Agents; its driver lines name it, as a
         # chat turn's do (`run_prepared_turn`).
+        posture = unattended_posture(
+            tool_safety,
+            session=session,
+            fernet=fernet,
+            agent_id=agent_uuid,
+            public_url=public_url,
+            session_factory=session_factory,
+            tenant_id=tenant_id,
+            channel_id=origin_place.channel_id if origin_place is not None else None,
+            entry_point=entry_point,
+            routine_sandbox_tools=sandbox_tools,
+            step_tools=step_tools,
+        )
         with (
             structlog.contextvars.bound_contextvars(
                 backend=MANAGED_AGENTS.provider,
@@ -821,9 +922,10 @@ async def run_turn_impl(
                     public_url=public_url,
                     session_factory=session_factory,
                     tenant_id=tenant_id,
-                    entry_point="routine",
+                    entry_point=entry_point,
                     routine_sandbox_tools=sandbox_tools,
                     principal_check=principal_check,
+                    step_tools=step_tools,
                 )
             ),
         ):
@@ -832,7 +934,13 @@ async def run_turn_impl(
                 scope=turn_scope,
                 session_id=session.id,
                 user_message=(
-                    context_prompt(origin, fragments=fragments, system=session.agent.system)
+                    (
+                        ""
+                        if step is not None
+                        else context_prompt(
+                            origin, fragments=fragments, system=session.agent.system
+                        )
+                    )
                     # Built-ins, search included, run only with the routine's sandbox
                     # opt-in; the gate above disables them otherwise.
                     + sources_prefix(
@@ -844,25 +952,15 @@ async def run_turn_impl(
                     + routine_memory
                     + trigger_message
                 ),
-                lifecycle=_NoOpLifecycle(),
+                lifecycle=_NoOpLifecycle(on_render=step.on_render if step is not None else None),
                 cancel=cancel,
                 render_interval_s=2.0,  # nothing renders; do not spin the diff timer
                 billing=billing,
                 # Nobody is here to press a card: the one unattended decider,
                 # from the policy now in force, never `AutoApprove`.
-                tool_confirmation=unattended_posture(
-                    tool_safety,
-                    session=session,
-                    fernet=fernet,
-                    agent_id=agent_uuid,
-                    public_url=public_url,
-                    session_factory=session_factory,
-                    tenant_id=tenant_id,
-                    channel_id=origin_place.channel_id if origin_place is not None else None,
-                    entry_point="routine",
-                    routine_sandbox_tools=sandbox_tools,
-                ),
+                tool_confirmation=step.decide(posture) if step is not None else posture,
                 deadline=effective_deadline,
+                resume_existing=step is not None and step.resume,
             )
 
         if (observation := current_outcome.get()) is not None:
@@ -876,7 +974,8 @@ async def run_turn_impl(
             on_state(state)
         return extract_final_response(state.content)
     finally:
-        if session_factory is not None:
+        # A lane's session lives on for the run's next steps.
+        if session_factory is not None and step is None:
             try:
                 await close_headless_app_session(
                     anthropic, session_factory, session_id=session.id, fernet=fernet

@@ -1,0 +1,18 @@
+{
+  "description": [
+    "Read your workflow step's brief again, with the outputs of the steps before it."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "step": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "step"
+    ],
+    "type": "object"
+  }
+}

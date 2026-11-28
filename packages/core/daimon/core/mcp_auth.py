@@ -42,7 +42,7 @@ from daimon.core.authz import (
     build_subject,
     build_turn_place,
 )
-from daimon.core.lead_intake_execution import current_intake_execution
+from daimon.core.lead_intake_execution import WorkflowExecution, current_intake_execution
 from daimon.core.mcp_hold import HOLD_CLAIM, hold_claim, parse_hold_claim
 from daimon.core.mcp_identity import RELAY_CLAIM, RelayBinding
 from daimon.core.operator_tokens import OperatorScope
@@ -241,6 +241,7 @@ def mint_jwt(
     relay: RelayBinding | None = None,
     anthropic_disabled: bool = False,
     seal_ids: Collection[str] = (),
+    workflow_run_id: uuid.UUID | None = None,
 ) -> str:
     """Sign `{sub: <account_uuid>, iat: <unix ts>}` HS256 with `secret`.
 
@@ -293,6 +294,9 @@ def mint_jwt(
         claims["slack_turn_context_id"] = str(slack_turn_context_id)
     if routine_id is not None and execution_id is not None:
         claims["routine_id"] = str(routine_id)
+        claims["execution_id"] = str(execution_id)
+    elif workflow_run_id is not None and execution_id is not None:
+        claims["workflow_run_id"] = str(workflow_run_id)
         claims["execution_id"] = str(execution_id)
     if chat_session_id is not None:
         claims["chat_session_id"] = chat_session_id
@@ -400,8 +404,10 @@ async def mint_chat_mcp_token(
         channel_id=None if hold is None else hold.channel_id,
     )
     execution = (routine_execution or current_intake_execution.get()) if chat_session_id else None
+    run = isinstance(execution, WorkflowExecution)
     token = mint_jwt(
-        routine_id=execution[0] if execution else None,
+        routine_id=execution[0] if execution and not run else None,
+        workflow_run_id=execution[0] if execution and run else None,
         execution_id=execution[1] if execution else None,
         account_id=account_id,
         chat_agent_id=agent_id,
@@ -440,6 +446,7 @@ async def mint_agent_mcp_token(
     slack_turn_context_id: uuid.UUID | None = None,
     seal_ids: Collection[str] = (),
     host_builtins: bool = False,
+    workflow_execution: WorkflowExecution | None = None,
 ) -> str:
     """Mint a long-lived, revocable, agent-scoped MCP JWT.
 
@@ -485,6 +492,8 @@ async def mint_agent_mcp_token(
     signed as its own claim, and ``seal_ids`` as `SEAL_CLAIM`: the server reads
     sealed sessions inside those ids only. ``host_builtins`` signs
     `HOST_BUILTINS_CLAIM`: an unattended turn may use host built-ins only with it.
+    ``workflow_execution`` signs an agent step's run and lane grant as MA's chat
+    credential does, so the server and relay apply that step's decider and claims.
     Nothing else may carry any of them.
     """
     # Registered chat execution retains the ordinary chat surface. External
@@ -503,7 +512,11 @@ async def mint_agent_mcp_token(
         raise ValueError("a chat-execution or provider-turn credential is internal")
     assert (platform is None) == (channel_id is None), "a channel binding needs both"
     if (
-        hold is not None or slack_turn_context_id is not None or seal_ids or host_builtins
+        hold is not None
+        or slack_turn_context_id is not None
+        or seal_ids
+        or host_builtins
+        or workflow_execution is not None
     ) and surface != "provider_turn":
         raise ValueError("only a provider-turn credential carries turn flags")
     jti = jti or uuid.uuid4()
@@ -545,6 +558,9 @@ async def mint_agent_mcp_token(
         claims[SEAL_CLAIM] = seal_claim(seal_ids)
     if host_builtins:
         claims[HOST_BUILTINS_CLAIM] = True
+    if workflow_execution is not None:
+        claims["workflow_run_id"] = str(workflow_execution.run_id)
+        claims["execution_id"] = str(workflow_execution.execution_id)
     return pyjwt.encode(claims, secret, algorithm="HS256")
 
 
@@ -612,6 +628,9 @@ def registered_agent_claims_match(
             expected.add(SEAL_CLAIM)
         if claims.get(HOST_BUILTINS_CLAIM) is True:
             expected.add(HOST_BUILTINS_CLAIM)
+        # An agent step's run and lane grant: both or neither.
+        if isinstance(claims.get("workflow_run_id"), str):
+            expected |= {"workflow_run_id", "execution_id"}
     if allow_session_grant and chat_execution and isinstance(claims.get("chat_session_id"), str):
         expected.add("chat_session_id")
         if isinstance(claims.get("requester_account_id"), str):

@@ -1,0 +1,36 @@
+{
+  "description": [
+    "Run the live version once, or with test=true the draft as a test run.",
+    "",
+    "A test run cannot write to real systems. Read the run with get_workflow_run."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "inputs": {
+        "anyOf": [
+          {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "test": {
+        "default": false,
+        "type": "boolean"
+      },
+      "workflow_id": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "workflow_id"
+    ],
+    "type": "object"
+  }
+}

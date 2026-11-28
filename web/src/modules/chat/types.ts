@@ -7,6 +7,8 @@ export type Step = {
   detail?: string
   status: "running" | "done" | "error"
   ms?: number
+  /** The tool behind the step, when the client reacts to it. */
+  tool?: string
 }
 
 export type FileOut = { id: string; name: string; size: number; kind: "csv" | "xlsx" | "pdf" | "png" }

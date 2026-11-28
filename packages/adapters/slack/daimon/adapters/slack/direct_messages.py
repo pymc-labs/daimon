@@ -21,6 +21,7 @@ from daimon.adapters.slack.gating import is_slack_connect_external
 from daimon.adapters.slack.interactions import resolve_web_client
 from daimon.adapters.slack.runtime import SlackRuntime, admission_refusal_message
 from daimon.adapters.slack.user_groups import user_group_lookup
+from daimon.adapters.slack.workflow_asks import claim_event
 from daimon.core.agent_identity import (
     AgentIdentity,
     agent_display_name,
@@ -389,6 +390,9 @@ async def handle_direct_message(
     user_id = str(event.get("user") or "")
     message_id = str(event.get("ts") or "")
     if not channel_id or not message_id:
+        return
+    # A reply in the thread under a workflow's ask answers it, before any turn.
+    if await claim_event(runtime, event, team_id=team_id):
         return
     key = (team_id, channel_id, user_id)
     bursts = runtime.dm_bursts

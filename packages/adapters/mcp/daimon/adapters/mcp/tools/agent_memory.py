@@ -23,9 +23,10 @@ from daimon.core.host_memory import (
     choose_store,
 )
 from daimon.core.ma_identity import derive_agent_uuid
-from daimon.core.provider_routine import routine_of_scope
+from daimon.core.provider_routine import routine_of_scope, workflow_of_scope
 from daimon.core.routines import mounts_personal_memory
 from daimon.core.stores.routines import get_routine
+from daimon.core.workflows.place import bound_step
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -85,6 +86,15 @@ async def open_host_memory(
         async with runtime.session_factory() as session:
             routine = await get_routine(session, routine_id, tenant_id=auth.tenant_id)
         routine_posts = routine is None or not mounts_personal_memory(routine)
+    elif personal and (run_id := workflow_of_scope(origin.thread_id)) is not None:
+        # A provider step's, as `HeadlessLaneTurn` mounts it: `memory: personal`, unposted.
+        async with runtime.session_factory() as session:
+            bound = await bound_step(
+                session, tenant_id=auth.tenant_id, run_id=run_id, execution_id=auth.execution_id
+            )
+        routine_posts = bound is None or not (
+            bound.personal and mounts_personal_memory(bound.subject)
+        )
     place = HostMemoryPlace(
         tenant_id=auth.tenant_id,
         agent_id=derive_agent_uuid(

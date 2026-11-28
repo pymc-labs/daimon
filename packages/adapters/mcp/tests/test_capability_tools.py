@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from daimon.adapters.mcp.server import create_mcp_app
-from daimon.core.capability_tools import CAPABILITY_TOOLS
+from daimon.core.capability_tools import CAPABILITY_TOOLS, WORKFLOW_STEP_TOOLS
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -15,6 +15,7 @@ from .test_tool_schema_snapshot import (
 _FAMILIES = {
     "watches": lambda name: "watch" in name,
     "routines": lambda name: "routine" in name,
+    "workflows": lambda name: "workflow" in name or name in WORKFLOW_STEP_TOOLS,
     "long_jobs": lambda name: "long_job" in name,
     "compute": lambda name: name.startswith("compute_"),
     "microsoft_365": lambda name: "microsoft" in name,

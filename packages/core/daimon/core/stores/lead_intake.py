@@ -7,6 +7,7 @@ import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 from cryptography.fernet import MultiFernet
@@ -33,7 +34,11 @@ from daimon.core.lead_intake import (
     normalize_project,
 )
 from daimon.core.lead_intake_access import LeadReadDenied, LeadReadTarget, read_target
-from daimon.core.lead_intake_execution import current_intake_execution
+from daimon.core.lead_intake_execution import (
+    WorkflowExecution,
+    current_intake_execution,
+    lane_grant,
+)
 from pydantic import BaseModel, Field
 from sqlalchemy import case, delete, func, literal, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
@@ -136,6 +141,7 @@ class IntakeStore:
         actor_id: str | None,
         provenance: tuple[UUID, UUID] | None = None,
     ) -> IntakeRecord:
+        run = isinstance(provenance, WorkflowExecution)
         connection = "gmail" if submission.source.kind == "gmail" else "discord"
         digest = hashlib.sha256(
             f"{self.tenant_id}:{connection}:{submission.source.key}".encode()
@@ -152,7 +158,9 @@ class IntakeStore:
             submission=submission,
             actor_id=actor_id,
             agent_id=config.agent_id,
-            routine_id=provenance[0] if provenance else None,
+            routine_id=provenance[0] if provenance and not run else None,
+            workflow_id=config.workflow_id if run else None,
+            workflow_run_id=provenance[0] if run else None,
             execution_id=provenance[1] if provenance else None,
             config_revision=config.revision,
             created_at=now,
@@ -714,6 +722,36 @@ def _effect_state(row: LeadIntakeEffect) -> LeadEffectState:
 
 
 @asynccontextmanager
+async def _grant(
+    sessions: async_sessionmaker[AsyncSession],
+    tenant_id: UUID,
+    lifetime_s: float,
+    **holder: UUID,
+) -> AsyncIterator[UUID]:
+    """A grant row for `holder` (a routine or a workflow run) while the block runs."""
+    identity = uuid4()
+    async with sessions() as session, session.begin():
+        session.add(
+            LeadIntakeExecution(
+                tenant_id=tenant_id,
+                id=identity,
+                expires_at=datetime.now(UTC) + timedelta(seconds=lifetime_s),
+                **holder,
+            )
+        )
+    try:
+        yield identity
+    finally:
+        async with sessions() as session, session.begin():
+            await session.execute(
+                delete(LeadIntakeExecution).where(
+                    LeadIntakeExecution.tenant_id == tenant_id,
+                    LeadIntakeExecution.id == identity,
+                )
+            )
+
+
+@asynccontextmanager
 async def routine_execution(
     sessions: async_sessionmaker[AsyncSession],
     tenant_id: UUID,
@@ -727,28 +765,45 @@ async def routine_execution(
     (`execution_is_active`). `lifetime_s` is the fire's own outer bound, so a grant
     a dead process left behind expires no later than its fire would have been stopped.
     """
-    identity = uuid4()
+    async with _grant(sessions, tenant_id, lifetime_s, routine_id=routine_id) as identity:
+        token = current_intake_execution.set((routine_id, identity))
+        try:
+            yield
+        finally:
+            current_intake_execution.reset(token)
+
+
+@asynccontextmanager
+async def workflow_execution(
+    sessions: async_sessionmaker[AsyncSession],
+    tenant_id: UUID,
+    run_id: UUID,
+    *,
+    lane: str,
+    lifetime_s: float,
+) -> AsyncIterator[UUID]:
+    """`routine_execution` for a workflow run's step in `lane`; yields the grant's id.
+
+    One grant per lane (`lane_grant`), so a lane's session keeps one execution across its
+    steps and names the step it runs now: each step extends it by `lifetime_s` and leaves
+    it. Deleting the run (or its workflow) deletes it, and an expired one is purged.
+    """
+    identity = lane_grant(run_id, lane)
+    expires = datetime.now(UTC) + timedelta(seconds=lifetime_s)
     async with sessions() as session, session.begin():
-        session.add(
-            LeadIntakeExecution(
-                tenant_id=tenant_id,
-                id=identity,
-                routine_id=routine_id,
-                expires_at=datetime.now(UTC) + timedelta(seconds=lifetime_s),
+        await session.execute(
+            insert(LeadIntakeExecution)
+            .values(tenant_id=tenant_id, id=identity, expires_at=expires, workflow_run_id=run_id)
+            .on_conflict_do_update(
+                index_elements=[LeadIntakeExecution.tenant_id, LeadIntakeExecution.id],
+                set_={"expires_at": func.greatest(LeadIntakeExecution.expires_at, expires)},
             )
         )
-    token = current_intake_execution.set((routine_id, identity))
+    token = current_intake_execution.set(WorkflowExecution(run_id, identity))
     try:
-        yield
+        yield identity
     finally:
         current_intake_execution.reset(token)
-        async with sessions() as session, session.begin():
-            await session.execute(
-                delete(LeadIntakeExecution).where(
-                    LeadIntakeExecution.tenant_id == tenant_id,
-                    LeadIntakeExecution.id == identity,
-                )
-            )
 
 
 async def execution_is_active(
@@ -756,6 +811,13 @@ async def execution_is_active(
 ) -> bool:
     row = await session.get(LeadIntakeExecution, (tenant_id, execution_id))
     return row is not None and row.routine_id == routine_id and row.expires_at > datetime.now(UTC)
+
+
+async def workflow_execution_is_active(
+    session: AsyncSession, tenant_id: UUID, run_id: UUID, execution_id: UUID
+) -> bool:
+    row = await session.get(LeadIntakeExecution, (tenant_id, execution_id))
+    return row is not None and row.workflow_run_id == run_id and row.expires_at > datetime.now(UTC)
 
 
 async def purge_expired(session: AsyncSession, now: datetime) -> None:
@@ -862,18 +924,46 @@ async def count_actor(session: AsyncSession, tenant_id: UUID, actor_id: str) -> 
     )
 
 
-async def configured_routines(
-    session: AsyncSession, tenant_ids: set[UUID]
-) -> set[tuple[UUID, UUID]]:
+async def _configs(session: AsyncSession, tenant_ids: set[UUID]) -> list[tuple[UUID, IntakeConfig]]:
     rows = await session.execute(
         select(LeadIntakeConfig.tenant_id, LeadIntakeConfig.config).where(
             LeadIntakeConfig.tenant_id.in_(tenant_ids)
         )
     )
+    return [(tenant, IntakeConfig.model_validate(payload)) for tenant, payload in rows]
+
+
+async def bound_config(
+    session: AsyncSession, tenant_id: UUID, *, key: str, holder: UUID
+) -> dict[str, Any] | None:
+    """The tenant's intake config, locked, when its `key` (`routine_id` or `workflow_id`) is
+    `holder`; else None."""
+    config = await session.scalar(
+        select(LeadIntakeConfig.config)
+        .where(LeadIntakeConfig.tenant_id == tenant_id)
+        .with_for_update()
+    )
+    return dict(config) if config and config.get(key) == str(holder) else None
+
+
+async def configured_routines(
+    session: AsyncSession, tenant_ids: set[UUID]
+) -> set[tuple[UUID, UUID]]:
     return {
         (tenant, config.routine_id)
-        for tenant, payload in rows
-        if (config := IntakeConfig.model_validate(payload)).routine_id is not None
+        for tenant, config in await _configs(session, tenant_ids)
+        if config.routine_id is not None
+    }
+
+
+async def configured_workflows(
+    session: AsyncSession, tenant_ids: set[UUID]
+) -> set[tuple[UUID, UUID]]:
+    """The (tenant, workflow) pairs lead intake is bound to."""
+    return {
+        (tenant, config.workflow_id)
+        for tenant, config in await _configs(session, tenant_ids)
+        if config.workflow_id is not None
     }
 
 

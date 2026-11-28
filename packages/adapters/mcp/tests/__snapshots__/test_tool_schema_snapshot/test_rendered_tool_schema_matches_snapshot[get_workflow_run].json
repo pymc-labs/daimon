@@ -1,0 +1,18 @@
+{
+  "description": [
+    "Read one run: its status, failure, inputs and each step's status."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "run_id": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "run_id"
+    ],
+    "type": "object"
+  }
+}

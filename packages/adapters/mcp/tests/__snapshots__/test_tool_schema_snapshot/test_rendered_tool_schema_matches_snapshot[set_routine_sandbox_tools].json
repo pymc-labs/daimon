@@ -3,6 +3,8 @@
     "Turn built-in sandbox tools (bash, file reads and edits and the rest) on or off",
     "for one routine's own scheduled runs. Admin only.",
     "",
+    "Legacy: prefer the workflow tools (list_workflows, run_workflow).",
+    "",
     "They are off for every unattended run by default. The supported way today is the",
     "operator's ``daimon routines sandbox-tools``. This tool accepts only a live platform",
     "admin's own token, re-checked against the server on each call; no Daimon",

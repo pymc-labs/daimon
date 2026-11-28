@@ -1,0 +1,27 @@
+{
+  "description": [
+    "End the whole workflow run early as done, because there is nothing to do.",
+    "",
+    "Only when your step's brief allows it. The run succeeds with nothing to do and its",
+    "other steps are skipped. End your turn afterwards."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "step": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "summary": {
+        "maxLength": 40000,
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "step",
+      "summary"
+    ],
+    "type": "object"
+  }
+}

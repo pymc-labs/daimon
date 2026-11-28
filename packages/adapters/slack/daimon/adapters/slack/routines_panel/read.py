@@ -14,7 +14,7 @@ from daimon.adapters.slack.routines_panel.state import RoutineEntry
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.routines import derive_glyph, panel_rows, routine_for_reader, routine_label
-from daimon.core.stores.routines import list_routines_for_tenant
+from daimon.core.stores.routines import list_routines_for_tenant, migrated_workflows
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -61,12 +61,14 @@ async def load_routines(
         agent_name_map[agent.id] = name
 
     shown, over_cap_count = panel_rows(rows)
+    moved = await migrated_workflows(session, [row.id for row in shown])
     entries = [
         RoutineEntry(
             routine=row,
             agent_name=agent_name_map.get(row.agent_id, f"<agent {row.agent_id[:8]}>"),
             glyph=derive_glyph(row),
             label=routine_label(row),
+            workflow_id=moved[row.id][0] if row.id in moved else None,
         )
         for row in shown
     ]

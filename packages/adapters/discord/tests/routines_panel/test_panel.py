@@ -16,6 +16,7 @@ from daimon.adapters.discord import theme
 from daimon.adapters.discord.routines_panel.embeds import build_panel_container
 from daimon.adapters.discord.routines_panel.panel import (
     RoutinesPanelView,
+    _MoveButton,
     _PauseButton,
     _RoutinePicker,
     _ViewOutputButton,
@@ -92,6 +93,19 @@ def _empty_policy_for_mock_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
         return TenantAccessPolicy()
 
     monkeypatch.setattr(panel_mod, "load_access_policy", policy)
+
+
+@pytest.fixture(autouse=True)
+def _no_moved_routines_for_mock_sessions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mock session has no workflow moves; a database session gets the real lookup."""
+    from daimon.core.posted_controls import routines as controls
+
+    real = controls.migrated_workflows
+
+    async def moved(session: Any, routine_ids: Any, **kw: Any) -> Any:
+        return await real(session, routine_ids, **kw) if isinstance(session, AsyncSession) else {}
+
+    monkeypatch.setattr(controls, "migrated_workflows", moved)
 
 
 def _find_button(view: discord.ui.LayoutView, label: str) -> discord.ui.Button[Any]:
@@ -242,6 +256,17 @@ def test_pause_button_relabels_on_pause_state() -> None:
     resume_btn = next(b for b in view2.walk_children() if isinstance(b, _PauseButton))
     assert resume_btn.label == "▶ Resume"
     assert resume_btn.style == discord.ButtonStyle.success
+
+
+def test_move_button_is_offered_to_admins_only() -> None:
+    """An admin may move a routine to a workflow; a member's panel has no such button."""
+    entry = _make_entry(enabled=True)
+    member = RoutinesPanelView(_make_state([entry]), runtime=_make_runtime(), allowed_user_id=42)
+    state = _make_state([entry])
+    state.admin = True
+    admin = RoutinesPanelView(state, runtime=_make_runtime(), allowed_user_id=42)
+    assert not any(isinstance(b, _MoveButton) for b in member.walk_children())
+    assert _find_button(admin, "Move to a workflow"), "an admin is offered the move"
 
 
 def test_empty_roster_disables_all_but_done_and_refresh() -> None:

@@ -361,3 +361,19 @@ async def test_refresh_keeps_a_dm_watch_reports_session_and_dm(
     )  # fmt: skip
     claim = _signed(vault.by_url(RELAY))[RELAY_CLAIM]
     assert (claim["grant"], claim["dm_channel"]) == ("g-1", "77"), "kept on refresh"
+
+
+async def test_a_workflow_steps_run_and_lane_grant_survive_a_refresh(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    binding = RelayBinding(
+        "Helper", owner="42", workflow_run_id=uuid.uuid4(), execution=uuid.uuid4(), dm_channel="77",
+    )  # fmt: skip
+    vault, account_id, agent_id = await _relay_vault(db_session_factory, binding, RELAY)
+    await _refresh(
+        db_session_factory, vault, account_id, agent_id, relay_urls=(RELAY, OTHER),
+        now=NOW + dt.timedelta(minutes=20),
+    )  # fmt: skip
+    for url in (RELAY, OTHER):
+        claim = parse_relay_claim(_signed(vault.by_url(url))[RELAY_CLAIM])
+        assert claim == binding, "the re-minted credential still names the run and its lane"

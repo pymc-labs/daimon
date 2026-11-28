@@ -39,6 +39,7 @@ from daimon.core.routine_service import (
     UnknownAgent,
 )
 from daimon.core.stores import platform_names as names_store
+from daimon.core.stores import routines as routines_store
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import CatchUpPolicy, RoutineDestinationKind, RoutineRow
 from daimon.core.stores.tenants import get_tenant
@@ -101,6 +102,8 @@ class Routine(BaseModel):
     last_output: str | None
     mine: bool
     owner: str | None
+    #: The workflow it runs as since an admin moved it; it changes there until moved back.
+    workflow: Choice | None = None
 
 
 class Choices(BaseModel):
@@ -168,6 +171,52 @@ def _refusal(error: RoutineRefused) -> HTTPException:
     return HTTPException(status_code=422, detail=str(error))
 
 
+async def reachable_channels_of(
+    runtime: WebRuntime, db: AsyncSession, caller: WebCaller, platform: str
+) -> dict[str, str]:
+    """The channels a routine of this person may deliver to, by id.
+
+    Every channel the workspace knows that the rules let people write in and where
+    the person could post through chat (`postable_channels`, the chat tool's check).
+    A member never gets a channel kept to its own agents (the Channels module's check).
+    """
+    tenant_id = caller.person.tenant_id
+    known = {
+        row.channel_id: row.name
+        for row in await names_store.list_channel_names(db, tenant_id=tenant_id, platform=platform)
+    }
+    principal = await caller.principal(db)
+    policy = await load_access_policy(db, tenant_id=tenant_id)
+    tenant = await get_tenant(db, tenant_id)
+    postable = await postable_channels(
+        runtime,
+        tenant_id=tenant_id,
+        platform=platform,
+        workspace_id=tenant.external_id if tenant is not None else "",
+        user_id=principal.external_id if principal.platform == platform else None,
+        channel_ids=known.keys(),
+    )
+    confidential = (
+        set[str]()
+        if is_admin(caller.role)
+        else {cid for cid, rule in policy.channel_rules.items() if rule.readers == "own"}
+    )
+    known = {
+        cid: name for cid, name in known.items() if cid in postable and cid not in confidential
+    }
+    return {
+        cid: name
+        for cid, name in sorted(known.items(), key=lambda item: item[1].lower())
+        if authorize(
+            policy,
+            subject=principal.subject,
+            action=Action.POST,
+            surface=Surface.ROUTINE,
+            place=Place(channel_id=cid, category_unresolved=True),
+        )
+    }
+
+
 def routines_router(runtime: WebRuntime) -> APIRouter:
     router = APIRouter(prefix="/api/routines")
 
@@ -190,49 +239,7 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
     async def reachable_channels(
         db: AsyncSession, caller: WebCaller, platform: str
     ) -> dict[str, str]:
-        """The channels a routine of this person may deliver to, by id.
-
-        Every channel the workspace knows that the rules let people write in and where
-        the person could post through chat (`postable_channels`, the chat tool's check).
-        A member never gets a channel kept to its own agents (the Channels module's check).
-        """
-        tenant_id = caller.person.tenant_id
-        known = {
-            row.channel_id: row.name
-            for row in await names_store.list_channel_names(
-                db, tenant_id=tenant_id, platform=platform
-            )
-        }
-        principal = await caller.principal(db)
-        policy = await load_access_policy(db, tenant_id=tenant_id)
-        tenant = await get_tenant(db, tenant_id)
-        postable = await postable_channels(
-            runtime,
-            tenant_id=tenant_id,
-            platform=platform,
-            workspace_id=tenant.external_id if tenant is not None else "",
-            user_id=principal.external_id if principal.platform == platform else None,
-            channel_ids=known.keys(),
-        )
-        confidential = (
-            set[str]()
-            if is_admin(caller.role)
-            else {cid for cid, rule in policy.channel_rules.items() if rule.readers == "own"}
-        )
-        known = {
-            cid: name for cid, name in known.items() if cid in postable and cid not in confidential
-        }
-        return {
-            cid: name
-            for cid, name in sorted(known.items(), key=lambda item: item[1].lower())
-            if authorize(
-                policy,
-                subject=principal.subject,
-                action=Action.POST,
-                surface=Surface.ROUTINE,
-                place=Place(channel_id=cid, category_unresolved=True),
-            )
-        }
+        return await reachable_channels_of(runtime, db, caller, platform)
 
     async def service(
         caller: WebCaller,
@@ -341,6 +348,7 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
                 rid: by is not None
                 for rid, by in (await opted_in_by_many(db, rows, platform)).items()
             }
+            moved = await routines_store.migrated_workflows(db, [r.id for r in rows])
         out: list[Routine] = []
         for row in rows:
             channel = routine_service.destination_channel_of(
@@ -381,6 +389,9 @@ def routines_router(runtime: WebRuntime) -> APIRouter:
                     last_output=row.last_error or row.last_result_tail,
                     mine=mine,
                     owner=None if mine else (label.name if label else None),
+                    workflow=Choice(id=str(moved[row.id][0]), name=moved[row.id][1])
+                    if row.id in moved
+                    else None,
                 )
             )
         return out

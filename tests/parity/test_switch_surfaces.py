@@ -48,6 +48,12 @@ ALLOWED: Final = {
     "adapters/cli/daimon/adapters/cli/commands/agents.py": (
         "Operator CLI: prints the preview and confirms every change like its other commands"
     ),
+    "adapters/cli/daimon/adapters/cli/commands/workflows.py": (
+        "Previews moving routines to workflows, not a model switch"
+    ),
+    "adapters/web/daimon/adapters/web/workflows.py": (
+        "Previews a workflow trigger's webhook and routine moves, not a model switch"
+    ),
     "core/daimon/core/agent_changes.py": "Home of change_model and switch_provider",
     "core/daimon/core/backend_refusals.py": "The refusal card's Switch back to Claude button",
     "core/daimon/core/channel_backend.py": "The provider store: previews and writes",

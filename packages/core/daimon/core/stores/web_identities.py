@@ -98,6 +98,18 @@ async def list_for_people(
     return found
 
 
+async def groups_of_account(
+    session: AsyncSession, *, tenant_id: uuid.UUID, account_id: uuid.UUID
+) -> frozenset[str]:
+    """The groups the account's sign-ins in the workspace carry."""
+    rows = await session.scalars(
+        select(func.unnest(WebIdentity.groups))
+        .join(WebPerson, WebPerson.id == WebIdentity.person_id)
+        .where(WebPerson.tenant_id == tenant_id, WebPerson.account_id == account_id)
+    )
+    return frozenset(rows)
+
+
 async def count_people_in_group(session: AsyncSession, *, tenant_id: uuid.UUID, group: str) -> int:
     """How many of the workspace's members carry `group` on any of their sign-ins."""
     count = await session.scalar(

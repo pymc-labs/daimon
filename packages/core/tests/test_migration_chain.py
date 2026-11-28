@@ -190,6 +190,8 @@ AFTER_MERGE_COLUMNS = {
     ("usage_observation", "observed_at"),
     ("routines", "delivery_hold"),
     ("routines", "owner_notice"),
+    ("lead_intake_executions", "workflow_run_id"),
+    ("lead_intake_executions", "routine_id"),
     ("compute_tasks", "wait_until"),
     ("compute_sessions", "wake_turns"),
 }
@@ -473,6 +475,10 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
         if expected != HEAD:
             table = getattr(getattr(obj, "table", None), "name", None)
             if kind == "column" and (table, name) in MAIN_BRANCH_COLUMNS | AFTER_MERGE_COLUMNS:
+                return False
+            if kind == "foreign_key_constraint" and any(
+                (table, column.name) in AFTER_MERGE_COLUMNS for column in obj.columns
+            ):
                 return False
             if name in MAIN_BRANCH_OBJECTS | AFTER_MERGE_OBJECTS:
                 return False

@@ -27,6 +27,7 @@ _TIER = {
     "channel": "Channel",
     "thread": "Thread",
     "routine": "Routine",
+    "workflow": "Workflow",
 }
 _BACKEND = {"gemini": "Gemini", "openai": "OpenAI", "selfhosted": "self-hosted"}
 _CATEGORY = {

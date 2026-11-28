@@ -3,10 +3,12 @@
 import { http, HttpResponse, type HttpHandler } from "msw"
 
 import type { ChatSession } from "@/lib/types"
+import type { Spec } from "@/modules/workflows/types"
 import type { Card, CardAnswer, FileOut, Msg, StreamEvent } from "@/modules/chat/types"
 import { monitoringOn } from "./features"
 import { forbidden, notFound, paged, sleep, sse, unauthorized, wait } from "./util"
 import { agent, AGENTS, me, session, SESSIONS, spend } from "./world"
+import { ask, DESCRIBED, draftOf, find as findWorkflow, mkDraft } from "./workflows"
 
 const uid = () => crypto.randomUUID().slice(0, 8)
 
@@ -132,7 +134,35 @@ function thread(sid: string) {
   }
   return threads[sid]!
 }
-const find = (pid: string, sid: string) => mine(pid).find((s) => s.id === sid)
+/** Each workflow's Ask Daimon thread: a normal chat session the `/chat` list never shows. */
+const subjects: Record<string, ChatSession> = {}
+const find = (pid: string, sid: string) => mine(pid).find((s) => s.id === sid) ?? Object.values(subjects).find((s) => s.id === sid)
+const subjectOf = (wf: string) => {
+  const s = (subjects[wf] ??= { id: `s_wf_${wf}`, title: "Ask Daimon", agent: agent("ag_default"), updated_at: new Date().toISOString() })
+  threads[s.id] ??= []
+  return s
+}
+
+/** One canned edit of the workflow's draft; the step carries the tool name the canvas listens for. */
+function subjectTurn(pid: string, sid: string, wf: string, text: string) {
+  return turn(pid, sid, async function* () {
+    yield* step("r", "Read the draft", "read_workflow_draft", 500)
+    const w = findWorkflow(wf)
+    const cur = w && draftOf(w)
+    if (!w || !cur) return
+    const blank = cur.spec.name === "Untitled workflow" && cur.spec.start === "agent"
+    const r = blank
+      ? { spec: DESCRIBED(text) as Spec, changed: Object.keys(DESCRIBED(text).nodes), reply: "Drafted Risky deals digest: every Monday at 09:00 the Sales Desk finds deals with no activity in 14 days, you check the digest, then it posts to #sales." }
+      : ask(cur.spec, text)
+    if (r.changed.length) {
+      yield { type: "step", step: { id: "e", label: "Edited the draft", detail: `${r.changed.length} step${r.changed.length === 1 ? "" : "s"}`, status: "running", tool: "edit_workflow_draft" } }
+      await sleep(900)
+      w.draft = mkDraft(w, r.spec, cur.revision + 1, { id: me()!.id, name: me()!.name }, 0)
+      yield { type: "step", step: { id: "e", label: "Edited the draft", detail: `${r.changed.length} step${r.changed.length === 1 ? "" : "s"}`, status: "done", ms: 900, tool: "edit_workflow_draft" } }
+    }
+    yield* type(r.reply)
+  }, 0.05)
+}
 
 type Kind = "mmm" | "pricing" | "general"
 const kindOf = (id: string): Kind => (id === "ag_mmm" ? "mmm" : id === "ag_pricing" ? "pricing" : "general")
@@ -301,6 +331,14 @@ const CHAT_MODELS = [
 ]
 
 export const chatHandlers: HttpHandler[] = [
+  http.get("/api/workflows/:id/chat", async ({ params }) => {
+    await wait(120)
+    if (!session.user()) return unauthorized()
+    const w = findWorkflow(params.id)
+    if (!w) return notFound()
+    const s = subjectOf(w.id)
+    return HttpResponse.json({ session_id: s.id, agent: s.agent })
+  }),
   http.get("/api/chat/agents", async () => {
     await wait()
     const p = session.user()
@@ -366,14 +404,15 @@ export const chatHandlers: HttpHandler[] = [
     const list = s && thread(sid)
     if (!s || !list) return notFound()
     if (m.credit && m.credit.left_usd <= 0) return HttpResponse.json({ detail: "Out of credits" }, { status: 402 })
-    const body = (await request.json()) as { id: string; content: string; attachments?: { id: string; name: string; size: number }[] }
+    const body = (await request.json()) as { id: string; content: string; context?: { selected_node?: string | null }; attachments?: { id: string; name: string; size: number }[] }
     if (!list.some((x) => x.id === body.id)) {
       list.push({ id: body.id, role: "user", content: body.content, created_at: new Date().toISOString(), attachments: body.attachments?.length ? body.attachments.map(({ name, size }) => ({ name, size })) : undefined })
       if (s.title === "New thread") s.title = lastWord(body.content).slice(0, 56)
       s.updated_at = new Date().toISOString()
     }
     await wait(200)
-    return scripted(p.id, sid, body.content, s.agent.id)
+    const wf = Object.entries(subjects).find(([, x]) => x.id === sid)?.[0]
+    return wf ? subjectTurn(p.id, sid, wf, body.content) : scripted(p.id, sid, body.content, s.agent.id)
   }),
   http.post("/api/chat/sessions/:id/cards/:card", async ({ params, request }) => {
     const p = session.user()

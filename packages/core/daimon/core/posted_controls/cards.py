@@ -88,6 +88,8 @@ CardKind = Literal[
     "watch_credential",
     "switch",
     "call",
+    #: A workflow's draft, run or panel card: answered in place, its buttons live in any state.
+    "workflow",
 ]
 RefusalReason = Literal[
     "admin_required",
@@ -201,6 +203,10 @@ class PostedCard(BaseModel):
     @model_validator(mode="after")
     def _check_requested_only_fields(self) -> Self:
         requested = self.state == "requested"
+        if self.kind == "workflow" and not requested:
+            if self.footer or self.requester_platform_user_id or self.expires_at_unix:
+                raise ValueError("a workflow card has no footer, requester or expiry")
+            return self
         if self.buttons and not requested:
             raise ValueError(f"state={self.state!r} must not carry buttons")
         if requested and not self.buttons:

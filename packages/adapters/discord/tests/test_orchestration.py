@@ -874,7 +874,8 @@ class TestSetupHook:
         ):
             await bot.setup_hook()
 
-        assert len(add_cog_calls) == 14, "setup_hook should add exactly 14 Cogs"
+        assert len(add_cog_calls) == 15, "setup_hook should add exactly 15 Cogs"
+        assert sum(type(cog).__name__ == "WorkflowsCog" for cog in add_cog_calls) == 1
         assert sum(type(cog).__name__ == "LeadsCog" for cog in add_cog_calls) == 1
         assert sum(type(cog).__name__ == "SettingsCog" for cog in add_cog_calls) == 1
         assert sum(type(cog).__name__ == "ModelCog" for cog in add_cog_calls) == 1
@@ -1995,7 +1996,7 @@ class TestResolverSelfHeal:
         router.add("GET", r"/v1/environments", env_list_handler)
 
         anthropic = build_fake_anthropic(router.dispatch)
-        settings = MagicMock()
+        settings = mock_settings()
         # Plain string on the MagicMock: bot.py applies str(), identity on str — assertion stays literal.
         settings.mcp.public_url = "https://example.test/mcp"
         settings.defaults_root = tmp_path

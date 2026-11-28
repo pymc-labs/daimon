@@ -1,7 +1,8 @@
 # Routines
 
-How to create a routine, how the scheduler runs it, where its result goes and
-what happens when a run fails.
+How to create and run a routine, and find its result and failures. Legacy: admins can
+[move routines to workflows](workflows.md#routines-and-workflows), as
+agent steps.
 
 A routine is a recurring [unattended](unattended.md) turn: a cron expression,
 a timezone, an agent and one prompt. The scheduler fires it, the agent runs
@@ -26,8 +27,8 @@ was set in, and needs no cleanup.
 Five MCP tools manage routines: `create_routine`, `list_routines`,
 `get_routine`, `update_routine` and `delete_routine`
 ([mcp-tools.md](mcp-tools.md#routines)). There is no pause tool: pause with
-`update_routine(enabled=False)`. The last run is in the `last_*` fields that
-`get_routine` returns.
+`update_routine(enabled=False)`. `get_routine` returns the last run in its `last_*`
+fields.
 
 Ask the agent in chat ("every weekday at 9am, post the sales
 numbers"), or use a panel:
@@ -60,7 +61,7 @@ token), an unknown IANA timezone, an unparseable cron expression and an
 
 Set `destination_kind` and `destination_id` together on `create_routine` or
 `update_routine`. Remove them with `update_routine(clear_destination=true)`.
-Changing it drops a result still pending for the old one. Before saving, the
+Changing it drops a result pending for the old one. Before saving, the
 tool checks that:
 
 - the id has the platform's shape: a Slack thread is `<channel>:<ts>` and a
@@ -90,7 +91,7 @@ Set `catch_up_policy` on `create_routine` or `update_routine`:
 - **`run-once`**: after downtime, an overdue slot fires once whatever its age.
   Missed slots coalesce into that one run and are never replayed one by one.
 
-Slots that pass while the same routine is still running are skipped under both
+Slots that pass while the routine is still running are skipped under both
 policies. `get_routine` and `list_routines` show the latest skipped range and
 reason (`stale` or `in_flight`), not a history.
 

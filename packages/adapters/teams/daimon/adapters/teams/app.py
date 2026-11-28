@@ -30,6 +30,7 @@ import anthropic
 import daimon.core.turn.bookkeeping as turn_bookkeeping
 import structlog
 from anthropic.types.beta import BetaManagedAgentsAgent
+from daimon.adapters.teams import workflow_asks, workflow_cards
 from daimon.adapters.teams.activity_feed import ActivityFeed
 from daimon.adapters.teams.admissions import (
     HOLDING,
@@ -119,6 +120,7 @@ from daimon.core.continuity.messages import (
     render_responder_changed_without_handoff,
 )
 from daimon.core.continuity.wakes import WakeThread, run_wake_poller
+from daimon.core.delivery import WorkflowPoster
 from daimon.core.direct_messages import DirectMessageAccessRevoked, require_dm_turn_grant
 from daimon.core.dm_debounce import DmBursts, debounce_seconds
 from daimon.core.dm_debounce import React as BurstMark
@@ -434,6 +436,8 @@ class TeamsApp:
         installs: TeamInstalls | None = None,
         direct: DirectChats | None = None,
         routine_poster: RoutinePoster | None = None,
+        workflow_poster: WorkflowPoster | None = None,
+        run_cards: Callable[[], Awaitable[int]] | None = None,
         owner_dm: OwnerDm | None = None,
         ask_human: bool = False,
         subscriptions: ChannelSubscriptions | None = None,
@@ -470,6 +474,9 @@ class TeamsApp:
         )
         # Posts routine results to their channels; None leaves them pending.
         self._routine_poster = routine_poster
+        # Posts workflow results and notices beside them; None leaves them pending.
+        self._workflow_poster = workflow_poster
+        self._run_cards = run_cards
         self._owner_dm = owner_dm
         # Support is on: answers carry an Ask a human button.
         self._ask_human = ask_human
@@ -571,6 +578,8 @@ class TeamsApp:
                         self.runtime.sessionmaker,
                         platform="teams",
                         post=self._routine_poster,
+                        workflow=self._workflow_poster,
+                        run_cards=self._run_cards,
                         should_stop=lambda: self.draining,
                         owner_dm=self._owner_dm,
                     )
@@ -1039,7 +1048,18 @@ class TeamsApp:
                     parsed = self._parse_graph(message, source, mentions=True)
                     if isinstance(parsed, Refusal):
                         await self._refuse_graph(parsed, message, source)
-                    elif not self._ignored_unprompted(parsed) and await self._claim(parsed):
+                        continue
+                    if await workflow_asks.claim_inbound(
+                        self.runtime, parsed, self._tenant_id, self._sender, self._reader
+                    ):
+                        await self._handled(parsed)
+                        continue  # a workflow ask's answer, not a turn
+                    if not self._ignored_unprompted(parsed) and await workflow_cards.claim_mention(
+                        self.runtime, parsed, self._tenant_id, self._sender
+                    ):
+                        await self._handled(parsed)
+                        continue  # a workflow's mention trigger started a run, not a turn
+                    if not self._ignored_unprompted(parsed) and await self._claim(parsed):
                         fresh.append(parsed)
                 except Exception:
                     # One message must not strand the rows already claimed for replay.
@@ -1116,9 +1136,29 @@ class TeamsApp:
                 )
 
     def _dispatch_inbound(self, parsed: TeamsInbound) -> None:
-        """Admit a verified message for the mention, typed-name or participation path."""
-        if not self._ignored_unprompted(parsed):
-            self.spawn(self._admit(parsed), name="teams.turn")
+        """Answer a workflow ask with a verified message, or admit it for the mention,
+        typed-name or participation path."""
+        self.spawn(self._answer_or_admit(parsed), name="teams.turn")
+
+    async def _answer_or_admit(self, parsed: TeamsInbound) -> None:
+        if await workflow_asks.claim_inbound(
+            self.runtime, parsed, self._tenant_id, self._sender, self._reader
+        ):
+            await self._handled(parsed)
+            return  # a workflow ask's answer, not a turn
+        if self._ignored_unprompted(parsed):
+            return
+        if await workflow_cards.claim_mention(self.runtime, parsed, self._tenant_id, self._sender):
+            await self._handled(parsed)
+            return  # a workflow's mention trigger started a run, not a turn
+        await self._admit(parsed)
+
+    async def _handled(self, parsed: TeamsInbound) -> None:
+        """Record an ask's answer as handled, so a restart's catch-up never runs it as a turn."""
+        with contextlib.suppress(*_DB_ERRORS):
+            await self._admissions.claim_receipt(
+                parsed.conversation_id, parsed.activity_id, now=datetime.now(UTC)
+            )
 
     def _ignored_unprompted(self, parsed: TeamsInbound) -> bool:
         """An unaddressed thread reply with participation off asks nothing: drop it."""

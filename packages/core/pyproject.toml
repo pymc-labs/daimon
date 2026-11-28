@@ -29,6 +29,7 @@ dependencies = [
     "pillow>=11,<13",
     "numpy>=2,<3",
     "python-ulid>=3.1,<4",
+    "cel-python>=0.5,<0.6",
 ]
 
 [project.urls]

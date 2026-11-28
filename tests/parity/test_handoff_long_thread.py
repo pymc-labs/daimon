@@ -48,6 +48,7 @@ from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.deps import build_turn_deps
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
+from daimon.testing.settings_mock import mock_settings
 from mux.testing.drivers.anthropic.ma import MARouter, list_response, session_response
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -161,7 +162,7 @@ def _make_runtime(
 ) -> SlackRuntime:
     from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 
-    settings = MagicMock()
+    settings = mock_settings()
     settings.outbound = OutboundSettings()
     settings.crypto.keys = (SecretStr(fernet_key),)
     settings.slack = SlackSettings(

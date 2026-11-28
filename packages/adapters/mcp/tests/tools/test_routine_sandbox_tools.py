@@ -12,6 +12,7 @@ import daimon.core.routine_sandbox as _sandbox_mod
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools.routines import MovedTo
 from daimon.core.config import McpSettings
 from daimon.core.features.service import FeatureActor
 from daimon.core.features.snapshot import FeaturePlace
@@ -26,7 +27,8 @@ from daimon.core.stores.domain import (
     RoutineRow,
     SandboxPin,
 )
-from daimon.core.stores.routines import create_routine
+from daimon.core.stores.routines import create_routine, delete_routine
+from daimon.core.stores.workflows import create_workflow
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.membership import FixtureMembershipResolver
 from fastmcp.exceptions import ToolError
@@ -266,3 +268,26 @@ async def test_an_unreadable_agent_or_environment_refuses_the_opt_in(
         )
 
     assert await _opt_in(committing_sessionmaker, chosen) == (None, None), "nothing written"
+
+
+async def test_a_moved_routine_shows_its_workflow_and_refuses_the_opt_in(
+    committing_sessionmaker: async_sessionmaker[AsyncSession], db_session: AsyncSession
+) -> None:
+    tenant_id, moved, other, account_id = await _setup(db_session)
+    flow = await create_workflow(
+        db_session,
+        tenant_id=tenant_id,
+        owner_account_id=account_id,
+        name="Nightly",
+        spec={},
+        converted_from={"routine_id": str(moved.id)},  # pyright: ignore[reportArgumentType]
+    )
+    await delete_routine(db_session, moved.id, tenant_id=tenant_id)
+    await db_session.commit()
+    runtime = _runtime(committing_sessionmaker, _resolver())
+    admin = _auth(tenant_id, ADMIN, is_admin=True, account_id=account_id)
+
+    shown = [v.moved_to for v in await _views(runtime, admin, [moved, other])]
+    assert shown == [MovedTo(workflow_id=str(flow.id), name="Nightly"), None], shown
+    with pytest.raises(ToolError, match="moved to Workflows"):
+        await _set_impl(runtime, admin, routine_id=moved.id, enabled=True)

@@ -14,7 +14,8 @@ things follow from it, and nothing changes for a routine without one:
    (`record_failure`).
 3. The post happens in the chat adapter for the tenant's platform — the
    scheduler has no platform client. Each adapter runs
-   `run_delivery_poller` with its own `RoutinePoster`; an adapter that runs
+   `run_delivery_poller` with its own `RoutinePoster`, which posts each row
+   as a `DeliveryJob` (`daimon.core.fire.delivery`); an adapter that runs
    none leaves rows `pending`, which is the safe default for a platform that
    cannot post yet. Before posting, `delivery_refusal` applies the tenant's
    access policy: a write-protected destination, or a creator no longer
@@ -27,13 +28,12 @@ Platform SDKs may retry a single send after a server error or connection reset.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from typing import TYPE_CHECKING, Final, Literal, cast
 
 import structlog
@@ -60,10 +60,20 @@ from daimon.core.channel_audience import requester_standing
 from daimon.core.config import Settings
 from daimon.core.cron_words import routine_phrase, schedule_words
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
+from daimon.core.delivery import (
+    DELIVERY_LEASE,
+    DELIVERY_POLL_INTERVAL_S,
+    DeliveryOutcome,
+    JobPoster,
+    RoutinePoster,
+    WorkflowPoster,
+    poll_once,
+    run_poller,
+)
 from daimon.core.features.snapshot import place_feature_or_none
+from daimon.core.fire.subject import RoutineFacts
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
-from daimon.core.ops_events import OpsEvent, report_ops_event
 from daimon.core.outbound.mentions import attribution_line, render_post
 from daimon.core.outbound.opt_out import opt_out_names
 from daimon.core.permissions import any_writers_none, limiting_ids_at
@@ -72,17 +82,15 @@ from daimon.core.routine_files import decode_payload, payload_for
 from daimon.core.self_knowledge import controls_hint
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
-from daimon.core.stores.agent_posts import posted_under
+from daimon.core.stores.agent_posts import parents_of
 from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.domain import CHAT_PLATFORMS, Role, RoutineRow
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.routines import (
     FAILURE_NOTICE,
-    claim_routine_deliveries,
     queue_failure_notice,
     record_result,
     routine_platform,
-    settle_routine_delivery,
 )
 from daimon.core.stores.routines import (
     OWNER_LACKS_ROLE_ERROR as OWNER_LACKS_ROLE_ERROR,
@@ -104,7 +112,6 @@ __all__ = [
     "RoutinePoster",
     "agent_delivered_itself",
     "agent_posted_to",
-    "claim_still_current",
     "destination_shape_error",
     "failure_notice_text",
     "record_failure",
@@ -129,17 +136,16 @@ __all__ = [
 ]
 
 if TYPE_CHECKING:
+    from daimon.core.fire.delivery import DeliveryFacts
     from daimon.core.owner_notices import OwnerDm
 
 log = structlog.get_logger(__name__)
-
-DELIVERY_LEASE: Final[timedelta] = timedelta(minutes=2)
-DELIVERY_POLL_INTERVAL_S: Final[float] = 15.0
 
 #: daimon's own posting tools: a call to one that lands in the destination is
 #: the agent delivering the result itself.
 _POST_TOOL: Final[str] = "send_message"
 _THREAD_TOOL: Final[str] = "create_thread"
+_DM_TOOL: Final[str] = "send_direct_message"
 
 _SLACK_CHANNEL: Final[re.Pattern[str]] = re.compile(r"[CG][A-Z0-9]{2,}")
 _SLACK_THREAD: Final[re.Pattern[str]] = re.compile(r"[CG][A-Z0-9]{2,}:[0-9]+\.[0-9]+")
@@ -183,7 +189,7 @@ class DeliveryTarget:
     thread_ts: str | None = None
 
 
-def delivery_target(row: RoutineRow, *, platform: str) -> DeliveryTarget | None:
+def delivery_target(row: RoutineFacts, *, platform: str) -> DeliveryTarget | None:
     """The row's destination for `platform`, or `None` when it has none or it
     is malformed (a Slack thread without `channel:ts`)."""
     if row.destination_kind in (None, "dm") or row.destination_id is None:
@@ -217,7 +223,7 @@ DirectPost = Literal["allowed", "protected", "unverified"]
 
 
 async def routine_links(
-    sessions: async_sessionmaker[AsyncSession], settings: Settings, row: RoutineRow, platform: str
+    sessions: async_sessionmaker[AsyncSession], settings: Settings, row: RoutineFacts, platform: str
 ) -> TenantLinks | None:
     """A routine fire's web links, with a member's access, where `web_awareness` is On where
     it fires (`routine_feature_place`)."""
@@ -230,7 +236,7 @@ async def routine_links(
 
 
 async def routine_knows(
-    sessions: async_sessionmaker[AsyncSession], settings: Settings, row: RoutineRow, platform: str
+    sessions: async_sessionmaker[AsyncSession], settings: Settings, row: RoutineFacts, platform: str
 ) -> bool:
     """Whether `self_knowledge` is On where a routine fires (`routine_feature_place`)."""
     from daimon.core.rule_views import routine_feature_place  # imports this module
@@ -280,7 +286,7 @@ def split_run_text(text: str) -> RunText:
 
 
 def render_routine_controls(
-    row: RoutineRow,
+    row: RoutineFacts,
     *,
     platform: str,
     direct_post: DirectPost = "allowed",
@@ -386,11 +392,14 @@ class _OwnPosts:
     sent: frozenset[str]
     #: Every channel `create_thread` opened a thread in.
     opened_in: frozenset[str]
+    #: Everyone `send_direct_message` messaged.
+    messaged: frozenset[str]
 
 
 def _own_posts(state: TurnState) -> _OwnPosts:
     sent: set[str] = set()
     opened_in: set[str] = set()
+    messaged: set[str] = set()
     for block in state.content:
         if not isinstance(block, ToolUseBlock):
             continue
@@ -407,28 +416,59 @@ def _own_posts(state: TurnState) -> _OwnPosts:
             channel_id = arguments.get("channel_id")
             if isinstance(channel_id, str):
                 opened_in.add(channel_id)
-    return _OwnPosts(sent=frozenset(sent), opened_in=frozenset(opened_in))
+        elif (arguments := daimon_tool_arguments(block, _DM_TOOL)) is not None:
+            recipient = arguments.get("recipient_id")
+            if isinstance(recipient, str):
+                messaged.add(recipient)
+    return _OwnPosts(frozenset(sent), frozenset(opened_in), frozenset(messaged))
 
 
-def _thread_of(place: str, channel_id: str) -> bool:
-    """Whether `place` names a thread of `channel_id` by a composite id.
+def _composite_parent(place: str) -> str | None:
+    """The channel a composite thread id names: Slack `<channel>:<ts>`, Teams
+    `<channel>;messageid=<root>`. A Discord thread has an id of its own."""
+    for separator in (";messageid=", ":"):
+        channel, found, rest = place.partition(separator)
+        if found and channel and rest and not (separator == ":" and channel.isdigit()):
+            return channel
+    return None
 
-    Slack addresses a thread as `<channel>:<ts>` and Teams as
-    `<channel>;messageid=<root>`. A Discord thread has an id of its own.
+
+async def posted_places(
+    sessions: async_sessionmaker[AsyncSession],
+    state: TurnState,
+    *,
+    tenant_id: uuid.UUID,
+    home: str | None = None,
+    run_as: str | None = None,
+) -> frozenset[str]:
+    """Where the agent posted by itself during the turn, in a Post's `to` grammar.
+
+    Each place `send_message` named; a thread adds its parent: one opened with
+    `create_thread`, one named by a composite id, or a Discord thread the record of the
+    agent's own posts sits under. `home` adds `home` when it was posted to, and a DM to
+    `run_as` adds `run_as`. The one rule for "posts for itself or Daimon posts, never both".
     """
-    return place.startswith((f"{channel_id}:", f"{channel_id};messageid="))
+    posts = _own_posts(state)
+    places = set(posts.sent | posts.opened_in)
+    places.update(p for p in map(_composite_parent, posts.sent) if p is not None)
+    if posts.sent:
+        async with sessions() as session:
+            places |= await parents_of(session, tenant_id=tenant_id, channel_ids=posts.sent)
+    if home is not None and home in places:
+        places.add("home")
+    if run_as is not None and run_as in posts.messaged:
+        places.add("run_as")
+    return frozenset(places)
 
 
-def agent_posted_to(state: TurnState, row: RoutineRow) -> bool:
+def agent_posted_to(state: TurnState, row: RoutineFacts) -> bool:
     """Whether the turn's own tool calls show the agent posted to the destination.
 
-    A `send_message` counts on the full destination as it names it: a channel
-    id, a Discord thread id, or a Slack thread's `<channel>:<ts>`. A post to
-    the bare channel of a thread destination is not the thread, and does not
-    count. Under a channel destination a thread counts too: one the agent
-    opened there with `create_thread`, or one addressed by its composite id.
-    A Discord thread that was already there has only its own id:
-    `agent_delivered_itself` looks its parent up.
+    A `send_message` counts on the full destination as it names it. A post to the bare
+    channel of a thread destination is not the thread. Under a channel destination a
+    thread counts too: one opened there, or one addressed by its composite id. A Discord
+    thread that was already there has only its own id: `agent_delivered_itself` looks
+    its parent up.
     """
     if row.destination_kind == "dm" or row.destination_id is None:
         return False
@@ -437,35 +477,21 @@ def agent_posted_to(state: TurnState, row: RoutineRow) -> bool:
         return True
     if row.destination_kind != "channel":
         return False
-    return row.destination_id in posts.opened_in or any(
-        _thread_of(place, row.destination_id) for place in posts.sent
-    )
+    return row.destination_id in posts.opened_in or row.destination_id in {
+        _composite_parent(p) for p in posts.sent
+    }
 
 
 async def agent_delivered_itself(
-    sessions: async_sessionmaker[AsyncSession], state: TurnState, row: RoutineRow
+    sessions: async_sessionmaker[AsyncSession], state: TurnState, row: RoutineFacts
 ) -> bool:
-    """Whether the agent posted to the destination, or to a thread under it, during the turn.
-
-    The one rule for the fallback post: the routine posts for itself or daimon
-    posts its final reply, never both. `agent_posted_to` answers from the tool
-    calls alone. What is left is a post into a Discord thread the turn did not
-    open: the record of the agent's own posts names that thread's parent.
-    """
-    if agent_posted_to(state, row):
-        return True
-    if row.destination_kind != "channel" or row.destination_id is None:
+    """Whether the agent posted to the destination, or to a thread under it, during the turn
+    (`posted_places`); a thread destination counts only itself."""
+    if row.destination_kind in (None, "dm") or row.destination_id is None:
         return False
-    sent = _own_posts(state).sent
-    if not sent:
-        return False
-    async with sessions() as session:
-        return await posted_under(
-            session,
-            tenant_id=row.tenant_id,
-            parent_channel_id=row.destination_id,
-            channel_ids=sent,
-        )
+    if row.destination_kind != "channel":
+        return agent_posted_to(state, row)
+    return row.destination_id in await posted_places(sessions, state, tenant_id=row.tenant_id)
 
 
 def destination_shape_error(platform: str, kind: str, destination_id: str) -> str | None:
@@ -629,7 +655,7 @@ async def record_routine_failure(
 
 
 def render_fallback_post(
-    row: RoutineRow,
+    row: DeliveryFacts,
     *,
     as_agent: bool = False,
     platform: str | None = None,
@@ -659,7 +685,7 @@ def render_fallback_post(
 
 
 async def routine_requester_name(
-    sessionmaker: async_sessionmaker[AsyncSession] | None, row: RoutineRow, platform: str
+    sessionmaker: async_sessionmaker[AsyncSession] | None, row: RoutineFacts, platform: str
 ) -> str | None:
     """The routine creator's stored display name, for platforms whose tag would ping."""
     if sessionmaker is None or row.created_by_user_id is None:
@@ -672,7 +698,7 @@ async def routine_requester_name(
 
 def _attributed(
     text: str,
-    row: RoutineRow,
+    row: RoutineFacts,
     platform: str | None,
     requester_name: str | None = None,
     agent_name: str | None = None,
@@ -691,7 +717,7 @@ def _attributed(
 
 
 async def routine_agent_name(
-    sessionmaker: async_sessionmaker[AsyncSession] | None, row: RoutineRow
+    sessionmaker: async_sessionmaker[AsyncSession] | None, row: RoutineFacts
 ) -> str:
     """The routine's agent as people see it: its display name, else its name."""
     if sessionmaker is None:
@@ -706,45 +732,84 @@ async def resolve_routine_identity(
     client: AsyncAnthropic,
     settings: Settings,
     *,
-    row: RoutineRow,
+    row: RoutineFacts,
     platform: Literal["discord", "slack"],
     workspace_id: str,
     default_agent_name: str | None,
 ) -> AgentIdentity:
-    """The identity a routine's result is posted under.
+    """The identity a routine's result is posted under (`resolve_post_identity`)."""
+    return await resolve_post_identity(
+        sessionmaker,
+        client,
+        settings,
+        tenant_id=row.tenant_id,
+        agent_name=row.agent_name,
+        agent_id=row.agent_id,
+        platform=platform,
+        workspace_id=workspace_id,
+        default_agent_name=default_agent_name,
+    )
+
+
+async def resolve_post_identity(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    client: AsyncAnthropic,
+    settings: Settings,
+    *,
+    tenant_id: uuid.UUID,
+    agent_name: str,
+    agent_id: str | None,
+    platform: Literal["discord", "slack", "teams"],
+    workspace_id: str,
+    default_agent_name: str | None,
+) -> AgentIdentity:
+    """The identity an unattended post (a routine's result, a workflow Post) goes out under.
+
+    Teams has no per-message face: its identity is the agent's name over the message.
 
     The built-in agent, identity switched off, or a failed lookup all come back
     built-in, so the post reads exactly as it did before agent identity. Any
-    error is caught here: a lookup that fails must not cost the result its post.
+    error is caught here: a lookup that fails must not cost the post.
     The poller is off any interaction deadline, so a new agent's face is waited for.
     """
-    plain = AgentIdentity(name=row.agent_name, avatar_url=None, builtin=True)
+    plain = AgentIdentity(name=agent_name, avatar_url=None, builtin=True)
     if not identity_enabled_for(settings, platform, workspace_id):
         return plain
     try:
         agent = await find_agent_by_daimon_tag(
-            client, tenant_id=row.tenant_id, name=row.agent_name, records=sessionmaker
+            client, tenant_id=tenant_id, name=agent_name, records=sessionmaker
         )
+        shown_id = agent_id or (agent.id if agent is not None else None)
+        display = (
+            await agent_display_name(
+                sessionmaker, tenant_id=tenant_id, agent_id=shown_id, fallback=agent_name
+            )
+            if shown_id
+            else agent_name
+        )
+        builtin = is_builtin_agent(
+            name=agent_name,
+            metadata=agent.metadata if agent is not None else None,
+            default_agent_name=default_agent_name,
+        )
+        if platform == "teams":
+            return AgentIdentity(name=display, avatar_url=None, builtin=builtin)
         async with sessionmaker.begin() as session:
             return await resolve_agent_identity(
                 session,
-                tenant_id=row.tenant_id,
-                agent_name=row.agent_name,
-                display_name=await routine_agent_name(sessionmaker, row),
-                is_builtin=is_builtin_agent(
-                    name=row.agent_name,
-                    metadata=agent.metadata if agent is not None else None,
-                    default_agent_name=default_agent_name,
-                ),
+                tenant_id=tenant_id,
+                agent_name=agent_name,
+                display_name=display,
+                is_builtin=builtin,
                 public_base_url=settings.mcp.app_root_url,
                 enabled=True,
                 background_sessionmaker=sessionmaker,
                 wait_for_face=True,
             )
-    except Exception as exc:  # identity is cosmetic: never lose the result over it
+    except Exception as exc:  # identity is cosmetic: never lose the post over it
         log.warning(
             "routine.identity_lookup_failed",
-            routine_id=str(row.id),
+            agent_name=agent_name,
             error_type=type(exc).__name__,
         )
         return plain
@@ -767,7 +832,7 @@ _DM_REASONS: Final[dict[str, tuple[str, ...]]] = {
 }
 
 
-def render_fallback_dm(row: RoutineRow, reason: str, agent_name: str | None = None) -> str:
+def render_fallback_dm(row: DeliveryFacts, reason: str, agent_name: str | None = None) -> str:
     """The direct message sent to the creator when the destination is unusable.
 
     The agent (as people see it, `routine_agent_name`) and schedule first, then why the
@@ -851,7 +916,7 @@ def creator_refusal_for(
 
 async def clear_creator(
     sessionmaker: async_sessionmaker[AsyncSession],
-    row: RoutineRow,
+    row: RoutineFacts,
     *,
     platform: str,
     membership_resolver: MembershipResolver | None = None,
@@ -932,7 +997,7 @@ async def clear_creator(
 
 
 async def _owner_is_outsider(
-    sessionmaker: async_sessionmaker[AsyncSession], row: RoutineRow, *, subject: Subject
+    sessionmaker: async_sessionmaker[AsyncSession], row: RoutineFacts, *, subject: Subject
 ) -> bool:
     """Whether `audience_hold` is `on` and the owner of a private result holds no internal role.
 
@@ -957,7 +1022,7 @@ async def _owner_is_outsider(
 
 async def private_delivery_refusal(
     sessionmaker: async_sessionmaker[AsyncSession],
-    row: RoutineRow,
+    row: RoutineFacts,
     *,
     membership_resolver: MembershipResolver | None = None,
 ) -> SkipReason | None:
@@ -1044,22 +1109,8 @@ def placement_unknown_is_unsafe(
     return any_writers_none(policy, categories_only=True)
 
 
-def claim_still_current(current: RoutineRow, row: RoutineRow, now: datetime) -> bool:
-    """Whether the delivery lease `row` was claimed with is still held and unexpired.
-
-    `current` is the routine as read now. A row that was not claimed has no
-    lease to lose.
-    """
-    return row.delivery_status != "claimed" or (
-        current.delivery_status == "claimed"
-        and current.delivery_lease_owner == row.delivery_lease_owner
-        and current.delivery_lease_expires_at is not None
-        and current.delivery_lease_expires_at > now
-    )
-
-
 async def tenant_dm_still_open(
-    sessionmaker: async_sessionmaker[AsyncSession], row: RoutineRow, external_id: str
+    sessionmaker: async_sessionmaker[AsyncSession], row: RoutineFacts, external_id: str
 ) -> bool:
     """Whether `row`'s tenant is still the live workspace `external_id` with routine DMs on."""
     async with sessionmaker() as session:
@@ -1072,34 +1123,6 @@ async def tenant_dm_still_open(
         )
 
 
-#: Skip notes that mean a post was attempted and failed; every other skip is deliberate.
-_POST_FAILURE_NOTES = frozenset(
-    {
-        "post_failed",
-        "Delivery was interrupted; it will not be retried.",
-        "The DM could not be delivered; it will not be retried.",
-        "access_policy_unreadable",
-        "The server access settings could not be read.",
-    }
-)
-
-
-@dataclass(frozen=True)
-class DeliveryOutcome:
-    status: Literal["delivered", "skipped"]
-    #: A `SkipReason`, or `dm_fallback:<reason>` for a result delivered to the
-    #: creator by direct message instead of the destination.
-    note: str | None = None
-    #: The error class of a post that was tried and failed, such as a fallback DM.
-    failed: str | None = None
-
-
-#: The adapter hook: post `row`'s result (or refuse) and say what happened.
-#: It is responsible for resolving the destination on its platform and for
-#: calling `delivery_refusal` with what it resolved.
-RoutinePoster = Callable[[RoutineRow], Awaitable[DeliveryOutcome]]
-
-
 async def poll_deliveries_once(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
@@ -1109,88 +1132,9 @@ async def poll_deliveries_once(
     owner: str | None = None,
     clock: Callable[[], datetime] | None = None,
 ) -> int:
-    """Claim due posts for `platform`, post each, settle. Returns how many."""
-    lease_owner = owner or f"{platform}:{uuid.uuid4()}"
-    async with sessionmaker() as session, session.begin():
-        claimed = await claim_routine_deliveries(
-            session, platform=platform, owner=lease_owner, now=now, lease=DELIVERY_LEASE
-        )
-    for row in claimed:
-        payload = decode_payload(payload_for(row))
-        raised = False
-        if not (payload.text.strip() or payload.files):
-            outcome = DeliveryOutcome(status="skipped", note="no_result")
-        else:
-            try:
-                outcome = await post(row)
-            except Exception as err:
-                # Named boundary: the poster is adapter code talking to a chat
-                # API. Settling `skipped` (not back to pending) keeps delivery
-                # at most once — a failure may have landed after the post.
-                raised = True
-                log.warning(
-                    "routine.delivery_failed",
-                    tenant_id=str(row.tenant_id),
-                    routine_id=str(row.id),
-                    status="post_failed",
-                    error_type=type(err).__name__,
-                )
-                _report_delivery_failed(sessionmaker, row, platform, type(err).__name__)
-                outcome = DeliveryOutcome(
-                    status="skipped",
-                    note=(
-                        "File delivery failed or was interrupted; it will not be retried."
-                        if payload.files
-                        else "post_failed"
-                    ),
-                )
-        async with sessionmaker() as session, session.begin():
-            settled = await settle_routine_delivery(
-                session,
-                row.id,
-                owner=lease_owner,
-                status=outcome.status,
-                note=outcome.note,
-                now=datetime.now(UTC) if clock is None else clock(),
-            )
-        log.info(
-            "routine.delivery_settled",
-            routine_id=str(row.id),
-            status=outcome.status,
-            note=outcome.note,
-            settled=settled,
-        )
-        if outcome.status == "skipped" and outcome.note != "no_result" and not raised:
-            # Real post failures page; deliberate skips (policy, archive, ...) only log.
-            failed = outcome.failed is not None or outcome.note in _POST_FAILURE_NOTES
-            (log.warning if failed else log.info)(
-                "routine.delivery_failed" if failed else "routine.delivery_skipped",
-                tenant_id=str(row.tenant_id),
-                routine_id=str(row.id),
-                status="skipped",
-                note=outcome.note,
-            )
-            if failed:
-                _report_delivery_failed(
-                    sessionmaker, row, platform, outcome.failed or "post_failed"
-                )
-    return len(claimed)
-
-
-def _report_delivery_failed(
-    sm: async_sessionmaker[AsyncSession], row: RoutineRow, platform: str, reason: str
-) -> None:
-    report_ops_event(
-        sm,
-        OpsEvent(
-            "routine.delivery_failed",
-            row.tenant_id,
-            reason=reason,
-            routine_id=row.id,
-            agent_id=row.agent_id,
-            platform=platform,
-        ),
-        logged=False,
+    """Claim due routine posts for `platform`, post each, settle. Returns how many."""
+    return await poll_once(
+        sessionmaker, platform=platform, post=JobPoster(post), now=now, owner=owner, clock=clock
     )
 
 
@@ -1201,20 +1145,18 @@ async def run_delivery_poller(
     post: RoutinePoster,
     should_stop: Callable[[], bool],
     interval_s: float = DELIVERY_POLL_INTERVAL_S,
+    workflow: WorkflowPoster | None = None,
+    run_cards: Callable[[], Awaitable[int]] | None = None,
     owner_dm: OwnerDm | None = None,
 ) -> None:
-    """Poll until `should_stop`, one `poll_deliveries_once` per interval; with `owner_dm`,
-    also send the failure notices waiting for this platform's routine owners."""
-    from daimon.core.owner_notices import poll_owner_notices_once  # imports this module
-
-    owner = f"{platform}:{uuid.uuid4()}"
-    while not should_stop():
-        try:
-            await poll_deliveries_once(
-                sessionmaker, platform=platform, post=post, now=datetime.now(UTC), owner=owner
-            )
-            if owner_dm is not None:
-                await poll_owner_notices_once(sessionmaker, platform=platform, send=owner_dm)
-        except Exception:
-            log.exception("routine.delivery_poll_failed", platform=platform)
-        await asyncio.sleep(interval_s)
+    """Poll routine posts, workflow posts with `workflow` and run cards with `run_cards`,
+    until `should_stop`; with `owner_dm`, also send the failure notices waiting for this
+    platform's routine owners."""
+    await run_poller(
+        sessionmaker,
+        platform=platform,
+        post=JobPoster(post, workflow, run_cards),
+        should_stop=should_stop,
+        interval_s=interval_s,
+        owner_dm=owner_dm,
+    )

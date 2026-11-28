@@ -340,10 +340,14 @@ async def test_relay_verdict_cards_ask_and_refuses_it_unattended() -> None:
     policy = _settings().tool_safety
     connector = Connector(_KEY, _UP, "ask", {"off": "disabled"})
     call = ToolCall(tool_use_id="t", server_name=_KEY, tool_name="write", input={})
-    assert await relay_verdict(policy, connector, call, attended=True) == "ask", "a card"
-    assert await relay_verdict(policy, connector, call, attended=False) == "refuse", "unattended"
+    assert (await relay_verdict(policy, connector, call, attended=True)).verdict == "ask", "a card"
+    assert (await relay_verdict(policy, connector, call, attended=False)).verdict == "refuse", (
+        "unattended"
+    )
     off = ToolCall(tool_use_id="t", server_name=_KEY, tool_name="off", input={})
-    assert await relay_verdict(policy, connector, off, attended=True) == "refuse", "disabled"
+    assert (await relay_verdict(policy, connector, off, attended=True)).verdict == "refuse", (
+        "disabled"
+    )
 
 
 def test_tools_cache_is_keyed_by_requester_and_token() -> None:
@@ -512,6 +516,27 @@ async def test_an_approved_card_never_runs_under_another_persons_credential(rig:
     assert refused.status_code == 403 and rig.upstream.calls == [], f"refused: {refused}"
     [after] = await _cards(rig)
     assert after.status == "approved", f"the card still waits for its own wake: {after.status}"
+
+
+async def test_a_step_credentials_call_is_decided_by_its_lanes_step(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provider step's credential names its run and lane: the relay asks that lane's step,
+    and with no step running there the call is refused, never decided by base policy."""
+    from daimon.adapters.mcp import connector_relay as relay_module
+
+    asked: list[object] = []
+
+    async def no_step(*_a: object, **kw: object) -> None:
+        asked.append((kw["run_id"], kw["execution_id"]))
+
+    monkeypatch.setattr(relay_module, "running_step_decider", no_step)
+    run, grant = uuid.uuid4(), uuid.uuid4()
+    claims = rig.claims(workflow_run_id=str(run), execution_id=str(grant))
+    call = {"name": "write", "arguments": {}}
+    result = _result(await rig.send("tools/call", call, claims=claims))
+    assert _text(result) == REFUSED_TEXT and asked == [(run, grant)], (result, asked)
+    assert rig.upstream.calls == [] and rig.posted == [], "no call, no card"
 
 
 async def test_always_ask_on_an_unattended_turn_is_refused(

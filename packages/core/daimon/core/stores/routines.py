@@ -22,6 +22,7 @@ import structlog
 from daimon.core._models import (
     Routine,
     Tenant,
+    Workflow,
 )
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.errors import RoutineAlreadyRunning, StoreError
@@ -1334,3 +1335,40 @@ async def erase_sandbox_setter(
                 ),
                 {"erased": SANDBOX_SETTER_ERASED, "setter": setter, "only_in": tenant_id},
             )
+
+
+# --- conversion to workflows ---
+
+
+async def migrated_workflows(
+    session: AsyncSession,
+    routine_ids: Collection[_uuid.UUID],
+    *,
+    tenant_id: _uuid.UUID | None = None,
+    key: Literal["routine_id", "source_routine_id"] = "routine_id",
+) -> dict[_uuid.UUID, tuple[_uuid.UUID, str]]:
+    """The workflow (id, name) each of `routine_ids` was converted to, by the routine's id or
+    its handback `source_routine_id`; absent ones never moved or converted back."""
+    if not routine_ids:
+        return {}
+    origin = Workflow.converted_from[key].astext
+    stmt = select(origin, Workflow.id, Workflow.name).where(
+        origin.in_([str(r) for r in routine_ids])
+    )
+    if tenant_id is not None:
+        stmt = stmt.where(Workflow.tenant_id == tenant_id)
+    rows = await session.execute(stmt)
+    return {_uuid.UUID(r): (w, name) for r, w, name in rows.tuples()}
+
+
+async def get_routine_for_move(
+    session: AsyncSession, routine_id: _uuid.UUID, *, tenant_id: _uuid.UUID
+) -> tuple[RoutineRow, dict[str, Any] | None] | None:
+    """The routine and its held owner notice, locked until the transaction ends, so no slot
+    claim races the move."""
+    orm = await session.scalar(
+        select(Routine)
+        .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
+        .with_for_update()
+    )
+    return None if orm is None else (RoutineRow.model_validate(orm), orm.owner_notice)

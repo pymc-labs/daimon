@@ -2,6 +2,8 @@
   "description": [
     "PATCH-update a routine, including owner-only DM delivery where supported.",
     "",
+    "Legacy: prefer the workflow tools (list_workflows, run_workflow).",
+    "",
     "Only provided fields are changed.",
     "",
     "``destination_kind`` + ``destination_id`` set where results go (see",

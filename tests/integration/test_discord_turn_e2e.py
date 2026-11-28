@@ -41,6 +41,7 @@ from daimon.testing import build_turn_router
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_tenant
 from daimon.testing.membership import FixtureMembershipResolver
+from daimon.testing.settings_mock import mock_settings
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -62,7 +63,7 @@ def _make_runtime(
     of an AsyncMock client. This is the key difference from test_orchestration.py
     which uses AsyncMock — here run_turn is exercised for real.
     """
-    settings = MagicMock()
+    settings = mock_settings()
     settings.agent_identity.enabled = True
     settings.mcp = McpSettings()
     settings.billing.markup = Decimal("1.0")

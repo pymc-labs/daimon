@@ -251,6 +251,7 @@ async def test_click_and_following_mention_use_normal_ingress_in_order(
     from daimon.core.turn.state import TurnState
     from daimon.testing.ma import resolved_agent_env_router
     from daimon.testing.ma_models import ma_environment
+    from daimon.testing.settings_mock import mock_settings
     from mux.testing.drivers.anthropic.ma_models import ma_session
 
     from .harness import make_bot
@@ -270,7 +271,7 @@ async def test_click_and_following_mention_use_normal_ingress_in_order(
     client = build_fake_anthropic(resolved_agent_env_router(agent, environment).dispatch)
     default = DeploymentDefault(agent_name="daimon", environment_name="default")
     deps = replace(deps_for(client, db_session_factory), deployment_default=default)
-    settings = MagicMock()
+    settings = mock_settings()
     settings.mcp = McpSettings()
     settings.app.env = "production"
     settings.discord.command_guild_ids = (int(_GUILD),)

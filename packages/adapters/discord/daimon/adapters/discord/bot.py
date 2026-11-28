@@ -20,7 +20,7 @@ import anthropic as _anthropic
 import sentry_sdk
 import structlog
 import structlog.contextvars
-from daimon.adapters.discord import theme
+from daimon.adapters.discord import theme, workflow_asks, workflow_cards
 from daimon.adapters.discord.agent_setup.stale_picture import StalePictureChangeButton
 from daimon.adapters.discord.attachments import prepare_attachments
 from daimon.adapters.discord.audience_rest import reader_from_settings
@@ -80,7 +80,7 @@ from daimon.adapters.discord.provider_actions import (
     provider_action_options,
 )
 from daimon.adapters.discord.reactions import QUEUED, WORKING
-from daimon.adapters.discord.routine_delivery import make_discord_routine_poster
+from daimon.adapters.discord.routine_delivery import make_discord_poster
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.adapters.discord.startup_replay import completed_orphan_text
 from daimon.adapters.discord.thread_gone import ThreadStops, TurnThreadWatch, stop_reason_of
@@ -105,6 +105,9 @@ from daimon.adapters.discord.typed_stop import (
 )
 from daimon.adapters.discord.views import STOP_NOT_ALLOWED, CancelView
 from daimon.adapters.discord.watch_access import require_watch_thread_access
+from daimon.adapters.discord.workflow_asks import AskButton
+from daimon.adapters.discord.workflow_cards import card_editor, web_at
+from daimon.adapters.discord.workflow_delivery import make_discord_workflow_poster
 from daimon.core.access_policy import CHANNEL_SCOPE_PREFIX, DM_SCOPE_PREFIX
 from daimon.core.agent_identity import (
     AgentIdentity,
@@ -148,6 +151,8 @@ from daimon.core.defaults.report import compose_failure_reason
 from daimon.core.direct_messages import sealed_among
 from daimon.core.errors import DaimonError, TurnError, UserFacingError
 from daimon.core.features.snapshot import FeaturePlace, may_turn_on, place_feature
+from daimon.core.fire.delivery import routine_poster
+from daimon.core.fire.subject import RoutineFacts
 from daimon.core.github_connect_delivery import run_connect_notice_poller
 from daimon.core.github_credentials import build_multifernet, decrypt_token
 from daimon.core.github_request_expiry import run_request_expiry_poller
@@ -176,7 +181,6 @@ from daimon.core.stores.discord_message_admissions import (
 from daimon.core.stores.domain import (
     CredentialRequestRow,
     Role,
-    RoutineRow,
     TaskContinuationRow,
     TenantRow,
     ThreadSessionRow,
@@ -268,6 +272,7 @@ from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_keys import answering_env_sha256, list_mounted_key_names
 from daimon.core.turn_origin import HandoffNotice, SessionState, render_turn_origin, turn_origin
 from daimon.core.turn_queue import TurnQueue
+from daimon.core.workflows import chat_cards
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Scope
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
@@ -943,7 +948,7 @@ class DaimonBot(commands.Bot):
         if self._output_sweeps.get(session_id) is task:
             del self._output_sweeps[session_id]
 
-    async def _routine_agent_names(self, row: RoutineRow) -> tuple[str | None, ...]:
+    async def _routine_agent_names(self, row: RoutineFacts) -> tuple[str | None, ...]:
         agent = await find_agent_by_daimon_tag(
             self.runtime.anthropic,
             tenant_id=row.tenant_id,
@@ -1318,30 +1323,48 @@ class DaimonBot(commands.Bot):
             )
             # Post routine results to their destinations. Same
             # switch as the wake poller: one process per platform posts.
+            results = make_discord_poster(
+                self.runtime.sessionmaker,
+                fetch_channel=self._channel_by_id,
+                open_dm=self.open_member_dm,
+                dm_policy=lambda row: env_dm_policy(
+                    self.runtime.settings.direct_message_policies, row.tenant_id
+                ),
+                client=self,
+                output_client=self.runtime.anthropic,
+                membership_resolver=self.membership_resolver,
+                resolve_agent_names=self._routine_agent_names,
+                resolve_identity=lambda row, guild_id: resolve_routine_identity(
+                    self.runtime.sessionmaker,
+                    self.runtime.anthropic,
+                    self.runtime.settings,
+                    row=row,
+                    platform="discord",
+                    workspace_id=guild_id,
+                    default_agent_name=self.runtime.deployment_default.agent_name,
+                ),
+            )
             self._spawn(
                 run_delivery_poller(
                     self.runtime.sessionmaker,
                     platform="discord",
-                    post=make_discord_routine_poster(
+                    post=routine_poster(self.runtime.sessionmaker, results, platform="discord"),
+                    workflow=make_discord_workflow_poster(
                         self.runtime.sessionmaker,
+                        settings=self.runtime.settings,
+                        links=web_at(self.runtime, self._channel_by_id),
                         fetch_channel=self._channel_by_id,
                         open_dm=self.open_member_dm,
-                        dm_policy=lambda row: env_dm_policy(
-                            self.runtime.settings.direct_message_policies, row.tenant_id
-                        ),
-                        client=self,
-                        output_client=self.runtime.anthropic,
                         membership_resolver=self.membership_resolver,
-                        resolve_agent_names=self._routine_agent_names,
-                        resolve_identity=lambda row, guild_id: resolve_routine_identity(
-                            self.runtime.sessionmaker,
-                            self.runtime.anthropic,
-                            self.runtime.settings,
-                            row=row,
-                            platform="discord",
-                            workspace_id=guild_id,
-                            default_agent_name=self.runtime.deployment_default.agent_name,
-                        ),
+                        output_client=self.runtime.anthropic,
+                        client=self,
+                        default_agent_name=self.runtime.deployment_default.agent_name,
+                    ),
+                    run_cards=chat_cards.follower(
+                        self.runtime.sessionmaker,
+                        platform="discord",
+                        links=web_at(self.runtime, self._channel_by_id),
+                        edit=lambda _, place, card: card_editor(self._channel_by_id, place, card),
                     ),
                     should_stop=lambda: self.draining or self.is_closed(),
                 )
@@ -1383,6 +1406,7 @@ class DaimonBot(commands.Bot):
             SecretShareRevealButton,
             ShareSecretCog,
         )
+        from daimon.adapters.discord.commands.workflows import WorkflowsCog
         from daimon.adapters.discord.feedback_reactions import FeedbackReactionCog
 
         await self.add_cog(HelpCog(self))
@@ -1391,6 +1415,7 @@ class DaimonBot(commands.Bot):
         await self.add_cog(AgentSetupCog(self))
         await self.add_cog(GitHubCog(self))
         await self.add_cog(RoutinesCog(self))
+        await self.add_cog(WorkflowsCog(self))
         await self.add_cog(LeadsCog(self))
         await self.add_cog(BillingCog(self))
         await self.add_cog(SettingsCog(self))
@@ -1417,6 +1442,9 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.posted_controls.host_call import HostCallControl
 
         self.add_dynamic_items(HostCallControl)
+        from daimon.adapters.discord.workflow_cards import WorkflowCardControl
+
+        self.add_dynamic_items(WorkflowCardControl)
 
         # Same rationale as CredentialRequestButton above: the wizard's
         # first screen is posted by the MCP process, and every tap on it
@@ -1472,6 +1500,8 @@ class DaimonBot(commands.Bot):
         # A setup panel from before picture uploads were turned off can still
         # show Change; the click gets the refusal instead of "interaction failed".
         self.add_dynamic_items(StalePictureChangeButton)
+        # A workflow ask's buttons outlive the process that posted them.
+        self.add_dynamic_items(AskButton)
 
     async def _post_to_guild(
         self, guild: discord.Guild, embed: discord.Embed
@@ -3224,6 +3254,18 @@ class DaimonBot(commands.Bot):
             and not resume_admitted
             and not isinstance(message, ButtonMessage)
             and message.guild is not None
+            and await workflow_asks.claim_message(
+                self.runtime,
+                message,
+                (derive_tenant_uuid(platform="discord", workspace_id=str(message.guild.id)),),
+            )
+        ):
+            return  # a workflow ask's answer, not a turn
+        if (
+            not startup_replay
+            and not resume_admitted
+            and not isinstance(message, ButtonMessage)
+            and message.guild is not None
             and isinstance(message.author, discord.Member)
             and not message.author.bot
         ):
@@ -3250,6 +3292,13 @@ class DaimonBot(commands.Bot):
             # From here on it is a mention: the same gates, the same turn, and
             # no participation screening or unmentioned-reply hint for it.
             bot_mentioned = await self._plain_text_mentions_on(message)
+        if (
+            bot_mentioned
+            and not resume_admitted
+            and not isinstance(message, ButtonMessage)
+            and await workflow_cards.claim_mention(self.runtime, message, self._channel_by_id)
+        ):
+            return  # a workflow's mention trigger started a run, not a turn
         reply_to_recorded_post = False
         reference = message.reference
         resolved = reference.resolved if isinstance(reference, discord.MessageReference) else None
@@ -3310,7 +3359,7 @@ class DaimonBot(commands.Bot):
                 reply_to_recorded_post = post is not None and (
                     post.source != "auto_thread"
                     if identity_on
-                    else post.source in ("turn", "routine")
+                    else post.source in ("turn", "routine", "workflow")
                 )
             except Exception as exc:
                 log.warning("reply_gate.lookup_failed", error_type=type(exc).__name__)

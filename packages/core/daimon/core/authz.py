@@ -62,6 +62,16 @@ class Action(StrEnum):
     # is the destination channel (None for a Discord thread or no
     # destination) and `parent_channel_id` the channel it posts into.
     SAVE_ROUTINE = "save_routine"
+    # Edit a workflow's draft, run it, or publish it (becoming its run-as person): decided
+    # as SAVE_ROUTINE for each agent it uses, at its home channel. The workflow's own roles
+    # (`workflow_access`) are checked by the caller first.
+    EDIT_WORKFLOW = "edit_workflow"
+    RUN_WORKFLOW = "run_workflow"
+    PUBLISH_WORKFLOW = "publish_workflow"
+    # Answer a workflow's wait (approve, reject, reply): the wait checks its addressees.
+    DECIDE_WAIT = "decide_wait"
+    # Approve a workflow's grants: current human admins only.
+    GRANT_WORKFLOW = "grant_workflow"
     # Change what an agent reaches: keys, connectors, MCP servers, prompt,
     # tools, skills, repo binding.
     CONFIGURE = "configure"
@@ -150,6 +160,7 @@ class Surface(StrEnum):
     HUB = "hub"  # a person's own hub session: only they see it
     AGENT_CHAT = "agent_chat"  # an agent-key or bearer call
     ROUTINE = "routine"  # a scheduled run posting into a channel
+    WORKFLOW = "workflow"  # a workflow run, by hand, scheduled or from a webhook
     HANDOFF = "handoff"  # a task handed to another agent in a thread
     CONFIG = "config"  # a configuration write (request tool, form, OAuth, direct tool)
     WEB = "web"  # the web app's chat: only the person sees it, but in no workspace channel
@@ -462,6 +473,11 @@ _CLIENT_REFUSED_ACTIONS = frozenset(
     {
         Action.DIRECT_MESSAGE,
         Action.SAVE_ROUTINE,
+        Action.EDIT_WORKFLOW,
+        Action.RUN_WORKFLOW,
+        Action.PUBLISH_WORKFLOW,
+        Action.DECIDE_WAIT,
+        Action.GRANT_WORKFLOW,
         Action.ACT_FOR_CREATOR,
         Action.CREATE_AGENT,
         Action.CONFIGURE,
@@ -485,11 +501,32 @@ _CLIENT_REFUSED_ACTIONS = frozenset(
 )
 
 #: Surfaces a client may never start a turn or run an agent on: everything but a channel.
-_CLIENT_REFUSED_SURFACES = frozenset({Surface.DM, Surface.HUB, Surface.AGENT_CHAT, Surface.ROUTINE})
+_CLIENT_REFUSED_SURFACES = frozenset(
+    {Surface.DM, Surface.HUB, Surface.AGENT_CHAT, Surface.ROUTINE, Surface.WORKFLOW}
+)
 
 #: What a held turn may not do at all, client or not.
-_HOLD_REFUSED_ACTIONS = frozenset({Action.DIRECT_MESSAGE, Action.SAVE_ROUTINE, Action.CREATE_AGENT})
+_HOLD_REFUSED_ACTIONS = frozenset(
+    {
+        Action.DIRECT_MESSAGE,
+        Action.SAVE_ROUTINE,
+        Action.CREATE_AGENT,
+        Action.EDIT_WORKFLOW,
+        Action.PUBLISH_WORKFLOW,
+        Action.GRANT_WORKFLOW,
+    }
+)
 
+
+#: Saved or run for an agent at a destination, as a routine is.
+_SAVES_FOR_AGENT = frozenset(
+    {
+        Action.SAVE_ROUTINE,
+        Action.EDIT_WORKFLOW,
+        Action.RUN_WORKFLOW,
+        Action.PUBLISH_WORKFLOW,
+    }
+)
 
 #: What a client may do only from a named origin channel, so it needs a hold.
 _ORIGIN_BOUND_ACTIONS = frozenset(
@@ -760,7 +797,14 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         refusal = run_refusal(agent.permissions, place.permissions, setup_thread=place.setup_thread)
         return ALLOW if refusal is None else _deny(refusal)
 
-    if req.action is Action.SAVE_ROUTINE:
+    if req.action is Action.GRANT_WORKFLOW:
+        human = subject.platform_user_id is not None and not subject.via_agent_key
+        return ALLOW if subject.is_admin and human else _deny("admin_required")
+
+    if req.action is Action.DECIDE_WAIT:
+        return ALLOW
+
+    if req.action in _SAVES_FOR_AGENT:
         if agent_invoker_roles(policy, agent.names) and not holds_agent_roles(
             policy, agent.names, subject
         ):

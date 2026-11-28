@@ -1,0 +1,38 @@
+schema: daimon.workflow/v1
+name: Daily digest
+goal: Post a short digest every weekday morning, unless there is nothing to report.
+triggers:
+  - id: weekdays
+    kind: schedule
+    cron: "0 8 * * 1-5"
+defaults:
+  agent: default
+start: collect
+nodes:
+  collect:
+    kind: agent
+    title: Collect the news
+    instructions: |
+      Gather what changed since yesterday and write a digest of at most ten lines.
+      Say "nothing new" when there is nothing worth reporting.
+    output:
+      digest: { type: string }
+      has_news: { type: boolean }
+    next: check
+  check:
+    kind: branch
+    title: Anything to report?
+    cases:
+      - when: ${{ steps.collect.output.has_news }}
+        to: send
+    else: quiet
+  send:
+    kind: finish
+    title: Digest
+    output: ${{ steps.collect.output.digest }}
+    deliver:
+      to: run_as
+      message: ${{ steps.collect.output.digest }}
+  quiet:
+    kind: finish
+    title: Nothing to report

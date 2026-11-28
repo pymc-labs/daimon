@@ -1,0 +1,30 @@
+{
+  "description": [
+    "Check a workflow's draft, or a spec you pass, and list errors, warnings and grants."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "spec": {
+        "anyOf": [
+          {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "workflow_id": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "workflow_id"
+    ],
+    "type": "object"
+  }
+}

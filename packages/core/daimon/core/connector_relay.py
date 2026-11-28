@@ -24,12 +24,17 @@ from pydantic import JsonValue
 
 if TYPE_CHECKING:
     from daimon.core.tool_safety import ToolSafetyPolicy
+    from daimon.core.turn.posture import PolicyApproval
     from mux.contracts.resources import AgentSpec
+
+    #: A workflow step's tool policy and decider (`workflows.agent_step.work_decider`).
+    StepDecider = tuple[ToolSafetyPolicy, Callable[[PolicyApproval], PolicyApproval]]
 
 __all__ = [
     "CACHE_TTL_S",
     "RELAY_PATH",
     "Connector",
+    "RelayDecision",
     "ToolsCache",
     "connectors_of",
     "daimon_destination",
@@ -163,14 +168,46 @@ def harness_connectors(spec: AgentSpec) -> dict[str, Connector]:
     return found
 
 
+@dataclass(frozen=True, slots=True)
+class RelayDecision:
+    """A relayed call's verdict; `text`, what the agent reads instead of a refused result."""
+
+    verdict: Verdict
+    text: str | None = None
+
+
 async def relay_verdict(
-    policy: ToolSafetyPolicy, connector: Connector, call: ToolCall, *, attended: bool
-) -> Verdict:
+    policy: ToolSafetyPolicy,
+    connector: Connector,
+    call: ToolCall,
+    *,
+    attended: bool,
+    step: StepDecider | None = None,
+) -> RelayDecision:
     """Run, card or refuse one relayed call: the agent's permission, then the operator's.
 
     A connector is never a trusted server. Nobody can press a card on an
-    unattended turn, so there it runs only what the unattended rules allow.
+    unattended turn, so there it runs only what the unattended rules allow. A workflow
+    step's call is decided by its step's decider around that, as its Managed Agents
+    session decides it: its writes, scoped writes, tools list and proposals.
     """
+    from daimon.core.turn.posture import PolicyApproval, ToolConfirmationResult
+
+    if step is None:
+        return RelayDecision(await _verdict(policy, connector, call, attended=attended))
+    step_policy, decider = step
+
+    async def base(inner: ToolCall) -> ToolConfirmationResult:
+        verdict = await _verdict(step_policy, connector, inner, attended=False)
+        return ToolConfirmationResult(allow=verdict == "run")
+
+    result = await decider(PolicyApproval(decide=base)).decide(call)
+    return RelayDecision("run") if result.allow else RelayDecision("refuse", result.deny_message)
+
+
+async def _verdict(
+    policy: ToolSafetyPolicy, connector: Connector, call: ToolCall, *, attended: bool
+) -> Verdict:
     from daimon.core.turn.approvals import tool_call_verdict
 
     permission = connector.permission(call.tool_name)

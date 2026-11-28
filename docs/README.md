@@ -23,7 +23,9 @@ server](https://daimon.decision.ai/) instead.
 - **Use it in a browser:** the [web app](web.md).
 <!-- /knowledge -->
 - **Shape what it does:** [Defaults](defaults.md) for agents and skills,
-  [Routines](routines.md) and [Watches](watches.md) for scheduled work,
+  [Routines](routines.md), [Workflows](workflows.md),
+  [Advanced workflows](workflows-advanced.md) and [Watches](watches.md)
+  for scheduled work,
   [Direct messages](direct-messages.md),
   [Repository memory](repo-memory.md),
   [Context providers](context-providers.md),

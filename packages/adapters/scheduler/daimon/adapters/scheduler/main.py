@@ -27,33 +27,23 @@ import functools
 import signal
 import sys
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
 
 import anthropic
 import httpx
 import structlog
 from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 from cryptography.fernet import MultiFernet
+from daimon.adapters.scheduler import workflows
+from daimon.adapters.scheduler.boundary import scheduler_step
 from daimon.adapters.scheduler.settings import SchedulerSettings
 from daimon.core import tenant_retirement
-from daimon.core.access_policy import TenantAccessPolicy, agent_invoker_roles
-from daimon.core.authz import (
-    Action,
-    AgentRef,
-    Place,
-    Subject,
-    Surface,
-    authorize,
-    build_agent_ref,
-    build_subject,
-)
 from daimon.core.billing import BillingConfig, load_billing_config
-from daimon.core.bot_access import BOT_ACCESS_UNAVAILABLE, bot_access_blocked, bot_access_wait_on
-from daimon.core.channel_audience import requester_standing
+from daimon.core.bot_access import bot_access_blocked, bot_access_wait_on
 from daimon.core.channel_backend import (
     backend_refusal_causes,
 )
@@ -62,22 +52,21 @@ from daimon.core.compute_sessions import ComputeSessions
 from daimon.core.config import (
     Settings,
     env_admits,
-    get_repo_memory_settings,
     load_settings,
 )
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
-from daimon.core.defaults.metadata import BUILTIN_AGENT_NAME
 from daimon.core.defaults.provisioning import reconcile_tenant_defaults
-from daimon.core.direct_messages import DirectMessageAccessRevoked, run_dm_routine
+from daimon.core.direct_messages import run_dm_routine
 from daimon.core.discord_membership import (
     DiscordRestMembershipResolver,
     open_discord_dm,
     send_discord_error_dm,
 )
 from daimon.core.dm_access import roles_by_membership, sender_admits
-from daimon.core.features.model_input import is_isolated
+from daimon.core.fire.run import FireDeps, fire_turn
+from daimon.core.fire.subject import routine_subject
 from daimon.core.github_app_session import (
     GitHubTokenMintUnavailable,
     archive_app_vault,
@@ -92,11 +81,9 @@ from daimon.core.github_issued_token_sweep import sweep_closed_github_issued_tok
 from daimon.core.headless_runner import run_turn
 from daimon.core.health import start_liveness_responder
 from daimon.core.hub_oauth_kv_sweep import sweep_expired_hub_oauth_kv
-from daimon.core.lead_intake_execution import current_intake_execution
 from daimon.core.logging_setup import configure_logging, mark_shutting_down
 from daimon.core.long_jobs import LongJobExecutor
 from daimon.core.long_jobs_ma import ManagedLongJobPort
-from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.ma_resolver import (
     ResolverCache,
     new_resolver_cache,
@@ -104,81 +91,36 @@ from daimon.core.ma_resolver import (
     resolve_environment,
     retrieve_agent_cached,
 )
-from daimon.core.mcp_identity import DmRoutineRelay, routine_destination_key
 from daimon.core.mcp_vault_janitor import archive_idle_relay_vaults
 from daimon.core.membership import MembershipResolver
-from daimon.core.membership_subject import resolve_subject
-from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_session, retrieve_agent
 from daimon.core.observability import init_sentry
 from daimon.core.ops_events import drain_ops_events
 from daimon.core.owner_notices import build_owner_notifier, discord_owner_dm
 from daimon.core.pending_carry_over_sweep import sweep_stale_pending_carry_overs
 from daimon.core.pending_file_sweeper import sweep_pending_file_deletes
-from daimon.core.permissions import any_agent_rules, any_own_readers
-from daimon.core.pricing import MODEL_PRICING
 from daimon.core.promo_settlement import settle_promo_credit
-from daimon.core.provider_routine import (
-    admit_provider_routine,
-    refusal_text,
-    run_provider_routine,
-)
+from daimon.core.provider_routine import admit_provider_routine, run_provider_routine
 from daimon.core.purge import sweep_privacy_session_deletes
 from daimon.core.retention import sweep as retention_sweep
-from daimon.core.routine_delivery import (
-    OWNER_LACKS_ROLE_ERROR,
-    DirectPost,
-    agent_delivered_itself,
-    delivery_target,
-    lapsed_role,
-    lapsed_role_card,
-    placement_unknown_is_unsafe,
-    record_routine_failure,
-    render_routine_controls,
-    routine_agent_name,
-    routine_knows,
-    routine_links,
-    split_run_text,
-)
-from daimon.core.routine_files import collect_routine_files, stage_routine_files
-from daimon.core.routine_hold import delivery_hold_value, routine_hold
-from daimon.core.routine_provider import routine_provider
-from daimon.core.routine_sandbox import routine_sandbox
-from daimon.core.routines import mounts_personal_memory
-from daimon.core.rule_views import (
-    is_routine_parent_unknown,
-    keeps_routine_inside,
-    routine_destination_channel,
-    routine_destination_place,
-    routine_origin,
-)
 from daimon.core.runtime_health import current_turn_counts, runtime_health
 from daimon.core.scheduler import (
     FireFn,
     OwnerNotifier,
     RoutineDispatcher,
+    RoutineFireStore,
     drain_owner_notices,
-    record_refusal,
     run_one_tick,
-    tell_owner,
 )
-from daimon.core.scope import DeploymentDefault, ScopeContext
+from daimon.core.scope import DeploymentDefault
 from daimon.core.session_compat import valid_unavailable_repo_urls
 from daimon.core.session_mutation import session_mutation_fence
 from daimon.core.session_ports_compat import retrieve_session_record, session_scope
 from daimon.core.skill_sync.resync_queue import drain_github_push_resync_queue
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.slack_event_dedup_sweep import sweep_expired_slack_event_dedup
-from daimon.core.spend_gate import (
-    SpendBlock,
-    SpendCheck,
-    SpendRequest,
-    spend_gate_in_new_session,
-)
-from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
-from daimon.core.stores.accounts import get_account
 from daimon.core.stores.direct_messages import dm_enabled
-from daimon.core.stores.domain import Role, RoutineRow, ThreadSessionRow
+from daimon.core.stores.domain import RoutineRow, TenantRow, ThreadSessionRow
 from daimon.core.stores.file_uploads import ROUTINE_OUTPUT_TITLE, delete_uploads
 from daimon.core.stores.github_connect import delete_expired_flows
 from daimon.core.stores.github_issued_tokens import (
@@ -203,27 +145,25 @@ from daimon.core.stores.github_issued_tokens import (
 from daimon.core.stores.github_router_sessions import close_for_ma_session
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.routines import (
-    pause_for_lapsed_role,
     record_result,
     update_routine_agent_id,
 )
-from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.secret_shares import clear_lapsed_shares
 from daimon.core.stores.security_audit import append_github_token_event
-from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_sessions import mark_dead, record_app_token_refresh
-from daimon.core.turn.admission import DmSource
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
-from daimon.core.turn.errors import AdmissionDenied
-from daimon.core.turn.outcomes import current_outcome, drain_outcomes
-from daimon.core.turn.state import TurnState
-from daimon.core.turn.termination import TerminationReason
+from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn_card_intent_sweep import sweep_retired_turn_card_intents
-from daimon.core.turn_hold import TurnHold
-from daimon.core.usage_recording import record_turn_usage
 from daimon.core.usage_sweep import sweep_headless_usage
 from daimon.core.wizard_sweep import sweep_expired_wizard_sessions
-from mux.contracts.config import DEFAULT_BACKEND
+from daimon.core.workflows import waits as workflow_waits
+from daimon.core.workflows.action_step import ActionStepExecutor
+from daimon.core.workflows.agent_step import AgentStepExecutor, session_files
+from daimon.core.workflows.call_step import WorkflowStepExecutor
+from daimon.core.workflows.code_step import CodeStepExecutor
+from daimon.core.workflows.code_worker import ManagedCodeWorker
+from daimon.core.workflows.post_step import PostStepExecutor
+from daimon.core.workflows.tool_client import McpPollClient, McpToolClient
 from mux.errors import ScopeViolation
 from sentry_sdk.integrations.asyncio import AsyncioIntegration
 from sqlalchemy import text
@@ -231,28 +171,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
-
-
-def scheduler_step[**P](step: Callable[P, Awaitable[None]]) -> Callable[P, Awaitable[None]]:
-    """Mark a sweep or drain that `tick` awaits, and stop its transient failures.
-
-    `_run_loops` ends every loop when one loop raises. A database, Anthropic or
-    GitHub error in one step would stop routine dispatch until a restart. This
-    boundary logs such an error and returns; the next tick retries. A step may
-    keep a narrower catch for its own log event. A test requires every step
-    `tick` awaits to carry this decorator or sit in an allow-list.
-    """
-
-    @functools.wraps(step)
-    async def guarded(*args: P.args, **kwargs: P.kwargs) -> None:
-        try:
-            await step(*args, **kwargs)
-        except (SQLAlchemyError, anthropic.APIError, httpx.HTTPError) as error:
-            log.exception(
-                "scheduler.step.failed", step=step.__name__, causes=backend_refusal_causes(error)
-            )
-
-    return guarded
 
 
 @scheduler_step
@@ -337,55 +255,36 @@ async def _acquire_advisory_lock(engine: AsyncEngine, key: int) -> AsyncConnecti
     return conn
 
 
-async def _spend_block(
-    sm: async_sessionmaker[AsyncSession],
-    settings: Settings,
-    row: RoutineRow,
-    *,
-    platform: str,
-    check: SpendCheck,
-    agent_id: str | None = None,
-) -> SpendBlock | None:
-    """What one check of the spend gate stops this routine's fire with, if anything.
-
-    The allowance check answers `cap_exceeded` when the creator's monthly limit is what
-    has no room.
-    """
-    return await spend_gate_in_new_session(
-        sm,
-        request=SpendRequest(
-            tenant_id=row.tenant_id,
-            platform_user_id=row.created_by_user_id,
-            platform=platform,
-            channel_id=row.channel_id,
-            agent_id=agent_id,
-        ),
-        markup=settings.billing.markup,
-        checks=frozenset({check}),
+async def _dm_open(
+    session: AsyncSession, settings: Settings, *, tenant_id: uuid.UUID, platform: str, owner: str
+) -> bool:
+    """Whether a routine may DM its owner: Discord, routine DMs on, owner allowed."""
+    return (
+        platform == "discord"
+        and env_admits(settings.direct_message_policies, tenant_id, owner)
+        and await dm_enabled(session, tenant_id=tenant_id)
     )
 
 
-async def _blocked(
+async def _owner_granted(
     sm: async_sessionmaker[AsyncSession],
-    settings: Settings,
-    row: RoutineRow,
+    resolver: MembershipResolver | None,
     *,
-    platform: str,
-    check: SpendCheck,
+    tenant: TenantRow,
+    agent_name: str,
+    owner: str,
 ) -> bool:
-    """Whether one check of the spend gate stops this routine's fire."""
-    return await _spend_block(sm, settings, row, platform=platform, check=check) is not None
+    """The agent's DM grant admits the owner, by their current server roles."""
+    return await sender_admits(
+        sm,
+        tenant_id=tenant.id,
+        agent_name=agent_name,
+        user_id=owner,
+        groups=roles_by_membership(resolver, tenant_id=tenant.id, guild_id=tenant.external_id),
+    )
 
 
-#: A DM routine whose source is restricted: its result may not leave that channel.
-RESTRICTED_SOURCE_ERROR = "restricted source cannot deliver by DM"
-
-
-#: The `last_error` of a routine on the self-hosted backend.
-SELFHOSTED_ROUTINES_UNSUPPORTED = "selfhosted_routines_unsupported"
-
-
-async def _build_fire(
+def _fire_deps(
     *,
     client: AsyncAnthropic,
     sm: async_sessionmaker[AsyncSession],
@@ -396,25 +295,9 @@ async def _build_fire(
     billing_config: BillingConfig | None = None,
     dm_turn_deps: TurnDeps | None = None,
     send_dm: Callable[[str, str, str], Awaitable[None]] | None = None,
-    notify_owner: OwnerNotifier | None = None,
-) -> FireFn:
-    """Construct the per-row ``fire`` callable consumed by ``run_one_tick``.
-
-    Flow per fire:
-
-    1. Resolve ``(platform, created_by_user_id) -> account_id`` via
-       ``get_or_create_platform_principal`` using ``row.tenant_id``.
-       If ``created_by_user_id`` is NULL on the row, record an error and
-       bail — there is no account to bind the daimon-mcp vault to.
-    2. Drive ``run_turn`` — the headless single-turn drain. ``run_turn``
-       owns the daimon-mcp vault attach (via ``ensure_mcp_vault``) when
-       ``mcp_settings`` and ``account_id`` are both supplied.
-    3. On success, write ``last_result_tail`` via ``record_result`` on a
-       FRESH session (independent of any other transaction).
-
-    Errors propagate out of this callable into the guarded gather member's
-    named error boundary, which records ``last_error``.
-    """
+) -> Callable[[], FireDeps]:
+    """The `FireDeps` a fire's turn runs with; the runtime clients are this module's names,
+    read at fire time."""
 
     membership_resolver = membership_resolver or (
         DiscordRestMembershipResolver(settings.discord.bot_token.get_secret_value())
@@ -447,892 +330,72 @@ async def _build_fire(
             )
         return turn_deps[0]
 
-    async def _refuse(
-        s: AsyncSession,
-        row: RoutineRow,
-        reason: str,
-        *,
-        error: str | None = None,
-        fault: bool = False,
-        tell: bool = True,
-    ) -> None:
-        """Refuse a fire as an issue, fenced on the destination and revision it was claimed
-        with. `tell` False tells the owner nothing (a wait that clears by itself)."""
-        await record_refusal(
-            s,
-            sm,
-            row,
-            reason,
-            error=error,
-            fault=fault,
-            notify_owner=notify_owner if tell else None,
-            expected_destination=(row.destination_kind, row.destination_id),
-            expected_private=row if row.destination_kind == "dm" else None,
-            expected_row=row,
+    def deps() -> FireDeps:
+        return FireDeps(
+            client=client,
+            sm=sm,
+            settings=settings,
+            deployment_default=deployment_default,
+            resolver_cache=resolver_cache,
+            membership_resolver=membership_resolver,
+            turn_deps=_turn_deps,
+            send_dm=send_dm,
+            dm_open=_dm_open,
+            owner_granted=_owner_granted,
+            run_turn=run_turn,
+            run_dm_routine=run_dm_routine,
+            resolve_agent=resolve_agent,
+            resolve_environment=resolve_environment,
+            retrieve_agent=retrieve_agent,
+            reconcile_tenant_defaults=reconcile_tenant_defaults,
+            get_or_create_platform_principal=get_or_create_platform_principal,
+            bot_access_wait_on=bot_access_wait_on,
+            bot_access_blocked=bot_access_blocked,
+            retrieve_agent_cached=retrieve_agent_cached,
+            open_discord_dm=open_discord_dm,
+            admit_provider_routine=admit_provider_routine,
+            run_provider_routine=run_provider_routine,
         )
 
-    async def _owner_dm_open(s: AsyncSession, row: RoutineRow, platform: str) -> bool:
-        """Whether a routine may DM its owner: Discord, routine DMs on, owner allowed."""
-        owner = row.created_by_user_id
-        return (
-            platform == "discord"
-            and owner is not None
-            and env_admits(settings.direct_message_policies, row.tenant_id, owner)
-            and await dm_enabled(s, tenant_id=row.tenant_id)
-        )
+    return deps
 
-    async def _tell_lapsed_owner(row: RoutineRow, platform: str) -> None:
-        """DM the owner once, after the lapsed-role pause committed; a failure is logged."""
-        owner = row.created_by_user_id
-        async with sm() as s:
-            if owner is None or send_dm is None or not await _owner_dm_open(s, row, platform):
-                return
-        try:
-            await send_dm(owner, *lapsed_role_card(row, await routine_agent_name(sm, row)))
-        except (httpx.HTTPError, ValueError) as exc:
-            # The routine stays paused; the panel shows why.
-            log.warning(
-                "routine.lapsed_role_dm_failed", routine_id=str(row.id), error=type(exc).__name__
-            )
 
-    async def _refused_over_channel_budget(row: RoutineRow, *, platform: str) -> bool:
-        """Record and refuse a fire over its channel budget. Keyed on `row.channel_id`,
-        the channel the fire is billed to (the destination's parent, else where the
-        routine was made)."""
-        if not await _blocked(sm, settings, row, platform=platform, check="budget_exceeded"):
-            return False
-        if (observation := current_outcome.get()) is not None:
-            observation.finish(reason=TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED)
-        log.info(
-            "routine.skipped.over_channel_budget",
-            routine_id=str(row.id),
-            tenant_id=str(row.tenant_id),
-            channel_id=row.channel_id,
-        )
-        reason = TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED
-        async with sm() as s, s.begin():
-            told = await record_routine_failure(
-                s, row, error="channel_budget_exceeded", reason=reason
-            )
-        tell_owner(notify_owner, row, reason, channel_told=told)
-        return True
+async def _build_fire(
+    *,
+    client: AsyncAnthropic,
+    sm: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    deployment_default: DeploymentDefault,
+    resolver_cache: ResolverCache,
+    membership_resolver: MembershipResolver | None = None,
+    billing_config: BillingConfig | None = None,
+    dm_turn_deps: TurnDeps | None = None,
+    send_dm: Callable[[str, str, str], Awaitable[None]] | None = None,
+    notify_owner: OwnerNotifier | None = None,
+) -> FireFn:
+    """Construct the per-row ``fire`` callable consumed by ``run_one_tick``.
 
-    async def _has_daimon_tools(row: RoutineRow, agent_id: str | None) -> bool:
-        """Whether the agent that runs this fire has Daimon's tools; an isolated one has none.
-        Unreadable: the fire's controls carry no hint about them."""
-        if agent_id is None:
-            return False
-        try:
-            agent = await retrieve_agent_cached(client, resolver_cache, row.tenant_id, agent_id)
-        except Exception:
-            log.warning("routine.agent_unreadable", routine_id=str(row.id), exc_info=True)
-            return False
-        return not is_isolated(agent)
-
-    async def _fire_dm(row: RoutineRow, owner_user_id: str, *, direct_post: DirectPost) -> None:
-        """Run an explicit owner-DM routine as a fresh private DM turn of its owner.
-
-        Same admission, session, memory and tools as a fresh live DM of the
-        owner with the routine's agent, unattended; the final text is queued
-        for the owner's DM only. Admission rechecks the owner's live
-        membership, the cold-DM agent rules and the creation source's seal.
-        """
-        if not row.source_provenance_known or row.destination_id != owner_user_id:
-            async with sm.begin() as session:
-                await record_refusal(
-                    session,
-                    sm,
-                    row,
-                    "source_provenance_unknown",
-                    notify_owner=notify_owner,
-                    expected_private=row,
-                )
-            return
-        if await _refused_over_channel_budget(row, platform="discord"):
-            return
-        prompt = (
-            render_routine_controls(
-                row,
-                platform="discord",
-                direct_post=direct_post,
-                web=await routine_links(sm, settings, row, "discord"),
-                knows=await routine_knows(sm, settings, row, "discord"),
-                daimon_tools=await _has_daimon_tools(row, row.agent_id),
-            )
-            + "\n"
-            + row.trigger_message
-        )
-        # Source-free stays source-free; a known source is rechecked for a seal.
-        source = (
-            DmSource(channel_id=row.source_channel_id, thread_id=row.source_thread_id)
-            if row.source_channel_id is not None
-            else None
-        )
-        deps = _turn_deps()
-        try:
-            # The owner's standing at this fire: an owner who lost the internal role
-            # starts no private turn (member mirror, then one fresh member fetch).
-            async with sm() as standing_session:
-                standing = await requester_standing(
-                    standing_session,
-                    tenant_id=row.tenant_id,
-                    user_id=owner_user_id,
-                    is_dm=True,
-                    resolver=deps.membership_resolver,
-                )
-            relay, open_dm = _dm_routine_relay(row, owner_user_id)
-            reply = await run_dm_routine(
-                deps,
-                requester_org=standing,
-                tenant_id=row.tenant_id,
-                owner_user_id=owner_user_id,
-                agent_name=row.agent_name,
-                prompt=prompt,
-                source=source,
-                budget_channel_id=row.channel_id,
-                # Built-ins only under an operator's opt-in for the agent: a DM
-                # routine takes no On of its own.
-                sandbox=await routine_sandbox(sm, settings, row, platform="discord"),
-                relay=relay,
-                open_dm=open_dm,
-            )
-        except (AdmissionDenied, DirectMessageAccessRevoked) as error:
-            log.info(
-                "routine.skipped.invoker_policy",
-                routine_id=str(row.id),
-                tenant_id=str(row.tenant_id),
-                reason=error.reason,
-            )
-            async with sm() as s, s.begin():
-                await record_refusal(
-                    s,
-                    sm,
-                    row,
-                    error.reason,
-                    error=refusal_text(error) if isinstance(error, AdmissionDenied) else None,
-                    notify_owner=notify_owner,
-                    expected_destination=("dm", owner_user_id),
-                    expected_private=row,
-                )
-            return
-        run_text = split_run_text(reply.text)
-        payload = (
-            await collect_routine_files(client, session_id=reply.session_id, text=run_text.post)
-            if reply.on_managed_agents
-            else await stage_routine_files(
-                sm, reply.outputs, tenant_id=row.tenant_id, text=run_text.post
-            )
-        )
-        async with sm() as s, s.begin():
-            await record_result(
-                s,
-                row.id,
-                tail=run_text.record,
-                delivery_payload=payload,
-                error=None,
-                delivery="pending",
-                producing_agent_id=reply.producing_agent_id,
-                expected_destination=(row.destination_kind, row.destination_id),
-                expected_private=row,
-                expected_row=row,
-            )
-
-    def _dm_routine_relay(
-        row: RoutineRow, owner: str
-    ) -> tuple[DmRoutineRelay | None, Callable[[], Awaitable[str]] | None]:
-        """What this fire binds into its turn's relay credential, and how to open the
-        owner's DM, when a server signs DM routines: this routine, its owner, this fire's
-        execution and the routine's revision now. (None, None) otherwise: today's turn."""
-        execution = current_intake_execution.get()
-        if (
-            not settings.mcp_identity.names_dm_routine
-            or settings.discord is None
-            or execution is None
-            or execution[0] != row.id
-        ):
-            return None, None
-        relay = DmRoutineRelay(
-            routine_id=row.id,
-            owner=owner,
-            execution=execution[1],
-            revision=row.updated_at.isoformat(),
-        )
-        token = settings.discord.bot_token.get_secret_value()
-        return relay, functools.partial(open_discord_dm, token, owner)
-
-    async def _owner_granted(row: RoutineRow, owner: str) -> bool:
-        """The routine agent's DM grant admits the owner, by their current server roles.
-
-        Read before the firing transaction, so the role lookup holds no connection.
-        """
-        async with sm() as s:
-            tenant = await get_tenant(s, row.tenant_id)
-        return tenant is not None and await sender_admits(
-            sm,
-            tenant_id=row.tenant_id,
-            agent_name=row.agent_name,
-            user_id=owner,
-            groups=roles_by_membership(
-                membership_resolver, tenant_id=row.tenant_id, guild_id=tenant.external_id
-            ),
-        )
-
-    async def _bot_locked_out(row: RoutineRow) -> bool:
-        """Whether the workspace waits for the bot's access and Discord says it has none here.
-
-        Read before the firing transaction, so the REST call holds no connection.
-        """
-        target = delivery_target(row, platform="discord")
-        if target is None or not target.channel_id.isdigit():
-            return False
-        async with sm() as s:
-            tenant = await get_tenant(s, row.tenant_id)
-        if tenant is None or tenant.platform != "discord":
-            return False
-        if not await bot_access_wait_on(sm, tenant_id=row.tenant_id, platform="discord"):
-            return False
-        async with httpx.AsyncClient(timeout=10) as http:
-            return await bot_access_blocked(
-                http, settings, guild_id=tenant.external_id, destination_id=target.channel_id
-            )
-
-    async def _refused_ran_agent(
-        row: RoutineRow,
-        ran_ref: AgentRef,
-        *,
-        policy: TenantAccessPolicy,
-        subject: Subject,
-        channel_id: str | None,
-        platform: str,
-    ) -> bool:
-        """Refuse the fire when the agent that will run, by every name a pin can be keyed
-        by, may not run at the destination; a lapsed role pauses the routine instead."""
-        decision = authorize(
-            policy,
-            subject=subject,
-            action=Action.RUN_AGENT,
-            surface=Surface.ROUTINE,
-            agent=ran_ref,
-            # A thread destination sits under its saved parent channel; one
-            # saved without it can't be placed here and fails closed while
-            # anything is isolated.
-            place=routine_destination_place(row, channel_id=channel_id),
-        )
-        if decision.reason is None:
-            return False
-        refusal = (
-            OWNER_LACKS_ROLE_ERROR
-            if decision.reason == "invoker_not_allowed"
-            and lapsed_role(policy, ran_ref.names, subject)
-            else decision.reason
-        )
-        log.info(
-            "routine.skipped.invoker_policy",
-            routine_id=str(row.id),
-            tenant_id=str(row.tenant_id),
-            reason=refusal,
-        )
-        paused = False
-        async with sm() as pin_s, pin_s.begin():
-            if refusal == OWNER_LACKS_ROLE_ERROR:
-                paused = await pause_for_lapsed_role(pin_s, row, error=refusal)
-            else:
-                await _refuse(pin_s, row, refusal)
-        if paused:
-            await _tell_lapsed_owner(row, platform)
-        return True
-
-    async def _gated_and_healed(
-        row: RoutineRow, *, platform: str, agent_id: str
-    ) -> RoutineRow | None:
-        """The row to run, its agent id healed to `agent_id`, or None when a gate refused.
-
-        The channel budget is keyed on `row.channel_id`, the channel the fire is billed
-        to (the destination's parent, else where the routine was made). The creator's
-        spend allowance and monthly limit come last, on the agent the fire resolved; a
-        spent monthly limit is `cap_exceeded`, as it was before the limit joined them.
-        """
-        if await _refused_over_channel_budget(row, platform=platform):
-            return None
-        spend_block = await _spend_block(
-            sm, settings, row, platform=platform, check="allowance_exhausted", agent_id=agent_id
-        )
-        if spend_block is not None:
-            capped = spend_block == "cap_exceeded"
-            reason = (
-                TerminationReason.ADMISSION_CAP_EXCEEDED
-                if capped
-                else TerminationReason.ADMISSION_DENIED
-            )
-            if (observation := current_outcome.get()) is not None:
-                observation.finish(reason=reason)
-            log.info(
-                "routine.skipped.cap_exceeded" if capped else "routine.skipped.allowance_exhausted",
-                routine_id=str(row.id),
-                tenant_id=str(row.tenant_id),
-            )
-            async with sm() as s, s.begin():
-                told = await record_routine_failure(s, row, error=spend_block, reason=reason)
-            tell_owner(notify_owner, row, reason, channel_told=told)
-            return None
-        if agent_id == row.agent_id:
-            return row
-        async with sm() as heal_s, heal_s.begin():
-            healed = await update_routine_agent_id(
-                heal_s, row.id, agent_id, expected_updated_at=row.updated_at
-            )
-        if not healed:
-            async with sm() as refused_s, refused_s.begin():
-                # The owner's own edit raced this fire; the next one runs it: no notice.
-                await _refuse(refused_s, row, "routine_changed", tell=False)
-            return None
-        return row.model_copy(update={"agent_id": agent_id})
-
-    async def _record_run(
-        row: RoutineRow,
-        result: str,
-        state: TurnState | None,
-        *,
-        files: Callable[[str], Awaitable[str]] | None,
-        hold: TurnHold | None,
-    ) -> None:
-        """Record a finished fire and queue its delivery, on every provider alike.
-
-        `files` turns the text to post into the outbox payload with the fire's files.
-        """
-        if row.destination_kind is None:
-            async with sm() as s, s.begin():
-                await record_result(s, row.id, tail=result, error=None, expected_row=row)
-            return
-        # Fallback post: only when the agent did not deliver to the destination,
-        # or a thread under it, itself. The chat adapter for `platform` posts it.
-        posted = state is not None and await agent_delivered_itself(sm, state, row)
-        run_text = split_run_text(result)
-        payload = run_text.post
-        needs_delivery = not posted
-        if files is not None:
-            payload = await files("" if posted else run_text.post)
-            # A messaging tool can have posted the text while leaving generated
-            # outputs behind. Deliver those without repeating the final reply.
-            needs_delivery = needs_delivery or bool(payload)
-        async with sm() as s, s.begin():
-            await record_result(
-                s,
-                row.id,
-                tail=run_text.record,
-                delivery_payload=payload,
-                # The hold this fire ran under travels with its result to delivery.
-                delivery_hold=delivery_hold_value(hold),
-                error=None,
-                delivery="pending" if needs_delivery else "skipped",
-                delivery_note=None if needs_delivery else "agent_posted",
-                expected_destination=(row.destination_kind, row.destination_id),
-                expected_row=row,
-            )
-
-    async def _fire_native(
-        row: RoutineRow,
-        *,
-        platform: str,
-        subject: Subject,
-        policy: TenantAccessPolicy | None,
-        channel_id: str | None,
-        direct_post: DirectPost,
-        hold: TurnHold | None,
-    ) -> None:
-        """Run a fire whose place is on OpenAI or Gemini as an unattended chat-path turn.
-
-        The same gates, controls, quiet-run rule and delivery as a Managed Agents fire;
-        admission resolves the agent through its own records and meters the turn.
-        """
-        assert row.created_by_user_id is not None  # `_fire` refused an ownerless row
-        owner = row.created_by_user_id
-        deps = _turn_deps()
-        try:
-            admission = await admit_provider_routine(
-                deps,
-                row,
-                platform=platform,
-                owner=owner,
-                subject=subject,
-                sandbox=await routine_sandbox(sm, settings, row, platform=platform),
-                hold=hold,
-                origin_place=(
-                    routine_origin(policy, row, platform=platform) if policy is not None else None
-                ),
-            )
-        except AdmissionDenied as error:
-            log.info(
-                "routine.skipped.admission",
-                routine_id=str(row.id),
-                tenant_id=str(row.tenant_id),
-                reason=error.reason,
-            )
-            async with sm() as s, s.begin():
-                await _refuse(s, row, error.reason, error=refusal_text(error))
-            return
-        ran = admission.agent
-        if (
-            policy is not None
-            and (any_agent_rules(policy) or any_own_readers(policy))
-            and await _refused_ran_agent(
-                row,
-                build_agent_ref(ran.name, ran.metadata, row.agent_name),
-                policy=policy,
-                subject=subject,
-                channel_id=channel_id,
-                platform=platform,
-            )
-        ):
-            return
-        healed = await _gated_and_healed(row, platform=platform, agent_id=ran.id)
-        if healed is None:
-            return
-        row = healed
-        prompt = (
-            render_routine_controls(
-                row,
-                platform=platform,
-                direct_post=direct_post,
-                web=await routine_links(sm, settings, row, platform),
-                knows=await routine_knows(sm, settings, row, platform),
-                held=hold is not None,
-                daimon_tools=await _has_daimon_tools(row, ran.id),
-            )
-            + "\n"
-            + row.trigger_message
-            if row.destination_kind is not None
-            else row.trigger_message
-        )
-        try:
-            run = await run_provider_routine(
-                deps,
-                admission,
-                routine_id=row.id,
-                tenant_id=row.tenant_id,
-                platform=platform,
-                owner=owner,
-                prompt=prompt,
-            )
-        except AdmissionDenied as error:
-            # An unattended rule refused the turn before its first message.
-            async with sm() as s, s.begin():
-                await _refuse(s, row, error.reason, error=refusal_text(error))
-            return
-
-        async def files(text: str) -> str:
-            return await stage_routine_files(sm, run.outputs, tenant_id=row.tenant_id, text=text)
-
-        await _record_run(row, run.text, run.state, files=files, hold=hold)
+    Each fire runs `fire_turn` over a `RoutineFireStore` for the claimed row.
+    Errors propagate out of this callable into the guarded gather member's
+    named error boundary, which records ``last_error``.
+    """
+    deps = _fire_deps(
+        client=client,
+        sm=sm,
+        settings=settings,
+        deployment_default=deployment_default,
+        resolver_cache=resolver_cache,
+        membership_resolver=membership_resolver,
+        billing_config=billing_config,
+        dm_turn_deps=dm_turn_deps,
+        send_dm=send_dm,
+    )
 
     async def _fire(row: RoutineRow) -> None:
-        if row.created_by_user_id is None:
-            async with sm() as s, s.begin():
-                await _refuse(
-                    s, row, "no_owner", error="This routine has no owner. Create it again."
-                )
-            return
-        granted = row.destination_kind != "dm" or await _owner_granted(row, row.created_by_user_id)
-        bot_locked_out = await _bot_locked_out(row)
-
-        async with sm() as s, s.begin():
-            tenant = await get_tenant(s, row.tenant_id)
-            if tenant is None:
-                await _refuse(
-                    s, row, "tenant_not_found", error="The routine's team was not found", fault=True
-                )
-                return
-            if tenant.archived_at is not None:
-                await _refuse(s, row, "tenant_archived", error="Daimon was removed from here.")
-                return
-            platform = tenant.platform
-            if row.destination_kind == "dm" and not (
-                granted and await _owner_dm_open(s, row, platform)
-            ):
-                await _refuse(
-                    s,
-                    row,
-                    "routine_dms_closed" if granted else "owner_not_allowed",
-                    error="routine DMs are disabled or the owner is not allowed",
-                )
-                return
-            # A thread, channel or agent on another provider is decided before anything
-            # is resolved at Anthropic: OpenAI and Gemini run through the chat path
-            # (`provider_routine`), never quietly on Claude.
-            if is_routine_parent_unknown(row):
-                await _refuse(s, row, "routine_destination_parent_unknown", fault=True)
-                return
-            provider = await routine_provider(s, row, platform=platform)
-            native = provider if provider != DEFAULT_BACKEND else None
-            if native == "selfhosted":
-                await _refuse(s, row, "routines_unsupported", error=SELFHOSTED_ROUTINES_UNSUPPORTED)
-                return
-            principal = await get_or_create_platform_principal(
-                s,
-                tenant_id=row.tenant_id,
-                # Source the platform from the routine's tenant so slack-created
-                # routines resolve a slack principal (not a mismatched discord one).
-                platform=tenant.platform,
-                external_id=row.created_by_user_id,
-            )
-            account_id = principal.account_id
-
-            # Invoker policy at fire time: someone taken off the allowlist
-            # stops running headless turns through routines they created. The
-            # creator facts come from live Discord membership, never a saved
-            # Discord admin role. Unreadable policy fails closed.
-            direct_post: DirectPost = "allowed"
-            # The owner as freshly resolved this fire; checked again against the
-            # resolved agent's names below. Unresolved stays an unknown subject.
-            fire_subject = Subject()
-            paused = False
-            fire_policy: TenantAccessPolicy | None = None
-            fire_channel_id: str | None = None
-            try:
-                policy = await load_access_policy(s, tenant_id=row.tenant_id)
-            except AccessPolicyUnreadable:
-                policy_error: str | None = "access_policy_unreadable"
-            else:
-                # A destination protected since the routine was made
-                # is never offered to the agent as a place to post (the protection
-                # guard is not on send_message yet). The poster re-checks with
-                # the parent channel and category it resolves.
-                # The scheduler cannot resolve a Discord thread's parent or
-                # a channel's category, so when the policy protects either,
-                # the agent is not invited to post directly at all.
-                target = delivery_target(row, platform=platform)
-                fire_policy = policy
-                fire_channel_id = target.channel_id if target is not None else None
-                if target is not None:
-                    if not authorize(
-                        policy,
-                        subject=Subject(),
-                        action=Action.POST,
-                        surface=Surface.ROUTINE,
-                        place=Place(channel_id=target.channel_id),
-                    ):
-                        direct_post = "protected"
-                    elif placement_unknown_is_unsafe(
-                        policy, platform=platform, kind=row.destination_kind
-                    ):
-                        direct_post = "unverified"
-                account = await get_account(s, account_id) if platform != "discord" else None
-                is_admin = (
-                    account is not None and account.role is Role.ADMIN and platform != "discord"
-                )
-                subject = build_subject(is_admin=is_admin, platform_user_id=row.created_by_user_id)
-                if platform == "discord" and (
-                    policy.invoker_role_ids
-                    or membership_resolver is not None
-                    or row.destination_kind == "dm"
-                ):
-                    subject = await resolve_subject(
-                        sm,
-                        membership_resolver,
-                        tenant_id=row.tenant_id,
-                        user_id=row.created_by_user_id,
-                        require_fresh=True,
-                        session=s,
-                    )
-                allowed = authorize(
-                    policy,
-                    subject=subject,
-                    action=Action.ACT_FOR_CREATOR,
-                    surface=Surface.ROUTINE,
-                )
-                membership_required = platform == "discord" and (
-                    bool(policy.invoker_role_ids)
-                    or membership_resolver is not None
-                    or row.destination_kind == "dm"
-                )
-                fire_subject = subject
-                policy_error = (
-                    None
-                    if allowed and (not membership_required or subject.verified_membership is True)
-                    else "invoker_not_allowed"
-                )
-                if (
-                    policy_error is not None
-                    and membership_required
-                    and subject.verified_membership is None
-                    and agent_invoker_roles(policy, (row.agent_name,))
-                ):
-                    # The platform could not say: retry next fire, tell nobody.
-                    policy_error = "membership_unavailable"
-                if row.destination_kind == "dm" and keeps_routine_inside(policy, row):
-                    policy_error = RESTRICTED_SOURCE_ERROR
-                # A pinned agent fires only when it posts straight into one of
-                # its pinned channels; `_check_agent_pin` refuses anything else
-                # at save time, and this holds for a pin added since. Isolation
-                # needs every name, so it waits for the resolved agent below.
-                if policy_error is None:
-                    initial = authorize(
-                        policy,
-                        subject=subject,
-                        action=Action.RUN_AGENT,
-                        surface=Surface.ROUTINE,
-                        agent=AgentRef.of(row.agent_name),
-                        place=Place(channel_id=target.channel_id if target is not None else None),
-                    )
-                    if initial.reason in ("runs_elsewhere", "invoker_not_allowed"):
-                        policy_error = (
-                            OWNER_LACKS_ROLE_ERROR
-                            if initial.reason == "invoker_not_allowed"
-                            and lapsed_role(policy, (row.agent_name,), subject)
-                            else initial.reason
-                        )
-                # The bot's own access comes after every owner check, so a revoked owner
-                # still stops the routine. Waiting costs no turn and tells nobody.
-                if policy_error is None and bot_locked_out:
-                    policy_error = BOT_ACCESS_UNAVAILABLE
-            if policy_error is not None:
-                log.info(
-                    "routine.skipped.invoker_policy",
-                    routine_id=str(row.id),
-                    tenant_id=str(row.tenant_id),
-                    reason=policy_error,
-                )
-                if policy_error == OWNER_LACKS_ROLE_ERROR:
-                    paused = await pause_for_lapsed_role(s, row, error=policy_error)
-                else:
-                    # A wait on the platform or the bot's access clears by itself: no notice.
-                    waits = policy_error in ("membership_unavailable", BOT_ACCESS_UNAVAILABLE)
-                    await _refuse(
-                        s,
-                        row,
-                        "restricted_source"
-                        if policy_error == RESTRICTED_SOURCE_ERROR
-                        else policy_error,
-                        error=policy_error,
-                        fault=policy_error == "membership_unavailable",
-                        tell=not waits,
-                    )
-        if policy_error is not None:
-            if paused:
-                await _tell_lapsed_owner(row, platform)
-            return
-
-        # A destination in a channel shared with another organisation is read by
-        # people from it, so the fire runs held to that channel (its own memory,
-        # the held credential). It never runs unheld.
-        async with sm() as hold_s:
-            fire_hold = await routine_hold(hold_s, row, platform=platform)
-
-        # Admission gate: per-tenant balance — independent of Stripe config.
-        # Keys on row.tenant_id (NOT NULL).
-        if await _blocked(sm, settings, row, platform=platform, check="balance_depleted"):
-            if (observation := current_outcome.get()) is not None:
-                observation.finish(reason=TerminationReason.ADMISSION_BALANCE_DEPLETED)
-            log.info(
-                "routine.skipped.over_balance",
-                routine_id=str(row.id),
-                tenant_id=str(row.tenant_id),
-            )
-            reason = TerminationReason.ADMISSION_BALANCE_DEPLETED
-            async with sm() as s, s.begin():
-                told = await record_routine_failure(s, row, error="balance_depleted", reason=reason)
-            tell_owner(notify_owner, row, reason, channel_told=told)
-            return
-
-        if row.destination_kind == "dm":
-            await _fire_dm(row, row.created_by_user_id, direct_post=direct_post)
-            return
-        if native is not None:
-            await _fire_native(
-                row,
-                platform=platform,
-                subject=fire_subject,
-                policy=fire_policy,
-                channel_id=fire_channel_id,
-                direct_post=direct_post,
-                hold=fire_hold,
-            )
-            return
-
-        # Bind routine context now; headless_runner calls the factory once
-        # (session_id, model_id) are known after create_session.
-        platform_user_id = row.created_by_user_id
-
-        def usage_record_factory(
-            session_id: str, model_id: str
-        ) -> Callable[..., Awaitable[object]]:
-            return functools.partial(
-                record_turn_usage,
-                sessionmaker=sm,
-                platform_user_id=platform_user_id,
-                managed_session_id=session_id,
-                model_id=model_id,
-                tenant_id=row.tenant_id,
-                markup=settings.billing.markup,
-                pricing=MODEL_PRICING.get(model_id),
-                channel_id=row.channel_id,
-                agent_id=resolved_agent_id,
-            )
-
-        # Resolve agent + environment by daimon-tag at fire time,
-        # self-healing across MA archive/recreate. The environment follows the
-        # routine's channel, then the tenant default, like a turn there would.
-        # defensive: post-0012 agent_name is NOT NULL but the fallback is harmless and free.
-        agent_tag = row.agent_name or deployment_default.agent_name or BUILTIN_AGENT_NAME
-        _public_url = str(settings.mcp.public_url) if settings.mcp.public_url else None
-        resolved_agent_id = await resolve_agent(
-            client,
-            tenant_id=row.tenant_id,
-            daimon_tag=agent_tag,
-            cached_id=row.agent_id,
-            apply_callable=lambda: reconcile_tenant_defaults(
-                client, sm, settings.defaults_root, tenant_id=row.tenant_id, public_url=_public_url
-            ),
-            cache=resolver_cache,
+        store = RoutineFireStore(
+            sm, row, notify_owner, record=record_result, heal=update_routine_agent_id
         )
-        async with sm() as scope_s:
-            scoped = await resolve(
-                scope_s,
-                context=ScopeContext(
-                    tenant_id=row.tenant_id,
-                    channel_id=routine_destination_channel(row) or row.channel_id,
-                ),
-                default=deployment_default,
-            )
-        resolved_env_id = await resolve_environment(
-            client,
-            tenant_id=row.tenant_id,
-            daimon_tag=scoped.environment_name or "default",
-            cached_id=None,
-            apply_callable=lambda: reconcile_tenant_defaults(
-                client, sm, settings.defaults_root, tenant_id=row.tenant_id, public_url=_public_url
-            ),
-            cache=resolver_cache,
-        )
-        # The pin and channel isolation are checked again on the agent that
-        # will actually run, by every name a pin can be keyed by, after
-        # self-healing may have picked a replacement: the saved routine name
-        # alone can miss a pin on the display name or a rename.
-        if fire_policy is not None and (
-            any_agent_rules(fire_policy) or any_own_readers(fire_policy)
-        ):
-            ran = await retrieve_agent(
-                client,
-                resolved_agent_id,
-                scope=resource_scope(tenant_id=str(row.tenant_id)),
-                records=sm,
-            )
-            ran_ref = build_agent_ref(ran.name, ran.metadata, row.agent_name)
-            if await _refused_ran_agent(
-                row,
-                ran_ref,
-                policy=fire_policy,
-                subject=fire_subject,
-                channel_id=fire_channel_id,
-                platform=platform,
-            ):
-                return
-        # Admission gate: the routine's channel budget, after the cap (run_one_tick),
-        # balance and pin gates, then the creator's spend on the agent the fire resolved.
-        healed_row = await _gated_and_healed(row, platform=platform, agent_id=resolved_agent_id)
-        if healed_row is None:
-            return
-        row = healed_row
-
-        # Mount the agent's assembled .env on the headless turn: derive the
-        # tenant-scoped agent UUID and pass tenant/agent/session_factory so
-        # run_turn uploads + mounts the credential file.
-        agent_uuid = derive_agent_uuid(tenant_id=row.tenant_id, ma_agent_id=resolved_agent_id)
-
-        # Fernet decrypts the per-agent GitHub PAT so a bound repo clones into
-        # the routine's session workspace. None when no crypto keys configured.
-        crypto_keys = tuple(secret.get_secret_value() for secret in settings.crypto.keys)
-        fernet = build_multifernet(crypto_keys) if crypto_keys else None
-
-        github_fallback_pat: str | None = None
-        github_app_id: str | None = settings.github_app.app_id
-        github_app_private_key: str | None = (
-            settings.github_app.private_key.get_secret_value()
-            if settings.github_app.private_key is not None
-            else None
-        )
-
-        # A routine with a destination opens with host-supplied
-        # controls naming it; one without sends its trigger message as before.
-        trigger_message = row.trigger_message
-        if row.destination_kind is not None:
-            trigger_message = (
-                render_routine_controls(
-                    row,
-                    platform=platform,
-                    direct_post=direct_post,
-                    web=await routine_links(sm, settings, row, platform),
-                    knows=await routine_knows(sm, settings, row, platform),
-                    held=fire_hold is not None,
-                    daimon_tools=await _has_daimon_tools(row, resolved_agent_id),
-                )
-                + "\n"
-                + row.trigger_message
-            )
-        final_state: list[TurnState] = []
-        output_sessions: list[str] = []
-        # Passed only when held, so an ordinary fire's call stays what it was.
-        held_fire: dict[str, Any] = {} if fire_hold is None else {"hold": fire_hold}
-
-        result = await run_turn(
-            anthropic=client,
-            agent_id=resolved_agent_id,
-            environment_id=resolved_env_id,
-            trigger_message=trigger_message,
-            on_state=final_state.append,
-            on_session=output_sessions.append,
-            mcp_settings=settings.mcp,
-            repo_memory=get_repo_memory_settings(settings),
-            account_id=account_id,
-            usage_record_factory=usage_record_factory,
-            tenant_id=row.tenant_id,
-            agent_uuid=agent_uuid,
-            session_factory=sm,
-            fernet=fernet,
-            github_fallback_pat=github_fallback_pat,
-            github_app_id=github_app_id,
-            github_app_private_key=github_app_private_key,
-            agent_github_app=settings.github_app,
-            github_mcp_router=settings.github.mcp_router,
-            tool_safety=settings.tool_safety,
-            budget_channel_id=row.channel_id,
-            # Stamped like a turn in the destination, so an isolated or sealed
-            # channel's routine transcript reads only from inside it.
-            origin_place=(
-                routine_origin(fire_policy, row, platform=platform)
-                if fire_policy is not None
-                else None
-            ),
-            # Built-in sandbox tools only under an admin's opt-in for the routine or
-            # its agent, and only while the run matches what that opt-in pinned.
-            sandbox=await routine_sandbox(sm, settings, row, platform=platform),
-            # The owner's personal memory, read-only, only for a routine whose
-            # result goes to nobody else; decided again from the row each fire.
-            personal_memory=mounts_personal_memory(row),
-            feature_settings=settings,
-            platform=platform,
-            runs_as_user=row.created_by_user_id,
-            membership_resolver=membership_resolver,
-            routine_id=row.id,
-            # Where this run posts, fixed now: a later edit of the routine moves no claim
-            # its relay calls sign (`daimon.core.mcp_identity.routine_destination_key`).
-            routine_destination=routine_destination_key(row),
-            **held_fire,
-        )
-
-        await _record_run(
-            row,
-            result,
-            final_state[0] if final_state else None,
-            files=(
-                lambda text, sid=output_sessions[-1]: collect_routine_files(
-                    client, session_id=sid, text=text
-                )
-            )
-            if output_sessions
-            else None,
-            hold=fire_hold,
-        )
+        await fire_turn(routine_subject(row), store, deps())
 
     return _fire
 
@@ -2304,6 +1367,30 @@ async def _usage_sweep_once(*, enabled: bool, sweep: Callable[[], Awaitable[None
     await sweep()
 
 
+_WORKFLOW_RESTART_S = 5.0
+
+
+@scheduler_step
+async def _workflow_loops(
+    engine: workflows.WorkflowEngine, *, stop_event: asyncio.Event, db: AsyncEngine
+) -> None:
+    """The workflow engine's own loops (`scheduler.workflows`), each step guarded there.
+
+    An error that ends them restarts them after a pause, so they never stay off until restart."""
+    while not stop_event.is_set():
+        try:
+            await workflows.run_loops(engine, stop_event=stop_event, db=db)
+        except Exception:  # named boundary: the workflow engine never ends routine dispatch
+            log.exception("scheduler.workflows.stopped")
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stop_event.wait(), _WORKFLOW_RESTART_S)
+
+
+@scheduler_step
+async def _workflows_once(engine: workflows.WorkflowEngine) -> None:
+    await workflows.run_once(engine)
+
+
 async def _run_loops(
     *,
     tick: Callable[[], Awaitable[None]],
@@ -2315,6 +1402,7 @@ async def _run_loops(
     compute_task_poll: Callable[[], Awaitable[None]],
     interval_s: float,
     stop_event: asyncio.Event,
+    workflow_loops: Callable[[], Awaitable[None]] | None = None,
     retention_sweep: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     """Run routine dispatch, housekeeping and upstream sweeps on separate loops until stopped.
@@ -2340,6 +1428,7 @@ async def _run_loops(
     unfinished session keeps its settle request. Dispatch, housekeeping and GitHub
     sessions finish their pass, and a GitHub pass ends at the next session. An
     uncaught error in any loop ends all loops.
+    `workflow_loops` runs until `stop_event` on its own intervals.
     """
     async with asyncio.TaskGroup() as loops:
         # Not cancelled on stop: each ends after the pass in flight.
@@ -2365,6 +1454,13 @@ async def _run_loops(
                 )
             ),
         ]
+        if workflow_loops is not None:
+            run_workflows = workflow_loops
+
+            async def workflows_until_stopped() -> None:
+                await run_workflows()
+
+            background.append(loops.create_task(workflows_until_stopped()))
         if retention_sweep is not None:
             background.append(
                 loops.create_task(
@@ -2501,7 +1597,6 @@ async def run(
         dm_turn_deps=dm_turn_deps,
         notify_owner=notify_owner,
     )
-
     dispatcher = RoutineDispatcher(scheduler_settings.max_concurrent_fires)
     compute = ComputeSessions(sm, settings.compute, compute_provider_for(settings.compute))
     long_jobs = LongJobExecutor(
@@ -2512,6 +1607,40 @@ async def run(
         markup=settings.billing.markup,
     )
     stop_event = asyncio.Event()
+    lane_turn = workflows.HeadlessLaneTurn(
+        client,
+        sm,
+        settings,
+        deployment_default,
+        resolver_cache,
+        DiscordRestMembershipResolver(settings.discord.bot_token.get_secret_value())
+        if settings.discord is not None
+        else None,
+        workflows.ProviderLaneTurn(dm_turn_deps),
+    )
+    tool_client = McpToolClient(client, sm, settings, lane_turn.targets)
+    workflow_engine = workflows.WorkflowEngine(
+        sm,
+        settings,
+        {
+            "agent": AgentStepExecutor(
+                sm,
+                settings,
+                lane_turn,
+                tool_client,
+                collect_files=functools.partial(session_files, client),
+            ),
+            "action": ActionStepExecutor(sm, settings, tool_client),
+            "workflow": WorkflowStepExecutor(sm, settings),
+            "post": PostStepExecutor(sm),
+            "code": CodeStepExecutor(
+                sm, ManagedCodeWorker(client, sm, settings, lane_turn.targets)
+            ),
+            **workflow_waits.executors(sm),
+        },
+        poll_client=McpPollClient(client, sm, settings, lane_turn.agent_id),
+        max_age=timedelta(seconds=scheduler_settings.max_age_s),
+    )
     loop = asyncio.get_running_loop()
 
     def on_signal() -> None:
@@ -2577,6 +1706,7 @@ async def run(
                 fernet=push_resync_fernet,
             )
             await _drain_github_installation_reconciliations(sm=sm, settings=settings)
+            await _workflows_once(workflow_engine)
             return 0
 
         async def tick() -> None:
@@ -2657,6 +1787,9 @@ async def run(
                 compute_task_poll=lambda: _poll_compute_tasks(compute),
                 interval_s=scheduler_settings.tick_interval_s,
                 stop_event=stop_event,
+                workflow_loops=lambda: _workflow_loops(
+                    workflow_engine, stop_event=stop_event, db=engine
+                ),
             )
 
         return 0

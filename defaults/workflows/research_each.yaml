@@ -1,0 +1,36 @@
+schema: daimon.workflow/v1
+name: Research each
+goal: Research every item in a list and put the findings together.
+inputs:
+  type: object
+  required: [items]
+  properties:
+    items: { type: array, items: { type: string }, title: What to research }
+triggers:
+  - id: manual
+    kind: manual
+defaults:
+  agent: default
+start: each
+nodes:
+  each:
+    kind: for_each
+    title: Research each item
+    items: ${{ inputs.items }}
+    as: topic
+    concurrency: 2
+    do:
+      kind: agent
+      instructions: Research the topic and write three sentences on what matters most.
+      inputs:
+        topic: ${{ item }}
+      output:
+        findings: { type: string }
+    next: done
+  done:
+    kind: finish
+    title: Findings
+    output: ${{ steps.each.output }}
+    deliver:
+      to: run_as
+      message: Research done for ${{ size(inputs.items) }} items.

@@ -1,0 +1,25 @@
+{
+  "description": [
+    "Publish the draft as the next live version.",
+    "",
+    "Needs a person who may edit it, a draft without errors and no grants still to approve."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "note": {
+        "default": "",
+        "maxLength": 500,
+        "type": "string"
+      },
+      "workflow_id": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "workflow_id"
+    ],
+    "type": "object"
+  }
+}

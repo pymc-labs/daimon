@@ -11,6 +11,7 @@ import asyncio
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import anthropic
 import structlog
@@ -26,18 +27,21 @@ from daimon.core.output_delivery import (
     render_oversize_notice,
 )
 from daimon.core.output_runtime import OutputRuntime
-from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.file_uploads import (
     MAX_UPLOAD_BYTES,
     ROUTINE_OUTPUT_TITLE,
     UploadTooLargeError,
     delete_uploads,
     get_upload,
+    is_staged_output,
     stage_upload,
 )
 from mux.errors import MuxError, UnsupportedCapability
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+if TYPE_CHECKING:
+    from daimon.core.fire.delivery import DeliveryFacts
 
 log = structlog.get_logger(__name__)
 
@@ -75,7 +79,7 @@ def plain_payload(text: str | None) -> str | None:
     return text
 
 
-def payload_for(row: RoutineRow) -> str | None:
+def payload_for(row: DeliveryFacts) -> str | None:
     """Only host-tagged envelopes may supply file ids; legacy replies stay text."""
     if row.delivery_note == OUTBOX_FILES:
         return row.delivery_payload
@@ -153,19 +157,33 @@ async def stage_routine_files(
     tenant_id: uuid.UUID,
     text: str,
 ) -> str:
-    """Read a provider fire's files while its runtime is live and stage them for delivery.
+    """A provider fire's reply with its staged files (`stage_files`), in the same envelope
+    as `collect_routine_files`."""
+    files, notices = await stage_files(sessions, outputs, tenant_id=tenant_id)
+    return _envelope(text, files, notices)
 
-    The same envelope, cap of ten files and notices as `collect_routine_files`; a file
-    over what a staged row holds stays in the workspace and is named in text.
+
+async def stage_files(
+    sessions: async_sessionmaker[AsyncSession],
+    outputs: OutputRuntime | None,
+    *,
+    tenant_id: uuid.UUID,
+    title: str = ROUTINE_OUTPUT_TITLE,
+) -> tuple[list[RoutineFile], list[str]]:
+    """Read a provider turn's files while its runtime is live and stage them for delivery: a
+    routine fire's, or a workflow step's `steps.<id>.files` (`title` is then the run's).
+
+    At most ten files; a file over what a staged row holds stays in the workspace and is
+    named in a notice.
     """
-    if outputs is None:
-        return plain_payload(text) or ""
     files: list[RoutineFile] = []
     notices: list[str] = []
+    if outputs is None:
+        return files, notices
     try:
         listed = await outputs.list_outputs()
     except UnsupportedCapability:  # a backend with no workspace listing has nothing to send
-        return plain_payload(text) or ""
+        return files, notices
     except MuxError as error:
         listed = ()
         log.exception(
@@ -198,7 +216,7 @@ async def stage_routine_files(
                 handle = await stage_upload(
                     db,
                     tenant_id=tenant_id,
-                    title=ROUTINE_OUTPUT_TITLE,
+                    title=title,
                     display_filename=meta.filename,
                     content_type=meta.mime_type,
                     content=content,
@@ -221,7 +239,7 @@ async def stage_routine_files(
             causes=backend_refusal_causes(error),
         )
         notices.append("Generated files could not be attached.")
-    return _envelope(text, files, notices)
+    return files, notices
 
 
 async def deliver_routine_files(
@@ -234,36 +252,43 @@ async def deliver_routine_files(
     may_post: Callable[[], Awaitable[bool]],
     sessions: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
+    keep_staged: bool = False,
 ) -> None:
     """Fail on the first uncertain upload; the outbox owns retries and settlement.
 
-    Delivery is never retried, so staged files are deleted once it ends, either way.
+    Delivery is never retried, so a routine's staged files are deleted once it ends, either
+    way. A workflow's stay: a later post, an approval or the run page reads them again.
     """
     refs = decode_payload(payload).files
     try:
         await _deliver(client, refs, max_bytes, post, notice, may_post, sessions, tenant_id)
     finally:
-        if staged := [ref.file_id for ref in refs if ref.staged]:
+        if not keep_staged and (staged := [ref.file_id for ref in refs if ref.staged]):
             async with sessions.begin() as db:
                 await delete_uploads(
                     db, title=ROUTINE_OUTPUT_TITLE, tenant_id=tenant_id, handle_ids=staged
                 )
 
 
-async def _read(
+class FileGone(RuntimeError):
+    """A staged file's bytes are no longer stored."""
+
+
+async def read_file(
     client: AsyncAnthropic | None,
     ref: RoutineFile,
     sessions: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
 ) -> bytes:
+    """A generated file's bytes: from the staging table when staged, else the provider's files."""
     if not ref.staged:
         if client is None:
             raise RuntimeError("Generated file delivery is unavailable; it will not be retried.")
         return await download_output_file(client, ref.file_id)
     async with sessions() as db:
         upload = await get_upload(db, tenant_id=tenant_id, handle_id=ref.file_id)
-    if upload is None or upload.content is None or upload.title != ROUTINE_OUTPUT_TITLE:
-        raise RuntimeError("A generated file is gone; delivery stopped.")
+    if upload is None or upload.content is None or not is_staged_output(upload.title):
+        raise FileGone("A generated file is gone; delivery stopped.")
     return upload.content
 
 
@@ -290,7 +315,7 @@ async def _deliver(
                 )
             )
             continue
-        content = await _read(client, ref, sessions, tenant_id)
+        content = await read_file(client, ref, sessions, tenant_id)
         if len(content) != ref.size_bytes:
             raise ValueError("Generated file size changed; delivery stopped.")
         if not await may_post():

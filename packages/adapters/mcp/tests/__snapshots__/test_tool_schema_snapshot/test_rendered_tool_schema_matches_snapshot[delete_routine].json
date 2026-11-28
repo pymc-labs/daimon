@@ -1,6 +1,8 @@
 {
   "description": [
-    "Delete a routine (hard delete, tenant-scoped)."
+    "Delete a routine (hard delete, tenant-scoped).",
+    "",
+    "Legacy: prefer the workflow tools (list_workflows, run_workflow)."
   ],
   "parameters": {
     "additionalProperties": false,

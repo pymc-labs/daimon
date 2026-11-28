@@ -421,7 +421,7 @@ async def test_on_message_creates_thread_under_generated_title_only_when_there_i
     bot = _bot(runtime)
     message = _channel_message(guild_id=int(guild_id), content=content)
     message.id = 8001
-    message.attachments = [SimpleNamespace(filename=name) for name in files]
+    message.attachments = [SimpleNamespace(filename=name, size=3) for name in files]
     message.create_thread.return_value = _thread(thread_id=8001)
 
     await bot.on_message(message)

@@ -31,6 +31,8 @@ nav:
   - Customise:
       - Defaults: defaults.md
       - Routines: routines.md
+      - Workflows: workflows.md
+      - Advanced workflows: workflows-advanced.md
       - Move routines in: routine-migration.md
       - Move people in: people-migration.md
       - Watches: watches.md

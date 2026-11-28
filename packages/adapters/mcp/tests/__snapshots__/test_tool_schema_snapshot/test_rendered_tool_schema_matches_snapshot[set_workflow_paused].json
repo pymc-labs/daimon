@@ -1,0 +1,22 @@
+{
+  "description": [
+    "Pause a live workflow so triggers stop starting runs, or resume it. Owner or admin."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "paused": {
+        "type": "boolean"
+      },
+      "workflow_id": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "workflow_id",
+      "paused"
+    ],
+    "type": "object"
+  }
+}

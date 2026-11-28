@@ -27,7 +27,7 @@ from daimon.core.agent_pins import agent_aliases
 from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.cron import InvalidScheduleError, validated_next_slot
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
-from daimon.core.errors import StoreError, UserFacingError
+from daimon.core.errors import RoutineMoved, StoreError, UserFacingError
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.permissions import any_agent_rules, any_own_readers, home_of, limiting_ids_at
 from daimon.core.routine_delivery import destination_shape_error
@@ -302,6 +302,18 @@ async def _view(env: RoutineEnv) -> CallView:
     if env.load_view is None:
         return CallView(viewer=RuleViewer(policy=OPEN_ACCESS_POLICY))
     return await env.load_view()
+
+
+async def _missing(
+    session: AsyncSession, routine_id: uuid.UUID, tenant_id: uuid.UUID
+) -> RoutineRefused:
+    """Why a routine id finds no row: it moved to Workflows, or there is none."""
+    if await routines_store.migrated_workflows(session, [routine_id], tenant_id=tenant_id):
+        moved = RoutineMoved()
+        refused = RoutineRefused(str(moved))
+        refused.__cause__ = moved
+        return refused
+    return RoutineNotFound()
 
 
 def _require_allowed(caller: RoutineCaller) -> None:
@@ -648,7 +660,9 @@ async def get_routine(env: RoutineEnv, caller: RoutineCaller, routine_id: uuid.U
     _require_allowed(caller)
     async with env.sessionmaker() as session:
         row = await routines_store.get_routine(session, routine_id, tenant_id=caller.tenant_id)
-    if row is None or not may_read(caller, row):
+        if row is None:
+            raise await _missing(session, routine_id, caller.tenant_id)
+    if not may_read(caller, row):
         raise RoutineNotFound()
     if not sees_routine((await _view(env)).viewer, row):
         raise RoutineNotFound()
@@ -680,7 +694,9 @@ async def update_routine(
     viewer = (await _view(env)).viewer
     async with env.sessionmaker() as session, session.begin():
         row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
-        if row is None or not sees_routine(viewer, row):
+        if row is None:
+            raise await _missing(session, routine_id, tenant_id)
+        if not sees_routine(viewer, row):
             raise RoutineNotFound()
         _require_owner(caller, row)
         destination_id = change.destination_id
@@ -812,7 +828,9 @@ async def set_enabled(
     viewer = (await _view(env)).viewer
     async with env.sessionmaker() as session, session.begin():
         row = await routines_store.get_routine(session, routine_id, tenant_id=caller.tenant_id)
-        if row is None or not sees_routine(viewer, row):
+        if row is None:
+            raise await _missing(session, routine_id, caller.tenant_id)
+        if not sees_routine(viewer, row):
             raise RoutineNotFound()
         _require_owner(caller, row)
         try:
@@ -850,14 +868,19 @@ async def run_now(env: RoutineEnv, caller: RoutineCaller, routine_id: uuid.UUID)
     viewer = (await _view(env)).viewer
     async with env.sessionmaker() as session, session.begin():
         row = await routines_store.get_routine(session, routine_id, tenant_id=caller.tenant_id)
-        if row is None or not sees_routine(viewer, row):
+        if row is None:
+            raise await _missing(session, routine_id, caller.tenant_id)
+        if not sees_routine(viewer, row):
             raise RoutineNotFound()
         _require_owner(caller, row)
         if not row.enabled:
             raise RoutineRefused("This routine is paused. Resume it to run it.")
-        due = await routines_store.mark_due(
-            session, routine_id, tenant_id=caller.tenant_id, now=env.now()
-        )
+        try:
+            due = await routines_store.mark_due(
+                session, routine_id, tenant_id=caller.tenant_id, now=env.now()
+            )
+        except StoreError as err:
+            raise _store_refusal(err) from err
         if due is None:
             raise RoutineNotFound()
         await _record(env, session, "run_now", due)
@@ -869,9 +892,17 @@ async def delete_routine(env: RoutineEnv, caller: RoutineCaller, routine_id: uui
     viewer = (await _view(env)).viewer
     async with env.sessionmaker() as session, session.begin():
         row = await routines_store.get_routine(session, routine_id, tenant_id=caller.tenant_id)
-        if row is None or not sees_routine(viewer, row):
+        if row is None:
+            raise await _missing(session, routine_id, caller.tenant_id)
+        if not sees_routine(viewer, row):
             raise RoutineNotFound()
         _require_owner(caller, row)
-        if not await routines_store.delete_routine(session, routine_id, tenant_id=caller.tenant_id):
+        try:
+            deleted = await routines_store.delete_routine(
+                session, routine_id, tenant_id=caller.tenant_id
+            )
+        except StoreError as err:
+            raise _store_refusal(err) from err
+        if not deleted:
             raise RoutineNotFound()
         await _record(env, session, "deleted", row)

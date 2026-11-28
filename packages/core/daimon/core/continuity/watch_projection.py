@@ -241,7 +241,7 @@ def validate_rule(rule: str, *, key: str | None, evidence: Sequence[str]) -> Non
     evidence_paths(evidence)
 
 
-def _digest(value: JsonValue) -> str:
+def value_digest(value: JsonValue) -> str:
     return hashlib.sha256(_key(value).encode()).hexdigest()[:DIGEST_CHARS]
 
 
@@ -256,7 +256,7 @@ def _keyed(projected: JsonValue, key: str) -> list[tuple[str, JsonValue]]:
         identity = _walk(element, key_path)
         if identity is None:
             continue  # An element without a key cannot be tracked.
-        digest = _digest(identity)
+        digest = value_digest(identity)
         if digest not in seen:
             seen.add(digest)
             result.append((digest, element))

@@ -37,9 +37,10 @@ from daimon.core.features.service import (
     clear_pinned_on,
 )
 from daimon.core.features.snapshot import FeaturePlace, place_guardrail, resolve_one
+from daimon.core.fire.subject import RoutineFacts
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent, retrieve_environment
-from daimon.core.routine_provider import routine_provider
+from daimon.core.routine_provider import place_provider
 from daimon.core.rule_views import routine_destination_channel
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.stores.domain import (
@@ -82,6 +83,7 @@ __all__ = [
     "opted_in_by",
     "opted_in_by_many",
     "own_opt_in",
+    "pinned_opt_in",
     "provider_run_matches_pin",
     "routine_place",
     "routine_sandbox",
@@ -137,25 +139,54 @@ async def current_pin(
     """
     if row.destination_kind == "dm":
         raise ChannelChangeRefused(DM_SANDBOX_REFUSAL, kind="invalid", reason="dm_routine")
-    scope = resource_scope(tenant_id=str(row.tenant_id))
     try:
-        agent = await retrieve_agent(client, row.agent_id, scope=scope, records=session_factory)
         async with session_factory() as session:
-            scoped = await resolve(
-                session,
-                context=ScopeContext(
-                    tenant_id=row.tenant_id,
-                    channel_id=routine_destination_channel(row) or row.channel_id,
-                ),
-                default=default,
-            )
             tenant = await get_tenant(session, row.tenant_id)
             if tenant is None:
                 raise _unavailable("routine's agent", "no workspace")
-            provider = await routine_provider(session, row, platform=tenant.platform)
+            provider = await place_provider(session, row, platform=tenant.platform)
+    except ChannelChangeRefused:
+        raise
+    except Exception as exc:  # any read failure refuses the opt-in
+        raise _unavailable("routine's agent", str(exc)) from exc
+    return await pin_at(
+        client,
+        session_factory,
+        tenant_id=row.tenant_id,
+        agent_id=row.agent_id,
+        channel_id=routine_destination_channel(row) or row.channel_id,
+        provider=provider,
+        default=default,
+    )
+
+
+async def pin_at(
+    client: AsyncAnthropic,
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    agent_id: str,
+    channel_id: str | None,
+    provider: str,
+    default: DeploymentDefault,
+) -> SandboxPin:
+    """What an opt-in for `agent_id` at `channel_id` pins now: the agent's version and the
+    environment the channel resolves to. A routine's On and a step's `builtins` grant.
+
+    Raises `ChannelChangeRefused` when either is archived, missing or unreadable.
+    """
+    scope = resource_scope(tenant_id=str(tenant_id))
+    try:
+        agent = await retrieve_agent(client, agent_id, scope=scope, records=session_factory)
+        async with session_factory() as session:
+            scoped = await resolve(
+                session,
+                context=ScopeContext(tenant_id=tenant_id, channel_id=channel_id),
+                default=default,
+            )
         environment = await find_environment_by_daimon_tag(
             client,
-            tenant_id=row.tenant_id,
+            tenant_id=tenant_id,
             name=scoped.environment_name or "default",
             records=session_factory,
         )
@@ -345,7 +376,7 @@ async def builtins_allowed(
     return found.on
 
 
-def routine_place(row: RoutineRow, platform: str) -> FeaturePlace:
+def routine_place(row: RoutineFacts, platform: str) -> FeaturePlace:
     """Where a routine's runs resolve features: its destination, its agent and itself."""
     return FeaturePlace.of(
         row.tenant_id,
@@ -357,7 +388,7 @@ def routine_place(row: RoutineRow, platform: str) -> FeaturePlace:
 
 
 def _decision(
-    row: RoutineRow,
+    row: RoutineFacts,
     settings: Settings | None,
     platform: str,
     values: Sequence[FeatureValueRow],
@@ -386,7 +417,7 @@ def _decision(
 
 
 async def _deciding(
-    session: AsyncSession, settings: Settings | None, row: RoutineRow, platform: str
+    session: AsyncSession, settings: Settings | None, row: RoutineFacts, platform: str
 ) -> FeatureValueRow | None:
     """`_decision` for one routine, from one read of its place."""
     stored = await place_values(
@@ -399,6 +430,14 @@ async def _deciding(
         keys=(SANDBOX_KEY,),
     )
     return _decision(row, settings, platform, stored)
+
+
+async def pinned_opt_in(
+    session: AsyncSession, row: RoutineFacts, platform: str
+) -> FeatureValueRow | None:
+    """The pinned On a routine runs under, its own or its agent's; None when off."""
+    decided = await _deciding(session, None, row, platform)
+    return None if decided is None or decided.pin is None else decided
 
 
 async def opted_in_by_many(
@@ -503,7 +542,7 @@ async def clear_agent_opt_ins(session: AsyncSession, *, tenant_id: uuid.UUID, ag
 async def routine_sandbox(
     sessions: async_sessionmaker[AsyncSession],
     settings: Settings | None,
-    row: RoutineRow,
+    row: RoutineFacts,
     *,
     platform: str,
 ) -> RoutineSandbox | None:

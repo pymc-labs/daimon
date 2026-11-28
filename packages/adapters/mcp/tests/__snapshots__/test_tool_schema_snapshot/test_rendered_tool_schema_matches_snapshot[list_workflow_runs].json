@@ -1,0 +1,29 @@
+{
+  "description": [
+    "List recent runs, newest first: all you can see, or one workflow's."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "limit": {
+        "default": 20,
+        "maximum": 100,
+        "minimum": 1,
+        "type": "integer"
+      },
+      "workflow_id": {
+        "anyOf": [
+          {
+            "format": "uuid",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  }
+}

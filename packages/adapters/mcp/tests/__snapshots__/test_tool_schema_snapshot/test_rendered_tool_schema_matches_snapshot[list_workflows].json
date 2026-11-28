@@ -1,0 +1,10 @@
+{
+  "description": [
+    "List the workflows this person can see: their own and those shared with the team."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

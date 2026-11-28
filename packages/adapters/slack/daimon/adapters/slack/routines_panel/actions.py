@@ -47,9 +47,15 @@ from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.observability import capture_exception_with_scope
 from daimon.core.posted_controls.routines import apply_routine_action
-from daimon.core.routines import can_manage_routine, can_read_routine_output, routine_label
+from daimon.core.routines import (
+    MOVED_TO_WORKFLOWS,
+    can_manage_routine,
+    can_read_routine_output,
+    routine_label,
+)
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import get_routine, pause_routine, resume_routine
+from daimon.core.workflows.chat_cards import Presser, move_routine
 from slack_sdk.errors import SlackApiError
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -88,17 +94,19 @@ async def handle_routines_command(runtime: SlackRuntime, payload: dict[str, Any]
 
         # Slow path (off the 3s window): resolve tenant + fetch routines.
         tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+        viewer = await routines_viewer(client, user_id=user_id, team_id=team_id)
         async with runtime.sessionmaker() as session:
             entries, over_cap_count, agent_name_map = await load_routines(
                 session,
                 runtime.anthropic,
                 tenant_id=tenant_id,
-                viewer_user_id=await routines_viewer(client, user_id=user_id, team_id=team_id),
+                viewer_user_id=viewer,
             )
         state = RoutinesPanelState(
             rows=entries,
             over_cap_count=over_cap_count,
             agent_name_map=agent_name_map,
+            admin=viewer is None,
             links=await web_links_at(runtime, tenant_id, admin=False, channel_id=channel_id),
         )
         # No hash — single updater, Pitfall 3.
@@ -218,6 +226,8 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                         if result == "gone"
                         else "This routine is already on."
                         if result == "already_running"
+                        else MOVED_TO_WORKFLOWS
+                        if result == "moved"
                         else "Only the routine's creator or a workspace admin "
                         "can pause or resume this routine."
                     )
@@ -229,17 +239,58 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
                     return
 
             # Re-render after successful write.
+            viewer = await routines_viewer(client, user_id=user_id, team_id=team_id)
             async with runtime.sessionmaker() as session:
                 entries, over_cap_count, agent_name_map = await load_routines(
                     session,
                     runtime.anthropic,
                     tenant_id=tenant_id,
-                    viewer_user_id=await routines_viewer(client, user_id=user_id, team_id=team_id),
+                    viewer_user_id=viewer,
                 )
             state = RoutinesPanelState(
                 rows=entries,
                 over_cap_count=over_cap_count,
                 agent_name_map=agent_name_map,
+                admin=viewer is None,
+                links=await web_links_at(runtime, tenant_id, admin=False, channel_id=channel_id),
+            )
+            await client.views_update(  # pyright: ignore[reportUnknownMemberType]
+                view_id=view_id,
+                view=build_content_view(state, channel_id=channel_id),
+            )
+
+        elif action_value == "move":
+            try:
+                routine_id = uuid.UUID(routine_id_str)
+            except ValueError:
+                log.warning("slack.routines_action.bad_routine_id", action_id=action_id)
+                return
+
+            refusal = await move_routine(
+                runtime.sessionmaker,
+                runtime.settings,
+                Presser(tenant_id, "slack", user_id),
+                routine_id,
+                client=runtime.anthropic,
+            )
+            if refusal is not None:
+                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]
+                    channel=channel_id or user_id, user=user_id, **notice_fields(refusal)
+                )
+                return
+            viewer = await routines_viewer(client, user_id=user_id, team_id=team_id)
+            async with runtime.sessionmaker() as session:
+                entries, over_cap_count, agent_name_map = await load_routines(
+                    session,
+                    runtime.anthropic,
+                    tenant_id=tenant_id,
+                    viewer_user_id=viewer,
+                )
+            state = RoutinesPanelState(
+                rows=entries,
+                over_cap_count=over_cap_count,
+                agent_name_map=agent_name_map,
+                admin=viewer is None,
                 links=await web_links_at(runtime, tenant_id, admin=False, channel_id=channel_id),
             )
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]
@@ -340,17 +391,19 @@ async def handle_routine_action(runtime: SlackRuntime, payload: dict[str, Any]) 
             )
 
         elif action_value == "refresh":
+            viewer = await routines_viewer(client, user_id=user_id, team_id=team_id)
             async with runtime.sessionmaker() as session:
                 entries, over_cap_count, agent_name_map = await load_routines(
                     session,
                     runtime.anthropic,
                     tenant_id=tenant_id,
-                    viewer_user_id=await routines_viewer(client, user_id=user_id, team_id=team_id),
+                    viewer_user_id=viewer,
                 )
             state = RoutinesPanelState(
                 rows=entries,
                 over_cap_count=over_cap_count,
                 agent_name_map=agent_name_map,
+                admin=viewer is None,
                 links=await web_links_at(runtime, tenant_id, admin=False, channel_id=channel_id),
             )
             await client.views_update(  # pyright: ignore[reportUnknownMemberType]

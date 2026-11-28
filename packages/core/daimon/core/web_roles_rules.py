@@ -27,6 +27,9 @@ Capability = Literal[
     "channels.manage",
     "routines.view",
     "routines.manage",
+    "workflows.view",
+    "workflows.run",
+    "workflows.manage",
     "credits.view_own",
     "credits.manage",
     "integrations.view",
@@ -46,6 +49,9 @@ _ALL: tuple[Capability, ...] = (
     "channels.manage",
     "routines.view",
     "routines.manage",
+    "workflows.view",
+    "workflows.run",
+    "workflows.manage",
     "credits.view_own",
     "credits.manage",
     "integrations.view",
@@ -67,6 +73,8 @@ _BY_ROLE: dict[Role, frozenset[Capability]] = {
             "channels.view",
             "routines.view",
             "routines.manage",
+            "workflows.view",
+            "workflows.run",
             "credits.view_own",
         }
     ),
@@ -83,6 +91,9 @@ _MODULE_OF: dict[Capability, WebModuleKey] = {
     "channels.manage": "channels",
     "routines.view": "routines",
     "routines.manage": "routines",
+    "workflows.view": "workflows",
+    "workflows.run": "workflows",
+    "workflows.manage": "workflows",
     "credits.view_own": "credits",
     "credits.manage": "credits",
     "integrations.view": "integrations",
@@ -93,12 +104,12 @@ _MODULE_OF: dict[Capability, WebModuleKey] = {
 }
 _MODULES_BY_ROLE: dict[Role, frozenset[WebModuleKey]] = {
     "owner": frozenset(
-        {"chat", "agents", "channels", "routines", "credits", "integrations", "admin"}
+        {"chat", "agents", "channels", "routines", "workflows", "credits", "integrations", "admin"}
     ),
     "admin": frozenset(
-        {"chat", "agents", "channels", "routines", "credits", "integrations", "admin"}
+        {"chat", "agents", "channels", "routines", "workflows", "credits", "integrations", "admin"}
     ),
-    "member": frozenset({"chat", "agents", "channels", "routines", "credits"}),
+    "member": frozenset({"chat", "agents", "channels", "routines", "workflows", "credits"}),
     "visitor": frozenset({"chat"}),
 }
 _MODULE_ORDER: tuple[WebModuleKey, ...] = (
@@ -106,6 +117,7 @@ _MODULE_ORDER: tuple[WebModuleKey, ...] = (
     "agents",
     "channels",
     "routines",
+    "workflows",
     "credits",
     "integrations",
     "admin",

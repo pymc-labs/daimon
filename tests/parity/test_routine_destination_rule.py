@@ -57,7 +57,7 @@ _SURFACES = (
     ("mcp/daimon/adapters/mcp/tools/routines.py", "_resolve_discord_destination"),
     ("mcp/daimon/adapters/mcp/tools/routines.py", "_resolve_slack_destination"),
     ("discord/daimon/adapters/discord/routine_delivery.py", "creator_may_post"),
-    ("slack/daimon/adapters/slack/routine_delivery.py", "_destination_refusal"),
+    ("slack/daimon/adapters/slack/routine_delivery.py", "destination_refusal"),
     ("web/daimon/adapters/web/channel_visibility.py", "_discord"),
     ("web/daimon/adapters/web/channel_visibility.py", "_slack"),
 )
@@ -220,9 +220,9 @@ async def _slack_save_and_post(
         saved = True
     except ToolError:
         saved = False
-    refusal = await slack_delivery._destination_refusal(  # pyright: ignore[reportPrivateUsage]
+    refusal = await slack_delivery.destination_refusal(
         client,
-        cast(Any, SimpleNamespace(created_by_user_id="U1")),
+        "U1",
         cast(Any, SimpleNamespace(channel_id="C1", thread_ts="1717.5" if thread else None)),
     )
     return saved, refusal is None

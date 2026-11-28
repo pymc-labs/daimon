@@ -43,6 +43,11 @@ FILES: dict[str, str] = {
     ".github/workflows/promote.yml": "deploy-workflow",
     # The web adapter's links parity test reads it.
     "web/src/lib/deep-links.json": "web-links",
+    # The core workflow tests check the doc's claims and run the validation fixture the SPA
+    # tests also replay.
+    "docs/workflows.md": "workflow-docs",
+    "docs/workflows-advanced.md": "workflow-docs",
+    "web/src/modules/workflows/fixtures/validation.json": "workflow-validation",
 }
 #: Root and tooling prose no test or image reads (`docs/` is read: area `docs`); code trees
 #: keep their own (skills, fixtures).
@@ -126,6 +131,8 @@ SUITES: dict[str, tuple[str, ...]] = {
     "spa": ("spa", "parity", "image-daimon"),
     "web": ("web", "parity", "lint", "shard-check", "image-daimon"),
     "web-links": ("spa", "web", "parity", "image-daimon"),
+    "workflow-docs": ("core",),
+    "workflow-validation": ("spa", "core", "parity", "image-daimon"),
     "parity": ("parity", "staging-config", "lint", "shard-check"),
     "tests": DAIMON,
     "simulated": ("simulated", "lint"),

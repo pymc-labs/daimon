@@ -8,7 +8,7 @@ links from; a test keeps the two equal. A link is
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Final, Literal, NamedTuple
 from urllib.parse import quote
@@ -35,6 +35,7 @@ LinkKey = Literal[
     "agents",
     "channel",
     "routine",
+    "workflow",
     "skill",
     "environment",
     "overview",
@@ -67,6 +68,7 @@ DEEP_LINKS: Final[Mapping[LinkKey, DeepLink]] = {
     "agents": DeepLink("/agents", None, "agents", "agents.view"),
     "channel": DeepLink("/channels", "channel", "channels", "channels.view"),
     "routine": DeepLink("/routines", "routine", "routines", "routines.view"),
+    "workflow": DeepLink("/workflows/{id}", None, "workflows", "workflows.view"),
     "skill": DeepLink("/agents/skills/{id}", None, "agents", "workspace.manage"),
     "environment": DeepLink("/agents/environments", "env", "agents", "workspace.manage"),
     "overview": DeepLink("/admin", None, "admin", "audit.view"),
@@ -91,6 +93,7 @@ MEMBER_CAPS: Final[frozenset[str]] = frozenset(
         "agents.view",
         "channels.view",
         "routines.view",
+        "workflows.view",
         "credits.view_own",
     }
 )
@@ -146,6 +149,9 @@ class TenantLinks:
 
     def routine(self, routine_id: uuid.UUID | str | None = None) -> str | None:
         return self._url("routine", None, None if routine_id is None else str(routine_id))
+
+    def workflow(self, workflow_id: uuid.UUID | str) -> str | None:
+        return self._url("workflow", str(workflow_id))
 
     def skill(self, skill_id: str) -> str | None:
         return self._url("skill", skill_id)
@@ -234,6 +240,11 @@ def panel_links(
     """The links a chat panel may offer in `tenant_id`; None with no web app."""
     links = WebLinks.from_settings(web)
     return None if links is None else links.for_tenant(tenant_id, admin=admin)
+
+
+#: The links a card may offer at a place, given its tenant, channel and thread: what an adapter
+#: builds from its `links_at`. None where the web app is off or `web_awareness` is Off there.
+WebAt = Callable[[uuid.UUID, str | None, str | None], Awaitable[TenantLinks | None]]
 
 
 class Assignment(NamedTuple):

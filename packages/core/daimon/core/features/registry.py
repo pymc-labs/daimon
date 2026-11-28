@@ -523,8 +523,9 @@ _ADMIN: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS)
 # Monitoring keeps what people say: workspace admins switch it on, an agent's owner may not.
 _ADMIN_NOT_OWNER: Final = Authority(DelegatedAction.CHANNEL_PERMISSIONS, agent_owner=False)
 WEB_MODULES: Final[tuple[str, ...]] = (
-    "chat", "agents", "channels", "routines", "credits", "integrations",
+    "chat", "agents", "channels", "routines", "credits", "integrations", "workflows",
 )  # fmt: skip
+_WORKFLOW_TIERS: Final[tuple[Tier, ...]] = ("deployment", "workspace", "agent", "channel")
 
 
 def _shown(
@@ -1423,6 +1424,84 @@ _CAPABILITIES: Final[tuple[FeatureSpec, ...]] = (
         "Lead intake",
         "The agent can take in sales leads and look them up. Off removes the lead tools here.",
         page="lead-intake.md#operator-setup",
+    ),
+    _capability(
+        "workflows",
+        "Workflows",
+        "Run workflows.",
+        page="workflows.md#turn-workflows-on",
+        tiers=_WORKFLOW_TIERS,
+        authority=_ADMIN,
+    ),
+    _capability(
+        "workflow_webhooks",
+        "Workflow webhooks",
+        "Webhook runs.",
+        page="workflows.md#triggers",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        default="off",
+        authority=_SERVER_ADMIN,
+    ),
+    _capability(
+        "workflow_code",
+        "Workflow code steps",
+        "Code steps.",
+        page="workflows.md#steps",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        default="off",
+        authority=_SERVER_ADMIN,
+    ),
+    _capability(
+        "workflow_mentions",
+        "Workflow mentions",
+        "Mention runs.",
+        page="workflows-advanced.md#mentions",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        authority=_SERVER_ADMIN,
+    ),
+    _capability(
+        "workflow_polls",
+        "Workflow polls",
+        "Poll runs.",
+        page="workflows-advanced.md#polls",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        authority=_SERVER_ADMIN,
+    ),
+    _capability(
+        "workflow_scoped_writes",
+        "Workflow scoped writes",
+        "Limited unattended writes.",
+        page="workflows-advanced.md#writes-inside-a-scope",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        default="off",
+        authority=_SERVER_ADMIN,
+    ),
+    _limit(
+        "workflow_run_budget",
+        "Workflow run budget",
+        "Most a run spends.",
+        {"50": "$50", "20": "$20", "10": "$10", "5": "$5", "2": "$2", "1": "$1"},
+        page="workflows.md#runs",
+        default="5",
+        tiers=("deployment", "workspace"),
+        authority=_SERVER_ADMIN,
+        minimum=0.01,
+    ),
+    _limit(
+        "workflow_retention_days",
+        "Workflow run history",
+        "Step history kept.",
+        {"400": "400 days", "180": "180 days", "90": "90 days", "30": "30 days"},
+        page="workflows.md#runs",
+        default="90",
+        tiers=("deployment", "workspace"),
+        authority=_ADMIN,
+        minimum=1,
     ),
     _limit(
         "long_jobs_max_usd",

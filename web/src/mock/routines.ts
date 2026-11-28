@@ -18,14 +18,24 @@ const titleOf = (name: string | null, message: string) => name || (message.split
 const routines: Stored[] = [
   { id: "r1", name: "Weekly channel readout", owner_id: "p_maya", owner: "Maya Lindqvist", mine: false, agent: { id: "ag_mmm", name: "MMM Analyst" }, cron: "0 9 * * 1", timezone: "Europe/Stockholm",
     schedule: "every Monday at 09:00", message: "Summarize last week's channel contribution for Larkspur and flag any interval wider than 20%.",
-    enabled: true, catch_up: "run-once", destination: DESTINATIONS[0]!, dm: false, sandbox_tools: true, next_run: hours(60), last_run: hours(-108), failed: false, last_output: "Search and social held steady; TV's interval widened to 24%." },
+    enabled: false, catch_up: "run-once", destination: DESTINATIONS[0]!, dm: false, sandbox_tools: true, next_run: null, last_run: hours(-240), failed: false, last_output: "Search and social held steady; TV's interval widened to 24%.",
+    workflow: { id: "wf_readout", name: "Weekly channel readout" } },
   { id: "r2", name: "Overnight price test", owner_id: "p_priya", owner: "Priya Raman", mine: false, agent: { id: "ag_pricing", name: "Pricing Analyst" }, cron: "30 8 * * 1-5", timezone: "America/New_York",
     schedule: "every weekday at 08:30", message: "Post the overnight price test readout.",
-    enabled: true, catch_up: "skip", destination: DESTINATIONS[3]!, dm: false, sandbox_tools: false, next_run: hours(14), last_run: hours(-10), failed: true, last_output: null },
+    enabled: false, catch_up: "skip", destination: DESTINATIONS[3]!, dm: false, sandbox_tools: false, next_run: null, last_run: hours(-222), failed: true, last_output: null,
+    workflow: { id: "wf_price", name: "Overnight price test" } },
   { id: "r3", name: null, owner_id: "p_priya", owner: "Priya Raman", mine: false, agent: { id: "ag_review", name: "Code Reviewer" }, cron: "0 17 * * 5", timezone: "Europe/London",
     schedule: "every Friday at 17:00", message: "List pull requests open for more than a week.",
-    enabled: false, catch_up: "skip", destination: null, dm: true, sandbox_tools: false, next_run: null, last_run: hours(-200), failed: false, last_output: null },
+    enabled: false, catch_up: "skip", destination: null, dm: true, sandbox_tools: false, next_run: null, last_run: hours(-264), failed: false, last_output: null,
+    workflow: { id: "wf_prs", name: "Stale pull requests" } },
+  { id: "r4", name: "Pipeline check", owner_id: "p_jonas", owner: "Jonas Weber", mine: false, agent: { id: "ag_default", name: "Daimon" }, cron: "0 8 * * 1-5", timezone: "Europe/Stockholm",
+    schedule: "every weekday at 08:00", message: "List deals that moved stage yesterday.",
+    enabled: true, catch_up: "skip", destination: DESTINATIONS[1]!, dm: false, sandbox_tools: false, next_run: hours(16), last_run: hours(-8), failed: false, last_output: "Two deals moved to proposal: Cobalt and Juniper.", workflow: null },
 ]
+
+/** The routine a mock workflow moves from or back to. */
+export const routineOf = (id: unknown) => visible().find((r) => r.id === id)
+const MOVED = "This routine moved to Workflows. Change it there."
 
 const view = (r: Stored): Routine => {
   const { owner_id, ...rest } = r
@@ -72,7 +82,7 @@ export const routinesHandlers: HttpHandler[] = [
     const r: Stored = {
       id: `r${Date.now()}`, name: b.name?.trim() || null, owner_id: m.id, owner: m.name, mine: true, agent: { id: a.id, name: a.name }, cron: b.cron, timezone: b.timezone,
       schedule: words(b.cron, b.timezone), message: b.message, enabled: true, catch_up: b.catch_up as CatchUp, destination: b.dm ? null : dest(b.destination), dm: !!b.dm, sandbox_tools: false,
-      next_run: next(b.cron), last_run: null, failed: false, last_output: null,
+      next_run: next(b.cron), last_run: null, failed: false, last_output: null, workflow: null,
     }
     routines.unshift(r)
     return HttpResponse.json(view(r))
@@ -83,6 +93,7 @@ export const routinesHandlers: HttpHandler[] = [
     if (!m?.capabilities.includes("routines.manage")) return forbidden()
     const r = visible().find((x) => x.id === params.id)
     if (!r) return notFound()
+    if (r.workflow) return invalid(MOVED)
     const b = (await request.json()) as RoutineChange
     if (b.agent_id) {
       const a = AGENTS.find((x) => x.id === b.agent_id)
@@ -106,6 +117,7 @@ export const routinesHandlers: HttpHandler[] = [
     if (!m?.capabilities.includes("routines.manage")) return forbidden()
     const r = visible().find((x) => x.id === params.id)
     if (!r) return notFound()
+    if (r.workflow) return invalid(MOVED)
     r.enabled = verb === "resume"
     r.next_run = r.enabled ? next(r.cron) : null
     return HttpResponse.json(view(r))
@@ -116,6 +128,7 @@ export const routinesHandlers: HttpHandler[] = [
     if (!m?.capabilities.includes("routines.manage")) return forbidden()
     const r = visible().find((x) => x.id === params.id)
     if (!r) return notFound()
+    if (r.workflow) return invalid(MOVED)
     if (!r.enabled) return HttpResponse.json({ detail: "This routine is paused. Resume it to run it." }, { status: 422 })
     r.next_run = new Date().toISOString()
     return HttpResponse.json(view(r))
@@ -126,6 +139,7 @@ export const routinesHandlers: HttpHandler[] = [
     if (!m?.capabilities.includes("routines.manage")) return forbidden()
     const i = routines.findIndex((x) => x.id === params.id && visible().includes(x))
     if (i < 0) return notFound()
+    if (routines[i]!.workflow) return invalid(MOVED)
     routines.splice(i, 1)
     return new HttpResponse(null, { status: 204 })
   }),

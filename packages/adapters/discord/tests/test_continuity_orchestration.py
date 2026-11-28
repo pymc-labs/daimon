@@ -50,6 +50,7 @@ from daimon.core.turn_origin import turn_origin as real_turn_origin
 from daimon.testing.discord_builders import discord_runtime
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.settings_mock import mock_settings
 from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -138,7 +139,7 @@ def _make_runtime(
     *,
     anthropic: _anthropic.AsyncAnthropic | None = None,
 ) -> DiscordRuntime:
-    settings = MagicMock()
+    settings = mock_settings()
     settings.agent_identity.enabled = True
     settings.mcp = McpSettings()
     settings.billing.markup = Decimal("1.0")

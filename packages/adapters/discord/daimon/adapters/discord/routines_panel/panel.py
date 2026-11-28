@@ -26,17 +26,18 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, AgentRef, Place, Surface, authorize, build_agent_ref
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
-from daimon.core.errors import DaimonError, UserFacingError
+from daimon.core.errors import DaimonError, RoutineMoved, UserFacingError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.permissions import any_agent_rules
 from daimon.core.posted_controls.routines import RoutineAction, apply_routine_action
 from daimon.core.routine_service import ROLES_REQUIRED_REFUSAL
-from daimon.core.routines import can_read_routine_output
+from daimon.core.routines import MOVE_TO_WORKFLOW, MOVED_TO_WORKFLOWS, can_read_routine_output
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import get_routine, update_routine
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.web_links import OPEN_IN_WEB
+from daimon.core.workflows.chat_cards import Presser, move_routine
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -54,9 +55,13 @@ async def _send_callback_error(interaction: discord.Interaction, exc: Exception)
     best-effort (its own try/except that only logs) -- a failure here must
     never re-raise out of the caller's boundary.
     """
-    log.exception("routines_panel_callback_failed", error=str(exc))
-    sentry_sdk.capture_exception(exc)
-    error_embed = build_notice_embed("Something went wrong.\n\nTry again.")
+    moved = isinstance(exc, RoutineMoved) or isinstance(exc.__cause__, RoutineMoved)
+    if not moved:  # a card shown before the move is not a failure
+        log.exception("routines_panel_callback_failed", error=str(exc))
+        sentry_sdk.capture_exception(exc)
+    error_embed = build_notice_embed(
+        MOVED_TO_WORKFLOWS if moved else "Something went wrong.\n\nTry again."
+    )
     try:
         if interaction.response.is_done():
             await interaction.followup.send(embed=error_embed, ephemeral=True)
@@ -161,7 +166,7 @@ class _DestinationPicker(discord.ui.Select["RoutinesPanelView"]):
                 discord.SelectOption(label="Direct message to me", value="dm"),
                 discord.SelectOption(label="No automatic delivery", value="none"),
             ],
-            disabled=state.selected is None,
+            disabled=state.locked,
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -220,7 +225,7 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
         super().__init__(
             label=label,
             style=style,
-            disabled=(state.selected is None),
+            disabled=state.locked,
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -282,6 +287,7 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
                     "gone": "This routine no longer exists.",
                     "wrong_tenant": "This routine is from another server.",
                     "not_owner": ("Only its creator or a server admin can pause it."),
+                    "moved": MOVED_TO_WORKFLOWS,
                 }
                 if result != "changed":
                     notice = build_notice_embed(refusals[result])
@@ -291,6 +297,37 @@ class _PauseButton(discord.ui.Button["RoutinesPanelView"]):
                         await interaction.response.send_message(embed=notice, ephemeral=True)
                     return
 
+            await _rerender(interaction, self.view)
+        except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
+            await _send_callback_error(interaction, exc)
+        except Exception as exc:  # routines-panel button-callback boundary
+            await _send_callback_error(interaction, exc)
+
+
+class _MoveButton(discord.ui.Button["RoutinesPanelView"]):
+    def __init__(self) -> None:
+        super().__init__(label=MOVE_TO_WORKFLOW, style=discord.ButtonStyle.primary)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if self.view is None or self.view.state.selected is None:
+            return
+        runtime = self.view.runtime
+        try:
+            await interaction.response.defer()
+            refusal = await move_routine(
+                runtime.sessionmaker,
+                runtime.settings,
+                Presser(
+                    derive_tenant_uuid(platform="discord", workspace_id=str(interaction.guild_id)),
+                    "discord",
+                    str(interaction.user.id),
+                ),
+                self.view.state.selected.routine.id,
+                client=runtime.anthropic,
+            )
+            if refusal is not None:
+                await interaction.followup.send(embed=build_notice_embed(refusal), ephemeral=True)
+                return
             await _rerender(interaction, self.view)
         except (DaimonError, anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
             await _send_callback_error(interaction, exc)
@@ -403,11 +440,19 @@ class RoutinesPanelView(discord.ui.LayoutView):
         container.add_item(layout.hairline())
         container.add_item(picker_row)
         container.add_item(discord.ui.ActionRow(_DestinationPicker(state)))
-        container.add_item(discord.ui.ActionRow(NewButton(), DeleteButton(state)))
+        manage_row: discord.ui.ActionRow[RoutinesPanelView] = discord.ui.ActionRow(
+            NewButton(), DeleteButton(state)
+        )
+        if state.admin and not state.locked:
+            manage_row.add_item(_MoveButton())
+        container.add_item(manage_row)
+        selected = state.selected
         web_url = (
             None
             if state.links is None
-            else state.links.routine(None if state.selected is None else state.selected.routine.id)
+            else state.links.workflow(selected.workflow_id)
+            if selected is not None and selected.workflow_id is not None
+            else state.links.routine(None if selected is None else selected.routine.id)
         )
         if web_url is not None:
             buttons_row.add_item(
@@ -437,18 +482,20 @@ async def _rerender(interaction: discord.Interaction, view: RoutinesPanelView) -
             raise UserFacingError(
                 "Daimon isn't set up on this server yet.\n\nAsk an admin to set it up."
             )
+        admin = await checks.is_guild_admin(interaction, action=DelegatedAction.ROUTINES)
         entries, over_cap_count, agent_name_map = await load_guild_routines(
             session,
             runtime.anthropic,
             tenant_id=tenant_id,
             viewer_user_id=str(view.allowed_user_id),
-            only_own=not await checks.is_guild_admin(interaction, action=DelegatedAction.ROUTINES),
+            only_own=not admin,
         )
     new_state = RoutinesPanelState.initial(
         rows=entries,
         over_cap_count=over_cap_count,
         agent_name_map=agent_name_map,
         links=view.state.links,
+        admin=admin,
     )
     # Preserve selection across refreshes when the row still exists.
     if view.state.selected is not None:

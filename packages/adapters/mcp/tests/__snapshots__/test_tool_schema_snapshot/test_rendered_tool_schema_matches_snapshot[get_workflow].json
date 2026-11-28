@@ -1,0 +1,20 @@
+{
+  "description": [
+    "Read a workflow: its draft spec and revision, its problems, and its live version.",
+    "",
+    "Read it before editing; edits name the revision they were made from."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "workflow_id": {
+        "format": "uuid",
+        "type": "string"
+      }
+    },
+    "required": [
+      "workflow_id"
+    ],
+    "type": "object"
+  }
+}

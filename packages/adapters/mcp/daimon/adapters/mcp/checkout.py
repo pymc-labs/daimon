@@ -68,6 +68,7 @@ def build_checkout_route(
                     "agent_id",
                     "chat_agent_id",
                     "routine_id",
+                    "workflow_run_id",
                     "execution_id",
                     "chat_session_id",
                     "slack_turn_context_id",

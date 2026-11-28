@@ -1,0 +1,68 @@
+{
+  "description": [
+    "Finish your workflow step with its output, a markdown summary and its route if any.",
+    "",
+    "Only in a workflow step, with the step id its brief gives. The output is checked against",
+    "the step's contract; on errors fix them and call again. `reason` says why you chose the",
+    "route. After it is recorded, end your turn."
+  ],
+  "parameters": {
+    "$defs": {
+      "JsonValue": {}
+    },
+    "additionalProperties": false,
+    "properties": {
+      "output": {
+        "anyOf": [
+          {
+            "additionalProperties": {
+              "$ref": "#/$defs/JsonValue"
+            },
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "reason": {
+        "anyOf": [
+          {
+            "maxLength": 1000,
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "route": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "step": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "summary": {
+        "maxLength": 40000,
+        "minLength": 1,
+        "type": "string"
+      }
+    },
+    "required": [
+      "step",
+      "summary"
+    ],
+    "type": "object"
+  }
+}

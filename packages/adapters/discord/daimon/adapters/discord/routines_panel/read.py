@@ -14,7 +14,7 @@ from daimon.adapters.discord.routines_panel.state import (
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.routine_sandbox import opted_in_by_many
 from daimon.core.routines import routine_for_reader
-from daimon.core.stores.routines import list_routines_for_tenant
+from daimon.core.stores.routines import list_routines_for_tenant, migrated_workflows
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _PICKER_CAP = 25
@@ -71,5 +71,13 @@ async def load_guild_routines(
     over_cap_count = max(0, len(entries) - _PICKER_CAP)
     shown = entries[:_PICKER_CAP]
     by = await opted_in_by_many(session, [entry.routine for entry in shown], "discord")
-    shown = [dataclasses.replace(entry, sandbox_by=by[entry.routine.id]) for entry in shown]
+    moved = await migrated_workflows(session, [entry.routine.id for entry in shown])
+    shown = [
+        dataclasses.replace(
+            entry,
+            sandbox_by=by[entry.routine.id],
+            workflow_id=moved[entry.routine.id][0] if entry.routine.id in moved else None,
+        )
+        for entry in shown
+    ]
     return shown, over_cap_count, agent_name_map

@@ -30,6 +30,7 @@ from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.slots import wait_for_slot
 from daimon.testing.builders import provision_workspace
+from daimon.testing.settings_mock import mock_settings
 from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -42,7 +43,7 @@ def _make_runtime(
     sessionmaker: async_sessionmaker[AsyncSession],
 ) -> DiscordRuntime:
     _ = tenant_id  # runtime no longer carries tenant_id
-    settings = MagicMock()
+    settings = mock_settings()
     settings.mcp = McpSettings()
     discord_settings = MagicMock()
     discord_settings.max_concurrent_turns_per_tenant = 100  # effectively uncapped in tests
@@ -993,6 +994,7 @@ async def test_drain_merges_attachments_from_all_of_authors_queued_messages(
     q1 = _make_thread_message(content="A", author_id=42, display_name="Alice")
     q2 = _make_thread_message(content="B", author_id=42, display_name="Alice")
     attachment = MagicMock(spec=discord.Attachment)
+    attachment.size = 3  # the workflow-ask check sizes every attachment
     q2.attachments = [attachment]
 
     task = asyncio.create_task(queued_bot.on_message(m1))

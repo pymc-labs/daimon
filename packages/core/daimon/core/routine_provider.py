@@ -1,6 +1,9 @@
-"""The provider a routine's fire runs on, read from local facts only."""
+"""The provider an unattended turn at a place runs on (a routine fire, an agent step), read
+from local facts only."""
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 from daimon.core.channel_backend import (
     agent_native_provider,
@@ -12,21 +15,27 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.routine_delivery import delivery_target
 from daimon.core.rule_views import routine_destination_channel
 from daimon.core.stores import mux_state
-from daimon.core.stores.domain import RoutineRow
 from mux.contracts.config import DEFAULT_BACKEND
 from mux.contracts.ids import Provider
 from sqlalchemy.ext.asyncio import AsyncSession
 
+if TYPE_CHECKING:
+    from daimon.core.fire.subject import RoutineFacts
 
-async def routine_provider(session: AsyncSession, row: RoutineRow, *, platform: str) -> Provider:
-    """Its thread destination's retained provider, else a channel's, else its agent's.
 
-    Read where admission admits the fire (`provider_routine.admit_provider_routine`): the
+async def place_provider(
+    session: AsyncSession, row: RoutineFacts, *, platform: str, home: str | None = None
+) -> Provider:
+    """The place's thread's retained provider, else its channel's, else its agent's.
+
+    A routine's place is its destination, else its channel; an agent step's its `at`, else
+    `home`, its workflow's home channel. Read where
+    admission admits the fire (`provider_routine.admit_provider_routine`): the
     destination's channel, else the one it was made in. A thread that kept Claude stays on
     it. The scheduler routes the fire by it and a sandbox opt-in pins it, so a change of
     provider needs a new opt-in.
     """
-    channel = routine_destination_channel(row) or row.channel_id
+    channel = routine_destination_channel(row) or row.channel_id or home
     thread_id = routine_thread_id(row, platform=platform)
     if channel is None:
         provider = None
@@ -60,7 +69,7 @@ async def routine_provider(session: AsyncSession, row: RoutineRow, *, platform: 
     return provider or DEFAULT_BACKEND
 
 
-def routine_thread_id(row: RoutineRow, *, platform: str) -> str | None:
+def routine_thread_id(row: RoutineFacts, *, platform: str) -> str | None:
     """A thread destination's own thread id (Slack's thread ts), else None."""
     if row.destination_kind != "thread":
         return None

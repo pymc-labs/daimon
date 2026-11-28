@@ -51,6 +51,7 @@ from daimon.core.stores.mcp_tokens import revoke_mcp_token
 from daimon.core.stores.turn_origins import get_session_origin
 from daimon.core.switch_cards import SWITCH_CARD_MAX_S
 from daimon.core.tool_safety import ToolCall
+from daimon.core.workflows.agent_step import running_step_decider
 from fastmcp.server.auth.auth import TokenVerifier
 from pydantic import JsonValue
 from starlette.requests import Request
@@ -93,6 +94,10 @@ class RelayTurn:
     """A provider turn's credential, whose asks become cards; else a self-hosted
     harness's, which asks the person itself (`host_calls.gate_path`)."""
     expires_at: datetime | None = None
+    #: The workflow run whose agent step this turn is (`workflow_execution`), if any.
+    workflow_run_id: uuid.UUID | None = None
+    #: Its lane's grant (`lane_grant`): which of the run's running steps this turn is.
+    execution_id: uuid.UUID | None = None
 
     @property
     def requester(self) -> uuid.UUID:
@@ -144,7 +149,13 @@ def relay_turn(claims: Mapping[str, object]) -> RelayTurn | None:
         # A malformed binding must not read as "no requester": refuse it, as identity does.
         or any(
             claims.get(name) is not None and _uuid(claims.get(name)) is None
-            for name in ("requester_account_id", "confirmed_call", TOKEN_JTI_CLAIM)
+            for name in (
+                "requester_account_id",
+                "confirmed_call",
+                TOKEN_JTI_CLAIM,
+                "workflow_run_id",
+                "execution_id",
+            )
         )
     ):
         return None
@@ -160,6 +171,8 @@ def relay_turn(claims: Mapping[str, object]) -> RelayTurn | None:
         token_jti=_uuid(claims.get(TOKEN_JTI_CLAIM)),
         carded=claims.get("no_confirmation_surface") is True,
         expires_at=datetime.fromtimestamp(exp, UTC) if isinstance(exp, int) else None,
+        workflow_run_id=_uuid(claims.get("workflow_run_id")),
+        execution_id=_uuid(claims.get("execution_id")),
     )
 
 
@@ -389,12 +402,28 @@ class ConnectorRelay:
             tool_name=name,
             input=cast("dict[str, object]", args),
         )
-        verdict = await relay_verdict(
-            self._settings.tool_safety, connector, call, attended=origin.attended
+        step = (
+            await running_step_decider(
+                self._sessionmaker,
+                self._settings,
+                tenant_id=turn.tenant_id,
+                run_id=turn.workflow_run_id,
+                execution_id=turn.execution_id,
+                url=connector.url,
+            )
+            if turn.workflow_run_id is not None
+            else None
         )
+        if turn.workflow_run_id is not None and step is None:
+            # A step's credential outside its one running step decides nothing: refused.
+            return _tool_text(REFUSED_TEXT)
+        decision = await relay_verdict(
+            self._settings.tool_safety, connector, call, attended=origin.attended, step=step
+        )
+        verdict = decision.verdict
         if verdict == "refuse":
             log.info("connector_relay.call_refused", server_key=connector.key, tool=name)
-            return _tool_text(REFUSED_TEXT)
+            return _tool_text(decision.text or REFUSED_TEXT)
         if verdict == "ask" and turn.carded:
             return await self._ask(turn, origin, connector, name, args)
         # Uncarded, the harness asked the person in-process before calling (its tool policy).

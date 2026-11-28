@@ -62,6 +62,7 @@ from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn_origin import turn_origin as real_turn_origin
 from daimon.testing.ma import resolved_agent_env_router
 from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.settings_mock import mock_settings
 from mux.contracts.ids import Scope
 from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from pydantic import SecretStr
@@ -75,7 +76,7 @@ _ENV_ID = "env_continuity_test"
 
 
 def _make_app(sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id_str: str) -> SlackApp:
-    settings = MagicMock()
+    settings = mock_settings()
     settings.outbound = OutboundSettings()
     settings.crypto.keys = ()
     settings.slack.max_concurrent_turns_per_tenant = 3

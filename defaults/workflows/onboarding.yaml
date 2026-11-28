@@ -1,0 +1,55 @@
+schema: daimon.workflow/v1
+name: Onboarding
+goal: Welcome a new person, wait a day, then check in.
+inputs:
+  type: object
+  required: [name, email]
+  properties:
+    name: { type: string }
+    email: { type: string }
+label: ${{ inputs.name }}
+triggers:
+  - id: manual
+    kind: manual
+start: prepare
+nodes:
+  prepare:
+    kind: transform
+    title: Prepare the welcome
+    set:
+      subject: Welcome, ${{ inputs.name }}
+      body: Glad to have you here. Reply to this message if anything is unclear.
+    next: confirm
+  confirm:
+    kind: approval
+    title: Confirm the welcome
+    approvers: [owner]
+    allow_self_approval: true
+    binds: welcome
+    show: ${{ steps.prepare.output.subject }} to ${{ inputs.email }}
+    routes:
+      approve: welcome
+      reject: stopped
+  welcome:
+    kind: action
+    title: Send the welcome
+    tool: gmail/send_message
+    args:
+      to: ${{ inputs.email }}
+      subject: ${{ steps.prepare.output.subject }}
+      body: ${{ steps.prepare.output.body }}
+    next: pause
+  pause:
+    kind: wait
+    title: Wait a day
+    for: 24h
+    next: done
+  done:
+    kind: finish
+    title: Onboarded
+    deliver:
+      to: run_as
+      message: Welcomed ${{ inputs.name }}; a day has passed.
+  stopped:
+    kind: finish
+    title: Not sent

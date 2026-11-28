@@ -870,6 +870,30 @@ ROWS: list[tuple[str, TenantAccessPolicy, dict[str, object], Decision]] = [
         _deny("own_agents_only"),
     ),
     (
+        "isolation shared agent is published in no workflow homed inside",
+        ISOLATED,
+        {"subject": MEMBER, "action": Action.PUBLISH_WORKFLOW, "agent": SHARED, "place": INSIDE},
+        _deny("own_agents_only"),
+    ),
+    (
+        "workflow grants are a member's to ask for, never to approve",
+        OPEN,
+        {"subject": MEMBER, "action": Action.GRANT_WORKFLOW},
+        _deny("admin_required"),
+    ),
+    (
+        "workflow grants are never approved with an agent key",
+        OPEN,
+        {"subject": AGENT_KEY_ADMIN, "action": Action.GRANT_WORKFLOW},
+        _deny("admin_required"),
+    ),
+    (
+        "an admin approves workflow grants",
+        OPEN,
+        {"subject": ADMIN, "action": Action.GRANT_WORKFLOW},
+        ALLOW,
+    ),
+    (
         "isolation shared agent is no channel default inside",
         ISOLATED,
         {"subject": ADMIN, "action": Action.BIND_CHANNEL_DEFAULT, "agent": SHARED, "place": INSIDE},

@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnClause
 
 PostKind = Literal["message", "thread"]
-PostSource = Literal["tool", "turn", "auto_thread", "routine"]
+PostSource = Literal["tool", "turn", "auto_thread", "routine", "workflow"]
 # A turn's progress card, answer, notice or controls card, or a routine result.
 PostRole = Literal["status", "answer", "notice", "controls", "routine"]
 
@@ -120,30 +120,26 @@ async def get_post(
     return AgentPostRow.model_validate(row) if row is not None else None
 
 
-async def posted_under(
-    session: AsyncSession,
-    *,
-    tenant_id: uuid.UUID,
-    parent_channel_id: str,
-    channel_ids: Collection[str],
-) -> bool:
-    """Whether an agent's own tool post in one of `channel_ids` is recorded under the parent.
+async def parents_of(
+    session: AsyncSession, *, tenant_id: uuid.UUID, channel_ids: Collection[str]
+) -> frozenset[str]:
+    """The parents an agent's own tool posts in `channel_ids` are recorded under.
 
     A deleted post counts: this asks where a thread sits, not what is still there.
     """
     if not channel_ids:
-        return False
-    found = await session.scalar(
-        select(AgentPostedMessage.id)
+        return frozenset()
+    rows = await session.scalars(
+        select(AgentPostedMessage.parent_channel_id)
         .where(
             AgentPostedMessage.tenant_id == tenant_id,
             AgentPostedMessage.source == "tool",
             AgentPostedMessage.channel_id.in_(channel_ids),
-            AgentPostedMessage.parent_channel_id == parent_channel_id,
+            AgentPostedMessage.parent_channel_id.is_not(None),
         )
-        .limit(1)
+        .distinct()
     )
-    return found is not None
+    return frozenset(p for p in rows if p is not None)
 
 
 async def list_posts_in(

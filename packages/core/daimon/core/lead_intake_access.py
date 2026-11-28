@@ -68,6 +68,7 @@ class LeadReader:
     routine_id: UUID | None = None
     execution_active: bool = False
     resolve: bool = False
+    workflow_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -164,6 +165,7 @@ async def authorize_lead_read(
             routine_id=reader.routine_id,
             execution_active=reader.execution_active,
             resolve=reader.resolve,
+            workflow_id=reader.workflow_id,
         )
     except PermissionError as exc:
         raise LeadReadDenied(str(exc)) from None

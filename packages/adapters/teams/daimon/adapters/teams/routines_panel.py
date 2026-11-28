@@ -55,6 +55,7 @@ from daimon.core.routine_service import (
     UnknownAgent,
 )
 from daimon.core.routines import (
+    MOVED_TO_WORKFLOWS,
     can_manage_routine,
     can_read_routine_output,
     panel_rows,
@@ -62,6 +63,7 @@ from daimon.core.routines import (
 )
 from daimon.core.stores import routines as store
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.workflows.chat_cards import Presser, move_routine
 from microsoft_teams.api import (
     AdaptiveCardInvokeActivity,
     AdaptiveCardInvokeResponse,
@@ -127,11 +129,12 @@ class RoutinesPanel:
     ) -> AdaptiveCard:
         async with self._runtime.sessionmaker() as session:
             rows = await store.list_routines_for_tenant(session, tenant_id=tenant_id)
-        if not is_admin:
-            # A routine's label and trigger are its creator's work.
-            rows = [row for row in rows if row.created_by_user_id == user_id]
-        rows = [routine_for_reader(row, user_id=user_id) for row in rows]
-        shown, hidden = panel_rows(rows)
+            if not is_admin:
+                # A routine's label and trigger are its creator's work.
+                rows = [row for row in rows if row.created_by_user_id == user_id]
+            rows = [routine_for_reader(row, user_id=user_id) for row in rows]
+            shown, hidden = panel_rows(rows)
+            moved = await store.migrated_workflows(session, [row.id for row in shown])
         channel_id, thread_id = where
         links = await web_links(
             self._runtime,
@@ -148,6 +151,7 @@ class RoutinesPanel:
             is_admin=is_admin,
             notice=notice,
             web_url=links.routine() if links else None,
+            moved={r: links.workflow(w) if links else None for r, (w, _) in moved.items()},
         )
 
     def _service_caller(self, actor: Actor) -> RoutineCaller:
@@ -183,7 +187,17 @@ class RoutinesPanel:
             except ValueError:
                 return toast(GONE)
             tenant_id = actor.tenant_id
-            if op == "confirm_delete":
+            if op == "move":
+                refusal = await move_routine(
+                    self._runtime.sessionmaker,
+                    self._runtime.settings,
+                    Presser(tenant_id, "teams", actor.user_id),
+                    routine_id,
+                    client=self._runtime.anthropic,
+                )
+                if refusal is not None:
+                    return toast(refusal)
+            elif op == "confirm_delete":
                 try:
                     await routine_service.delete_routine(
                         self._service_env(tenant_id),
@@ -194,6 +208,8 @@ class RoutinesPanel:
                     return toast(NOT_OWNER)
                 except RoutineNotFound:
                     return toast(GONE)
+                except RoutineRefused as refused:  # moved to Workflows after the card was shown
+                    return toast(str(refused))
                 notice = "🗑️ Routine deleted."
             else:
                 async with self._runtime.sessionmaker.begin() as session:
@@ -220,6 +236,8 @@ class RoutinesPanel:
                         if result != "changed":
                             if result == "already_running":
                                 return toast("This routine is already on.")
+                            if result == "moved":
+                                return toast(MOVED_TO_WORKFLOWS)
                             return toast(GONE if result == "gone" else NOT_OWNER)
                     else:
                         row = await store.get_routine(session, routine_id, tenant_id=tenant_id)

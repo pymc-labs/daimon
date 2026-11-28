@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import binascii
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 
 type Cursor = tuple[datetime, uuid.UUID]
@@ -17,6 +18,14 @@ type Cursor = tuple[datetime, uuid.UUID]
 DEFAULT_PAGE = 100
 #: The most rows a client may ask for in one page.
 MAX_PAGE = 200
+
+
+@dataclass(frozen=True)
+class Page[T]:
+    """A page of rows, and the cursor of the next page when more follow."""
+
+    rows: list[T]
+    next: Cursor | None = None
 
 
 def encode_cursor(cursor: Cursor) -> str:

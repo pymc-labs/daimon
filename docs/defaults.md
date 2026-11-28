@@ -53,6 +53,10 @@ off the agent at the provider and out of its fingerprint, so `apply` and
 `verify` read the agent as if the entry were absent. Each turn on a listed
 platform adds it to the session instead.
 
+<!-- knowledge: web -->
+`platforms` also takes `web`, the web app's chat.
+<!-- /knowledge -->
+
 - It fills only the room left under the 50-skill limit, and counts before a
   channel's skills.
 - Only the Anthropic backend gets it.

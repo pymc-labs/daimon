@@ -677,8 +677,7 @@ class TeamsTurnLifecycle(OutputGate):
                 await self._close(text, actions=actions, summary=summary, error=not tool_only)
                 self._answered = tool_only
                 return
-            if self._agent_name_prefix is not None:
-                answer = f"**{self._agent_name_prefix}**\n\n{answer}"
+            answer = card.agent_named(self._agent_name_prefix, answer)
             chunks = split_fenced(answer, card.TEAMS_LIMIT)
             # A ping posts the answer fresh, so Teams notifies; the card is retired after.
             if self._ping and await self._requester_opted_out():

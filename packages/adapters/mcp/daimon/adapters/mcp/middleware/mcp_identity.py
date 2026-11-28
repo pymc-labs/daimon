@@ -520,6 +520,7 @@ class IdentityMiddleware(Middleware):
             for binding in (
                 "chat_agent_id",
                 "routine_id",
+                "workflow_run_id",
                 "execution_id",
                 "slack_turn_context_id",
                 "confirmed_call",
@@ -609,6 +610,7 @@ class IdentityMiddleware(Middleware):
 
         identity = AuthIdentity(
             routine_id=signed_uuid("routine_id"),
+            workflow_run_id=signed_uuid("workflow_run_id"),
             execution_id=signed_uuid("execution_id"),
             account_id=account_id,
             tenant_id=tenant_id,
@@ -870,7 +872,8 @@ def _person_agent(agent_id: uuid.UUID | None, claims: Mapping[str, object]) -> u
     if agent_id is None or claims.get(TOKEN_KIND_CLAIM) != "agent":
         return None
     if claims.get(CHAT_EXECUTION_CLAIM) is True or any(
-        claims.get(key) is not None for key in ("chat_agent_id", "routine_id", "execution_id")
+        claims.get(key) is not None
+        for key in ("chat_agent_id", "routine_id", "workflow_run_id", "execution_id")
     ):
         return None
     return agent_id

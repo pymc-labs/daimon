@@ -1,0 +1,338 @@
+"""The validator against the fixtures the web canvas also checks (`validation.test.ts`), and
+the publish it blocks."""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import pytest
+from daimon.core.constants import AGENT_SKILL_CAP
+from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
+from daimon.core.workflows import service
+from daimon.core.workflows.access import Who
+from daimon.core.workflows.catalog import spec_agent_tools, tool_catalog
+from daimon.core.workflows.service import Env
+from daimon.core.workflows.spec import parse_spec
+from daimon.core.workflows.taint import Catalog, SkillPin, catalog_of, tainted_steps, tool_facts
+from daimon.core.workflows.unattended import exposed_at_run
+from daimon.core.workflows.validate import validate_document, validate_spec
+from daimon.testing.ma_models import ma_agent
+from daimon.testing.workflows import NOW, agents_with, make_world
+from sqlalchemy.ext.asyncio import AsyncSession
+
+FIXTURES = Path(__file__).parents[4] / "web/src/modules/workflows/fixtures/validation.json"
+CASES: list[dict[str, Any]] = json.loads(FIXTURES.read_text())["cases"]
+
+
+@pytest.mark.parametrize("case", CASES, ids=[c["name"] for c in CASES])
+def test_validator_matches_shared_fixture(case: dict[str, Any]) -> None:
+    catalog = Catalog.model_validate(case["catalog"]) if "catalog" in case else None
+    result = validate_document(case["spec"], catalog)
+
+    errors = sorted({f"{p.code}:{p.node or ''}" for p in result.errors})
+    warnings = sorted({f"{p.code}:{p.node or ''}" for p in result.warnings})
+    assert errors == case["errors"], f"errors differ: {[p.message for p in result.errors]}"
+    assert warnings == case["warnings"], "warnings differ from the fixture"
+    if "grants" in case:
+        grants = sorted({f"{g.kind}:{g.node or ''}" for g in result.grants})
+        assert grants == case["grants"], "grants differ from the fixture"
+    if "classes" in case:
+        assert result.classes == case["classes"], "Rule of Two classes differ from the fixture"
+
+
+def test_an_action_is_classified_as_tool_safety_classifies_it() -> None:
+    """A write the old name guess missed needs its grant; an operator effect overrides it."""
+
+    def grants(tool: str) -> list[str]:
+        spec: dict[str, Any] = {
+            "schema": "daimon.workflow/v1",
+            "name": "merge",
+            "start": "act",
+            "nodes": {
+                "act": {"kind": "action", "tool": tool, "args": {}, "next": "done"},
+                "done": {"kind": "finish"},
+            },
+        }
+        return [g.kind for g in validate_document(spec, None).grants]
+
+    assert grants("github/merge_pull_request") == ["unattended_write"], "unknown names write"
+    assert grants("github/get_pull_request") == [], "a get_ name reads"
+    marked = ToolSafetyPolicy(effects={"github/get_pull_request": "write"})
+    assert tool_facts(marked, "github/get_pull_request").writes, "the operator's effect wins"
+
+
+def test_a_one_time_schedule_must_be_in_the_future() -> None:
+    spec: dict[str, Any] = {
+        "schema": "daimon.workflow/v1",
+        "name": "once",
+        "triggers": [{"id": "once", "kind": "schedule", "at": "2026-11-21T09:00:00Z"}],
+        "start": "done",
+        "nodes": {"done": {"kind": "finish"}},
+    }
+
+    def codes(now: datetime) -> list[str]:
+        return [p.code for p in validate_document(spec, None, now=now).errors]
+
+    assert codes(datetime(2026, 11, 21, 10, tzinfo=UTC)) == ["at_in_past"]
+    assert codes(datetime(2026, 11, 21, 8, tzinfo=UTC)) == []
+
+
+async def test_a_draft_with_errors_cannot_be_published(db_session: AsyncSession) -> None:
+    world = await make_world(db_session, {"f": {"kind": "finish"}}, "f")
+    env = Env(world.sm, world.settings, Who(world.tenant_id, world.owner, admin=True), NOW)
+    draft = await service.get_draft(env, world.workflow_id)
+    broken = draft.spec | {"start": "missing"}
+    await service.save_draft(env, world.workflow_id, base_revision=draft.revision, spec=broken)
+    with pytest.raises(service.Invalid, match="before publishing"):
+        await service.publish(env, world.workflow_id, "")
+
+
+async def test_every_validation_classes_the_agents_tools(db_session: AsyncSession) -> None:
+    """An agent reading mail and sending it breaks the Rule of Two on any path, and its run
+    sees the same exposure from the tools kept with the version."""
+    tools = {"triage": ["gmail/list_messages", "gmail/send_message"]}
+    nodes = {
+        "read": {
+            "kind": "agent",
+            "agent": "triage",
+            "instructions": "x",
+            "writes": "allow",
+            "next": "done",
+        },
+        "done": {"kind": "finish"},
+    }
+    world = await make_world(db_session, nodes, "read")
+    who = Who(world.tenant_id, world.owner, admin=True)
+    blind = Env(world.sm, world.settings, who, NOW)
+    env = Env(world.sm, world.settings, who, NOW, agents_with(tools))
+    draft = await service.get_draft(env, world.workflow_id)
+    codes = [p.code for p in (await service.validate(env, world.workflow_id, draft.spec)).errors]
+    assert "rule_of_two" in codes, f"the agent's own mail reads taint its sends: {codes}"
+    with pytest.raises(service.Invalid, match="before publishing"):
+        await service.publish(env, world.workflow_id, "")
+    unknown = [
+        p.code for p in (await service.validate(blind, world.workflow_id, draft.spec)).errors
+    ]
+    assert "unknown_agent" in unknown, "a path that lists no agents fails closed"
+    spec = parse_spec(draft.spec)
+    run_catalog = catalog_of(OPEN_TOOL_SAFETY, tools)
+    assert exposed_at_run(spec, "read", untrusted_inputs=False, catalog=run_catalog), "at run"
+
+
+async def test_a_toolset_on_by_default_offers_its_unlisted_tools() -> None:
+    """A server attached with only `default_config` (as `mcp_attach` does) enables every tool:
+    its reads taint the agent's writes, and a spec may name its tools."""
+    on = {"enabled": True, "permission_policy": {"type": "always_allow"}}
+    gmail: dict[str, Any] = {
+        "type": "mcp_toolset",
+        "mcp_server_name": "gmail",
+        "default_config": on,
+        "configs": [],
+    }
+
+    async def agents() -> list[Any]:
+        return [ma_agent(id="agent_triage", name="triage", tools=[gmail])]
+
+    async def down() -> dict[str, SkillPin]:
+        raise RuntimeError("the skills API is down")
+
+    raw: dict[str, Any] = {
+        "schema": "daimon.workflow/v1",
+        "name": "triage",
+        "start": "read",
+        "nodes": {
+            "read": {
+                "kind": "agent",
+                "agent": "triage",
+                "instructions": "x",
+                "writes": "allow",
+                "next": "send",
+            },
+            "send": {"kind": "action", "tool": "gmail/send_message", "args": {}, "next": "f"},
+            "f": {"kind": "finish"},
+        },
+    }
+    # A spec that names no skills never lists them, so a skills outage blocks nothing.
+    catalog = await tool_catalog(OPEN_TOOL_SAFETY, agents, down, spec=raw)
+    spec = parse_spec(raw)
+    codes = [p.code for p in validate_spec(spec, catalog).errors]
+    assert "rule_of_two" in codes and "unknown_tool" not in codes, codes
+    stored = catalog_of(OPEN_TOOL_SAFETY, spec_agent_tools(spec, catalog))
+    assert exposed_at_run(spec, "read", untrusted_inputs=False, catalog=stored), "at run"
+
+
+@pytest.mark.parametrize("root", ["workflow.state", "workflow.last_run"])
+def test_an_agent_reading_what_earlier_runs_saved_is_exposed(root: str) -> None:
+    """Earlier runs wrote it from whatever they read, so it is untrusted like their inputs."""
+    nodes: dict[str, Any] = {
+        "a": {"kind": "agent", "instructions": "x", "inputs": {"seen": f"${{{{ {root} }}}}"}},
+        "b": {"kind": "agent", "instructions": "y"},
+    }
+    spec = parse_spec({"schema": "daimon.workflow/v1", "name": "T", "start": "a", "nodes": nodes})
+    assert tainted_steps(spec, untrusted_inputs=False) == {"a"}, f"only the reader of {root}"
+
+
+def test_skills_past_the_sessions_room_are_a_warning() -> None:
+    """A lane's session holds every lane step's skills; past the cap the rest would drop."""
+
+    def step(skill: str, then: str) -> dict[str, Any]:
+        return {"kind": "agent", "instructions": "x", "skills": [skill], "next": then}
+
+    spec: dict[str, Any] = {
+        "schema": "daimon.workflow/v1",
+        "name": "skills",
+        "defaults": {"agent": "daimon"},
+        "start": "a",
+        "nodes": {"a": step("one", "b"), "b": step("two", "done"), "done": {"kind": "finish"}},
+    }
+    pins = {n: SkillPin(id=f"skill_{n}", version="1") for n in ("one", "two")}
+
+    def warned(held: int) -> list[str]:
+        owned = frozenset(f"own_{i}" for i in range(held))
+        catalog = catalog_of(OPEN_TOOL_SAFETY, {"daimon": []}, pins, {"daimon": owned})
+        return [f"{p.code}:{p.node}" for p in validate_document(spec, catalog).warnings]
+
+    assert warned(AGENT_SKILL_CAP - 2) == [], "both fit"
+    assert warned(AGENT_SKILL_CAP - 1) == ["skill_room:a", "skill_room:b"], "one would drop"
+
+
+def _scoped(scope: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": "daimon.workflow/v1",
+        "name": "scoped",
+        "start": "act",
+        "nodes": {
+            "act": {
+                "kind": "action",
+                "tool": "mail/send_reply",
+                "args": {},
+                "writes_to": [{"tool": "mail/send_reply", **scope}],
+                "next": "done",
+            },
+            "done": {"kind": "finish"},
+        },
+    }
+
+
+_TO = {"to": {"domains": ["example.com"]}}
+
+
+@pytest.mark.parametrize(
+    ("scope", "code"),
+    [
+        ({"where": {"message.to": _TO["to"]}, "free": ["message"]}, "scope_free"),
+        ({"where": {"to": _TO["to"]}, "free": ["to"]}, "scope_free"),
+        ({"where": _TO, "free": ["message.subject", "body"]}, None),
+        ({"where": {"to": {"prefix": [""]}}}, "scope_empty"),
+        ({"where": {"to": {"domains": [""]}}}, "scope_empty"),
+        ({"where": {"to": {"in": ["", "a@x.org"]}}}, "scope_empty"),
+        (
+            {"where": {"id": {"created_by": {"tool": "mail/list_threads", "id": ".id"}}}},
+            "scope_created_by",
+        ),
+        ({"where": {"id": {"created_by": {"tool": "mail/create_draft", "id": ".id"}}}}, None),
+    ],
+)
+def test_a_scope_that_bounds_nothing_is_refused(scope: dict[str, Any], code: str | None) -> None:
+    result = validate_document(_scoped(scope), None)
+    assert [p.code for p in result.errors if p.code.startswith("scope_")] == [code] * bool(code), (
+        "each unbounded shape is refused and a bounded one passes"
+    )
+
+
+def test_the_grant_a_reviewer_approves_shows_the_limits_in_words() -> None:
+    scope = {
+        "where": {"to": {"domains": ["example.com"], "in": ["a@x.org"]}},
+        "free": ["subject", "body"],
+    }
+    [grant] = [
+        g for g in validate_document(_scoped(scope), None).grants if g.kind == "scoped_write"
+    ]
+    assert grant.detail == (
+        "mail/send_reply: to is a@x.org or is an address at example.com. Any text in subject, body."
+    ), "the grant names the tool, each limit and the free arguments"
+
+
+@pytest.mark.parametrize(
+    ("timeout", "limited"),
+    [
+        (None, False),
+        ({"after": "1d", "route": "stop"}, False),
+        ({"after": "1d", "route": "fail"}, False),
+        ({"after": "1d", "route": "again"}, True),
+    ],
+)
+def test_an_approval_that_times_out_back_into_the_loop_is_no_person_gate(
+    timeout: dict[str, str] | None, limited: bool
+) -> None:
+    ask: dict[str, Any] = {
+        "kind": "approval",
+        "answer": "choice",
+        "routes": {"again": "work", "stop": "done"},
+    }
+    spec: dict[str, Any] = {
+        "schema": "daimon.workflow/v1",
+        "name": "loop",
+        "start": "work",
+        "nodes": {
+            "work": {"kind": "agent", "agent": "a", "instructions": "Go", "next": "ask"},
+            "ask": {**ask, **({"timeout": timeout} if timeout else {})},
+            "done": {"kind": "finish"},
+        },
+    }
+    codes = [p.code for p in validate_document(spec, None).errors]
+    assert ("loop_limit" in codes) is limited, f"{timeout}: {codes}"
+
+
+def _codes(run: dict[str, Any], after: dict[str, Any], home: bool = True) -> list[str]:
+    raw: dict[str, Any] = {
+        "schema": "daimon.workflow/v1",
+        "name": "T",
+        "start": "run",
+        "nodes": {"run": {"kind": "agent", "agent": "a", "instructions": "x", **run}, **after},
+    }
+    if home:
+        raw["home"] = {"channel": "C0HOME"}
+    result = validate_document(raw)
+    return sorted(f"{p.code}:{p.severity}" for p in result.errors + result.warnings)
+
+
+_DONE = {"done": {"kind": "finish"}}
+
+
+@pytest.mark.parametrize(
+    ("run", "home", "codes"),
+    [
+        ({"at": "home"}, True, []),
+        ({"at": "C0OTHER/1700000000.000100"}, True, []),
+        ({"at": "home"}, False, ["no_home:error"]),
+        ({"at": "origin"}, False, ["no_home:warning"]),
+        ({"at": "run_as"}, True, ["bad_place:error"]),
+        ({"at": "${{ inputs.c }}"}, True, ["bad_place:error"]),
+        ({"memory": "personal"}, True, []),
+        ({"memory": "personal", "at": "home"}, True, ["private_place:error"]),
+    ],
+)
+def test_an_agent_works_in_a_channel_or_thread_and_a_personal_one_nowhere(
+    run: dict[str, Any], home: bool, codes: list[str]
+) -> None:
+    assert _codes({**run, "next": "done"}, _DONE, home) == codes
+
+
+@pytest.mark.parametrize(
+    ("post", "codes"),
+    [
+        ({"to": "run_as", "message": "${{ steps.run.summary }}"}, []),
+        ({"to": "home", "message": "${{ steps.run.summary }}"}, ["private_output:error"]),
+        ({"to": "owner", "message": "${{ steps.run.files }}"}, ["private_output:error"]),
+        ({"to": "home", "message": "${{ 'home' in steps.run.posted }}"}, []),
+    ],
+)
+def test_only_a_post_to_the_person_reads_a_personal_steps_result(
+    post: dict[str, Any], codes: list[str]
+) -> None:
+    after = {"post": {"kind": "post", "next": "done", **post}, **_DONE}
+    assert _codes({"memory": "personal", "next": "post"}, after) == codes

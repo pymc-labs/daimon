@@ -32,7 +32,7 @@ async def require_card(
     """Return only when a person confirmed this very call on a card; else refuse it."""
     if (
         auth.agent_id is not None
-        or auth.routine_id is not None
+        or auth.fire_bound
         or auth.is_external_agent
         or auth.hold is not None
         or auth.client

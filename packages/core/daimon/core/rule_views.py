@@ -28,6 +28,7 @@ from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_
 from daimon.core.defaults.metadata import private_routine_stamp
 from daimon.core.errors import DaimonError
 from daimon.core.features.snapshot import FeaturePlace
+from daimon.core.fire.subject import RoutineFacts
 from daimon.core.permissions import (
     agent_permissions,
     any_agent_rules,
@@ -42,7 +43,6 @@ from daimon.core.permissions import (
 from daimon.core.routine_delivery import delivery_target, teams_channel_of
 from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.selfhosted_resources import list_live_agent_facts
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -113,7 +113,7 @@ def clear_refusal(policy: TenantAccessPolicy, *, channel_id: str) -> BindingRefu
     return "keeps_own" if channel_rule(policy, channel_id).readers == "own" else None
 
 
-def routine_destination_channel(row: RoutineRow) -> str | None:
+def routine_destination_channel(row: RoutineFacts) -> str | None:
     """The channel a routine delivers into (a thread's parent), or None without a destination.
 
     The saved `channel_id` is the destination's parent; a row saved before it
@@ -129,7 +129,7 @@ def routine_destination_channel(row: RoutineRow) -> str | None:
     return _channel_in_thread_id(row.destination_id) or row.destination_id
 
 
-def is_routine_parent_unknown(row: RoutineRow) -> bool:
+def is_routine_parent_unknown(row: RoutineFacts) -> bool:
     """A thread destination saved before its parent channel was recorded, whose id
     doesn't carry it (a Discord thread; a Slack one is ``channel:ts``, a Teams one
     ``19:…;messageid=…``)."""
@@ -150,7 +150,7 @@ def _channel_in_thread_id(thread_id: str) -> str | None:
     return channel if sep and channel else None
 
 
-def routine_destination_place(row: RoutineRow, *, channel_id: str | None) -> Place:
+def routine_destination_place(row: RoutineFacts, *, channel_id: str | None) -> Place:
     """Where a routine fires into: `channel_id` under its saved parent channel.
 
     A thread whose parent is unknown (`is_routine_parent_unknown`) is marked
@@ -179,7 +179,7 @@ class RoutineOrigin:
     reads_inside: bool = False
 
 
-def _routine_channel_thread(row: RoutineRow, *, platform: str) -> tuple[str, str | None] | None:
+def _routine_channel_thread(row: RoutineFacts, *, platform: str) -> tuple[str, str | None] | None:
     channel_id = routine_destination_channel(row) or row.channel_id
     if channel_id is None:
         return None
@@ -197,7 +197,7 @@ def _routine_channel_thread(row: RoutineRow, *, platform: str) -> tuple[str, str
     return channel_id, thread_id
 
 
-def routine_feature_place(row: RoutineRow, *, platform: str) -> FeaturePlace:
+def routine_feature_place(row: RoutineFacts, *, platform: str) -> FeaturePlace:
     """Where a routine's features resolve: where it fires (`routine_origin`), with its agent,
     as its session's toolset reads them."""
     channel_id, thread_id = _routine_channel_thread(row, platform=platform) or (None, None)
@@ -205,7 +205,7 @@ def routine_feature_place(row: RoutineRow, *, platform: str) -> FeaturePlace:
 
 
 def routine_origin(
-    policy: TenantAccessPolicy, row: RoutineRow, *, platform: str
+    policy: TenantAccessPolicy, row: RoutineFacts, *, platform: str
 ) -> RoutineOrigin | None:
     """The channel and thread a routine fires into, with the readers limits over them now.
 
@@ -233,7 +233,7 @@ def routine_origin(
 
 
 def keeps_routine_inside(
-    policy: TenantAccessPolicy, row: RoutineRow, *, parent_channel_id: str | None = None
+    policy: TenantAccessPolicy, row: RoutineFacts, *, parent_channel_id: str | None = None
 ) -> bool:
     """Whether a routine's result must stay in a channel only its own agents read, so
     never goes by DM.

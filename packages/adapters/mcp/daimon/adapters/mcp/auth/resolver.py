@@ -57,6 +57,8 @@ class AuthIdentity:
     # Signed lead-intake routine execution grant, never a tool argument.
     routine_id: uuid.UUID | None = None
     execution_id: uuid.UUID | None = None
+    # A workflow run's step grant names its run in place of `routine_id`.
+    workflow_run_id: uuid.UUID | None = None
     # Ordinary chat execution identity (see the module docstring).
     chat_agent_id: uuid.UUID | None = None
     platform_user_id: str | None = None
@@ -139,12 +141,18 @@ class AuthIdentity:
                     self.agent_id,
                     self.chat_agent_id,
                     self.routine_id,
+                    self.workflow_run_id,
                     self.execution_id,
                     self.chat_session_id,
                     self.slack_turn_context_id,
                 ),
             )
         )
+
+    @property
+    def fire_bound(self) -> bool:
+        """A routine's fire or a workflow run's step signed this credential."""
+        return self.routine_id is not None or self.workflow_run_id is not None
 
     @property
     def is_external_agent(self) -> bool:

@@ -404,7 +404,9 @@ def _wipe_sql(schema: str) -> str:
     # A rolled-back nextval() still advances a sequence; a private schema would
     # have started every test at 1.
     restart = f'ALTER SEQUENCE "{schema}"."{SUPPORT_REVISION_SEQ.name}" RESTART;'
-    return f"DO $$ BEGIN {deletes} {restart} END $$"
+    # The run ledger refuses deletes outside a cascade or this maintenance window.
+    ledger = "PERFORM set_config('daimon.workflow_ledger_maintenance', '{}', true);"
+    return f"DO $$ BEGIN {ledger.format('on')} {deletes} {restart} {ledger.format('off')} END $$"
 
 
 def _is_lock_timeout(err: DBAPIError) -> bool:

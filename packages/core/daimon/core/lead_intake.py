@@ -291,6 +291,8 @@ class IntakeConfig(BaseModel):
     crm_connection_id: str
     portal_id: str
     routine_id: UUID | None = None
+    #: The workflow that runs intake instead of a routine; at most one of the two is set.
+    workflow_id: UUID | None = None
     recipients: tuple[str, ...] = ()
     notifier_user_ids: tuple[str, ...] = ()
     resolver_user_ids: tuple[str, ...] = ()
@@ -306,6 +308,8 @@ class IntakeConfig(BaseModel):
     def raw_ttl_is_shorter(self) -> IntakeConfig:
         if self.raw_retention_days >= self.retention_days:
             raise ValueError("Raw source retention must be shorter than lead retention")
+        if self.routine_id is not None and self.workflow_id is not None:
+            raise ValueError("Intake is bound to a routine or a workflow, not both")
         return self
 
 
@@ -363,6 +367,9 @@ class IntakeRecord(BaseModel):
     actor_id: str | None = None
     agent_id: UUID | None = None
     routine_id: UUID | None = None
+    #: The workflow and run that captured it, when a workflow's step did.
+    workflow_id: UUID | None = None
+    workflow_run_id: UUID | None = None
     execution_id: UUID | None = None
     config_revision: int
     error_code: str | None = None
@@ -421,8 +428,9 @@ def authorize_intake_actor(
     routine_id: UUID | None,
     execution_active: bool,
     resolve: bool = False,
+    workflow_id: UUID | None = None,
 ) -> None:
-    """Require live admission plus the named routine or human business grant."""
+    """Require live admission plus the named routine (or workflow) or human business grant."""
     if agent_id != config.agent_id or facts.is_member is not True:
         raise PermissionError("intake_actor_not_admitted")
     if not is_invoker_allowed(
@@ -437,12 +445,16 @@ def authorize_intake_actor(
         routine_id != config.routine_id or not execution_active or resolve
     ):
         raise PermissionError("routine_not_authorized")
+    if workflow_id is not None and (
+        workflow_id != config.workflow_id or not execution_active or resolve
+    ):
+        raise PermissionError("routine_not_authorized")
     if resolve and not may_resolve(
         user_id=user_id,
         role_ids=facts.role_ids,
         core_role_ids=policy.invoker_role_ids,
         resolver_ids=config.resolver_user_ids,
-        routine=routine_id is not None,
+        routine=routine_id is not None or workflow_id is not None,
         member=facts.is_member is True,
     ):
         raise PermissionError("sales_resolver_or_core_role_required")

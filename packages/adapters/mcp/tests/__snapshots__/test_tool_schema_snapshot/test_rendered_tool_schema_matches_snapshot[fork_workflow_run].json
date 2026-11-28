@@ -1,0 +1,56 @@
+{
+  "description": [
+    "Start a new run from an earlier one: with `step`, from that step on with the earlier",
+    "steps' results reused; without, the whole run again. `inputs` replaces the inputs."
+  ],
+  "parameters": {
+    "additionalProperties": false,
+    "properties": {
+      "inputs": {
+        "anyOf": [
+          {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "run_id": {
+        "format": "uuid",
+        "type": "string"
+      },
+      "step": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "version": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "run_id"
+    ],
+    "type": "object"
+  }
+}

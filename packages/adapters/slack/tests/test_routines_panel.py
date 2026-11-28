@@ -14,9 +14,10 @@ from typing import Any
 
 import pytest
 from daimon.adapters.slack.routines_panel.read import load_routines
-from daimon.adapters.slack.routines_panel.state import RoutinesPanelState
+from daimon.adapters.slack.routines_panel.state import RoutineEntry, RoutinesPanelState
 from daimon.adapters.slack.routines_panel.views import build_content_view
 from daimon.core.routines import PANEL_CAP
+from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import record_result, set_last_fired_at
 from daimon.testing.builders import new_routine
 from daimon.testing.factories import make_tenant
@@ -303,3 +304,34 @@ def test_open_in_web_url_button_follows_the_state_links() -> None:
     assert linked[-1] == ("Open in web", links.routine()), "the button opens the routines page"
     plain = labels(RoutinesPanelState(rows=[], over_cap_count=0, agent_name_map={}))
     assert [text for text, _ in plain] == ["↻ Refresh", "New routine"], "no links, no button"
+
+
+def test_move_option_is_offered_to_admins_only() -> None:
+    """The overflow menu holds Move to a workflow for an admin and not for a member."""
+    now = datetime.now(UTC)
+    row = RoutineRow(
+        id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        created_by_user_id=None,
+        agent_id="agent-x",
+        agent_name="Alpha",
+        cron_expr="0 * * * *",
+        timezone="UTC",
+        trigger_message="My routine",
+        enabled=True,
+        next_fire_at=None,
+        last_fired_at=None,
+        last_error=None,
+        last_result_tail=None,
+        created_at=now,
+        updated_at=now,
+    )
+    entry = RoutineEntry(routine=row, agent_name="Alpha", glyph="⏳", label="My routine")
+
+    def options(*, admin: bool) -> list[str]:
+        state = RoutinesPanelState(rows=[entry], over_cap_count=0, agent_name_map={}, admin=admin)
+        section = next(b for b in build_content_view(state)["blocks"] if b["type"] == "section")
+        return [o["text"]["text"] for o in section["accessory"]["options"]]
+
+    assert "Move to a workflow" in options(admin=True), "an admin may move it"
+    assert "Move to a workflow" not in options(admin=False), "a member may not"

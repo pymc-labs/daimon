@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from daimon.core.config import Settings
 from daimon.core.features.snapshot import FeaturePlace, place_feature
+from daimon.core.fire.subject import RoutineFacts
 from daimon.core.rule_views import routine_destination_channel
-from daimon.core.stores.domain import RoutineRow
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 __all__ = ["routine_header_shown"]
@@ -17,7 +17,7 @@ __all__ = ["routine_header_shown"]
 
 async def routine_header_shown(
     sessionmaker: async_sessionmaker[AsyncSession],
-    row: RoutineRow,
+    row: RoutineFacts,
     platform: str,
     settings: Settings | None = None,
 ) -> bool:

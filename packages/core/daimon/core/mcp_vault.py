@@ -31,7 +31,13 @@ from anthropic.types.beta.vaults.beta_managed_agents_credential import (
 from anthropic.types.beta.vaults.beta_managed_agents_environment_variable_auth_response import (
     BetaManagedAgentsEnvironmentVariableAuthResponse,
 )
-from daimon.core.lead_intake_execution import current_intake_execution
+from daimon.core.lead_intake_execution import (
+    EXECUTION_METADATA_KEYS,
+    WorkflowExecution,
+    current_intake_execution,
+    execution_from_metadata,
+    execution_metadata,
+)
 from daimon.core.mcp_auth import CHAT_TOKEN_REFRESH_MARGIN, chat_token_label, mint_chat_mcp_token
 from daimon.core.mcp_hold import hold_from_metadata, hold_metadata_value, hold_vault_suffix
 from daimon.core.mcp_identity import RelayBinding
@@ -96,6 +102,7 @@ RELAY_AGENT_CHAT_METADATA_KEY = "daimon_relay_agent_chat"
 RELAY_EXECUTION_METADATA_KEY = "daimon_relay_execution"
 RELAY_REVISION_METADATA_KEY = "daimon_relay_revision"
 RELAY_DM_CHANNEL_METADATA_KEY = "daimon_relay_dm_channel"
+RELAY_WORKFLOW_RUN_METADATA_KEY = "daimon_relay_workflow_run"
 #: Display-name prefix of a session's own relay vault.
 RELAY_VAULT_PREFIX = "daimon-relay:"
 
@@ -240,8 +247,7 @@ async def chat_mcp_credential(
         "daimon_chat_expires_at": expires_at.isoformat(),
     }
     if execution is not None:
-        metadata["daimon_routine_id"] = str(execution[0])
-        metadata["daimon_routine_execution"] = str(execution[1])
+        metadata.update(execution_metadata(execution))
     if chat_session_id is not None:
         metadata["daimon_chat_session"] = chat_session_id
 
@@ -272,6 +278,8 @@ async def chat_mcp_credential(
             metadata[RELAY_REVISION_METADATA_KEY] = relay.revision
         if relay.dm_channel is not None:
             metadata[RELAY_DM_CHANNEL_METADATA_KEY] = relay.dm_channel
+        if relay.workflow_run_id is not None:
+            metadata[RELAY_WORKFLOW_RUN_METADATA_KEY] = str(relay.workflow_run_id)
     return {
         "metadata": metadata,
         "auth": {"type": "static_bearer", "mcp_server_url": public_url, "token": token},
@@ -313,12 +321,12 @@ async def _refresh_chat_credential_locked(
         metadata = cred.metadata or {}
         if preserve_context:
             chat_session_id = metadata.get("daimon_chat_session")
-        if chat_session_id and metadata.get("daimon_routine_execution"):
-            saved_execution = (
-                uuid.UUID(metadata["daimon_routine_id"]),
-                uuid.UUID(metadata["daimon_routine_execution"]),
-            )
-            if execution is not None and execution != saved_execution:
+        if chat_session_id and (saved_execution := execution_from_metadata(metadata)):
+            if execution is not None and (
+                execution != saved_execution
+                or isinstance(execution, WorkflowExecution)
+                != isinstance(saved_execution, WorkflowExecution)
+            ):
                 raise ValueError("routine_execution_grant_mismatch")
             execution = saved_execution
         if chat_session_id is None:
@@ -421,8 +429,7 @@ async def _refresh_chat_credential_locked(
                 HOLD_METADATA_KEY,
                 SEAL_METADATA_KEY,
                 "daimon_chat_session",
-                "daimon_routine_id",
-                "daimon_routine_execution",
+                *EXECUTION_METADATA_KEYS,
             }
         },
         **registered_payload["metadata"],
@@ -677,7 +684,13 @@ async def refresh_relay_vault(
     raw_routine = metadata.get(RELAY_ROUTINE_METADATA_KEY)
     # A routine's run keeps the fire it was bound to: a channel or thread routine's alone,
     # a DM routine's turn with its session.
-    raw_execution = metadata.get(RELAY_EXECUTION_METADATA_KEY) if raw_routine is not None else None
+    raw_run = metadata.get(RELAY_WORKFLOW_RUN_METADATA_KEY)
+    # A workflow step's session keeps its run and lane grant, which a routine's fire never has.
+    raw_execution = (
+        metadata.get(RELAY_EXECUTION_METADATA_KEY)
+        if raw_routine is not None or raw_run is not None
+        else None
+    )
     dm_turn = raw_execution is not None and raw_key is not None
     bound = metadata.get(RELAY_AGENT_CHAT_METADATA_KEY)
     # Only a binding naming no chat session, routine or watch may name an agent chat.
@@ -690,6 +703,7 @@ async def refresh_relay_vault(
         RELAY_EXECUTION_METADATA_KEY,
         RELAY_REVISION_METADATA_KEY,
         RELAY_DM_CHANNEL_METADATA_KEY,
+        RELAY_WORKFLOW_RUN_METADATA_KEY,
     } & set(metadata)
     rebind = agent_chat is not None and agent_chat != bound and not names_other
     if (
@@ -723,10 +737,11 @@ async def refresh_relay_vault(
                 grant=metadata.get(RELAY_GRANT_METADATA_KEY) if raw_key is not None else None,
                 agent_chat=agent_chat if rebind else bound,
                 execution=None if raw_execution is None else uuid.UUID(raw_execution),
+                workflow_run_id=None if raw_run is None else uuid.UUID(raw_run),
                 revision=metadata.get(RELAY_REVISION_METADATA_KEY) if dm_turn else None,
                 # A DM routine's turn, or a watch report's in its owner's DM (session alone).
                 dm_channel=metadata.get(RELAY_DM_CHANNEL_METADATA_KEY)
-                if dm_turn or (raw_key is not None and raw_routine is None)
+                if dm_turn or raw_run is not None or (raw_key is not None and raw_routine is None)
                 else None,
             ),
         )

@@ -65,7 +65,7 @@ async def _routine_keeps_builtins(auth: AuthIdentity) -> bool:
     matched the operator's pin and `unattended_capabilities` allowed it, so a
     pin row alone, or a run that did not match, never opens them.
     """
-    return auth.routine_id is not None and auth.host_builtins
+    return auth.fire_bound and auth.host_builtins
 
 
 def register_host_web_fetch_tool(mcp: FastMCP, runtime: McpRuntime) -> None:

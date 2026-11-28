@@ -9,10 +9,11 @@ from typing import Literal, Protocol
 
 from daimon.core.errors import RoutineAlreadyRunning
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.routines import migrated_workflows
 from sqlalchemy.ext.asyncio import AsyncSession
 
 RoutineAction = Literal["pause", "resume", "toggle"]
-RoutineResult = Literal["changed", "gone", "wrong_tenant", "not_owner", "already_running"]
+RoutineResult = Literal["changed", "gone", "wrong_tenant", "not_owner", "already_running", "moved"]
 
 
 class Load(Protocol):
@@ -64,7 +65,12 @@ async def apply_routine_action(
     """
     row = await load(session, routine_id, tenant_id=tenant_id)
     if row is None:
-        return "gone"
+        # A card shown before the move still offers the buttons; either way nothing changes.
+        return (
+            "moved"
+            if await migrated_workflows(session, [routine_id], tenant_id=tenant_id)
+            else "gone"
+        )
     if check_tenant and row.tenant_id != tenant_id:
         return "wrong_tenant"
     if not await allowed(row):

@@ -5,10 +5,18 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from uuid import UUID
 
-from daimon.core._models import Routine, Tenant
+from daimon.core._models import (
+    Routine,
+    Tenant,
+    Workflow,
+    WorkflowRun,
+    WorkflowTrigger,
+    WorkflowTriggerEvent,
+)
 from daimon.core.errors import StoreError
-from daimon.core.routine_move import RoutineSeedEntry, seed_first_slot
+from daimon.core.routine_move import MovedRoutine, RoutineSeedEntry, seed_first_slot
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.routines import migrated_workflows
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -50,8 +58,12 @@ async def seed_routines(
         assert orm.source_routine_id is not None
         rows.setdefault(orm.source_routine_id, []).append(RoutineRow.model_validate(orm))
     planned: list[tuple[RoutineRow, datetime]] = []
+    converted = await migrated_workflows(session, ids, tenant_id=tenant_id, key="source_routine_id")
     for entry in entries:
         matches = rows.get(entry.source_routine_id, [])
+        if entry.source_routine_id in converted:
+            errors.append(f"{entry.source_routine_id}: runs as a workflow, not a routine")
+            continue
         if len(matches) != 1:
             reason = (
                 "no Daimon routine has this id in the selected team"
@@ -102,6 +114,23 @@ async def seed_routines(
     return planned
 
 
+async def _refuse_converted(
+    session: AsyncSession, tenant_id: UUID, source_routine_ids: list[UUID] | None
+) -> None:
+    """A handback selection (None: the whole team) holds no routine that runs as a workflow."""
+    origin = Workflow.converted_from["source_routine_id"].astext
+    stmt = select(origin, Workflow.id, Workflow.name).where(
+        Workflow.tenant_id == tenant_id, origin.is_not(None)
+    )
+    if source_routine_ids is not None:
+        stmt = stmt.where(origin.in_([str(r) for r in source_routine_ids]))
+    for rid, workflow_id, name in sorted((await session.execute(stmt)).tuples()):
+        raise StoreError(
+            f"{rid}: runs as workflow {name}. "
+            f"Move it back first: daimon workflows to-routine {workflow_id}. Nothing was changed."
+        )
+
+
 async def rollback_rows(
     session: AsyncSession, *, tenant_id: UUID, source_routine_ids: list[UUID] | None = None
 ) -> list[RoutineRow]:
@@ -113,6 +142,7 @@ async def rollback_rows(
         if len(set(source_routine_ids)) != len(source_routine_ids):
             raise StoreError("Duplicate routine id in rollback selection.")
         statement = statement.where(Routine.source_routine_id.in_(source_routine_ids))
+    await _refuse_converted(session, tenant_id, source_routine_ids)
     rows = [
         RoutineRow.model_validate(row)
         for row in (
@@ -131,6 +161,53 @@ async def rollback_rows(
     if not rows:
         raise StoreError("No routines matched the export selection.")
     return rows
+
+
+async def moved_routines(session: AsyncSession, rows: list[RoutineRow]) -> dict[UUID, MovedRoutine]:
+    """Where each routine that runs as a workflow keeps its cursor: the workflow's trigger."""
+    moved = await migrated_workflows(session, [row.id for row in rows])
+    if not moved:
+        return {}
+    routine_of = {workflow_id: routine_id for routine_id, (workflow_id, _) in moved.items()}
+    found = (
+        await session.execute(
+            select(WorkflowTrigger, Workflow.name, Workflow.status)
+            .join(Workflow, Workflow.id == WorkflowTrigger.workflow_id)
+            .where(WorkflowTrigger.workflow_id.in_(routine_of), WorkflowTrigger.kind == "schedule")
+        )
+    ).all()
+    open_runs = set(
+        (
+            await session.execute(
+                select(WorkflowRun.workflow_id, WorkflowRun.trigger_key).where(
+                    WorkflowRun.workflow_id.in_([workflow_id for workflow_id, _ in moved.values()]),
+                    WorkflowRun.mode == "live",
+                    WorkflowRun.status.in_(("queued", "running", "waiting")),
+                )
+            )
+        ).tuples()
+    )
+    # A claimed slot is an accepted event until the starts loop makes it a run.
+    waiting = set(
+        await session.scalars(
+            select(WorkflowTriggerEvent.trigger_id).where(
+                WorkflowTriggerEvent.trigger_id.in_([trigger.id for trigger, _, _ in found]),
+                WorkflowTriggerEvent.status == "accepted",
+                WorkflowTriggerEvent.test.is_(False),
+            )
+        )
+    )
+    return {
+        routine_of[trigger.workflow_id]: MovedRoutine(
+            workflow_name=name,
+            active=status == "active" and trigger.enabled,
+            run_in_flight=trigger.id in waiting
+            or (trigger.workflow_id, trigger.trigger_key) in open_runs,
+            last_fired_slot=trigger.last_fired_slot,
+            seeded_after=trigger.seeded_after,
+        )
+        for trigger, name, status in found
+    }
 
 
 async def pause_for_handback(
@@ -159,6 +236,7 @@ async def pause_for_handback(
             await session.scalars(statement.execution_options(populate_existing=True))
         ).all()
     ]
+    await _refuse_converted(session, tenant_id, source_routine_ids)
     for rid in source_routine_ids:
         matches = [row for row in rows if row.source_routine_id == rid]
         if len(matches) != 1:

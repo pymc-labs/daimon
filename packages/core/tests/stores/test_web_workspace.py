@@ -38,7 +38,7 @@ async def test_settings_default_to_everything_on_and_modules_come_from_features(
     )
 
     assert (fresh.modules_off, fresh.default_agent) == ((), None), (
-        "a workspace that chose nothing has everything on"
+        "a workspace that chose nothing has every module on"
     )
     assert saved.modules_off == ("agents", "credits"), "the modules switched off are listed"
     assert saved.default_agent == "a1", "the default agent is saved"

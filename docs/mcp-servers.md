@@ -114,7 +114,7 @@ The token carries these claims:
 | `routine` | with `"routine_claims": true`: the routine whose run posts to `channel` |
 | `wake` | with `"wake_claims": true`: why a call with no new message runs |
 | `rev`, `routine_name` | with `routine`: a hash of its prompt, owner, agent name and destination (none while paused), and its name |
-| `owner` | with a channel or thread `routine`: its owner, not an asker |
+| `owner` | with a channel or thread `routine`, or a workflow's agent step: the routine's owner or the person the run is for, not an asker |
 
 `room` is `dm` for a direct message. In a room it is `contained` or `narrow` as
 [Rooms with outside people](outside-people.md#contained-and-narrow-rooms) defines them,

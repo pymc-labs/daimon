@@ -1363,7 +1363,7 @@ async def _admit_gates(
                     backend_revision_origin = None
 
         # A routine binds its own fresh scope but runs on the provider its thread kept,
-        # read as `routine_provider` routes it (`effective_thread_backend`).
+        # read as `place_provider` routes it (`effective_thread_backend`).
         provider_thread_id = slot_thread_id if routine_thread_id is None else routine_thread_id
         own_released = released
         if routine_thread_id is not None and channel is not None:

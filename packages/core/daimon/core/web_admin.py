@@ -45,7 +45,9 @@ MAX_ACCESS_GROUPS = 100
 MAX_INVITE_CREDIT_USD = 100_000
 MAX_INVITE_DAYS = 90
 _BUSY = "Settings are being changed. Try again."
-ModuleName = Literal["chat", "agents", "channels", "routines", "credits", "integrations"]
+ModuleName = Literal[
+    "chat", "agents", "channels", "routines", "workflows", "credits", "integrations"
+]
 
 
 class WebAdminError(DaimonError):

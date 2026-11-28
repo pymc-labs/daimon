@@ -87,7 +87,7 @@ def private_reply(row, text="private answer"):
 def message(message_id=101):
     msg = MagicMock(spec=discord.Message)
     msg.id = message_id
-    msg.author = SimpleNamespace(id=999, bot=False)
+    msg.author = SimpleNamespace(id=999, bot=False, mutual_guilds=[])
     msg.channel = MagicMock(spec=discord.DMChannel)
     msg.channel.id = 555
     msg.channel.send = AsyncMock(return_value=SimpleNamespace(id=888, edit=AsyncMock()))
@@ -1313,6 +1313,7 @@ def dm_message(message_id=101, content="hello", attachments=(), snapshots=()):
 def attachment(filename="photo.png", *, voice=False):
     att = MagicMock(spec=discord.Attachment)
     att.filename = filename
+    att.size = 3
     att.is_voice_message.return_value = voice
     return att
 

@@ -95,6 +95,8 @@ async def test_a_member_sees_only_their_own_routines(
     assert "my standup" in card and str(mine.id) in card, "the creator manages their own"
     assert "their digest" not in card, "another person's routine is not listed"
     assert "New routine" not in card, "only an admin is offered create"
+    assert "Move to a workflow" not in card, "only an admin may move a routine"
+    assert "Legacy" in card, "the panel says routines are legacy"
 
 
 async def test_an_admin_sees_and_manages_every_routine(
@@ -108,6 +110,7 @@ async def test_an_admin_sees_and_manages_every_routine(
     card = json.dumps(teams_api_fake.activity_requests[-1].body)
     assert "their digest" in card and str(theirs.id) in card
     assert "New routine" in card
+    assert "Move to a workflow" in card, "an admin may move a routine to a workflow"
 
 
 async def test_pause_and_resume_update_the_row_and_replace_the_card(

@@ -1,6 +1,8 @@
 {
   "description": [
-    "List the routines you created (an admin sees every routine in the workspace)."
+    "List the routines you created (an admin sees every routine in the workspace).",
+    "",
+    "Legacy: prefer the workflow tools (list_workflows, run_workflow)."
   ],
   "parameters": {
     "additionalProperties": false,

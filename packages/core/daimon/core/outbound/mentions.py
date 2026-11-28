@@ -83,8 +83,9 @@ def attribution_line(
     requester_id: str | None = None,
     requester_name: str | None = None,
     routine_name: str | None = None,
+    workflow_name: str | None = None,
 ) -> str | None:
-    """The last line of a tool or routine post: who asked for it, without a ping."""
+    """The last line of a tool, routine or workflow post: who asked for it, without a ping."""
     if platform == "discord" and requester_id:
         return f"-# requested by <@{requester_id}>"
     if requester_name:
@@ -93,6 +94,9 @@ def attribution_line(
     if routine_name:
         prefix = "-# " if platform == "discord" else ""
         return f'{prefix}from the routine "{routine_name}"'
+    if workflow_name:
+        prefix = "-# " if platform == "discord" else ""
+        return f'{prefix}from the workflow "{workflow_name}"'
     return None
 
 

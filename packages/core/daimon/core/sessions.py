@@ -67,6 +67,8 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_CHAT_SESSION,
     MA_METADATA_KEY_PRIVATE_DM,
     MA_METADATA_KEY_TENANT,
+    MA_METADATA_KEY_WORKFLOW_RUN,
+    MA_METADATA_KEY_WORKFLOW_STEP,
 )
 from daimon.core.errors import StoreError
 from daimon.core.features.model_input import DEFAULT_TOOLSET, SessionToolset
@@ -740,10 +742,15 @@ async def create_session(
     relay_destination: str | None = None,
     relay_execution: uuid.UUID | None = None,
     relay_dm_routine: DmRoutineRelay | None = None,
+    relay_dm_channel: str | None = None,
     github_mcp_router: bool = False,
     identity: SessionIdentity = DEFAULT_IDENTITY,
+    workflow_run_id: uuid.UUID | None = None,
+    workflow_step_id: uuid.UUID | None = None,
 ) -> BetaManagedAgentsSession:
     """Create an MA session. Returns the SDK session object directly.
+
+    ``workflow_run_id`` and ``workflow_step_id`` stamp a workflow lane's session.
 
     When ``mcp_settings`` has both ``public_url`` and ``jwt_secret``,
     ``ensure_agent_mcp_vault()`` runs first (refreshing its registered credential
@@ -810,6 +817,9 @@ async def create_session(
     ``relay_destination`` is where the routine posted when the run started
     (`daimon.core.mcp_identity.routine_destination_key`), and ``relay_execution`` the
     fire it runs in; the relay signs the routine's claims only while that fire runs.
+    A workflow lane's session binds its ``workflow_run_id`` with ``relay_execution`` as
+    its lane's grant, ``relay_owner`` as the run-as person and, for a private step,
+    ``relay_dm_channel`` as their DM.
 
     ``budget_channel_id`` is the channel whose budget the session's spend counts
     toward (for a DM, the channel it was moved from). It is stamped apart from
@@ -1102,8 +1112,14 @@ async def create_session(
                     owner=relay_owner,
                     destination=relay_destination,
                     grant=chat_session_id if relay_session_key is not None else None,
+                    # A lane's session: its run and run-as person, never beside a routine.
+                    workflow_run_id=workflow_run_id
+                    if relay_owner is not None and relay_routine_id is None
+                    else None,
+                    dm_channel=relay_dm_channel,
                     execution=relay_execution
-                    if relay_routine_id is not None and relay_destination is not None
+                    if (relay_routine_id is not None and relay_destination is not None)
+                    or (relay_owner is not None and workflow_run_id is not None)
                     else None,
                 ),
                 now=dt.datetime.now(dt.UTC),
@@ -1376,6 +1392,10 @@ async def create_session(
             budget_channel_id=budget_channel_id,
             agent_chat=agent_chat,
         )
+        if workflow_run_id is not None:
+            metadata[MA_METADATA_KEY_WORKFLOW_RUN] = str(workflow_run_id)
+        if workflow_step_id is not None:
+            metadata[MA_METADATA_KEY_WORKFLOW_STEP] = str(workflow_step_id)
         if chat_session_id is not None:
             metadata[MA_METADATA_KEY_CHAT_SESSION] = chat_session_id
         if github_transport == "router":

@@ -16,6 +16,7 @@ from typing import Final, Literal, NamedTuple
 
 from daimon.core import credit_views
 from daimon.core.platform_names import UNNAMED_CHANNEL
+from daimon.core.routines import LEGACY
 from daimon.core.stores import tenants as tenants_store
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -142,7 +143,7 @@ def channel_entry(
     spend: credit_views.ChannelSpend, names: Mapping[tuple[str, str], str]
 ) -> SpendEntry:
     if spend.origin == "routine":
-        row_id, name, kind = "routines", "Routines", "routine"
+        row_id, name, kind = "routines", f"Routines ({LEGACY})", "routine"
     elif credit_views.is_web_spend(spend.platform, spend.channel_id):
         row_id, name, kind = "web", "Web", "web"
     elif spend.channel_id is None:

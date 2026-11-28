@@ -1854,6 +1854,8 @@ class WebStep(BaseModel):
     detail: str | None = None
     status: Literal["running", "done", "error"]
     ms: int | None = None
+    #: The tool the call named, so the page can tell which edits it made.
+    tool: str | None = None
 
 
 class WebAttachment(BaseModel):
@@ -1946,6 +1948,8 @@ class WebThreadRow(BaseModel):
     agent_id: str
     agent_name: str
     title: str
+    #: What the thread is about, such as `{"kind": "workflow", "id": ...}`; None for a chat.
+    subject: dict[str, Any] | None
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None
@@ -2046,6 +2050,7 @@ class OpsEventRow(BaseModel):
     subject_key: str | None
     release: str | None
     note: str | None
+    workflow_run_id: uuid.UUID | None = None
 
 
 class OpsIssueStateRow(BaseModel):

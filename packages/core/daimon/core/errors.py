@@ -85,6 +85,13 @@ class RoutineAlreadyRunning(StoreError):
     """An enabled routine cannot be resumed and rescheduled again."""
 
 
+class RoutineMoved(StoreError):
+    """The routine runs as a workflow now; it changes there, or after it converts back."""
+
+    def __init__(self) -> None:
+        super().__init__("This routine moved to Workflows. Change it there.")
+
+
 class TurnError(DaimonError):
     """A renderable turn failure. Carried on `TurnState.error`."""
 

@@ -1,4 +1,5 @@
-"""Routines tools: create / list / get / update / delete, and an admin's sandbox opt-in.
+"""Legacy routines tools (prefer workflows): create / list / get / update / delete, and an
+admin's sandbox opt-in.
 
 ``register_routines_tools(mcp, runtime)`` wires the ``@mcp.tool`` closures for
 this group; each closure delegates to a module-private ``_*_impl`` function
@@ -66,7 +67,7 @@ from daimon.core.admin_actions import DelegatedAction
 from daimon.core.authz import Action, Subject, authorize, build_subject
 from daimon.core.channel_changes import ChannelChangeRefused
 from daimon.core.discord_membership import verify_discord_source
-from daimon.core.errors import StoreError
+from daimon.core.errors import RoutineMoved, StoreError
 from daimon.core.features.service import FeatureActor
 from daimon.core.features.snapshot import FeaturePlace, place_guardrail
 from daimon.core.membership_subject import resolve_subject
@@ -718,6 +719,11 @@ async def _set_routine_sandbox_tools_impl(
     viewer = await load_isolation_view(runtime, auth)
     async with runtime.session_factory() as session:
         row = await routines_store.get_routine(session, routine_id, tenant_id=auth.tenant_id)
+        moved = row is None and bool(
+            await routines_store.migrated_workflows(session, [routine_id], tenant_id=auth.tenant_id)
+        )
+    if moved:
+        raise ToolError(str(RoutineMoved()))
     if row is None or not routine_service.sees_routine(viewer, row):
         raise ToolError(routine_service.NOT_FOUND)
 
@@ -747,12 +753,20 @@ async def _set_routine_sandbox_tools_impl(
     return routine_for_reader(row, user_id=auth.platform_user_id)
 
 
+class MovedTo(BaseModel):
+    """The workflow a routine runs as since an admin moved it: it changes there, not here."""
+
+    workflow_id: str
+    name: str
+
+
 class RoutineView(RoutineRow):
     """A routine as the tools return it: its page on the web when there is one, and whether
     it is opted in to built-in sandbox tools, by its own setting or its agent's."""
 
     web_url: WebUrl = None
     sandbox_tools: bool = False
+    moved_to: MovedTo | None = None
 
 
 async def _views(
@@ -762,11 +776,15 @@ async def _views(
     links = await tenant_links(runtime, auth)
     async with runtime.session_factory() as session:
         sandbox = await opted_in_by_many(session, rows, auth.platform or "")
+        moved = await routines_store.migrated_workflows(session, [row.id for row in rows])
     return [
         RoutineView.model_validate(row, from_attributes=True).model_copy(
             update={
                 "web_url": None if links is None else links.routine(row.id),
                 "sandbox_tools": sandbox[row.id] is not None,
+                "moved_to": MovedTo(workflow_id=str(moved[row.id][0]), name=moved[row.id][1])
+                if row.id in moved
+                else None,
             }
         )
         for row in rows
@@ -793,6 +811,8 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         origin_context_id: str | None = None,
     ) -> RoutineView:
         """Create a recurring routine; owner DMs run as unattended live-DM turns.
+
+        Legacy: prefer the workflow tools (list_workflows, run_workflow).
 
         Owner-DM routines are scheduled live-DM turns, using the owner's normal
         personal/shared memory, credentials and DM tool authority in a fresh private
@@ -865,14 +885,20 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool
     async def list_routines(ctx: Context) -> list[RoutineView]:  # pyright: ignore[reportUnusedFunction]
-        """List the routines you created (an admin sees every routine in the workspace)."""
+        """List the routines you created (an admin sees every routine in the workspace).
+
+        Legacy: prefer the workflow tools (list_workflows, run_workflow).
+        """
         auth = await _auth(ctx)
         return await _views(runtime, auth, await _list_routines_impl(runtime, auth))
 
     @mcp.tool
     async def get_routine(ctx: Context, routine_id: UUID) -> RoutineView:  # pyright: ignore[reportUnusedFunction]
         """Get a routine by id. Raises if not found, cross-tenant, or someone else's and you
-        are not an admin."""
+        are not an admin.
+
+        Legacy: prefer the workflow tools (list_workflows, run_workflow).
+        """
         auth = await _auth(ctx)
         return await _viewed(
             runtime, auth, await _get_routine_impl(runtime, auth, routine_id=routine_id)
@@ -893,6 +919,8 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         clear_destination: bool = False,
     ) -> RoutineView:
         """PATCH-update a routine, including owner-only DM delivery where supported.
+
+        Legacy: prefer the workflow tools (list_workflows, run_workflow).
 
         Only provided fields are changed.
 
@@ -927,7 +955,10 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool
     async def delete_routine(ctx: Context, routine_id: UUID) -> DeleteResult:  # pyright: ignore[reportUnusedFunction]
-        """Delete a routine (hard delete, tenant-scoped)."""
+        """Delete a routine (hard delete, tenant-scoped).
+
+        Legacy: prefer the workflow tools (list_workflows, run_workflow).
+        """
         return await _delete_routine_impl(runtime, await _auth(ctx), routine_id=routine_id)
 
     @mcp.tool(tags={"admin"})
@@ -936,6 +967,8 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> RoutineView:
         """Turn built-in sandbox tools (bash, file reads and edits and the rest) on or off
         for one routine's own scheduled runs. Admin only.
+
+        Legacy: prefer the workflow tools (list_workflows, run_workflow).
 
         They are off for every unattended run by default. The supported way today is the
         operator's ``daimon routines sandbox-tools``. This tool accepts only a live platform

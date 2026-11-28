@@ -37,6 +37,7 @@ from daimon.core.mcp_identity import (
     RELAY_CLAIM,
     RELAY_PATH,
     REQUESTER_PLATFORMS,
+    UNOPENED_DM_PLACE,
     IdentitySigner,
     RelayBinding,
     RequesterBodyError,
@@ -56,6 +57,7 @@ from daimon.core.mcp_identity import (
     routine_revision,
     stamp_parsed,
     watch_conversation,
+    workflow_revision,
 )
 from daimon.core.mcp_server_url import same_ascii_mcp_url
 from daimon.core.ops_catalog import OpsCode
@@ -78,6 +80,7 @@ from daimon.core.stores.thread_sessions import get_thread_session_by_id
 from daimon.core.stores.turn_origins import get_session_origin, list_active_origins
 from daimon.core.stores.watches import get_firing, watch_seed
 from daimon.core.turn_origin import origin_place
+from daimon.core.workflows.place import BoundStep, bound_step
 from fastmcp.server.auth.auth import TokenVerifier
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -429,6 +432,40 @@ async def _routine_run(
             ):
                 return None
     return row
+
+
+async def _workflow_step_run(
+    sessionmaker: async_sessionmaker[AsyncSession], binding: RelayBinding, *, tenant_id: uuid.UUID
+) -> BoundStep | None:
+    """The agent step a lane's credential serves now (`bound_step`), by `_routine_run`'s rule:
+    only while its run-as person is still the one the session was minted for."""
+    if binding.workflow_run_id is None or binding.owner is None:
+        return None
+    async with sessionmaker() as session:
+        step = await bound_step(
+            session,
+            tenant_id=tenant_id,
+            run_id=binding.workflow_run_id,
+            execution_id=binding.execution,
+            agent_name=binding.agent_name,
+        )
+    return step if step is not None and step.subject.created_by_user_id == binding.owner else None
+
+
+def _workflow_claims(
+    step: BoundStep, platform: str, workspace: str | None
+) -> dict[str, str | None]:
+    """An agent step's workflow claims: its id, name and, while it is active and the run is
+    live, the revision a server's approval is bound to (`workflow_revision`)."""
+    signed = f"{platform}:{workspace}" if workspace else None
+    flow = step.workflow
+    return {
+        "workflow": str(flow.id),
+        "workflow_rev": workflow_revision(flow.tenant_id, flow.id, step.version, workspace=signed)
+        if flow.status == "active" and step.version is not None
+        else None,
+        "workflow_name": step.workflow.name,
+    }
 
 
 async def _dm_routine_run(
@@ -835,6 +872,7 @@ def build_identity_relay_route(
             )
             routine_id: str | None = None
             signed_routine: RoutineRow | None = None
+            signed_step: BoundStep | None = None
             if (
                 server.routine_claims
                 and origin is None
@@ -896,10 +934,42 @@ def build_identity_relay_route(
                 # leaves the call as it is without the setting.
                 routine_id, signed_routine = str(binding.routine_id), dm_routine
                 place, room = TurnPlace(channel_id=binding.dm_channel, message_id=None), "dm"
+            elif (
+                server.routine_claims
+                and origin is None
+                and binding.workflow_run_id is not None
+                and FOREIGN_HOME_CLAIM not in claims
+                and (step := await _workflow_step_run(sessionmaker, binding, tenant_id=tenant_id))
+                is not None
+            ):
+                # An agent step signs its workflow for the room its `at` names now, read from
+                # the run, or for a private step its run-as person's DM the lane opened.
+                destination = await routine_room(
+                    sessionmaker,
+                    tenant_id=tenant_id,
+                    platform=platform,
+                    destination=routine_conversation(step.subject),
+                    now=now,
+                )
+                if destination is not None:
+                    signed_step = step
+                    place, room = (
+                        TurnPlace(channel_id=destination[0], message_id=None),
+                        destination[1],
+                    )
+                elif (
+                    step.at is None
+                    and server.dm_routine_claims
+                    and binding.dm_channel is not None
+                    and person == binding.owner
+                ):
+                    signed_step = step
+                    place, room = TurnPlace(channel_id=binding.dm_channel, message_id=None), "dm"
             wake: WakeReason | None = None
             if (
                 server.wake_claims
                 and routine_id is None
+                and signed_step is None
                 and origin is not None
                 and granted
                 and isinstance(person, str)
@@ -956,9 +1026,12 @@ def build_identity_relay_route(
                     else None
                 ),
                 routine_name=signed_routine.name if signed_routine is not None else None,
-                # A channel or thread routine's owner, for what the run makes for them.
-                routine_owner=signed_routine.created_by_user_id
-                if signed_routine is not None and room != "dm"
+                **(_workflow_claims(signed_step, platform, workspace) if signed_step else {}),
+                # A channel or thread routine's owner (a step's run-as person), for what
+                # the run makes for them.
+                routine_owner=owned.created_by_user_id
+                if (owned := signed_routine or (signed_step.subject if signed_step else None))
+                and room != "dm"
                 else None,
             )
             headers["authorization"] = f"Bearer {tokens.token(identity, now=now)}"
@@ -1000,6 +1073,19 @@ def build_identity_relay_route(
                         routine_conversation(routine),
                         "routine",
                     )
+            elif (
+                binding.workflow_run_id is not None
+                and platform in REQUESTER_PLATFORMS
+                and FOREIGN_HOME_CLAIM not in claims
+                and (step := await _workflow_step_run(sessionmaker, binding, tenant_id=tenant_id))
+                is not None
+            ):
+                named, conversation, kind = (
+                    step.subject.created_by_user_id,
+                    routine_conversation(step.subject)
+                    or (dict(UNOPENED_DM_PLACE) if binding.dm_channel else None),
+                    "routine",
+                )
             elif (
                 watch is not None
                 and platform in REQUESTER_PLATFORMS

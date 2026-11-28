@@ -74,7 +74,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 UnattendedEntryPoint = Literal[
-    "watch", "routine", "wake", "mcp_chat", "cli_run", "checkpoint", "long_job"
+    "watch", "routine", "wake", "mcp_chat", "cli_run", "checkpoint", "long_job", "workflow_step"
 ]
 
 log = structlog.get_logger(__name__)
@@ -118,7 +118,27 @@ ENTRY_POINT_POLICY: Final[Mapping[UnattendedEntryPoint, CapabilityPolicy]] = {
     "mcp_chat": CapabilityPolicy(allow_builtins=False, allow_skills=True),
     "cli_run": CapabilityPolicy(allow_builtins=False, allow_skills=True),
     "checkpoint": CapabilityPolicy(allow_builtins=False, allow_skills=True),
+    # A step's built-ins come from its node (`StepTools`), behind a publish grant.
+    "workflow_step": CapabilityPolicy(allow_builtins=False, allow_skills=True),
 }
+
+
+@dataclass(frozen=True)
+class StepTools:
+    """A workflow step's own limits inside the `workflow_step` entry point."""
+
+    #: The reviewed built-ins this step may use (`builtins: read` or `all`).
+    builtins: frozenset[str] = frozenset()
+    #: The only MCP tools kept, or None to keep the agent's own (`tools: inherit`).
+    tool_allowlist: frozenset[ServerTool] | None = None
+    #: Daimon's own tools that stay under an allowlist: the step tools and the proxy.
+    own_tools: frozenset[str] = frozenset()
+
+    def allowlist(self, daimon_server: str) -> frozenset[ServerTool] | None:
+        if self.tool_allowlist is None:
+            return None
+        return self.tool_allowlist | {ServerTool(daimon_server, t) for t in self.own_tools}
+
 
 _CLOSED: Final[CapabilityPolicy] = CapabilityPolicy(allow_builtins=False, allow_skills=False)
 
@@ -496,12 +516,16 @@ def _configs(tool: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [dict(config) for config in cast("list[Mapping[str, Any]]", tool.get("configs") or [])]
 
 
-def _disabled_builtins(tool: dict[str, Any]) -> dict[str, Any]:
+def _disabled_builtins(tool: dict[str, Any], keep: frozenset[str] = frozenset()) -> dict[str, Any]:
+    """Built-ins off, except the reviewed names in `keep`, each enabled alone."""
     off = {"enabled": False}
+    configs = [{**config, "enabled": config.get("name") in keep} for config in _configs(tool)]
+    named = {str(config.get("name")) for config in configs}
+    configs += [{"name": n, "enabled": True} for n in sorted(keep - named)]
     return {
         **tool,
         "default_config": {**(tool.get("default_config") or {}), **off},
-        "configs": [{**config, **off} for config in _configs(tool)],
+        "configs": configs,
     }
 
 
@@ -608,6 +632,7 @@ async def constrain_capabilities(
     allow_builtins: bool = False,
     allow_skills: bool = False,
     tool_allowlist: frozenset[ServerTool] | None = None,
+    step_tools: StepTools | None = None,
 ) -> ConstrainedSession:
     """The tools and servers `snapshot` may run with unattended. No provider call.
 
@@ -620,23 +645,31 @@ async def constrain_capabilities(
     config, so each call reaches the unattended decider; Daimon's carded tools are
     disabled (a card cannot be shown here, so they would only refuse); Daimon's
     `protected_tools` and rule tools are listed as `session_tools_for_policy`
-    lists them, and a foreign `daimon-mcp` URL is healed.
+    lists them, and a foreign `daimon-mcp` URL is healed. `step_tools` narrows a
+    workflow step further: only its reviewed built-ins, only its listed tools.
     """
+    keep = frozenset[str]()
+    if step_tools is not None:
+        keep = step_tools.builtins & BUILTIN_TOOL_NAMES
+        allow_builtins = False
+        tool_allowlist = step_tools.allowlist(DAIMON_SERVER_NAME)
     require_allowed_capabilities(snapshot, allow_skills=allow_skills)
     original = SessionToolConfig.of(snapshot)
     tools = [dict(tool) for tool in original.tools]
     servers = [dict(server) for server in original.mcp_servers]
     tools = [
-        _disabled_builtins(tool)
+        _disabled_builtins(tool, keep)
         if tool.get("type") == BUILTIN_TOOLSET and not allow_builtins
         else tool
         for tool in tools
         if tool.get("type") != CUSTOM_TOOL
     ]
     # Only this read on the verified deployment endpoint may retain own-server access.
+    own_names = {"get_long_job", *(step_tools.own_tools if step_tools else ())}
     own_reads = frozenset(
-        ServerTool(server["name"], "get_long_job")
+        ServerTool(server["name"], name)
         for server in servers
+        for name in own_names
         if server["name"] == DAIMON_SERVER_NAME
         and public_url is not None
         and isinstance(server.get("url"), str)
@@ -779,6 +812,7 @@ def capability_posture(
     *,
     allow_builtins: bool = False,
     tool_allowlist: frozenset[ServerTool] | None = None,
+    step_tools: StepTools | None = None,
 ) -> PolicyApproval:
     """`posture`, refusing what `constrain_capabilities` took out of the session.
 
@@ -786,14 +820,18 @@ def capability_posture(
     built-in or custom call (`server_name=None`) is refused unless
     `allow_builtins` (a routine an admin opted in) and it names a reviewed
     built-in (`BUILTIN_TOOL_NAMES`), so a custom tool's call is refused even
-    then. With a `tool_allowlist` so is every unlisted call.
+    then. With a `tool_allowlist` so is every unlisted call. `step_tools` replaces
+    both with the step's own built-ins and list.
     """
     decide = posture.decide
+    builtins = BUILTIN_TOOL_NAMES
+    if step_tools is not None:
+        builtins = step_tools.builtins & BUILTIN_TOOL_NAMES
+        allow_builtins = bool(builtins)
+        tool_allowlist = step_tools.allowlist(DAIMON_SERVER_NAME)
 
     async def constrained(call: ToolCall) -> ToolConfirmationResult:
-        if call.server_name is None and (
-            not allow_builtins or call.tool_name not in BUILTIN_TOOL_NAMES
-        ):
+        if call.server_name is None and (not allow_builtins or call.tool_name not in builtins):
             return ToolConfirmationResult(
                 allow=False,
                 deny_message=(
