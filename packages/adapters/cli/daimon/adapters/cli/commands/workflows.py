@@ -157,7 +157,9 @@ async def import_workflow(
 ) -> uuid.UUID:
     env = await operator_env(rt, tenant_id, owner=owner)
     body = NewWorkflow.model_validate({"from": "import", "yaml": path.read_text(encoding="utf-8")})
-    made = await _say(service.create(env, body, rt.settings.defaults_root))
+    made = await _say(
+        service.create(env, body, rt.settings.defaults_root, made_in=service.MADE_OUTSIDE_CHAT)
+    )
     draft = await _say(service.get_draft(env, uuid.UUID(made.id)))
     errors = len(draft.validation.errors)
     console.print(

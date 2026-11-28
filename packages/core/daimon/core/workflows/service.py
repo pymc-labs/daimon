@@ -243,7 +243,15 @@ BLANK: dict[str, Any] = {
 }
 
 
-async def create(env: Env, body: NewWorkflow, defaults_root: Path) -> views.Workflow:
+MADE_OUTSIDE_CHAT = store.MadeIn(known=True, channel_id=None, thread_id=None)
+"""For a workflow made in the web app, the CLI or by a client, not in a channel or thread."""
+
+
+async def create(
+    env: Env, body: NewWorkflow, defaults_root: Path, *, made_in: store.MadeIn
+) -> views.Workflow:
+    """Create a draft. `made_in` is where the call came from, from its surface; a surface
+    that cannot tell passes `known=False`, which keeps the workflow from posting by DM."""
     match body.from_:
         case "template":
             spec = load_template(defaults_root, body.template or "")
@@ -270,6 +278,7 @@ async def create(env: Env, body: NewWorkflow, defaults_root: Path) -> views.Work
             spec=spec,
             home_channel_id=columns.get("home_channel_id"),
             visibility=columns.get("visibility", "private"),
+            made_in=made_in,
         )
         return await _view(env, session, workflow, budget=budget)
 

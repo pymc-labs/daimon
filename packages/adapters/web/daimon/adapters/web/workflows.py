@@ -226,7 +226,12 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
     @router.post("", status_code=201)
     @speaks
     async def create(body: service.NewWorkflow, caller: Member) -> views.Workflow:  # pyright: ignore[reportUnusedFunction]
-        return await service.create(await env_of(caller), body, runtime.settings.defaults_root)
+        return await service.create(
+            await env_of(caller),
+            body,
+            runtime.settings.defaults_root,
+            made_in=service.MADE_OUTSIDE_CHAT,
+        )
 
     @router.get("/templates")
     @speaks

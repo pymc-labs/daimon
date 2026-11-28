@@ -6,10 +6,12 @@ from dataclasses import replace
 from typing import Any
 
 from daimon.core._models import WorkflowDelivery
+from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.config import DirectMessagePolicy, WebSettings
 from daimon.core.delivery import DeliveryOutcome, JobPoster, poll_once
 from daimon.core.outbound.reach import ReachPlan
 from daimon.core.stores import accounts, tenants
+from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.direct_messages import set_dm_enabled
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.workflow_deliveries import DeliveryRow
@@ -191,3 +193,11 @@ async def test_a_workflow_made_where_content_stays_posts_nothing_by_dm(
         await db_session.commit()
         got = await clear_post(world.sm, dm, platform="slack", dm_policies={})
         assert got == cleared if isinstance(cleared, str) else isinstance(got, cleared), got
+    # A known source whose channel keeps its content inside refuses too.
+    await set_access_policy(
+        db_session,
+        tenant_id=world.tenant_id,
+        policy=TenantAccessPolicy(channel_rules={"C0HOME": ChannelRule(readers="inside")}),
+    )
+    await db_session.commit()
+    assert await clear_post(world.sm, dm, platform="slack", dm_policies={}) == "restricted_source"

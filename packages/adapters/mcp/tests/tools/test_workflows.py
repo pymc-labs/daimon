@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -23,7 +24,7 @@ from daimon.core.posted_controls import PostedCard
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import Role
 from daimon.core.stores.workflow_runs import get_run
-from daimon.core.stores.workflows import merge_state
+from daimon.core.stores.workflows import get_workflow, merge_state
 from daimon.core.web_links import WebLinks
 from daimon.core.workflows.chat_cards import ChatPlace
 from daimon.core.workflows.edits import AddNode, Connect
@@ -200,6 +201,38 @@ async def test_in_a_chat_turn_a_card_links_the_web_only_where_the_turn_is_aware(
         await _run(runtime, auth, workflow_id=world.workflow_id, inputs={}, test=False)
         for card in posted[-2:]:
             assert ("Open in web" in [b.label for b in card.buttons]) is shown, (aware, card)
+
+
+async def test_a_workflow_made_in_chat_records_where_and_an_unreadable_source_stays_unknown(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessionmaker = committing_sessionmaker
+    runtime, auth = await _person(sessionmaker, db_session, chat_session_id="s1")
+    origin: list[object] = [SimpleNamespace(thread_id="777", parent_channel_id="6")]
+
+    async def chat_origin(*_: object) -> object:
+        return origin[0]
+
+    monkeypatch.setattr(tools, "_chat_origin", chat_origin)
+
+    async def made_in(who: AuthIdentity) -> object:
+        created = await _create(runtime, who, name="Flow", template=None, spec=None)
+        async with sessionmaker() as session:
+            row = await get_workflow(
+                session, tenant_id=who.tenant_id, workflow_id=uuid.UUID(created["id"])
+            )
+        assert row is not None
+        return row.made_in
+
+    assert await made_in(auth) == {"known": True, "channel_id": "6", "thread_id": "777"}
+    origin[0] = None
+    assert await made_in(auth) == {"known": False, "channel_id": None, "thread_id": None}, (
+        "a chat turn whose origin cannot be read posts nothing by DM"
+    )
+    outside = replace(auth, chat_session_id=None)
+    assert await made_in(outside) == {"known": True, "channel_id": None, "thread_id": None}
 
 
 async def test_clear_workflow_state_when_the_owner_asks_empties_what_runs_saved(

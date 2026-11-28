@@ -24,7 +24,9 @@ from daimon.adapters.mcp.tools._own_card import post_own_card
 from daimon.adapters.mcp.tools._web_url import tenant_links
 from daimon.core.access_policy import DM_SCOPE_PREFIX, place_thread_id
 from daimon.core.posted_controls import PostedCard
+from daimon.core.stores.direct_messages import get_conversation_by_scope
 from daimon.core.stores.domain import TurnOriginRow
+from daimon.core.stores.workflows import MadeIn
 from daimon.core.teams_threads import conversation_of
 from daimon.core.web_links import TenantLinks, WebAt
 from daimon.core.workflows import chat_cards, exchange, run_views, service, views
@@ -149,6 +151,31 @@ async def _chat_origin(runtime: McpRuntime, auth: AuthIdentity) -> TurnOriginRow
     return await get_session_turn_origin(runtime, auth)
 
 
+async def _made_in(runtime: McpRuntime, auth: AuthIdentity) -> MadeIn:
+    """Where a workflow made by this call comes from. A chat turn's source is its channel
+    and thread, a moved private conversation's the channel it came from; one whose source
+    cannot be read stays unknown, so the workflow posts nothing by DM."""
+    unknown = MadeIn(known=False, channel_id=None, thread_id=None)
+    if auth.platform not in CARD_PLATFORMS or auth.chat_session_id is None:
+        return service.MADE_OUTSIDE_CHAT
+    origin = await _chat_origin(runtime, auth)
+    if origin is None:
+        return unknown
+    if not origin.thread_id.startswith(DM_SCOPE_PREFIX):
+        thread = place_thread_id(origin.thread_id)
+        return MadeIn(known=True, channel_id=origin.parent_channel_id, thread_id=thread)
+    async with runtime.session_factory() as session:
+        dm = await get_conversation_by_scope(
+            session, tenant_id=auth.tenant_id, account_id=auth.account_id, scope_id=origin.thread_id
+        )
+    if dm is None:
+        return unknown
+    if dm.source_channel_id is not None:
+        return MadeIn(known=True, channel_id=dm.source_channel_id, thread_id=dm.source_thread_id)
+    cold = dm.is_cold and dm.source_thread_id is None and not dm.source_thread_keys
+    return service.MADE_OUTSIDE_CHAT if cold else unknown
+
+
 async def _post(
     runtime: McpRuntime, auth: AuthIdentity, origin: TurnOriginRow, card: PostedCard
 ) -> ChatPlace:
@@ -201,7 +228,9 @@ async def _create_workflow_impl(
             )
         else:
             body = NewWorkflow.model_validate({"from": "blank", "name": name})
-        created = await service.create(env, body, runtime.settings.defaults_root)
+        created = await service.create(
+            env, body, runtime.settings.defaults_root, made_in=await _made_in(runtime, auth)
+        )
         if name and (template is not None or spec is not None):
             created = await service.patch(env, uuid.UUID(created.id), Patch(name=name))
         return await _workflow_view(env, uuid.UUID(created.id))
