@@ -55,6 +55,7 @@ from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.spend_gate import spend_person_of_account
 from daimon.core.stores import identity, tenants, workflow_runs
 from daimon.core.stores.domain import SandboxPin, pin_json
+from daimon.core.stores.file_uploads import workflow_output_title
 from daimon.core.stores.lead_intake import workflow_execution
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.tool_safety import ToolSafetyPolicy
@@ -155,7 +156,9 @@ class ProviderLaneTurn:
                 on_session=step.on_session,
                 on_render=step.on_render,
             )
-        files, _ = await stage_files(sm, ran_turn.outputs, tenant_id=run.tenant_id)
+        files, _ = await stage_files(
+            sm, ran_turn.outputs, tenant_id=run.tenant_id, title=workflow_output_title(run.id)
+        )
         posted = await posted_places(
             sm,
             ran_turn.state,
@@ -432,30 +435,30 @@ class HeadlessLaneTurn:
         )
         return LaneReply(text, posted)
 
-    async def agent_id(
-        self,
-        tenant_id: uuid.UUID,
-        agent: str | None,
-        heal: Callable[[], Awaitable[object]] | None = None,
-    ) -> str:
-        """A workspace agent's id by its spec key (the default agent for None)."""
+    async def agent_id(self, tenant_id: uuid.UUID, agent: str | None) -> str:
+        """A workspace agent's id by its spec key (the default agent for None).
+
+        Only the default agent is healed by a defaults apply. A named agent that is gone
+        was renamed or archived: applying would recreate a seeded one under its old name.
+        """
         public_url = str(self.settings.mcp.public_url) if self.settings.mcp.public_url else None
 
-        def reconcile() -> Awaitable[object]:
-            return reconcile_tenant_defaults(
-                self.client,
-                self.sm,
-                self.settings.defaults_root,
-                tenant_id=tenant_id,
-                public_url=public_url,
-            )
+        async def apply() -> None:
+            if agent is None:
+                await reconcile_tenant_defaults(
+                    self.client,
+                    self.sm,
+                    self.settings.defaults_root,
+                    tenant_id=tenant_id,
+                    public_url=public_url,
+                )
 
         return await resolve_agent(
             self.client,
             tenant_id=tenant_id,
             daimon_tag=agent or self.deployment_default.agent_name or BUILTIN_AGENT_NAME,
             cached_id=None,
-            apply_callable=heal or reconcile,
+            apply_callable=apply,
             cache=self.resolver_cache,
         )
 
@@ -475,7 +478,7 @@ class HeadlessLaneTurn:
             )
 
         agent = agent_of(work.spec, node) if isinstance(node, AgentNode) else None
-        agent_id = await self.agent_id(run.tenant_id, agent, heal)
+        agent_id = await self.agent_id(run.tenant_id, agent)
         async with self.sm() as s:
             scoped = await resolve(
                 s,

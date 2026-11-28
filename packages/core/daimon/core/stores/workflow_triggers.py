@@ -29,7 +29,7 @@ from daimon.core.cron import InvalidScheduleError
 from daimon.core.workflows.clock import next_slot
 from daimon.core.workflows.spec import ScheduleTrigger, parse_duration
 from pydantic import BaseModel, ConfigDict, ValidationError
-from sqlalchemy import case, delete, func, or_, select, update
+from sqlalchemy import Integer, case, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -455,15 +455,31 @@ async def record_event(
     return EventRow.model_validate(dup), EventRow.model_validate(first)
 
 
+#: Rows that are not deliveries a sender got through: they never count toward its limit.
+_UNCOUNTED = ("signature", "rate_limited")
+
+
 async def count_events_since(
     session: AsyncSession,
     *,
     since: datetime,
     trigger_id: uuid.UUID | None = None,
     tenant_id: uuid.UUID | None = None,
+    reason: str | None = None,
 ) -> int:
-    """Events of one trigger, or of every webhook trigger of a workspace, since `since`."""
+    """Deliveries of one trigger, or of every webhook trigger of a workspace, since `since`;
+    with `reason`, only the rows with it. Bad signatures and rate-limit rows are left out
+    unless asked for, so strangers cannot use up a sender's allowance."""
     stmt = select(func.count()).where(WorkflowTriggerEvent.received_at >= since)
+    if reason is not None:
+        stmt = stmt.where(WorkflowTriggerEvent.reason == reason)
+    else:
+        stmt = stmt.where(
+            or_(
+                WorkflowTriggerEvent.reason.is_(None),
+                WorkflowTriggerEvent.reason.notin_(_UNCOUNTED),
+            )
+        )
     if trigger_id is not None:
         stmt = stmt.where(WorkflowTriggerEvent.trigger_id == trigger_id)
     if tenant_id is not None:
@@ -473,6 +489,34 @@ async def count_events_since(
         )
         stmt = stmt.where(WorkflowTriggerEvent.trigger_id.in_(ids))
     return await session.scalar(stmt) or 0
+
+
+async def note_rate_limited(
+    session: AsyncSession, *, trigger: TriggerRow, now: datetime, test: bool
+) -> None:
+    """Count one refused delivery in the trigger's single row for this minute."""
+    minute = now.replace(second=0, microsecond=0)
+    dropped = WorkflowTriggerEvent.payload["dropped"].astext.cast(Integer)
+    await session.execute(
+        insert(WorkflowTriggerEvent)
+        .values(
+            tenant_id=trigger.tenant_id,
+            trigger_id=trigger.id,
+            delivery_id=f"rate_limited:{minute.isoformat()}",
+            test=test,
+            verified=True,
+            status="rejected",
+            http_status=429,
+            reason="rate_limited",
+            payload={"dropped": 1},
+            received_at=minute,
+        )
+        .on_conflict_do_update(
+            index_elements=["trigger_id", "delivery_id"],
+            index_where=text("delivery_id IS NOT NULL AND status <> 'duplicate'"),
+            set_={"payload": func.jsonb_build_object("dropped", func.coalesce(dropped, 0) + 1)},
+        )
+    )
 
 
 async def list_events(

@@ -28,9 +28,10 @@ from daimon.core._models import (
     WorkflowWaitAnswer,
 )
 from daimon.core.stores import workflow_triggers
+from daimon.core.stores.file_uploads import delete_run_uploads
 from daimon.core.workflows.state import merged, oversized
 from pydantic import BaseModel, ConfigDict, JsonValue
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import JSONB, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
@@ -310,6 +311,10 @@ async def delete_workflow(
 ) -> bool:
     """Delete the workflow with all its state (FK cascades) and unbind lead intake from it;
     usage rows keep their money."""
+    await delete_run_uploads(
+        session,
+        runs=and_(WorkflowRun.tenant_id == tenant_id, WorkflowRun.workflow_id == workflow_id),
+    )
     result = await session.execute(
         delete(Workflow)
         .where(Workflow.tenant_id == tenant_id, Workflow.id == workflow_id)
@@ -505,6 +510,10 @@ async def count_for_account(session: AsyncSession, *, account_id: uuid.UUID) -> 
 
 async def erase_for_account(session: AsyncSession, *, account_id: uuid.UUID) -> int:
     """Erase the person from every workspace's workflows (module docstring); returns the count."""
+    await delete_run_uploads(
+        session,
+        runs=WorkflowRun.workflow_id.in_(select(Workflow.id).where(_private_owned(account_id))),
+    )
     erased = await session.execute(
         delete(Workflow).where(_private_owned(account_id)).returning(Workflow.id)
     )

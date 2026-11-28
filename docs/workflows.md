@@ -34,6 +34,9 @@ Runs already started stop at their next step without spending.
 | Run budget | `workflow_run_budget` | $5 |
 | Run history | `workflow_retention_days` | 90 days |
 
+The files a step makes stay available to later posts and to the run page until its run
+leaves the history.
+
 Deployment caps on steps, runs, items and webhooks are under
 [Workflows settings](configuration.md#workflows).
 
@@ -59,6 +62,9 @@ limit. Validation names each problem, and a draft with errors cannot be publishe
 
 An Agent step can load skills from the workspace library by name. Each publish
 pins the version it saw, so a later library edit reaches runs after a republish.
+
+Renaming an agent renames it in every draft and published version, so its steps
+keep working. A step whose named agent is gone fails; no new agent is made.
 
 An Agent step can work in a place: home, where the run started, or a channel or
 thread. The place's access rules apply, and the agent can post there itself. A
@@ -89,7 +95,9 @@ catches up with one run.
 A webhook trigger checks the sender's signature: Standard Webhooks, GitHub,
 Stripe, Slack or a bearer token. Each delivery starts at most one run. A repeat is
 recognised for 30 days after its payload is deleted. The trigger
-has a test URL that captures one delivery as a test run.
+has a test URL that captures one delivery as a test run. Only signed deliveries count
+toward a webhook's rate limit. A delivery over it is dropped and counted in the Deliveries
+tab, and the owner is told once a day.
 
 ## Asks in chat
 
@@ -157,6 +165,8 @@ You can cancel a run, retry it from the step that failed, or rerun it from any
 step with the earlier results reused. Runs past a workflow's active limit queue.
 A run ends when it passes its deadline or spends its budget.
 A run that hits an error Daimon cannot get past fails on its own, and other runs go on.
+The web app lists runs and inbox items a page at a time, newest first, and shows each
+person only their own.
 
 Each step's spend counts against the allowance of the person the run is for.
 

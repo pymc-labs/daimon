@@ -33,6 +33,7 @@ from daimon.core.stores.file_uploads import (
     UploadTooLargeError,
     delete_uploads,
     get_upload,
+    is_staged_output,
     stage_upload,
 )
 from mux.errors import MuxError, UnsupportedCapability
@@ -167,9 +168,10 @@ async def stage_files(
     outputs: OutputRuntime | None,
     *,
     tenant_id: uuid.UUID,
+    title: str = ROUTINE_OUTPUT_TITLE,
 ) -> tuple[list[RoutineFile], list[str]]:
     """Read a provider turn's files while its runtime is live and stage them for delivery: a
-    routine fire's, or a workflow step's `steps.<id>.files`.
+    routine fire's, or a workflow step's `steps.<id>.files` (`title` is then the run's).
 
     At most ten files; a file over what a staged row holds stays in the workspace and is
     named in a notice.
@@ -214,7 +216,7 @@ async def stage_files(
                 handle = await stage_upload(
                     db,
                     tenant_id=tenant_id,
-                    title=ROUTINE_OUTPUT_TITLE,
+                    title=title,
                     display_filename=meta.filename,
                     content_type=meta.mime_type,
                     content=content,
@@ -250,35 +252,38 @@ async def deliver_routine_files(
     may_post: Callable[[], Awaitable[bool]],
     sessions: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
+    keep_staged: bool = False,
 ) -> None:
     """Fail on the first uncertain upload; the outbox owns retries and settlement.
 
-    Delivery is never retried, so staged files are deleted once it ends, either way.
+    Delivery is never retried, so a routine's staged files are deleted once it ends, either
+    way. A workflow's stay: a later post, an approval or the run page reads them again.
     """
     refs = decode_payload(payload).files
     try:
         await _deliver(client, refs, max_bytes, post, notice, may_post, sessions, tenant_id)
     finally:
-        if staged := [ref.file_id for ref in refs if ref.staged]:
+        if not keep_staged and (staged := [ref.file_id for ref in refs if ref.staged]):
             async with sessions.begin() as db:
                 await delete_uploads(
                     db, title=ROUTINE_OUTPUT_TITLE, tenant_id=tenant_id, handle_ids=staged
                 )
 
 
-async def _read(
+async def read_file(
     client: AsyncAnthropic | None,
     ref: RoutineFile,
     sessions: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,
 ) -> bytes:
+    """A generated file's bytes: from the staging table when staged, else the provider's files."""
     if not ref.staged:
         if client is None:
             raise RuntimeError("Generated file delivery is unavailable; it will not be retried.")
         return await download_output_file(client, ref.file_id)
     async with sessions() as db:
         upload = await get_upload(db, tenant_id=tenant_id, handle_id=ref.file_id)
-    if upload is None or upload.content is None or upload.title != ROUTINE_OUTPUT_TITLE:
+    if upload is None or upload.content is None or not is_staged_output(upload.title):
         raise RuntimeError("A generated file is gone; delivery stopped.")
     return upload.content
 
@@ -306,7 +311,7 @@ async def _deliver(
                 )
             )
             continue
-        content = await _read(client, ref, sessions, tenant_id)
+        content = await read_file(client, ref, sessions, tenant_id)
         if len(content) != ref.size_bytes:
             raise ValueError("Generated file size changed; delivery stopped.")
         if not await may_post():

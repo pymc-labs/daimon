@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { toast } from "sonner"
 
 import { ApiError, api, stream } from "@/lib/api"
+import { usePaged } from "@/lib/hooks"
 import { ACTIVE_RUN, project } from "./runs"
 import { diff, validate } from "./spec"
 import type {
@@ -25,7 +26,7 @@ export function useClearState(id: string) {
     onError: (e) => toast.error(e.message),
   })
 }
-export const useRuns = (id: string) => useQuery({ queryKey: ["workflows", id, "runs"], queryFn: () => api.get<RunSummary[]>(`${base(id)}/runs`) })
+export const useRuns = (id: string) => usePaged<RunSummary>(["workflows", id, "runs"], `${base(id)}/runs`)
 export const useBoard = (id: string) => useQuery({ queryKey: ["workflows", id, "runs", "board"], queryFn: () => api.get<Board>(`${base(id)}/runs?view=board`) })
 export const useCalendar = (id: string, month: string) => useQuery({ queryKey: ["workflows", id, "runs", "calendar", month], queryFn: () => api.get<Calendar>(`${base(id)}/runs?view=calendar&month=${month}`) })
 export const useCatalog = () => useQuery({ queryKey: ["workflows", "catalog"], queryFn: () => api.get<Catalog>("/api/workflows/catalog"), staleTime: Infinity })
@@ -78,7 +79,7 @@ export function useStartRun(id: string) {
 // ---------- runs ----------
 
 const runBase = (id: string) => `/api/workflows/runs/${id}`
-export const useAllRuns = () => useQuery({ queryKey: ["workflow-runs"], queryFn: () => api.get<RunSummary[]>("/api/workflows/runs"), refetchInterval: 5000 })
+export const useAllRuns = () => usePaged<RunSummary>(["workflow-runs"], "/api/workflows/runs", { refetchInterval: 5000 })
 export const useAttention = () => useQuery({ queryKey: ["workflow-runs", "attention"], queryFn: () => api.get<AttentionItem[]>("/api/workflows/attention") })
 export const useRun = (wf: string, n: string) => useQuery({ queryKey: ["workflow-run", wf, n], queryFn: () => api.get<RunDetail>(`${base(wf)}/runs/${n}`), enabled: !!n })
 export const useRunById = (id: string | null) => useQuery({ queryKey: ["workflow-run", id], queryFn: () => api.get<RunDetail>(runBase(id!)), enabled: !!id })
@@ -265,7 +266,7 @@ export function useRequestPublish(id: string) {
 
 // ---------- inbox ----------
 
-export const useInbox = () => useQuery({ queryKey: ["workflow-inbox"], queryFn: () => api.get<InboxItem[]>("/api/workflows/inbox"), refetchInterval: 8000 })
+export const useInbox = () => usePaged<InboxItem>(["workflow-inbox"], "/api/workflows/inbox", { refetchInterval: 8000 })
 export const useInboxItem = (id: string | null) => useQuery({ queryKey: ["workflow-inbox", id], queryFn: () => api.get<InboxDetail>(`/api/workflows/inbox/${id}`), enabled: !!id })
 
 export function useDecide(id: string, after?: () => void) {

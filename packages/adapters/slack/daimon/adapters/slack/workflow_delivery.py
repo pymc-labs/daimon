@@ -206,6 +206,7 @@ def make_slack_workflow_poster(runtime: SlackRuntime) -> WorkflowPoster:
             may_post=may_post,
             sessions=runtime.sessionmaker,
             tenant_id=row.tenant_id,
+            keep_staged=True,
         )
         return done
 

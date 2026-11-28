@@ -3,8 +3,10 @@
 Security code at the public edge. The trigger id is the only address; an unknown id, a
 trigger that is not a webhook, a workspace with webhooks off and a test URL that is not
 listening all answer the same 404, so nothing tells one workspace's ids from another's.
-Rate limits come before any secret is touched and write nothing; a failed signature is
-logged without its body or delivery id, so it cannot fill the log or poison the dedupe.
+A failed signature is logged without its body or delivery id, so it cannot poison the
+dedupe, and only up to the per-minute limit, so it cannot fill the log. Only signed
+deliveries count toward the rate limits, so a stranger holding the URL cannot block the
+sender. A delivery over a limit leaves one counted row per minute and one owner notice a day.
 The body is verified raw, then parsed. Nothing here starts a run: the starts loop does,
 through `runs.start_run`, so every trigger path meets the same preflight.
 """
@@ -40,6 +42,7 @@ _MAX_HEADERS: Final = 64
 _MAX_HEADER_VALUE: Final = 1024
 _MAX_DELIVERY_ID: Final = 200
 _MINUTE: Final = timedelta(minutes=1)
+_DAY: Final = timedelta(days=1)
 #: Deeper bodies are refused: evaluating one would overflow the interpreter's stack.
 MAX_DEPTH: Final = 64
 #: GitHub signs no timestamp and its delivery header is unsigned, so a captured request
@@ -185,6 +188,27 @@ async def _limited(
     )
 
 
+async def _note_limited(
+    session: AsyncSession, trigger: TriggerRow, now: datetime, test: bool
+) -> None:
+    await store.note_rate_limited(session, trigger=trigger, now=now, test=test)
+    topic = f"rate_limited:{trigger.trigger_key}"
+    if test or await store.notice_sent_since(
+        session, workflow_id=trigger.workflow_id, topic=topic, since=now - _DAY
+    ):
+        return
+    await store.add_owner_notice(
+        session,
+        tenant_id=trigger.tenant_id,
+        workflow_id=trigger.workflow_id,
+        topic=topic,
+        text=(
+            f"The {trigger.trigger_key} webhook is receiving more deliveries than it accepts "
+            "a minute, and the extra ones are dropped. See the Deliveries tab."
+        ),
+    )
+
+
 async def _offer(
     session: AsyncSession,
     trigger: TriggerRow,
@@ -235,8 +259,6 @@ async def receive(
         if target is None:
             return NOT_FOUND
         spec, config = target
-        if await _limited(session, settings, trigger, now):
-            return Reply(429, {"error": "rate_limited"})
         scheme = cast("Scheme | None", config.get("verify"))
         secrets = await store.live_secrets(session, trigger_id=trigger.id, now=now)
         plain = _secrets(settings, [s.encrypted_secret for s in secrets])
@@ -257,8 +279,15 @@ async def receive(
             )
 
         if not verify(scheme, plain, headers, body, now=now):
-            await reject(401, "signature", None)
+            bad = await store.count_events_since(
+                session, since=now - _MINUTE, trigger_id=trigger.id, reason="signature"
+            )
+            if bad < settings.workflows.webhook_per_minute:
+                await reject(401, "signature", None)
             return Reply(401, {"error": "invalid_signature"})
+        if await _limited(session, settings, trigger, now):
+            await _note_limited(session, trigger, now, test)
+            return Reply(429, {"error": "rate_limited"})
         payload = parse(body, headers.get("content-type", ""))
         if payload is None:
             await reject(422, "not_an_object", None)

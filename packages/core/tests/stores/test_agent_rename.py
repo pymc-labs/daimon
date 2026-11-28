@@ -317,12 +317,23 @@ _KEPT_JSON_COLUMNS = {
 }
 
 
+# JSON payloads whose agent keys `rename_workflow_agents` rewrites.
+_MOVED_JSON_COLUMNS = {
+    ("workflows", "draft_spec"),
+    ("workflow_versions", "spec"),
+    ("workflow_versions", "agent_tools"),
+    ("workflow_publish_requests", "spec"),
+    ("workflow_triggers", "config"),
+}
+
+
 def test_kept_json_columns_when_schema_walked_then_still_exist() -> None:
     found = {
         (table.name, column.name)
         for table in Base.metadata.tables.values()
         for column in table.columns
     }
+    assert found >= _MOVED_JSON_COLUMNS, "the workflow rename rewrites columns that exist"
     assert set(_KEPT_JSON_COLUMNS) <= found, (
         f"drop entries for columns that are gone: {set(_KEPT_JSON_COLUMNS) - found}"
     )
@@ -353,7 +364,10 @@ async def test_count_references_when_dry_running_then_matches_what_the_rename_mo
     keys = await policy_keys_to_move(db_session, tenant_id=tid, old="daimon", new="default")
 
     expected = {f"{t}.{c}" for t, c in _LIVE_NAME_COLUMNS}
-    expected |= {f"{t}.{c}" for t, c, _ in _KEYED_NAME_COLUMNS} | {"user_config.agent_name"}
+    expected |= {f"{t}.{c}" for t, c, _ in _KEYED_NAME_COLUMNS} | {
+        "user_config.agent_name",
+        "workflows.spec",
+    }
     assert set(counts) == expected, "every column the rename moves is counted"
     nonzero = {label: n for label, n in counts.items() if n}
     assert nonzero == {"routines.agent_name": 2, "user_config.agent_name": 1}, (

@@ -9,12 +9,14 @@ from __future__ import annotations
 import uuid
 from collections import defaultdict
 from collections.abc import Collection
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
 from daimon.core._models import PlatformPrincipal, WorkflowGrant, WorkflowRun, WorkflowStep
+from daimon.core.cursor import Cursor
 from daimon.core.stores.workflow_runs import ACTIVE_RUN_STATES, RunRow, StepRow
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -62,18 +64,49 @@ async def spend_since(
     return {workflow_id: total or Decimal(0) for workflow_id, total in rows.tuples()}
 
 
+@dataclass(frozen=True)
+class RunScope:
+    """The runs a person may see: every run of `whole`, and their own of `own_only`."""
+
+    account_id: uuid.UUID
+    whole: frozenset[uuid.UUID]
+    own_only: frozenset[uuid.UUID] = frozenset()
+
+    def clause(self) -> ColumnElement[bool]:
+        mine = or_(
+            WorkflowRun.triggered_by["account_id"].astext == str(self.account_id),
+            WorkflowRun.run_as_account_id == self.account_id,
+        )
+        return or_(
+            WorkflowRun.workflow_id.in_(list(self.whole)),
+            and_(WorkflowRun.workflow_id.in_(list(self.own_only)), mine),
+        )
+
+
 async def list_runs(
     session: AsyncSession,
     *,
     tenant_id: uuid.UUID,
+    scope: RunScope,
     workflow_id: uuid.UUID | None = None,
+    before: Cursor | None = None,
     limit: int = 100,
 ) -> list[RunRow]:
-    """Runs, newest first; one workflow's, or the workspace's."""
-    query = select(WorkflowRun).where(WorkflowRun.tenant_id == tenant_id)
+    """The runs `scope` allows, newest first, after the cursor `before`."""
+    query = select(WorkflowRun).where(WorkflowRun.tenant_id == tenant_id, scope.clause())
     if workflow_id is not None:
         query = query.where(WorkflowRun.workflow_id == workflow_id)
-    rows = await session.scalars(query.order_by(WorkflowRun.created_at.desc()).limit(limit))
+    if before is not None:
+        at, key = before
+        query = query.where(
+            or_(
+                WorkflowRun.created_at < at,
+                and_(WorkflowRun.created_at == at, WorkflowRun.id < key),
+            )
+        )
+    rows = await session.scalars(
+        query.order_by(WorkflowRun.created_at.desc(), WorkflowRun.id.desc()).limit(limit)
+    )
     return [RunRow.model_validate(orm) for orm in rows]
 
 
@@ -82,21 +115,31 @@ async def board_runs(
     *,
     tenant_id: uuid.UUID,
     workflow_id: uuid.UUID,
+    scope: RunScope,
     month: str | None = None,
     date_field: str | None = None,
     limit: int = 200,
 ) -> list[RunRow]:
-    """A workflow's live runs, newest first; with `month`, those whose card `date_field`
-    falls in it (`YYYY-MM`)."""
+    """A workflow's live runs the scope allows, newest first. With `month`, those whose card
+    `date_field` falls in it (`YYYY-MM`). Without, every open run and the newest `limit`
+    that ended, so a long-open card never drops off the board."""
     query = select(WorkflowRun).where(
         WorkflowRun.tenant_id == tenant_id,
         WorkflowRun.workflow_id == workflow_id,
         WorkflowRun.mode == "live",
+        scope.clause(),
     )
+    newest = (WorkflowRun.created_at.desc(), WorkflowRun.id.desc())
     if month is not None and date_field is not None:
         query = query.where(WorkflowRun.card[date_field].astext.startswith(month))
-    rows = await session.scalars(query.order_by(WorkflowRun.created_at.desc()).limit(limit))
-    return [RunRow.model_validate(orm) for orm in rows]
+        rows = await session.scalars(query.order_by(*newest).limit(limit))
+        return [RunRow.model_validate(orm) for orm in rows]
+    open_ = await session.scalars(query.where(WorkflowRun.status.in_(ACTIVE_RUN_STATES)))
+    ended = await session.scalars(
+        query.where(WorkflowRun.status.not_in(ACTIVE_RUN_STATES)).order_by(*newest).limit(limit)
+    )
+    found = [RunRow.model_validate(orm) for orm in [*open_, *ended]]
+    return sorted(found, key=lambda r: (r.created_at, r.id), reverse=True)
 
 
 async def stage_steps(

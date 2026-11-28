@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from functools import cache
 from typing import Annotated
 
-from daimon.core.cursor import MAX_PAGE, Cursor, decode_cursor, encode_cursor
+from daimon.core.cursor import MAX_PAGE, Cursor, Page, decode_cursor, encode_cursor
 from fastapi import HTTPException, Query, Response
 
 NEXT_HEADER = "X-Next-Cursor"
@@ -51,3 +51,10 @@ def cut[T](
     if len(rows) > page.limit:
         response.headers[NEXT_HEADER] = encode_cursor(key(kept[-1]))
     return kept
+
+
+def send[T](page: Page[T], response: Response) -> list[T]:
+    """A page the core already cut: its rows, and the header when more follow."""
+    if page.next is not None:
+        response.headers[NEXT_HEADER] = encode_cursor(page.next)
+    return page.rows

@@ -12,7 +12,7 @@ import asyncio
 import functools
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import AsyncExitStack, asynccontextmanager, suppress
+from contextlib import suppress
 from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
@@ -25,10 +25,12 @@ from daimon.adapters.web.chat import chattable_agents
 from daimon.adapters.web.chat_json import agent_json
 from daimon.adapters.web.directory import chattable
 from daimon.adapters.web.faces import avatars_of
+from daimon.adapters.web.paging import PageRequest, page_of, send
 from daimon.adapters.web.routines import reachable_channels_of
+from daimon.adapters.web.run_wakeups import RunWakeups
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.channel_audience import channels_with_outsiders
-from daimon.core.output_delivery import download_output_file
+from daimon.core.routine_files import read_file
 from daimon.core.stores import tenants
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores.thread_agent_bindings import create_binding
@@ -45,7 +47,6 @@ from daimon.core.workflows import (
 )
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.catalog import tenant_skills
-from daimon.core.workflows.runs import run_channel
 from daimon.core.workflows.service import Env, WorkflowError
 from daimon.core.workflows.taint import tool_facts
 from daimon.core.workflows.validate import Grant, Validation
@@ -53,7 +54,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncEngine
 
 Viewer = Annotated[WebCaller, Depends(requires("workflows.view"))]
 Member = Annotated[WebCaller, Depends(requires("workflows.run"))]
@@ -252,8 +252,11 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
 
     @router.get("/runs")
     @speaks
-    async def all_runs(caller: Viewer) -> list[run_views.RunSummary]:  # pyright: ignore[reportUnusedFunction]
-        return await service.list_runs(await env_of(caller))
+    async def all_runs(  # pyright: ignore[reportUnusedFunction]
+        caller: Viewer, response: Response, page: Annotated[PageRequest, Depends(page_of(100))]
+    ) -> list[run_views.RunSummary]:
+        found = await service.runs_page(await env_of(caller), limit=page.limit, before=page.cursor)
+        return send(found, response)
 
     @router.get("/runs/{run_id}")
     @speaks
@@ -280,11 +283,12 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
     @router.get("/runs/{run_id}/files/{name}")
     @speaks
     async def run_file(run_id: uuid.UUID, name: str, caller: Viewer) -> Response:  # pyright: ignore[reportUnusedFunction]
-        ref = await service.run_file(await env_of(caller), run_id, name)
+        env = await env_of(caller)
+        ref = await service.run_file(env, run_id, name)
         anthropic = client()
-        if anthropic is None:
+        if anthropic is None and not ref.staged:
             raise HTTPException(status_code=503, detail=SOON)
-        content = await download_output_file(anthropic, ref.file_id)
+        content = await read_file(anthropic, ref, env.sm, env.who.tenant_id)
         disposition = f"attachment; filename*=UTF-8''{quote(ref.filename)}"
         return Response(
             content,
@@ -292,33 +296,12 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
             headers={"Content-Disposition": disposition, "X-Content-Type-Options": "nosniff"},
         )
 
-    @asynccontextmanager
-    async def wakeups(tenant_id: uuid.UUID, run_id: uuid.UUID) -> AsyncIterator[asyncio.Event]:
-        """Set when the run's ledger changes; stays quiet where LISTEN is not possible."""
-        woke = asyncio.Event()
-        engine = runtime.sessionmaker.kw.get("bind")
-
-        def on_notice(_conn: object, _pid: int, _channel: str, payload: str) -> None:
-            if payload == str(run_id):
-                woke.set()
-
-        async with AsyncExitStack() as stack:
-            try:
-                if isinstance(engine, AsyncEngine):
-                    conn = await stack.enter_async_context(engine.connect())
-                    raw = (await conn.get_raw_connection()).driver_connection
-                    if raw is not None:
-                        channel = run_channel(tenant_id)
-                        await raw.add_listener(channel, on_notice)
-                        stack.push_async_callback(raw.remove_listener, channel, on_notice)
-            except _LISTEN_ERRORS:
-                pass
-            yield woke
+    wakeups = RunWakeups(runtime.sessionmaker.kw.get("bind"))
 
     async def frames(
         env: Env, run_id: uuid.UUID, after: int, first: list[run_views.RunEvent], ended: bool
     ) -> AsyncIterator[str]:
-        async with wakeups(env.who.tenant_id, run_id) as woke:
+        async with wakeups.watch(env.who.tenant_id, run_id) as woke:
             quiet = 0
             events = first
             while True:
@@ -343,6 +326,8 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
     async def stream(run_id: uuid.UUID, request: Request, caller: Viewer) -> StreamingResponse:  # pyright: ignore[reportUnusedFunction]
         """The ledger after `Last-Event-ID` (a sequence number), then live until the run ends."""
         env = await env_of(caller)
+        if wakeups.full:
+            raise HTTPException(status_code=429, detail="Too many open run pages.")
         raw = request.headers.get("last-event-id", "0")
         after = int(raw) if raw.isdigit() else 0
         first, ended = await service.run_events(env, run_id, after)
@@ -379,8 +364,11 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
 
     @router.get("/inbox")
     @speaks
-    async def inbox_list(caller: Viewer) -> list[inbox.InboxItem]:  # pyright: ignore[reportUnusedFunction]
-        return await inbox.list_items(await env_of(caller))
+    async def inbox_list(  # pyright: ignore[reportUnusedFunction]
+        caller: Viewer, response: Response, page: Annotated[PageRequest, Depends(page_of(100))]
+    ) -> list[inbox.InboxItem]:
+        found = await inbox.items_page(await env_of(caller), limit=page.limit, before=page.cursor)
+        return send(found, response)
 
     @router.get("/inbox/{item_id}")
     @speaks
@@ -554,12 +542,15 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
     async def runs(  # pyright: ignore[reportUnusedFunction]
         workflow_id: uuid.UUID,
         caller: Viewer,
+        response: Response,
+        page: Annotated[PageRequest, Depends(page_of(100))],
         view: Literal["list", "board", "calendar"] = "list",
         month: str | None = None,
     ) -> list[run_views.RunSummary] | run_views.Board | run_views.Calendar:
         env = await env_of(caller)
         if view == "list":
-            return await service.list_runs(env, workflow_id)
+            found = await service.runs_page(env, workflow_id, limit=page.limit, before=page.cursor)
+            return send(found, response)
         return await service.runs_view(env, workflow_id, view, month)
 
     @router.post("/{workflow_id}/runs", status_code=201)
