@@ -64,7 +64,8 @@ An Agent step can work in a place: home, where the run started, or a channel or
 thread. The place's access rules apply, and the agent can post there itself. A
 later step reads where it posted in `steps.<id>.posted`. With personal memory, the
 step reads the memory of the person the run is for. Its result is private and it
-works in no place, so only a Post to that person can use the result.
+works in no place, so only a Post to that person can use the result. Only that
+person or an admin can restart the run.
 
 `writes: policy` lets a step write exactly as the server's rules for unattended
 runs allow. A step with no output fields completes with its plain reply as its
