@@ -16,17 +16,22 @@ import pytest
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.adapters.web.turns import WebTurns
 from daimon.adapters.web.workflows import workflows_router
+from daimon.core._models import WorkflowRun
 from daimon.core.config import Settings
 from daimon.core.features.service import set_workspace_feature
 from daimon.core.stores import web_roles as roles_store
 from daimon.core.stores import workflow_runs
 from daimon.core.stores.domain import WebPersonRow
-from daimon.core.stores.file_uploads import stage_upload, workflow_output_title
+from daimon.core.stores.file_uploads import (
+    delete_run_uploads,
+    stage_upload,
+    workflow_output_title,
+)
 from daimon.testing import ma_agent
-from daimon.testing.ma import MARouter
 from daimon.testing.turn_router import AGENT_ID, build_turn_router
 from daimon.testing.workflows import ma_agents_with
 from fastapi.routing import APIRoute
+from mux.testing.drivers.anthropic.ma import MARouter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .chat_support import Workspace, build_turns, funded_workspace, one_session, signed_in
@@ -287,6 +292,10 @@ async def test_a_staged_run_file_downloads_from_the_staging_table(rig: Rig) -> N
             )
         got = await r.client.get(f"/api/workflows/runs/{run['id']}/files/{handle}")
         assert (got.status_code, got.content) == (200, b"staged"), got.text
+        async with r.factory.begin() as db:
+            await delete_run_uploads(db, runs=WorkflowRun.id == uuid.UUID(run["id"]))
+        gone = await r.client.get(f"/api/workflows/runs/{run['id']}/files/{handle}")
+        assert gone.status_code == 404, f"a file whose bytes are gone is not found: {gone.text}"
 
 
 async def test_each_starter_template_creates_a_draft_that_validates(rig: Rig) -> None:

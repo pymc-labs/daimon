@@ -270,6 +270,10 @@ async def deliver_routine_files(
                 )
 
 
+class FileGone(RuntimeError):
+    """A staged file's bytes are no longer stored."""
+
+
 async def read_file(
     client: AsyncAnthropic | None,
     ref: RoutineFile,
@@ -284,7 +288,7 @@ async def read_file(
     async with sessions() as db:
         upload = await get_upload(db, tenant_id=tenant_id, handle_id=ref.file_id)
     if upload is None or upload.content is None or not is_staged_output(upload.title):
-        raise RuntimeError("A generated file is gone; delivery stopped.")
+        raise FileGone("A generated file is gone; delivery stopped.")
     return upload.content
 
 

@@ -30,7 +30,7 @@ from daimon.adapters.web.routines import reachable_channels_of
 from daimon.adapters.web.run_wakeups import RunWakeups
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.channel_audience import channels_with_outsiders
-from daimon.core.routine_files import read_file
+from daimon.core.routine_files import FileGone, read_file
 from daimon.core.stores import tenants
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores.thread_agent_bindings import create_binding
@@ -288,7 +288,10 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
         anthropic = client()
         if anthropic is None and not ref.staged:
             raise HTTPException(status_code=503, detail=SOON)
-        content = await read_file(anthropic, ref, env.sm, env.who.tenant_id)
+        try:
+            content = await read_file(anthropic, ref, env.sm, env.who.tenant_id)
+        except FileGone:
+            raise HTTPException(status_code=404, detail="That file is gone.") from None
         disposition = f"attachment; filename*=UTF-8''{quote(ref.filename)}"
         return Response(
             content,
