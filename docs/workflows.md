@@ -94,7 +94,9 @@ catches up with one run.
 
 A webhook trigger checks the sender's signature: Standard Webhooks, GitHub,
 Stripe, Slack or a bearer token. Each delivery starts at most one run. The trigger
-has a test URL that captures one delivery as a test run.
+has a test URL that captures one delivery as a test run. Only signed deliveries count
+toward a webhook's rate limit. A delivery over it is dropped and counted in the Deliveries
+tab, and the owner is told once a day.
 
 ## Asks in chat
 

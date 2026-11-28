@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 from cryptography.fernet import Fernet
-from daimon.core._models import Tenant, WorkflowRun, WorkflowTriggerEvent
+from daimon.core._models import Tenant, WorkflowDelivery, WorkflowRun, WorkflowTriggerEvent
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.github_credentials import build_multifernet, encrypt_token
 from daimon.core.stores import workflow_triggers as store
@@ -208,6 +208,40 @@ async def test_limits_and_switches_refuse_before_anything_is_stored(
     one = settings(webhook_per_minute=1)
     assert (await hook.post(one, **req)).status == 202, "the first"
     assert (await hook.post(one, **hook.signed(GOOD, "msg_2"))).status == 429, "limited"
+
+
+async def test_unsigned_requests_cannot_use_up_the_senders_allowance(
+    db_session: AsyncSession,
+) -> None:
+    hook = await make_hook(db_session)
+    cfg = settings(webhook_per_minute=2)
+    stranger = {"headers": {"content-type": "application/json"}, "body": b"{}"}
+    for _ in range(5):
+        assert (await hook.post(cfg, **stranger)).status == 401, "refused"
+    kept = await db_session.scalar(select(func.count(WorkflowTriggerEvent.id)))
+    assert kept == 2, "bad signatures are logged only up to the limit"
+    reply = await hook.post(cfg, **hook.signed(GOOD, "msg_1"))
+    assert reply.status == 202, "the real sender still gets through"
+
+
+async def test_a_rate_limited_delivery_leaves_one_row_a_minute_and_one_owner_notice(
+    db_session: AsyncSession,
+) -> None:
+    hook = await make_hook(db_session)
+    cfg = settings(webhook_per_minute=1)
+    assert (await hook.post(cfg, **hook.signed(GOOD, "msg_1"))).status == 202, "the first"
+    for n in (2, 3):
+        assert (await hook.post(cfg, **hook.signed(GOOD, f"msg_{n}"))).status == 429, "limited"
+    rows = (
+        await db_session.scalars(
+            select(WorkflowTriggerEvent).where(WorkflowTriggerEvent.reason == "rate_limited")
+        )
+    ).all()
+    assert [(r.http_status, r.payload) for r in rows] == [(429, {"dropped": 2})], "one counter"
+    notices = await db_session.scalar(
+        select(func.count(WorkflowDelivery.id)).where(WorkflowDelivery.kind == "notice")
+    )
+    assert notices == 1, "the owner hears once"
 
 
 async def test_a_listening_test_url_captures_one_delivery_as_a_test_run(
