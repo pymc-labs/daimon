@@ -259,6 +259,8 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
         f"{_V}[only a post to the run-as person reads a personal result]",
         f"{_V}[an agent with personal memory works nowhere]",
     ),
+    "Only that person or an admin can restart the run": _W
+    + "test_runs.py::test_only_the_run_as_person_or_an_admin_redrives_a_private_run",
     "`writes: policy` lets a step write": _ROUTINE,
     "completes with its plain reply as its": _PARITY,
     "ends the run quietly when its reply": _PARITY,

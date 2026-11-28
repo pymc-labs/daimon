@@ -13,7 +13,7 @@
         "type": "string"
       },
       "summary": {
-        "maxLength": 4000,
+        "maxLength": 40000,
         "minLength": 1,
         "type": "string"
       }

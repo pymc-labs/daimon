@@ -81,7 +81,9 @@ _NO_PIN: Final = "Can't read the step's agent or its environment, so its built-i
 _NO_TURN: Final = "The step's agent can't start a turn on its model provider here."
 #: A deliberate difference from Managed Agents: a provider turn a lost worker left can't be
 #: reattached, so its attempt fails `retryable` and the next one starts afresh.
-NO_REATTACH: Final = "A provider turn can't be reattached after a lost worker."
+NO_REATTACH: Final = (
+    "This step can't pick up where it was after Daimon restarted, so it starts again."
+)
 
 
 @dataclass(frozen=True)

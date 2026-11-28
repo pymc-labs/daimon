@@ -333,7 +333,7 @@ def test_a_translation_is_deterministic() -> None:
         == ids(BASE.id)["workflow"]
         == uuid.uuid5(uuid.UUID("5d2f7c1e-6a0b-4f3e-9c8d-7b1a2e4f6c90"), f"{BASE.id}:workflow")
     )
-    assert move.spec_hash == "e4c26b026d8ed4a18bd3dd9e62bc46f16e49bff1430341bedc15f063b7762a53"
+    assert move.spec_hash == "2704e6def2c1beaace9507b8a2dc41bbad7016fe21a7b271de4a041a703913e6"
 
 
 def _back(move: Move, **over: Any) -> WorkflowSnapshot:

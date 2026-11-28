@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -14,6 +14,7 @@ from daimon.adapters.cli.commands import workflows as cli
 from daimon.adapters.cli.commands.routines import run_translate
 from daimon.core.config import Settings
 from daimon.core.errors import UserFacingError
+from daimon.core.stores import workflow_runs
 from daimon.core.stores.routines import claim_due_fireable, list_routines_for_tenant
 from daimon.core.workflows import engine, service
 from daimon.core.workflows.access import Who
@@ -92,6 +93,9 @@ async def test_runs_are_listed_redriven_cancelled_and_verified(db_session: Async
     rt, out, console = _rig(world)
     failed = await world.run()
     await world.execute(await world.claim(failed.id, "a"), engine.Failed("agent", "no"))
+    async with world.sm.begin() as s:  # the CLI redrives on the real clock
+        later = datetime.now(UTC) + timedelta(days=1)
+        await workflow_runs.update_run(s, failed.id, deadline_at=later)
 
     await cli.list_runs(rt, console, world.tenant_id, None, limit=10, as_json=True)
     assert '"status": "failed"' in out.getvalue(), out.getvalue()

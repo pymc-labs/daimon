@@ -90,6 +90,7 @@ class _Admission:
     backend_revision: ConfigRevision
     channel_skills: tuple[Any, ...] = ()
     backend: Any = None
+    budget_channel_id: str | None = None
 
 
 class _Outputs:
