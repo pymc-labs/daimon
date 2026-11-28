@@ -77,6 +77,7 @@ from daimon.core.features.session_identity import DEFAULT_IDENTITY
 from daimon.core.features.snapshot import FeaturePlace, resolve_features
 from daimon.core.features.toolset import place_session
 from daimon.core.github_app_session import close_headless_app_session
+from daimon.core.lead_intake_execution import current_intake_execution
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call, sdk_agent, sdk_environment
@@ -614,6 +615,14 @@ async def run_turn_impl(
         and feature_settings.mcp_identity.names_routine
         else None
     )
+    # The fire this run belongs to, bound beside its destination: the relay signs the
+    # routine's claims only while that fire runs (`routine_execution`).
+    fire = current_intake_execution.get()
+    relay_execution = (
+        fire[1]
+        if relay_destination is not None and fire is not None and fire[0] == routine_id
+        else None
+    )
 
     async def _assemble_session() -> BetaManagedAgentsSession:
         nonlocal fragments, memory_on
@@ -733,6 +742,7 @@ async def run_turn_impl(
             relay_owner=runs_as_user if relay_routine and (routine_id or step) else None,
             relay_dm_channel=step_dm_channel if relay_routine and step else None,
             relay_destination=relay_destination,
+            relay_execution=relay_execution,
             identity=identity,
             workflow_run_id=step.workflow_run_id if step is not None else None,
             workflow_step_id=step.workflow_step_id if step is not None else None,

@@ -679,12 +679,10 @@ async def refresh_relay_vault(
     expires_at = next(iter(expiries)) if len(expiries) == 1 else None
     raw_key = metadata.get(RELAY_SESSION_METADATA_KEY)
     raw_routine = metadata.get(RELAY_ROUTINE_METADATA_KEY)
-    # A DM routine's turn: its session and routine together, with the fire it was bound to.
-    raw_execution = (
-        metadata.get(RELAY_EXECUTION_METADATA_KEY)
-        if raw_key is not None and raw_routine is not None
-        else None
-    )
+    # A routine's run keeps the fire it was bound to: a channel or thread routine's alone,
+    # a DM routine's turn with its session.
+    raw_execution = metadata.get(RELAY_EXECUTION_METADATA_KEY) if raw_routine is not None else None
+    dm_turn = raw_execution is not None and raw_key is not None
     bound = metadata.get(RELAY_AGENT_CHAT_METADATA_KEY)
     # Only a binding naming no chat session, routine or watch may name an agent chat.
     names_other = {
@@ -729,11 +727,10 @@ async def refresh_relay_vault(
                 grant=metadata.get(RELAY_GRANT_METADATA_KEY) if raw_key is not None else None,
                 agent_chat=agent_chat if rebind else bound,
                 execution=None if raw_execution is None else uuid.UUID(raw_execution),
-                revision=metadata.get(RELAY_REVISION_METADATA_KEY)
-                if raw_execution is not None
-                else None,
+                revision=metadata.get(RELAY_REVISION_METADATA_KEY) if dm_turn else None,
+                # A DM routine's turn, or a watch report's in its owner's DM (session alone).
                 dm_channel=metadata.get(RELAY_DM_CHANNEL_METADATA_KEY)
-                if raw_execution is not None
+                if dm_turn or (raw_key is not None and raw_routine is None)
                 else None,
             ),
         )

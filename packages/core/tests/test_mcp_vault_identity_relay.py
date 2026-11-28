@@ -195,8 +195,10 @@ async def test_headless_relay_credential_names_no_session(
 async def test_refresh_keeps_a_routines_signed_owner_and_destination(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    routine_id = uuid.uuid4()
-    binding = RelayBinding("Helper", routine_id=routine_id, owner="42", destination="channel:9:")
+    routine_id, execution = uuid.uuid4(), uuid.uuid4()
+    binding = RelayBinding(
+        "Helper", routine_id=routine_id, owner="42", destination="channel:9:", execution=execution
+    )
     vault, account_id, agent_id = await _relay_vault(db_session_factory, binding, RELAY)
     assert _signed(vault.by_url(RELAY))[RELAY_CLAIM]["owner"] == "42"
     await _refresh(
@@ -205,11 +207,12 @@ async def test_refresh_keeps_a_routines_signed_owner_and_destination(
     )  # fmt: skip
     for url in (RELAY, OTHER):
         claim = _signed(vault.by_url(url))[RELAY_CLAIM]
-        assert (claim["routine"], claim["owner"], claim["destination"]) == (
+        assert (claim["routine"], claim["owner"], claim["destination"], claim["execution"]) == (
             str(routine_id),
             "42",
             "channel:9:",
-        ), "kept on refresh"
+            str(execution),
+        ), "kept on refresh, with the fire the run was bound to"
 
 
 async def test_refresh_keeps_the_binding_and_adds_a_relay_attached_since(
@@ -345,3 +348,16 @@ async def test_a_chat_session_or_routine_binding_never_gains_an_agent_chat(
             agent_chat="sesn_x",
         )  # fmt: skip
         assert _signed(vault.by_url(RELAY))[RELAY_CLAIM] == before, "its binding is unchanged"
+
+
+async def test_refresh_keeps_a_dm_watch_reports_session_and_dm(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    binding = RelayBinding("Helper", uuid.uuid4(), grant="g-1", dm_channel="77")
+    vault, account_id, agent_id = await _relay_vault(db_session_factory, binding, RELAY)
+    await _refresh(
+        db_session_factory, vault, account_id, agent_id, relay_urls=(RELAY,),
+        now=NOW + dt.timedelta(minutes=20),
+    )  # fmt: skip
+    claim = _signed(vault.by_url(RELAY))[RELAY_CLAIM]
+    assert (claim["grant"], claim["dm_channel"]) == ("g-1", "77"), "kept on refresh"

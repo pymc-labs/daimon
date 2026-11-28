@@ -452,8 +452,9 @@ async def test_submitting_a_form_sends_the_keyed_answer_block_as_the_user_messag
             status=WizardStatus.SUBMITTED,
         ),
     )
+    # The progress plans guidance leads a chat turn's message; the answer block follows it.
     sent_texts = [
-        block["text"]
+        block["text"].split("</progress_plans>", 1)[-1].lstrip("\n")
         for event in sent_events
         for block in event["events"][0]["content"]
         if block.get("type") == "text"

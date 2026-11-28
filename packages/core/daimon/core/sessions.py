@@ -740,6 +740,7 @@ async def create_session(
     relay_routine_id: uuid.UUID | None = None,
     relay_owner: str | None = None,
     relay_destination: str | None = None,
+    relay_execution: uuid.UUID | None = None,
     relay_dm_routine: DmRoutineRelay | None = None,
     relay_dm_channel: str | None = None,
     github_mcp_router: bool = False,
@@ -814,9 +815,10 @@ async def create_session(
     without it the relay names no person. ``relay_routine_id`` marks a routine's run and
     ``relay_owner`` the owner it started for; the relay names that owner, not a live turn.
     ``relay_destination`` is where the routine posted when the run started
-    (`daimon.core.mcp_identity.routine_destination_key`). A workflow lane's session binds
-    its ``workflow_run_id`` with ``relay_owner`` as the run-as person and, for a private
-    step, ``relay_dm_channel`` as their DM.
+    (`daimon.core.mcp_identity.routine_destination_key`), and ``relay_execution`` the
+    fire it runs in; the relay signs the routine's claims only while that fire runs.
+    A workflow lane's session binds its ``workflow_run_id`` with ``relay_owner`` as the
+    run-as person and, for a private step, ``relay_dm_channel`` as their DM.
 
     ``budget_channel_id`` is the channel whose budget the session's spend counts
     toward (for a DM, the channel it was moved from). It is stamped apart from
@@ -1114,6 +1116,9 @@ async def create_session(
                     if relay_owner is not None and relay_routine_id is None
                     else None,
                     dm_channel=relay_dm_channel,
+                    execution=relay_execution
+                    if relay_routine_id is not None and relay_destination is not None
+                    else None,
                 ),
                 now=dt.datetime.now(dt.UTC),
                 scope=scope,

@@ -560,7 +560,7 @@ class ProgressPlansSettings(BaseModel):
     """
 
     mode: CascadeMode = Field(
-        default=CascadeMode.OFF,
+        default=CascadeMode.ON,
         description=(
             "Deprecated: use DAIMON_FEATURES__PROGRESS_PLANS. "
             'Deployment default for progress plans on the "Working on it…" card (Discord, '
@@ -2571,6 +2571,12 @@ class McpIdentitySettings(BaseModel):
     def names_dm_routine(self) -> bool:
         """Whether any server is sent a DM routine's claims (`dm_routine_claims`)."""
         return any(server.dm_routine_claims for server in self.servers)
+
+    @property
+    def names_dm_watch_report(self) -> bool:
+        """Whether any server is sent a DM watch report's claims: one with both
+        `dm_routine_claims` and `wake_claims`."""
+        return any(server.dm_routine_claims and server.wake_claims for server in self.servers)
 
     @property
     def names_agent_chat_requester(self) -> bool:

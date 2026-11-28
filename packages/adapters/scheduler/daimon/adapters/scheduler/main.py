@@ -822,18 +822,22 @@ def _log_refresh_failure(
     *,
     expires_at: datetime | None,
     now: datetime,
+    token_in_use: bool,
 ) -> None:
     """Log a failed refresh as `<prefix>.deferred` (WARNING) or `<prefix>.failed` (ERROR).
 
     Call it inside the `except` block, after `_record_refresh_failure`, so the
     traceback is attached and the failure count includes this failure. It defers
     only a transient mint outage, only while the session is inside its retry
-    budget and its token is not about to expire. Used by the mapped-session
-    loop (`scheduler.github_app_session_refresh`) and the MCP loop
+    budget and, when something can use its token (``token_in_use``), the token
+    is not about to expire. Used by the mapped-session loop
+    (`scheduler.github_app_session_refresh`) and the MCP loop
     (`scheduler.github_mcp_app_session_refresh`).
     """
     failures = _app_refresh_failures[session_id][0]
-    token_urgent = expires_at is not None and expires_at <= now + _REFRESH_URGENT_MARGIN
+    token_urgent = (
+        token_in_use and expires_at is not None and expires_at <= now + _REFRESH_URGENT_MARGIN
+    )
     if (
         isinstance(error, GitHubTokenMintUnavailable)
         and _is_transient_cause(error)
@@ -916,16 +920,29 @@ async def _refresh_github_app_sessions(
     fernet: MultiFernet | None,
     stopping: Callable[[], bool] = _never_stopping,
 ) -> None:
+    """Keep the GitHub token of each running turn fresh, and narrow live tokens on access loss.
+
+    A mapped session is only used by a turn, and a turn renews a token that is
+    missing, revoked or 40 minutes old when it starts (`prepare_session_for_turn`).
+    So an idle session's token is left to lapse: renewing every session ever
+    created made one pass outgrow the token lifetime. An idle session that still
+    holds an unexpired token keeps its access check. The clock is read per session
+    because a pass can be long.
+    """
     if fernet is None:
         return
-    now = datetime.now(UTC)
     async with sm() as session:
         live = await list_live_app_sessions(session)
     for candidate in live:
         if stopping():
             return
+        now = datetime.now(UTC)
         session_id = candidate.mapping.ma_session_id
         if session_id in _app_refresh_retired:
+            continue
+        active_turn = candidate.mapping.active_turn_message_id is not None
+        holds_live_token = candidate.last_expires_at is not None and candidate.last_expires_at > now
+        if not active_turn and not holds_live_token:
             continue
         due_for_expiry = candidate.expires_at is None or candidate.expires_at <= now + timedelta(
             minutes=15
@@ -1005,7 +1022,11 @@ async def _refresh_github_app_sessions(
                     changed_token = await session_token_needs_rotation(
                         session, session_id=session_id
                     )
-                if not due_for_expiry and not narrowed and not changed_token:
+                # Read inside the fence: a turn that just started may have renewed it.
+                renew = active_turn and (
+                    item.expires_at is None or item.expires_at <= now + timedelta(minutes=15)
+                )
+                if not renew and not narrowed and not changed_token:
                     _last_app_access_checks[session_id] = now
                     _app_refresh_failures.pop(session_id, None)
                     continue
@@ -1054,12 +1075,16 @@ async def _refresh_github_app_sessions(
                 error,
                 expires_at=candidate.expires_at,
                 now=now,
+                token_in_use=active_turn,
             )
     async with sm() as session:
-        mcp_live = await list_live_mcp_app_sessions(session, now=now, include_expired=True)
+        mcp_live = await list_live_mcp_app_sessions(
+            session, now=datetime.now(UTC), include_expired=True
+        )
     for candidate in mcp_live:
         if stopping():
             return
+        now = datetime.now(UTC)
         try:
             async with session_mutation_fence(sm, candidate.session_id, check=False):
                 # Continue and close use this fence too. Re-read after acquiring it.
@@ -1179,13 +1204,18 @@ async def _refresh_github_app_sessions(
                 error,
                 expires_at=candidate.expires_at,
                 now=now,
+                # An MCP session renews only while running or just after a
+                # start, when a client can still continue it.
+                token_in_use=True,
             )
     # Drop state for sessions that died or closed since the last sweep.
     async with sm() as session:
         tracked = {item.mapping.ma_session_id for item in await list_live_app_sessions(session)}
         tracked.update(
             item.session_id
-            for item in await list_live_mcp_app_sessions(session, now=now, include_expired=True)
+            for item in await list_live_mcp_app_sessions(
+                session, now=datetime.now(UTC), include_expired=True
+            )
         )
     for state in (
         _last_app_access_checks,

@@ -190,14 +190,15 @@ with no new message it can recognise:
 
 | Turn | Signed as | Setting |
 | --- | --- | --- |
-| A routine that posts to a channel or thread | that routine and room | `routine_claims` |
+| A routine that posts to a channel or thread, while its run is live | that routine, its room and its owner | `routine_claims` |
 | A Managed Agents routine that posts to its owner's DM, while its run is live | that routine, the owner and their DM, room `dm` | `routine_claims` and `dm_routine_claims` |
-| A timer, watch report, finished long job, hand-off or resumed form that runs in its own thread | its reason, read as a routine posting there | `wake_claims` |
+| A timer, watch report, finished long job, hand-off or resumed form that runs in its own thread, or a watch report in the new thread it opened | its reason, read as a routine posting there | `wake_claims` |
+| A watch report to its owner's DM, while it runs | its reason, the owner and their DM, room `dm` | `wake_claims` and `dm_routine_claims` |
 | A person's turn, on each call while it runs | `wake: turn`, beside the person and message | `wake_claims` |
 
 Other turns sign none of these claims, so the settings do not change what they read.
-These include a routine with no destination or on OpenAI or Gemini, a timer in a DM or
-channel, and a watch report to a DM or a new thread. Watch polls, helpers, agent chat, `daimon run` and checkpoints
+These include a routine with no destination or on OpenAI or Gemini, and a timer in a DM
+or channel. Watch polls, helpers, agent chat, `daimon run` and checkpoints
 are the same.
 
 ### A routine in its owner's DM
