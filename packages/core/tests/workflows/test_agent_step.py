@@ -444,6 +444,10 @@ async def test_daimons_own_writes_follow_the_unattended_decision_and_its_reads_s
     steps = {
         "trusted allow": (decide_as("allow"), True),
         "exposed allow": (decide_as("allow", exposed=True), False),
+        # `policy` counts as no write at publish (`node_writes`): untrusted data steering it
+        # leaves Daimon's own writes as refused as `allow`'s.
+        "trusted policy": (decide_as("policy"), True),
+        "exposed policy": (decide_as("policy", exposed=True), False),
         "refuse": (decide_as("refuse"), False),
         "test run": (decide_as("allow", test=True), False),
     }
