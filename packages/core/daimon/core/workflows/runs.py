@@ -74,6 +74,9 @@ BLOCKED_RECHECK: Final = timedelta(minutes=15)
 BLOCKED_FOR: Final = timedelta(days=1)
 _TERMINAL: Final = frozenset({"succeeded", "failed", "skipped", "cancelled"})
 _MESSAGE_LIMIT: Final = 500
+#: How long a webhook's dedupe stub outlives its payload: senders redeliver within days.
+REPLAY_WINDOW: Final = timedelta(days=30)
+_SWEEP_BATCH: Final = 500
 #: Runs a key may queue behind its active ones.
 QUEUE_LIMIT: Final = 100
 #: How many runs deep a chain of event or call starts may go.
@@ -1900,19 +1903,28 @@ async def sweep(
     now: datetime,
     retention_days: Callable[[uuid.UUID], Awaitable[int]],
 ) -> None:
-    """Delete trigger events past the payload retention and finished runs past their
-    workspace's retention.
+    """Delete trigger events past the payload retention (dedupe stubs `REPLAY_WINDOW`
+    later) and finished runs past their workspace's retention, in batches until none are
+    left.
 
     `retention_days(tenant_id)` awaits to the workspace's retention in days.
     """
     async with sm.begin() as session:
         before = now - timedelta(days=settings.workflows.payload_retention_days)
-        await workflow_triggers.delete_events_before(session, before=before)
+        await workflow_triggers.delete_events_before(
+            session, before=before, stubs_before=before - REPLAY_WINDOW
+        )
         tenant_ids = await workflow_runs.tenants_with_finished_runs(session)
     for tenant_id in tenant_ids:
         days = await retention_days(tenant_id)
-        async with sm.begin() as session:
-            old = await workflow_runs.finished_runs_before(
-                session, tenant_id=tenant_id, before=now - timedelta(days=days), limit=500
-            )
-            await workflow_runs.delete_runs(session, old)
+        while True:
+            async with sm.begin() as session:
+                old = await workflow_runs.finished_runs_before(
+                    session,
+                    tenant_id=tenant_id,
+                    before=now - timedelta(days=days),
+                    limit=_SWEEP_BATCH,
+                )
+                await workflow_runs.delete_runs(session, old)
+            if len(old) < _SWEEP_BATCH:
+                break

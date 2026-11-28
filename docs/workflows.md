@@ -87,7 +87,8 @@ A schedule fires each slot once. A missed slot is skipped, unless the trigger
 catches up with one run.
 
 A webhook trigger checks the sender's signature: Standard Webhooks, GitHub,
-Stripe, Slack or a bearer token. Each delivery starts at most one run. The trigger
+Stripe, Slack or a bearer token. Each delivery starts at most one run. A repeat is
+recognised for 30 days after its payload is deleted. The trigger
 has a test URL that captures one delivery as a test run.
 
 ## Asks in chat

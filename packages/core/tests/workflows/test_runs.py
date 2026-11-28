@@ -34,7 +34,7 @@ from daimon.testing.workflows import NOW, World, make_settings, make_world
 from mux.contracts.config import BackendConfig
 from mux.profiles import selectable_models
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -693,3 +693,20 @@ async def test_only_the_run_as_person_or_an_admin_retries_a_private_runs_unknown
         await service.decide(as_owner, run.id, "retry")
     admin = Env(world.sm, world.settings, Who(world.tenant_id, world.owner, admin=True), NOW)
     assert (await service.decide(admin, run.id, "retry")).status == "running"
+
+
+async def test_the_sweep_deletes_every_expired_run_in_batches(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A workspace with more expired runs than one batch loses all of them in one pass."""
+    world = await make_world(db_session, INLINE, "b")
+    for _ in range(3):
+        await world.run(inputs={"n": 3})
+    monkeypatch.setattr(runs, "_SWEEP_BATCH", 2)
+
+    async def days(_: uuid.UUID) -> int:
+        return 1
+
+    await runs.sweep(world.sm, world.settings, now=NOW + timedelta(days=2), retention_days=days)
+    left = await db_session.scalar(select(func.count()).select_from(WorkflowRun))
+    assert left == 0, f"every run past retention goes: {left} left"

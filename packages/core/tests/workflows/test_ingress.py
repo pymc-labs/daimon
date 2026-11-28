@@ -248,13 +248,18 @@ async def test_a_replayed_github_body_is_a_duplicate_even_past_retention(
     first = await hook.post(**sent(body, "d1"))
     assert first.status == 202, first
     async with hook.sm.begin() as s:
-        await store.delete_events_before(s, before=NOW + timedelta(days=365))
+        await store.delete_events_before(s, before=NOW + timedelta(days=365), stubs_before=NOW)
     kept = await db_session.scalar(select(WorkflowTriggerEvent))
     assert kept is not None and kept.payload is None, "retention clears the payload"
     again = await hook.post(**sent(body, "d2"))
     assert again.body.get("duplicate") is True, f"a replay is a duplicate: {again}"
     other = await hook.post(**sent(json.dumps(GOOD | {"x": 1}).encode(), "d3"))
     assert other.status == 202, f"a new body is a new delivery: {other}"
+    async with hook.sm.begin() as s:
+        later = NOW + timedelta(days=365)
+        await store.delete_events_before(s, before=later, stubs_before=later)
+    left = await db_session.scalar(select(func.count()).select_from(WorkflowTriggerEvent))
+    assert left == 0, f"a stub goes once the replay window passes: {left} left"
 
 
 async def test_a_repeated_bearer_body_starts_each_time(db_session: AsyncSession) -> None:

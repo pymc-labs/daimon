@@ -545,16 +545,21 @@ async def mark_event(
     )
 
 
-async def delete_events_before(session: AsyncSession, *, before: datetime) -> int:
+async def delete_events_before(
+    session: AsyncSession, *, before: datetime, stubs_before: datetime
+) -> int:
     """The deliveries log keeps the payload retention's days. Older events go, but a first
-    delivery with a dedupe key stays, cleared, so a replay of it stays a duplicate."""
+    delivery with a dedupe key stays, cleared, until `stubs_before`, so a replay of it
+    within the sender's redelivery window stays a duplicate."""
     old = WorkflowTriggerEvent.received_at < before
     keyed = (WorkflowTriggerEvent.status != "duplicate") & (
         WorkflowTriggerEvent.delivery_id.is_not(None)
         | WorkflowTriggerEvent.payload_hash.is_not(None)
     )
     gone = await session.scalars(
-        delete(WorkflowTriggerEvent).where(old, ~keyed).returning(WorkflowTriggerEvent.id)
+        delete(WorkflowTriggerEvent)
+        .where(old, ~keyed | (WorkflowTriggerEvent.received_at < stubs_before))
+        .returning(WorkflowTriggerEvent.id)
     )
     await session.execute(
         update(WorkflowTriggerEvent)
