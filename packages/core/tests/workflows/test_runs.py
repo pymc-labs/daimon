@@ -624,3 +624,19 @@ async def test_a_private_steps_result_reaches_only_the_person_it_runs_as(
         fork = await world.run(run_as_account_id=runner, fork_of=(run.id, "post"))
         steps = await world.steps(fork.id)
         assert (steps["p"].output if "p" in steps else None) == copied, f"fork as {runner}"
+
+
+async def test_only_the_run_as_person_or_an_admin_redrives_a_private_run(
+    db_session: AsyncSession,
+) -> None:
+    """Its steps read that person's personal memory; the workflow's owner can't restart it."""
+    world = await make_world(db_session, PRIVATE_FLOW, "p")
+    person = (await _runner(db_session, world)).who.account_id
+    run = await world.run(run_as_account_id=person)
+    await world.execute(await world.claim(run.id, "p"), engine.Failed("agent", "no"))
+    assert (await world.get(run.id)).status == "failed"
+    as_owner = Env(world.sm, world.settings, Who(world.tenant_id, world.owner), NOW)
+    with pytest.raises(service.Forbidden):
+        await service.redrive(as_owner, run.id)
+    admin = Env(world.sm, world.settings, Who(world.tenant_id, world.owner, admin=True), NOW)
+    assert (await service.redrive(admin, run.id)).status == "running"

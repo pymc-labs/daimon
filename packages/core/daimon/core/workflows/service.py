@@ -1102,8 +1102,18 @@ async def cancel(env: Env, run_id: uuid.UUID) -> run_views.RunSummary:
     return await _fresh(env, run.id)
 
 
+async def _as_run_as(env: Env, run: RunRow) -> None:
+    """A run with private steps goes on only for the person it runs as, or an admin: its
+    steps read that person's personal memory."""
+    async with env.sm() as session:
+        hidden = await run_views.hides_output(session, run, env.who.account_id)
+    if hidden and not env.who.admin:
+        raise Forbidden("Only the person this run runs as, or an admin, can restart it.")
+
+
 async def redrive(env: Env, run_id: uuid.UUID) -> run_views.RunSummary:
     run, _, _ = await _control(env, run_id)
+    await _as_run_as(env, run)
     result = await runs.redrive(
         env.sm, env.settings, run_id=run.id, account_id=env.who.account_id, now=env.now
     )
@@ -1124,6 +1134,8 @@ async def decide(
     if decision == "skip" and not rights.edit:
         # A skip's output feeds the steps after it: only someone who can edit writes it.
         raise Forbidden("Only the owner or an editor can skip a step with an output.")
+    if decision == "retry":
+        await _as_run_as(env, run)
     async with env.sm() as session:
         steps = await runs_store.list_steps(session, run.id)
     unknown = next((s for s in steps if s.status == "unknown"), None)
