@@ -623,7 +623,8 @@ async def test_picker_offers_every_permission_level_and_counts_hidden(
     assert [choices[i]["data-max-access"] for i in (1, 2, 3, 4, 5)] == ["write"] * 5
     assert choices[201]["data-installation"] == "78"
     assert "hidden because your GitHub account" not in page
-    assert "Not listed?" in page and "Open GitHub setup" in page
+    assert "Repo in another account or org?" in page and "Install the app there" in page
+    assert "Only accounts and orgs where the Daimon GitHub App is installed are listed." in page
     # The owner sheet only offers repos under that owner.
     assert "Everything in alpha</button>" not in page
     assert "Everything in beta</button>" not in page

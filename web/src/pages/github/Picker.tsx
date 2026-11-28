@@ -109,7 +109,7 @@ export function Picker({ view, step }: { view: WorkspacePickerView; step: Step }
         onRetry={() => step.run(() => connectApi.view(view.state))}
       />
       {view.install_url && (
-        <p className="mt-4 flex items-center gap-2 text-sm text-muted-foreground">Missing a repo?<a href={view.install_url} className="text-link hover:underline">Open GitHub setup</a></p>
+        <p className="mt-4 flex items-center gap-2 text-sm text-muted-foreground">Missing a repo or another account?<a href={view.install_url} className="text-link hover:underline">Install the app there</a></p>
       )}
       <Actions>
         <Button variant="outline" size="lg" disabled={step.pending} onClick={() => step.run(() => connectApi.cancel(view.state))}>Cancel</Button>

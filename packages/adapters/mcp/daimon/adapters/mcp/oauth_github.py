@@ -1155,12 +1155,14 @@ def _agent_editor_page(view: AgentEditorView) -> Response:
         '<button id="close-repo-picker" class="gh-dialog-close" type="button" '
         f'aria-label="Close add repos">{icon("x")}</button></div>'
         '<div id="repo-owner-choice" class="gh-owner-choice">'
-        f"<p>{esc(agent_name)} can read and change the repos you add.</p>"
+        f"<p>{esc(agent_name)} can read and change the repos you add. Only accounts and "
+        "orgs where the Daimon GitHub App is installed are listed.</p>"
         + "".join(owner_choice_rows)
-        + f'<p class="gh-dialog-link gh-not-listed"><span>{icon("info")}Not listed?</span>'
+        + f'<p class="gh-dialog-link gh-not-listed"><span>{icon("info")}'
+        "Repo in another account or org?</span>"
         '<a class="gh-add-button" href="'
         + esc(view.install_url, quote=True)
-        + '">Open GitHub setup</a></p>'
+        + '">Install the app there</a></p>'
         '<div class="gh-dialog-footer" hidden><span id="owner-picker-count">0 selected</span>'
         '<button id="owner-clear-selection" class="gh-link-button" '
         'type="button">Clear selection</button>'
@@ -1514,7 +1516,7 @@ def _confirmation_page(view: WorkspacePickerView) -> Response:
         [
             '<p class="gh-empty" hidden>No repos match this search.</p></div>'
             + '<p class="gh-dialog-link">Missing a repo? Add it to the Daimon GitHub App '
-            "on GitHub."
+            "on GitHub, or install the app on the account that owns it."
             + (
                 f' <a href="{html.escape(view.install_url, quote=True)}">Open GitHub setup</a>'
                 if view.install_url

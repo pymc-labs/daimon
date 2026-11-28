@@ -1291,7 +1291,12 @@ class GithubAppSettings(BaseModel):
 
     app_id: str | None = Field(default=None, description="GitHub App ID for agent-scoped access.")
     app_slug: str | None = Field(
-        default=None, description="GitHub App URL slug used for installation links."
+        default=None,
+        description=(
+            "The App's URL name, the <slug> in https://github.com/apps/<slug>, not its "
+            "display name. Install links use it, so a wrong value sends people to a "
+            "GitHub 404."
+        ),
     )
     private_key: SecretStr | None = Field(
         default=None, description="GitHub App private key as PEM or base64-encoded PEM."
