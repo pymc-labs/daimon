@@ -57,6 +57,7 @@ from daimon.core.mcp_identity import (
     routine_revision,
     stamp_parsed,
     watch_conversation,
+    workflow_revision,
 )
 from daimon.core.mcp_server_url import same_ascii_mcp_url
 from daimon.core.ops_catalog import OpsCode
@@ -454,13 +455,14 @@ async def _workflow_step_run(
 def _workflow_claims(
     step: BoundStep, platform: str, workspace: str | None
 ) -> dict[str, str | None]:
-    """An agent step's workflow claims: its id, name and, while it is active, the revision a
-    server's approval is bound to (`routine_revision` of the step's facts)."""
+    """An agent step's workflow claims: its id, name and, while it is active and the run is
+    live, the revision a server's approval is bound to (`workflow_revision`)."""
     signed = f"{platform}:{workspace}" if workspace else None
+    flow = step.workflow
     return {
-        "workflow": str(step.workflow.id),
-        "workflow_rev": routine_revision(step.subject, workspace=signed)
-        if step.workflow.status == "active"
+        "workflow": str(flow.id),
+        "workflow_rev": workflow_revision(flow.tenant_id, flow.id, step.version, workspace=signed)
+        if flow.status == "active" and step.version is not None
         else None,
         "workflow_name": step.workflow.name,
     }

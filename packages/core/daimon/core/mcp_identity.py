@@ -639,6 +639,21 @@ def routine_revision(row: RoutineFacts, *, workspace: str | None) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def workflow_revision(
+    tenant_id: uuid.UUID, workflow_id: uuid.UUID, version: int, *, workspace: str | None
+) -> str:
+    """What a server's approval of a workflow is bound to, signed as `workflow_rev`: the
+    SHA-256 hex of the tenant, the workspace as signed in `ws`, the workflow and its
+    published version. Every step and every person running it sign the same; a new
+    version changes it."""
+    text = json.dumps(
+        {"v": 1, "tenant": str(tenant_id), "ws": workspace or "", "workflow": str(workflow_id),
+         "version": version},
+        sort_keys=True, separators=(",", ":"),
+    )  # fmt: skip
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
 def sign_identity(
     claims: IdentityClaims,
     *,

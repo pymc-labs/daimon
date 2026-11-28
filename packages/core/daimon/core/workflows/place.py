@@ -125,6 +125,8 @@ class BoundStep:
     at: str | None
     #: Whether the step reads its run-as person's personal memory (`memory: personal`).
     personal: bool = False
+    #: The published version a live run runs; None for a test run, which no approval covers.
+    version: int | None = None
 
 
 async def bound_step(
@@ -170,4 +172,5 @@ async def bound_step(
         platform=tenant.platform,
         origin=run.origin,
     )
-    return BoundStep(flow, subject, node.at, node.memory == "personal")
+    version = run.version if run.mode == "live" else None
+    return BoundStep(flow, subject, node.at, node.memory == "personal", version)
