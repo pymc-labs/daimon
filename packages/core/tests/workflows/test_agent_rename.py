@@ -69,7 +69,7 @@ async def test_rename_agent_references_when_workflows_name_it_then_specs_tools_a
     assert moved.agent_tools == {"aria": ["a/b"]}, "the version's tools are keyed by the new name"
     assert moved.spec_hash != "h", "the hash covers the rewritten spec"
     pinned = node_hash(parse_spec(moved.spec).nodes["a"])
-    assert [g.pins["node_hash"] for g in grants] == [pinned], "the grant follows its node"
+    assert [(g.pins or {})["node_hash"] for g in grants] == [pinned], "the grant follows its node"
 
     async with other.sm() as s:
         untouched = await workflows.get_workflow(
