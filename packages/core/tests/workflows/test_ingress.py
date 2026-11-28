@@ -215,7 +215,7 @@ async def test_unsigned_requests_cannot_use_up_the_senders_allowance(
 ) -> None:
     hook = await make_hook(db_session)
     cfg = settings(webhook_per_minute=2)
-    stranger = {"headers": {"content-type": "application/json"}, "body": b"{}"}
+    stranger: dict[str, Any] = {"headers": {"content-type": "application/json"}, "body": b"{}"}
     for _ in range(5):
         assert (await hook.post(cfg, **stranger)).status == 401, "refused"
     kept = await db_session.scalar(select(func.count(WorkflowTriggerEvent.id)))
