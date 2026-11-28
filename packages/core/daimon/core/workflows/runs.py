@@ -77,6 +77,7 @@ _MESSAGE_LIMIT: Final = 500
 #: How long a webhook's dedupe stub outlives its payload: senders redeliver within days.
 REPLAY_WINDOW: Final = timedelta(days=30)
 _SWEEP_BATCH: Final = 500
+_ASK_STEP_CANCELLED: Final = "Closed: this step was cancelled."
 #: Runs a key may queue behind its active ones.
 QUEUE_LIMIT: Final = 100
 #: How many runs deep a chain of event or call starts may go.
@@ -456,13 +457,17 @@ async def _apply(
     if loaded.spec.card is not None:
         card = board.render_card(loaded.spec, [_view(r) for r in rows], loaded.facts, now=now)
         await workflow_runs.update_run(session, run.id, card=card)
+    end = transition.end
     for r in rows:
         if (r.node_id, r.visit) in stale:
             # A cancelled attempt is over: a later claim never reattaches to it.
             await workflow_runs.finish_attempt(session, step_id=r.id, status="abandoned", now=now)
+            if end is None:  # a run's end closes its asks itself, saying how it ended
+                await _close_asks(session, [r.id], now=now)
             if isinstance(loaded.spec.nodes.get(r.node_id), ForEachNode):
-                events += await _cancel_items(session, r, now=now, reason="parent_cancelled")
-    end = transition.end
+                events += await _cancel_items(
+                    session, r, now=now, reason="parent_cancelled", close_asks=end is None
+                )
     if end is not None and end.state and run.mode == "live" and end.status == "succeeded":
         saved = await workflows.merge_state(
             session, tenant_id=run.tenant_id, workflow_id=run.workflow_id, patch=end.state, now=now
@@ -540,13 +545,33 @@ def _ended(status: str, now: datetime) -> StepWrite:
     return {"status": status, "lease_owner": None, "lease_expires_at": None, "ended_at": now}
 
 
+async def _close_asks(
+    session: AsyncSession, step_ids: Sequence[uuid.UUID], *, now: datetime
+) -> None:
+    """A cancelled step's open waits close, and its asks' posts say so: an answer to one
+    would be refused, and an open wait would come due on every tick."""
+    for step_id in step_ids:
+        closed = await workflow_runs.close_waits(
+            session, status="cancelled", now=now, step_id=step_id
+        )
+        for wait in (await workflow_waits.waits_by_id(session, closed)).values():
+            await asks.queue_updates(session, wait, _ASK_STEP_CANCELLED)
+
+
 async def _cancel_items(
-    session: AsyncSession, parent: StepRow, *, now: datetime, reason: str
+    session: AsyncSession,
+    parent: StepRow,
+    *,
+    now: datetime,
+    reason: str,
+    close_asks: bool = True,
 ) -> list[Event]:
     items = await workflow_runs.list_items(session, run_id=parent.run_id, parent_step_id=parent.id)
     going = [i for i in items if i.status in engine.ACTIVE]
     if not going:
         return []
+    if close_asks:
+        await _close_asks(session, [i.id for i in going], now=now)
     await workflow_runs.save_items(
         session,
         parent=parent,

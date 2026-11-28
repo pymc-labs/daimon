@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 from typing import Any
 
-from daimon.core.stores import workflow_run_events, workflow_runs
+from daimon.core.stores import workflow_run_events, workflow_runs, workflow_waits
 from daimon.core.workflows import engine, run_views, runs
 from daimon.core.workflows.call_step import WorkflowStepExecutor
 from daimon.core.workflows.preflight import Refusal
@@ -212,3 +213,25 @@ async def test_calls_stop_past_the_depth_limit(db_session: AsyncSession) -> None
     await runs.execute(world.sm, world.settings, {"workflow": executor}, claimed, clock=lambda: NOW)
     step = (await world.steps(run.id))["call"]
     assert step.status == "failed" and "3 deep" in (step.error_message or ""), f"{step}"
+
+
+async def test_items_cancelled_by_too_many_failures_close_their_asks(
+    db_session: AsyncSession,
+) -> None:
+    """The For each fails over to `on_error` and the run goes on; an item that was waiting
+    on an ask closes it, so no one answers it and it never comes due."""
+    nodes = each() | {"after": {"kind": "agent", "instructions": "Tidy up", "next": "f"}}
+    nodes["each"] |= {"on_error": "after"}
+    world = await make_world(db_session, nodes, "each")
+    run = await world.run(inputs={"names": NAMES})
+    claimed = await world.claim(run.id, "each[0]")
+
+    async def ask(work: runs.StepWork) -> runs.Park:
+        return runs.Park("approval", addressees=("owner",), expires_at=NOW + timedelta(days=1))
+
+    await runs.execute(world.sm, world.settings, {"agent": ask}, claimed, clock=lambda: NOW)
+    await world.execute(await world.claim(run.id, "each[1]"), engine.Failed("agent", "no"))
+    assert (await world.get(run.id)).status == "running", "the run goes on past the For each"
+    async with world.sm() as s:
+        asked = await workflow_waits.waits_of_step(s, claimed.step.id)
+    assert [w.status for w in asked] == ["cancelled"], f"the item's ask closes: {asked}"
