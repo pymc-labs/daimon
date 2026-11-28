@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from daimon.adapters.scheduler.workflows import WorkflowEngine, run_once
+from daimon.adapters.scheduler.workflows.loops import polls_step
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.stores import tenants, workflow_runs, workflows
 from daimon.core.stores.workflow_run_events import list_events
@@ -179,7 +180,7 @@ async def test_a_crashing_poll_does_not_stop_the_other_loops(db_session: AsyncSe
     loops = WorkflowEngine(
         sm, settings, {"agent": agent}, owner="w1", clock=lambda: NOW, poll_client=client
     )
-    await run_once(loops)
+    await polls_step(loops)  # crashes inside its step boundary
     await run_once(loops)
     async with sm() as session:
         steps = {s.node_id: s.status for s in await workflow_runs.list_steps(session, run_id)}
