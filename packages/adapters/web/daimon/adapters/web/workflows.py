@@ -12,7 +12,7 @@ import asyncio
 import functools
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import AsyncExitStack, asynccontextmanager, suppress
+from contextlib import suppress
 from typing import Annotated, Any, Literal
 from urllib.parse import quote
 
@@ -26,6 +26,7 @@ from daimon.adapters.web.chat_json import agent_json
 from daimon.adapters.web.directory import chattable
 from daimon.adapters.web.faces import avatars_of
 from daimon.adapters.web.routines import reachable_channels_of
+from daimon.adapters.web.run_wakeups import RunWakeups
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.channel_audience import channels_with_outsiders
 from daimon.core.routine_files import read_file
@@ -45,7 +46,6 @@ from daimon.core.workflows import (
 )
 from daimon.core.workflows.access import Who
 from daimon.core.workflows.catalog import tenant_skills
-from daimon.core.workflows.runs import run_channel
 from daimon.core.workflows.service import Env, WorkflowError
 from daimon.core.workflows.taint import tool_facts
 from daimon.core.workflows.validate import Grant, Validation
@@ -53,7 +53,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncEngine
 
 Viewer = Annotated[WebCaller, Depends(requires("workflows.view"))]
 Member = Annotated[WebCaller, Depends(requires("workflows.run"))]
@@ -293,33 +292,12 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
             headers={"Content-Disposition": disposition, "X-Content-Type-Options": "nosniff"},
         )
 
-    @asynccontextmanager
-    async def wakeups(tenant_id: uuid.UUID, run_id: uuid.UUID) -> AsyncIterator[asyncio.Event]:
-        """Set when the run's ledger changes; stays quiet where LISTEN is not possible."""
-        woke = asyncio.Event()
-        engine = runtime.sessionmaker.kw.get("bind")
-
-        def on_notice(_conn: object, _pid: int, _channel: str, payload: str) -> None:
-            if payload == str(run_id):
-                woke.set()
-
-        async with AsyncExitStack() as stack:
-            try:
-                if isinstance(engine, AsyncEngine):
-                    conn = await stack.enter_async_context(engine.connect())
-                    raw = (await conn.get_raw_connection()).driver_connection
-                    if raw is not None:
-                        channel = run_channel(tenant_id)
-                        await raw.add_listener(channel, on_notice)
-                        stack.push_async_callback(raw.remove_listener, channel, on_notice)
-            except _LISTEN_ERRORS:
-                pass
-            yield woke
+    wakeups = RunWakeups(runtime.sessionmaker.kw.get("bind"))
 
     async def frames(
         env: Env, run_id: uuid.UUID, after: int, first: list[run_views.RunEvent], ended: bool
     ) -> AsyncIterator[str]:
-        async with wakeups(env.who.tenant_id, run_id) as woke:
+        async with wakeups.watch(env.who.tenant_id, run_id) as woke:
             quiet = 0
             events = first
             while True:
@@ -344,6 +322,8 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
     async def stream(run_id: uuid.UUID, request: Request, caller: Viewer) -> StreamingResponse:  # pyright: ignore[reportUnusedFunction]
         """The ledger after `Last-Event-ID` (a sequence number), then live until the run ends."""
         env = await env_of(caller)
+        if wakeups.full:
+            raise HTTPException(status_code=429, detail="Too many open run pages.")
         raw = request.headers.get("last-event-id", "0")
         after = int(raw) if raw.isdigit() else 0
         first, ended = await service.run_events(env, run_id, after)
