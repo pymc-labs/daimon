@@ -102,7 +102,7 @@ export function ReviewSections({ r }: { r: Review }) {
 export function ReviewBody({ wf, draft, note, setNote }: { wf: Workflow; draft: Draft; note: string; setNote: (s: string) => void }) {
   const { data: catalog } = useCatalog()
   const live = wf.live_version ? wf.spec : null
-  const r = useMemo(() => reviewDiff(live, draft.spec, { channel: (id) => `#${catalog?.channels.find((c) => c.id === id)?.name ?? id}` }), [live, draft.spec, catalog])
+  const r = useMemo(() => reviewDiff(live, draft.spec, { catalog }), [live, draft.spec, catalog])
   const grants = draft.new_grants
   const errors = draft.validation.errors
   const next = (wf.live_version ?? 0) + 1

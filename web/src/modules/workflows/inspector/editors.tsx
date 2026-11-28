@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils"
 import { fileRefs, finishDeliver, setAnswer, titleOf, toolWrites, upstreamRefs } from "../spec"
 import type { AnswerShape, AskWhere, Node } from "../types"
 import { approverLabel, KIND } from "../kinds"
+import { ANSWER, asOptions, BUILTINS, NETWORK, NOWHERE, NOWHERE_LABEL, OUTCOME, placeOptions, SESSION, WHERE, WRITES } from "../options"
 import { OutputTable } from "./OutputTable"
 import { AddButton, Field, Pick, RemoveButton, RouteRows, Section, Segmented, TargetSelect, type EditorProps } from "./parts"
 import { useLocal } from "./useLocal"
@@ -76,17 +77,6 @@ const setRoute = (x: Node, name: string, to: string) => {
   x.routes![name] = typeof r === "string" ? to : { ...r, to }
 }
 
-const NOWHERE = "none"
-/** Where a step posts or works: its home, where the run started, a channel or thread, and (for a post) people. */
-function placeOptions(catalog: EditorProps["catalog"], current: string | undefined, people: boolean) {
-  const places = [
-    { value: "home", label: "Home channel" }, { value: "origin", label: "Where the run started" },
-    ...(people ? [{ value: "owner", label: "Owner" }, { value: "run_as", label: "Person it runs as" }] : []),
-    ...(catalog?.channels ?? []).map((c) => ({ value: c.id, label: `#${c.name}` })),
-  ]
-  return !current || places.some((o) => o.value === current) ? places : [...places, { value: current, label: current }]
-}
-
 export function AgentEditor(p: EditorProps) {
   const { n, set, ro, catalog } = p
   const key = n.agent ?? p.spec.defaults?.agent ?? "daimon"
@@ -97,9 +87,9 @@ export function AgentEditor(p: EditorProps) {
         <div className="space-y-3">
           <Field label="Agent"><Pick value={key} ro={ro} onChange={(v) => set((x) => { x.agent = v })} options={(catalog?.agents ?? []).map((a) => ({ value: a.key, label: a.name }))} /></Field>
           <Field label="Works in"><Pick value={n.at ?? NOWHERE} ro={ro || n.memory === "personal"} onChange={(v) => set((x) => { x.at = v === NOWHERE ? undefined : v })}
-            options={[{ value: NOWHERE, label: "Nowhere in particular" }, ...placeOptions(catalog, n.at, false)]} /></Field>
+            options={[{ value: NOWHERE, label: NOWHERE_LABEL }, ...placeOptions(catalog, n.at, false)]} /></Field>
           <Field label="Personal memory"><Switch checked={n.memory === "personal"} disabled={ro} onCheckedChange={(v) => set((x) => { x.memory = v ? "personal" : undefined; if (v) x.at = undefined })} /></Field>
-          <Field label="Session"><Pick value={n.session ?? "main"} ro={ro} onChange={(v) => set((x) => { x.session = v === "main" ? undefined : v })} options={[{ value: "main", label: "Main lane" }, { value: "fresh", label: "Fresh" }]} /></Field>
+          <Field label="Session"><Pick value={n.session ?? "main"} ro={ro} onChange={(v) => set((x) => { x.session = v === "main" ? undefined : v })} options={asOptions(SESSION)} /></Field>
         </div>
       </Section>
       <Prompt value={n.instructions ?? ""} ro={ro} onChange={(v) => set((x) => { x.instructions = v }, 500)} />
@@ -116,8 +106,8 @@ export function AgentEditor(p: EditorProps) {
           <Field label="Tools"><Pick value={Array.isArray(n.tools) ? "custom" : "inherit"} ro={ro} onChange={(v) => set((x) => { x.tools = v === "inherit" ? undefined : [] })}
             options={[{ value: "inherit", label: `Inherit (${agent?.tools ?? 0})` }, { value: "custom", label: Array.isArray(n.tools) ? `Custom (${n.tools.length})` : "Custom" }]} /></Field>
           <Field label="Writes"><Pick value={n.writes ?? "refuse"} ro={ro} onChange={(v) => set((x) => { x.writes = v === "refuse" ? undefined : (v as Node["writes"]) })}
-            options={[{ value: "refuse", label: "Refuse" }, { value: "propose", label: "Propose" }, { value: "allow", label: "Allow" }, { value: "policy", label: "As the server allows" }]} /></Field>
-          <Field label="Built-ins"><Segmented value={n.builtins ?? "none"} ro={ro} onChange={(v) => set((x) => { x.builtins = v === "none" ? undefined : v })} options={[["none", "None"], ["read", "Read"], ["all", "All"]]} /></Field>
+            options={asOptions(WRITES)} /></Field>
+          <Field label="Built-ins"><Segmented value={n.builtins ?? "none"} ro={ro} onChange={(v) => set((x) => { x.builtins = v === "none" ? undefined : v })} options={BUILTINS} /></Field>
         </div>
       </Section>
       <Limits {...p} />
@@ -154,7 +144,7 @@ export function ApprovalEditor(p: EditorProps) {
           </Field>
           <Field label="Needs"><Pick value={String(n.min_approvals ?? 1)} ro={ro} onChange={(v) => set((x) => { x.min_approvals = Number(v) })} options={approvers.map((_, i) => ({ value: String(i + 1), label: `${i + 1} of ${approvers.length}` }))} /></Field>
           <Field label="Where">
-            <Segmented value={where} ro={ro} options={[["inbox", "Inbox"], ["dm", "DM"], ["thread", "Thread"]]}
+            <Segmented value={where} ro={ro} options={WHERE}
               onChange={(v) => set((x) => { x.deliver = v; if (v !== "thread") { x.channel = undefined; x.approvers = [x.approvers ?? []].flat().filter((a) => a !== "thread") } })} />
           </Field>
           {where === "thread" && (
@@ -164,7 +154,7 @@ export function ApprovalEditor(p: EditorProps) {
             </Field>
           )}
           <Field label="Answer">
-            <Segmented value={shape} ro={ro} options={[["approve", "Approve"], ["choice", "Choice"], ["text", "Text"], ["form", "Form"]]} onChange={(v) => set((x) => setAnswer(x, v))} />
+            <Segmented value={shape} ro={ro} options={ANSWER} onChange={(v) => set((x) => setAnswer(x, v))} />
           </Field>
           <Field label="Remind every"><Text value={n.remind_every ?? ""} placeholder="Never" ro={ro} onChange={(v) => set((x) => { x.remind_every = v || undefined }, 400)} /></Field>
           <Field label="Timeout"><Text value={typeof n.timeout === "object" ? n.timeout.after : n.timeout ?? ""} placeholder="None" ro={ro} onChange={(v) => set((x) => { x.timeout = v ? { after: v, route: typeof x.timeout === "object" ? x.timeout.route : "reject" } : undefined }, 400)} /></Field>
@@ -334,7 +324,7 @@ export function FinishEditor(p: EditorProps) {
     <>
       <Section>
         <div className="space-y-3">
-          <Field label="Outcome"><Segmented value={n.outcome ?? "succeeded"} ro={ro} onChange={(v) => set((x) => { x.outcome = v })} options={[["succeeded", "Succeed"], ["failed", "Fail"]]} /></Field>
+          <Field label="Outcome"><Segmented value={n.outcome ?? "succeeded"} ro={ro} onChange={(v) => set((x) => { x.outcome = v })} options={OUTCOME} /></Field>
           <Field label="Output"><RefPicker value={typeof n.output === "string" ? n.output : ""} groups={upstreamRefs(spec, p.id)} ro={ro} onChange={(v) => set((x) => { x.output = v })} /></Field>
           <Field label="Deliver to"><Pick value={to?.to ?? "none"} ro={ro} onChange={(v) => set((x) => { x.deliver = v === "none" ? undefined : { ...finishDeliver(x), to: v } })}
             options={[{ value: "none", label: "Nowhere" }, ...(catalog?.channels ?? []).map((c) => ({ value: `#${c.name}`, label: `#${c.name}` }))]} /></Field>
@@ -380,7 +370,7 @@ export function BasicEditor(p: EditorProps) {
     <>
       {n.kind === "transform" && <Bindings title="Set" add="Add field" rows={n.set ?? {}} p={p} onChange={(r) => set((x) => { x.set = r })} />}
       {n.kind === "code" && <>
-        <Section><Field label="Network"><Segmented value={n.network ?? "off"} ro={ro} onChange={(v) => set((x) => { x.network = v })} options={[["off", "Off"], ["on", "On"]]} /></Field></Section>
+        <Section><Field label="Network"><Segmented value={n.network ?? "off"} ro={ro} onChange={(v) => set((x) => { x.network = v })} options={NETWORK} /></Field></Section>
         <Section title="Python">
           <textarea value={src} readOnly={ro} onChange={(e) => setSrc(e.target.value)} spellCheck={false} className="min-h-48 w-full resize-y rounded-md border bg-background px-3 py-2 font-mono text-[12.5px] leading-[1.7] outline-none focus-visible:border-ring" />
         </Section>

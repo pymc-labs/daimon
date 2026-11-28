@@ -23,6 +23,9 @@ export function Chain({ run }: { run: RunDetail }) {
   return <span className="flex items-center gap-1.5 text-xs text-success" title={`Head ${run.head_hash.slice(0, 12)}`}><ShieldCheck className="size-3.5" /><span className="text-foreground">Verified</span></span>
 }
 
+// The open body is 228px: seven Compact rows (32px) between its 4px paddings, or Raw's 32px header and seven 28px rows. Whole rows, so a body pinned to the newest row or opened at the first never cuts one. Plus the 44px header and two 1px borders.
+const OPEN = "h-[274px]"
+
 /** The run's ledger: Compact groups rows per step, Raw lists every row; new rows animate in. */
 export function Ledger({ run, events, fresh, select, open, setOpen, className, raw }: {
   run: RunDetail; events: RunEvent[]; fresh: number; select: (key: string) => void; open: boolean; setOpen: (o: boolean) => void; className?: string; raw?: boolean
@@ -35,7 +38,7 @@ export function Ledger({ run, events, fresh, select, open, setOpen, className, r
   const pinned = useRef(["queued", "running", "waiting"].includes(run.status))
   useEffect(() => { const b = body.current; if (b && pinned.current) b.scrollTop = b.scrollHeight }, [shown.length, mode, open])
   return (
-    <section className={cn("flex shrink-0 flex-col border-t bg-background", open ? "h-64" : "h-11", className)}>
+    <section className={cn("flex shrink-0 flex-col border-t bg-background", open ? OPEN : "h-11", className)}>
       <header className="flex h-11 shrink-0 items-center gap-3 pr-2 pl-2 max-sm:gap-2">
         <button className="flex h-8 items-center gap-1.5 rounded-md px-2 text-sm font-medium hover:bg-accent" onClick={() => setOpen(!open)} aria-expanded={open}>
           <ChevronDown className={cn("size-4 text-muted-foreground transition-transform", !open && "-rotate-90")} />Ledger

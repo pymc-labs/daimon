@@ -80,7 +80,7 @@ function CompareDialog({ wf, versions, initial, onClose }: { wf: Workflow; versi
   const [[a, b], setPair] = useState(initial)
   const { data: catalog } = useCatalog()
   const from = useVersionSpec(wf.id, a), to = useVersionSpec(wf.id, b)
-  const r = useMemo(() => from.data && to.data ? reviewDiff(from.data.spec, to.data.spec, { channel: (id) => `#${catalog?.channels.find((c) => c.id === id)?.name ?? id}` }) : null, [from.data, to.data, catalog])
+  const r = useMemo(() => from.data && to.data ? reviewDiff(from.data.spec, to.data.spec, { catalog }) : null, [from.data, to.data, catalog])
   const pick = (label: string, v: number, set: (n: number) => void) => (
     <div className="flex min-w-0 flex-1 items-center gap-2 text-sm">
       <span className="text-muted-foreground">{label}</span>

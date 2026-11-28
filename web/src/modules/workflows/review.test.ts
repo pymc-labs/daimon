@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import { SPECS } from "@/mock/workflows-specs"
-import { newGrants } from "@/mock/workflows"
+import { CATALOG, newGrants } from "@/mock/workflows"
 import { lineDiff, reviewDiff, reviewCount, trimContext } from "./review"
 import { clone } from "./spec"
 
@@ -36,12 +36,22 @@ describe("reviewDiff", () => {
     expect(added.changes.map((c) => c.label)).toContain("Tool")
   })
 
+  it("words agent and post fields as the inspector does", () => {
+    const s = clone(live)
+    s.nodes.research = { ...s.nodes.research!, agent: "mmm", at: "C0SALES", writes: "policy", memory: "personal", session: "fresh", builtins: "read", timeout: "15m", retry: { attempts: 3 } }
+    s.nodes.send = { kind: "post", to: "owner", as_agent: "sales", message: "Hi" }
+    const r = reviewDiff(live, s, { catalog: CATALOG })
+    const at = (id: string) => Object.fromEntries(r.nodes.find((n) => n.id === id)!.changes.map((c) => [c.label, c.to]))
+    expect(at("research")).toMatchObject({ Agent: "MMM Analyst", "Works in": "#sales", Writes: "As the server allows", "Personal memory": "On", Session: "Fresh", "Built-ins": "Read", Timeout: "15m", Tries: "3" })
+    expect(at("send")).toMatchObject({ "Post to": "Owner", "Post as": "Sales Desk" })
+  })
+
   it("reports removed nodes and trigger and access changes", () => {
     const s = clone(live)
     delete s.nodes.send
     s.triggers = [{ ...s.triggers![0]!, verify: "github" }]
     s.visibility = "private"
-    const r = reviewDiff(live, s, { channel: (id) => `#${id}` })
+    const r = reviewDiff(live, s, { catalog: CATALOG })
     expect(r.nodes.find((n) => n.id === "send")?.effect).toBe("removed")
     expect(r.triggers[0]).toMatchObject({ effect: "changed", changes: [{ label: "Verification", to: "github" }] })
     expect(r.access).toEqual([{ label: "Visibility", from: "shared", to: "private" }])
