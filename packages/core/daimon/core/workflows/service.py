@@ -44,6 +44,7 @@ from daimon.core.workflows.spec import (
     dump_spec,
     node_hash,
     parse_spec,
+    private_steps,
     spec_hash,
 )
 from daimon.core.workflows.taint import Catalog
@@ -977,9 +978,16 @@ async def run_file(env: Env, run_id: uuid.UUID, file_id: str) -> RoutineFile:
     """A file the run holds, a step's or an answer's, for a viewer of the run to download."""
     async with env.sm() as session:
         run, _, _ = await _run(session, env, run_id)
+        # A private step's files are the run-as person's alone (`hides_output`).
+        hidden = (
+            run_views.secret_steps(await runs.run_spec(session, run))
+            if await run_views.hides_output(session, run, env.who.account_id)
+            else frozenset[str]()
+        )
         refs: list[Any] = []
         for step_row in await runs_store.list_steps(session, run.id):
-            refs += step_row.files or []
+            if step_row.node_id not in hidden:
+                refs += step_row.files or []
             for wait in await workflow_waits.waits_of_step(session, step_row.id):
                 refs += wait.answer_files or []
     for ref in refs:
@@ -1007,6 +1015,13 @@ async def _pins(env: Env, from_run: uuid.UUID, nodes: Sequence[str]) -> dict[str
     async with env.sm() as session:
         run, _, _ = await _run(session, env, from_run)
         steps = await runs_store.list_steps(session, run.id)
+        # Another person's test pins none of the run-as person's private results.
+        if await run_views.hides_output(session, run, env.who.account_id):
+            steps = [
+                s
+                for s in steps
+                if s.node_id not in private_steps(await runs.run_spec(session, run))
+            ]
     wanted = set(nodes)
     return {
         s.node_id: {"route": s.route, "output": s.output}

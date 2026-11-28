@@ -23,7 +23,7 @@ from daimon.core.workflows import engine
 from daimon.core.workflows.brief import check_output
 from daimon.core.workflows.graph import ancestors
 from daimon.core.workflows.runs import account_actor, key_of, node_of, spec_of
-from daimon.core.workflows.spec import AgentNode, Spec
+from daimon.core.workflows.spec import AgentNode, Spec, private_steps
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -205,7 +205,8 @@ async def context_text(session: AsyncSession, g: Grant) -> str:
     """The brief again, plus the latest outputs of the steps upstream of this one."""
     briefs = await step_events(session, g.run.id, step_key=g.key, types=[BRIEF_SENT])
     brief = next((e.data["brief"] for e in reversed(briefs) if "brief" in e.data), "")
-    up = ancestors(g.spec, g.step.node_id)
+    # A private step's result reads only to a post to the run-as person (`reads_private`).
+    up = ancestors(g.spec, g.step.node_id) - private_steps(g.spec)
     latest: dict[str, StepRow] = {}
     for s in await workflow_runs.list_steps(session, g.run.id):
         fresher = s.node_id not in latest or s.visit > latest[s.node_id].visit

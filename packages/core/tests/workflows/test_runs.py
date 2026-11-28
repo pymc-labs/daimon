@@ -566,3 +566,61 @@ async def test_a_runner_reruns_only_the_live_version(db_session: AsyncSession) -
         await service.rerun(env, source.id, version="draft")
     again = await service.rerun(env, source.id)
     assert not again.test, "a plain rerun runs the live version"
+
+
+PRIVATE_FLOW: dict[str, Any] = {
+    "p": {"kind": "agent", "instructions": "Read my notes", "memory": "personal", "next": "a"},
+    "a": {"kind": "agent", "instructions": "Go on", "next": "post"},
+    "post": {"kind": "post", "to": "run_as", "message": "${{ steps.p.output }}", "next": "f"},
+    "f": {"kind": "finish"},
+}
+
+
+async def test_a_private_steps_result_reaches_only_the_person_it_runs_as(
+    db_session: AsyncSession,
+) -> None:
+    """`memory: personal` output stays the run-as person's on every route: another step's
+    context, the step's detail and the post reading it, its files, a fork and a test pin."""
+    from daimon.core.workflows import step_tools
+
+    world = await make_world(db_session, PRIVATE_FLOW, "p")
+    as_person = await _runner(db_session, world)
+    person = as_person.who.account_id
+    run = await world.run(run_as_account_id=person)
+    file = {"file_id": "f1", "filename": "notes.txt", "mime_type": "text/plain", "size_bytes": 3}
+    async with world.sm.begin() as s:
+        await workflow_runs.save_steps(
+            s, tenant_id=world.tenant_id, run_id=run.id,
+            steps={("p", 1): {"status": "succeeded", "output": "secret", "summary": "s",
+                              "files": [file]},
+                   ("a", 1): {"status": "ready"}, ("post", 1): {"status": "succeeded"}},
+        )  # fmt: skip
+        p = (await world.steps(run.id))["p"]
+        await workflow_runs.add_activity(
+            s, tenant_id=world.tenant_id, step_id=p.id, kind="note", text="read notes", now=NOW
+        )
+    claimed = await world.claim(run.id, "a")
+    async with world.sm() as s:
+        attempt = await workflow_runs.running_attempt(s, claimed.step.id)
+        assert attempt is not None
+        spec = await runs.run_spec(s, run)
+        node = spec.nodes["a"]
+        grant = step_tools.Grant(run, claimed.step, attempt, spec, node)  # type: ignore[arg-type]
+        assert "secret" not in await step_tools.context_text(s, grant), "another step's context"
+        for key in ("p", "post"):
+            hidden = await run_views.step_detail(s, run, key, None, now=NOW, private=True)
+            assert hidden is not None and (hidden.output, hidden.files, hidden.input) == (
+                None, [], {},
+            ) and hidden.activity == [], f"{key}: {hidden}"  # fmt: skip
+        shown = await run_views.step_detail(s, run, "p", None, now=NOW)
+        assert shown is not None and shown.output == "secret" and shown.activity, shown
+    owner = Env(world.sm, world.settings, Who(world.tenant_id, world.owner), NOW)
+    with pytest.raises(service.NotFound):
+        await service.run_file(owner, run.id, "f1")
+    assert (await service.run_file(as_person, run.id, "f1")).file_id == "f1"
+    assert await service._pins(owner, run.id, ["p"]) == {}, "another person pins nothing"  # pyright: ignore[reportPrivateUsage]
+    assert "p" in await service._pins(as_person, run.id, ["p"])  # pyright: ignore[reportPrivateUsage]
+    for runner, copied in ((world.owner, None), (person, "secret")):
+        fork = await world.run(run_as_account_id=runner, fork_of=(run.id, "post"))
+        steps = await world.steps(fork.id)
+        assert (steps["p"].output if "p" in steps else None) == copied, f"fork as {runner}"

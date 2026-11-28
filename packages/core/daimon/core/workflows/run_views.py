@@ -31,7 +31,7 @@ from daimon.core.workflows.engine import (
     step_key,
 )
 from daimon.core.workflows.expressions import ExpressionError, Ref, render, template_refs
-from daimon.core.workflows.spec import Spec, parse_spec, private_steps
+from daimon.core.workflows.spec import ForEachNode, Spec, parse_spec, private_steps, reads_private
 from daimon.core.workflows.views import Person, iso, obj, people_of, person, seq
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -381,6 +381,17 @@ _FAILURES: Final = {
     "step.retry_scheduled",
     "step.unknown",
 }
+
+
+def secret_steps(spec: Spec) -> frozenset[str]:
+    """The steps whose result, input and files `hides_output` hides: the private steps and the
+    posts to the run-as person that read them (`reads_private`)."""
+    readers = {
+        n
+        for n, node in spec.nodes.items()
+        if reads_private(node.do if isinstance(node, ForEachNode) else node)
+    }
+    return private_steps(spec) | readers
 
 
 async def hides_output(session: AsyncSession, run: RunRow, reader: uuid.UUID | None) -> bool:
@@ -938,11 +949,15 @@ async def step_detail(
         now=now,
     )
     context: Any = None
+    # A private step's result, and the input of the post to the run-as person that reads it,
+    # are theirs alone (`hides_output`); unparsable, nothing of the step shows.
+    secret = private
     try:
         parsed = parse_spec(spec)
         facts = replace(facts, private_steps=private_steps(parsed))
         context = expression_context(parsed, [_view(s) for s in steps], node_id, facts)
         context |= own
+        secret = private and node_id in secret_steps(parsed)
     except ValueError:
         context = None
     shown: dict[str, Any] = {}
@@ -976,9 +991,9 @@ async def step_detail(
         model=node.get("model") if node.get("kind") == "agent" else None,
         summary=step.summary if done and not private else None,
         route={"name": route, "reason": str(obj(way).get("when") or "")} if route else None,
-        files=[file_view(run.id, f) for f in step.files] if done else [],
-        input=shown,
-        output=_in_order(step.output, obj(node.get("output"))) if done else None,
+        files=[file_view(run.id, f) for f in step.files] if done and not secret else [],
+        input={} if secret else shown,
+        output=_in_order(step.output, obj(node.get("output"))) if done and not secret else None,
         untrusted=untrusted,
         rejections=[
             {"attempt": 1, "errors": list(e.data.get("errors") or [])}
@@ -989,9 +1004,9 @@ async def step_detail(
         activity=[
             ActivityLine(at=at.isoformat(), kind=kind, text=text, tool=tool)
             for at, kind, text, tool in activity
-            if not (kind == "note" and _plan_of(text))
+            if not (kind == "note" and _plan_of(text)) and not secret
         ],
-        plan=plans[-1] if plans else [],
+        plan=plans[-1] if plans and not secret else [],
     )
 
 
