@@ -22,11 +22,17 @@ def agent_of(spec: Spec, node: AgentNode) -> str | None:
 
 
 def lane_key(spec: Spec, node_id: str, node: AgentNode, visit: int) -> str:
-    """`main:<agent>`, `<lane>:<agent>`, or `fresh:<node>#<visit>` for a fresh session."""
+    """`main:<agent>`, `<lane>:<agent>`, or `fresh:<node>#<visit>` for a fresh session.
+
+    A step's place (`at`) and personal memory stay in its session's context, so steps that
+    differ in either never share one: each gets `|at=<place>` and `|memory=personal`.
+    """
     lane = node.session or MAIN
     if lane == FRESH:
         return f"{FRESH}:{node_id}#{visit}"
-    return f"{lane}:{agent_of(spec, node) or ''}"
+    at = f"|at={node.at}" if node.at is not None else ""
+    memory = f"|memory={node.memory}" if node.memory is not None else ""
+    return f"{lane}:{agent_of(spec, node) or ''}{at}{memory}"
 
 
 def lane_skills(spec: Spec, node_id: str, node: AgentNode) -> list[str]:
