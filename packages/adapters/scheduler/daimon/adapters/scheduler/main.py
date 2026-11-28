@@ -1372,7 +1372,10 @@ async def _workflow_loops(
     engine: workflows.WorkflowEngine, *, stop_event: asyncio.Event, db: AsyncEngine
 ) -> None:
     """The workflow engine's own loops (`scheduler.workflows`), each step guarded there."""
-    await workflows.run_loops(engine, stop_event=stop_event, db=db)
+    try:
+        await workflows.run_loops(engine, stop_event=stop_event, db=db)
+    except Exception:  # named boundary: the workflow engine never ends routine dispatch
+        log.exception("scheduler.workflows.stopped")
 
 
 @scheduler_step

@@ -186,3 +186,33 @@ async def test_a_crashing_poll_does_not_stop_the_other_loops(db_session: AsyncSe
         steps = {s.node_id: s.status for s in await workflow_runs.list_steps(session, run_id)}
     assert client.calls == 1, "the bad poll ran"
     assert steps["a"] == "succeeded", "the loops went on past it"
+
+
+async def test_a_run_whose_spec_no_longer_reads_fails_alone(db_session: AsyncSession) -> None:
+    """A version published by a later release (a field this server does not know) fails its
+    run with a plain reason; the loops go on and finish the other runs."""
+    sm, settings, broken = await _started(db_session)
+    _, _, healthy = await _started(db_session)
+    await db_session.execute(
+        text(
+            "UPDATE workflow_versions SET spec = (spec::jsonb || '{\"later\": true}')::json"
+            " WHERE workflow_id = (SELECT workflow_id FROM workflow_runs WHERE id = :run)"
+        ),
+        {"run": broken},
+    )
+    await db_session.commit()
+
+    async def agent(work: runs.StepWork) -> engine.Outcome:
+        return engine.Succeeded({"n": 3})
+
+    await run_once(WorkflowEngine(sm, settings, {"agent": agent}, owner="w1", clock=lambda: NOW))
+    async with sm() as session:
+        failed = await workflow_runs.get_run(session, broken)
+        done = await workflow_runs.get_run(session, healthy)
+        steps = await workflow_runs.list_steps(session, broken)
+        events = await list_events(session, broken)
+    assert failed is not None and failed.status == "failed", failed
+    assert failed.failure_reason == "engine_error", "the run says why it stopped"
+    assert all(s.status == "cancelled" for s in steps), "its steps end with it"
+    assert verify(broken, events).ok, "its ledger still verifies"
+    assert done is not None and done.status == "succeeded", "the other run finished"

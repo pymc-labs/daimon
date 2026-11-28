@@ -25,7 +25,7 @@ from daimon.core._models import (
     WorkflowStepActivity,
     WorkflowWait,
 )
-from daimon.core.workflows.engine import ErrorClass, StepStatus
+from daimon.core.workflows.engine import ACTIVE, ErrorClass, StepStatus
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import and_, delete, func, literal, select, true, update
 from sqlalchemy.dialects.postgresql import JSONB, insert
@@ -457,6 +457,31 @@ async def save_steps(
             if changes
             else stmt.on_conflict_do_nothing()
         )
+
+
+async def cancel_active_steps(session: AsyncSession, *, run_id: uuid.UUID, now: datetime) -> None:
+    """Every active step and item of the run cancelled, its worker's settle made stale."""
+    await session.execute(
+        update(WorkflowStep)
+        .where(WorkflowStep.run_id == run_id, WorkflowStep.status.in_(ACTIVE))
+        .values(
+            status="cancelled",
+            lease_owner=None,
+            lease_expires_at=None,
+            ended_at=now,
+            generation=WorkflowStep.generation + 1,
+        )
+    )
+    await session.execute(
+        update(WorkflowAttempt)
+        .where(
+            WorkflowAttempt.status == "running",
+            WorkflowAttempt.step_id.in_(
+                select(WorkflowStep.id).where(WorkflowStep.run_id == run_id)
+            ),
+        )
+        .values(status="abandoned", ended_at=now)
+    )
 
 
 async def ready_steps(

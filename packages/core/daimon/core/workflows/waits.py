@@ -27,6 +27,7 @@ from daimon.core.stores.workflows import WorkflowRow
 from daimon.core.workflows import asks, callbacks, engine, runs
 from daimon.core.workflows.access import Who, holders, rights_of
 from daimon.core.workflows.clock import add_duration
+from daimon.core.workflows.endings import contained
 from daimon.core.workflows.engine import Event, Outcome
 from daimon.core.workflows.expressions import ExpressionError, expressions_in, render
 from daimon.core.workflows.runs import ENGINE, Park, Sessions, StepWork, account_actor
@@ -937,8 +938,9 @@ async def match_events(sm: Sessions, settings: Settings, *, now: datetime, limit
     for wait in open_:
         async with sm() as session:
             candidates = await workflow_waits.buffered_for(session, wait, now=now)
-        if candidates and await _arrive(sm, settings, wait, candidates, now):
-            arrived += 1
+        async with contained(sm, run_id=wait.run_id, now=now):
+            if candidates and await _arrive(sm, settings, wait, candidates, now):
+                arrived += 1
     return arrived
 
 

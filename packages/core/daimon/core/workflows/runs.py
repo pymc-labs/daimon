@@ -17,10 +17,8 @@ from decimal import Decimal
 from typing import Any, Final, Literal, Protocol
 
 from daimon.core.config import Settings
-from daimon.core.fire.failure import report_failure
 from daimon.core.lead_intake_execution import lane_grant
 from daimon.core.stores import (
-    security_audit,
     workflow_deliveries,
     workflow_runs,
     workflow_triggers,
@@ -32,6 +30,15 @@ from daimon.core.stores.workflow_runs import RunRow, StepRow, StepWrite
 from daimon.core.workflows import asks, board, callbacks, delivery, engine
 from daimon.core.workflows.asks import Ask
 from daimon.core.workflows.clock import add_duration, run_times
+from daimon.core.workflows.endings import (
+    ASK_CLOSED,
+    ASK_ENDED,
+    audit_end,
+    contained,
+    report_after_commit,
+)
+from daimon.core.workflows.endings import ENGINE as ENGINE
+from daimon.core.workflows.endings import run_channel as run_channel
 from daimon.core.workflows.engine import Event, Outcome, RunEnd, RunFacts, StepView, Transition
 from daimon.core.workflows.expressions import ExpressionError, evaluate, render
 from daimon.core.workflows.graph import ancestors
@@ -53,12 +60,10 @@ from daimon.core.workflows.spec import (
 from daimon.core.workflows.state import STATE_LIMIT, reads_of
 from daimon.core.workflows.taint import Catalog, SkillPin, catalog_of
 from pydantic import JsonValue
-from sqlalchemy import event as sa_event
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 Sessions = async_sessionmaker[AsyncSession]
-ENGINE: Final = "engine"
 READY_CHANNEL: Final = "workflow_ready"
 START_CHANNEL: Final = "workflow_start"
 WAITS_CHANNEL: Final = "workflow_waits"
@@ -69,22 +74,10 @@ BLOCKED_RECHECK: Final = timedelta(minutes=15)
 BLOCKED_FOR: Final = timedelta(days=1)
 _TERMINAL: Final = frozenset({"succeeded", "failed", "skipped", "cancelled"})
 _MESSAGE_LIMIT: Final = 500
-#: What an ask still open when its run ends says, by how the run ended.
-_ASK_CLOSED: Final = {
-    "cancelled": "Cancelled: the run was stopped.",
-    "failed": "Closed: the run failed.",
-    "timed_out": "Expired: the run ran out of time.",
-}
-_ASK_ENDED: Final = "Closed: the run ended."
 #: Runs a key may queue behind its active ones.
 QUEUE_LIMIT: Final = 100
 #: How many runs deep a chain of event or call starts may go.
 MAX_CHAIN_DEPTH: Final = 3
-
-
-def run_channel(tenant_id: uuid.UUID) -> str:
-    """The NOTIFY channel the run page's stream listens on."""
-    return f"workflow_run_{tenant_id.hex}"
 
 
 def account_actor(account_id: uuid.UUID) -> str:
@@ -496,12 +489,12 @@ async def _apply(
         )
         for wait in (await workflow_waits.waits_by_id(session, closed)).values():
             # Each open ask's posts say it is over, so no one answers a closed question.
-            await asks.queue_updates(session, wait, _ASK_CLOSED.get(end.status, _ASK_ENDED))
+            await asks.queue_updates(session, wait, ASK_CLOSED.get(end.status, ASK_ENDED))
         events += await _queue_posts(session, loaded, end, [_view(r) for r in rows])
         if run.mode == "live":
             await _offer_finished(session, loaded, rows, end, now)
             if end.status in ("failed", "timed_out"):
-                _report_after_commit(session, run, end.reason or end.status)
+                report_after_commit(session, run, end.reason or end.status)
     else:
         projected = engine.project_status([_view(r) for r in rows])
         status, reason = projected or ("running", None)
@@ -521,20 +514,7 @@ async def _apply(
         at=now,
     )
     if end is not None:
-        seq = await workflow_runs.get_run(session, run.id)
-        await security_audit.append_event(
-            session,
-            tenant_id=run.tenant_id,
-            account_id=run.run_as_account_id,
-            agent_id=None,
-            platform=None,
-            platform_user_id=None,
-            tool_name="workflow_run",
-            operation=end.status,
-            outcome="allowed",
-            reason=f"run {run.id} seq {seq.last_seq if seq else 0} head {head}",
-            occurred_at=now,
-        )
+        await audit_end(session, run, end.status, head, now)
     if any(r.status == "ready" for r in rows):
         await _notify(session, READY_CHANNEL, str(run.id))
     await _notify(session, run_channel(run.tenant_id), str(run.id))
@@ -777,23 +757,6 @@ async def _write_step(
     if write.get("status") == "ready":
         await _notify(session, READY_CHANNEL, str(step.run_id))
     await _apply(session, loaded, Transition((), tuple(events), None), now=now)
-
-
-def _report_after_commit(session: AsyncSession, run: RunRow, reason: str) -> None:
-    """A failed live run's log line and ops event, as a routine fire's (`report_failure`),
-    once the run's end is committed; its owner's notice is `queue_failure_notice`."""
-    bind = session.bind
-
-    def report(_: object) -> None:
-        report_failure(
-            async_sessionmaker(bind=bind),
-            run.tenant_id,
-            reason,
-            workflow_id=run.workflow_id,
-            workflow_run_id=run.id,
-        )
-
-    sa_event.listen(session.sync_session, "after_commit", report, once=True)
 
 
 async def _queue_posts(
@@ -1782,14 +1745,17 @@ async def sync_children(sm: Sessions, settings: Settings, *, now: datetime, limi
         parents = await workflow_runs.parents_of_ended_children(session, limit=limit)
         orphans = await workflow_runs.orphaned_children(session, limit=limit)
     for step_id in parents:
-        await settle_from_child(sm, settings, step_id=step_id, now=now)
+        async with contained(sm, step_id=step_id, now=now):
+            await settle_from_child(sm, settings, step_id=step_id, now=now)
     async with sm() as session:
         posted = await workflow_deliveries.settled_post_steps(session, limit=limit)
     for step_id in posted:
-        await settle_from_post(sm, settings, step_id=step_id, now=now)
+        async with contained(sm, step_id=step_id, now=now):
+            await settle_from_post(sm, settings, step_id=step_id, now=now)
     end = RunEnd("cancelled", reason="parent_stopped", message="The calling run stopped")
     for run_id in orphans:
-        await stop_run(sm, settings, run_id=run_id, end=end, now=now)
+        async with contained(sm, run_id=run_id, now=now):
+            await stop_run(sm, settings, run_id=run_id, end=end, now=now)
     return len(parents) + len(orphans) + len(posted)
 
 

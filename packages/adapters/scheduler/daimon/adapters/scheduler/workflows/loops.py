@@ -1,6 +1,7 @@
 """The workflow engine's loops: starts, steps, waits, heartbeat, sweep and schedules.
 
-Each loop repeats one `scheduler_step` on its interval; NOTIFY on `workflow_start` and
+Each loop repeats one `scheduler_step` on its interval; each run's work in it sits behind
+`endings.contained`, so a run that raises fails alone. NOTIFY on `workflow_start` and
 `workflow_ready` wakes the starts and steps loops early. Steps run as tasks of this
 process under a lease the heartbeat renews; a lease lost to a cancel or a reclaim
 cancels its task, and a task whose process died is reclaimed once its lease runs out.
@@ -23,6 +24,7 @@ from daimon.core.config import Settings
 from daimon.core.features.snapshot import FeaturePlace, resolve_features
 from daimon.core.stores import tenants, workflow_runs
 from daimon.core.workflows import polls, runs, triggers, waits
+from daimon.core.workflows.endings import contained
 from daimon.core.workflows.engine import RunEnd
 from daimon.core.workflows.features import KEYS, workflow_features
 from sqlalchemy.exc import SQLAlchemyError
@@ -76,9 +78,14 @@ class WorkflowEngine:
 
     def spawn(self, claimed: runs.Claimed) -> None:
         step_id = claimed.step.id
-        task = asyncio.create_task(
-            runs.execute(self.sm, self.settings, self.executors, claimed, clock=self.clock)
-        )
+
+        async def run() -> None:
+            async with contained(self.sm, run_id=claimed.run.id, now=self.clock()):
+                await runs.execute(
+                    self.sm, self.settings, self.executors, claimed, clock=self.clock
+                )
+
+        task = asyncio.create_task(run())
         self.tasks[step_id] = (task, claimed.step.generation)
 
         def done(finished: asyncio.Task[None]) -> None:
@@ -97,7 +104,8 @@ async def starts_step(engine: WorkflowEngine) -> None:
     async with engine.sm() as session:
         queued = await workflow_runs.queued_runs(session, limit=_BATCH)
     for run_id in queued:
-        await runs.promote_queued(engine.sm, engine.settings, run_id, now=now)
+        async with contained(engine.sm, run_id=run_id, now=now):
+            await runs.promote_queued(engine.sm, engine.settings, run_id, now=now)
 
 
 @scheduler_step
@@ -119,9 +127,11 @@ async def steps_step(engine: WorkflowEngine) -> None:
             continue
         if agent and owner is not None and per_owner.get(owner, 0) >= caps.per_owner_agent_steps:
             continue
-        claimed = await runs.claim(
-            engine.sm, step_id=step_id, owner=engine.owner, lease=LEASE, now=now
-        )
+        claimed = None
+        async with contained(engine.sm, step_id=step_id, now=now):
+            claimed = await runs.claim(
+                engine.sm, step_id=step_id, owner=engine.owner, lease=LEASE, now=now
+            )
         if claimed is None:
             continue
         free -= 1
@@ -146,13 +156,16 @@ async def waits_step(engine: WorkflowEngine) -> None:
         ]
         overdue = await workflow_runs.overdue_runs(session, now=now, limit=_BATCH)
     for wait in blocked:
-        await runs.recheck_blocked(engine.sm, engine.settings, wait, now=now)
+        async with contained(engine.sm, run_id=wait.run_id, now=now):
+            await runs.recheck_blocked(engine.sm, engine.settings, wait, now=now)
     await waits.match_events(engine.sm, engine.settings, now=now)
     for wait in due:
-        await waits.on_due(engine.sm, engine.settings, wait, now=now)
+        async with contained(engine.sm, run_id=wait.run_id, now=now):
+            await waits.on_due(engine.sm, engine.settings, wait, now=now)
     end = RunEnd("timed_out", reason="deadline", message="The run passed its deadline")
     for run_id in overdue:
-        await runs.stop_run(engine.sm, engine.settings, run_id=run_id, end=end, now=now)
+        async with contained(engine.sm, run_id=run_id, now=now):
+            await runs.stop_run(engine.sm, engine.settings, run_id=run_id, end=end, now=now)
 
 
 @scheduler_step
@@ -172,10 +185,12 @@ async def heartbeat_step(engine: WorkflowEngine) -> None:
         expired = await workflow_runs.expired_leases(session, now=now, limit=_BATCH)
     end = RunEnd("failed", reason="over_budget", message="The run spent its budget")
     for run_id in over:
-        await runs.stop_run(engine.sm, engine.settings, run_id=run_id, end=end, now=now)
+        async with contained(engine.sm, run_id=run_id, now=now):
+            await runs.stop_run(engine.sm, engine.settings, run_id=run_id, end=end, now=now)
     for step_id in expired:
         if step_id not in engine.tasks:
-            await runs.reclaim(engine.sm, engine.settings, step_id=step_id, now=now)
+            async with contained(engine.sm, step_id=step_id, now=now):
+                await runs.reclaim(engine.sm, engine.settings, step_id=step_id, now=now)
 
 
 @scheduler_step
@@ -243,7 +258,10 @@ async def run_loops(
     async def repeat(name: str, step: Callable[[WorkflowEngine], Awaitable[None]]) -> None:
         wake = engine.wake.get(name)
         while not stop_event.is_set():
-            await step(engine)
+            try:
+                await step(engine)
+            except Exception:  # named boundary: one loop's error never ends the others
+                log.exception("workflows.loop.failed", loop=name)
             waiters = [asyncio.ensure_future(stop_event.wait())]
             if wake is not None:
                 wake.clear()

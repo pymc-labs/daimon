@@ -155,6 +155,7 @@ carries over to later versions.
 You can cancel a run, retry it from the step that failed, or rerun it from any
 step with the earlier results reused. Runs past a workflow's active limit queue.
 A run ends when it passes its deadline or spends its budget.
+A run that hits an error Daimon cannot get past fails on its own, and other runs go on.
 
 Each step's spend counts against the allowance of the person the run is for.
 
