@@ -38,7 +38,7 @@ from daimon.core.workflows.graph import ancestors
 from daimon.core.workflows.items import ItemState, item_label, items_next, items_problem
 from daimon.core.workflows.lanes import agent_of, lane_key
 from daimon.core.workflows.preflight import Cleared, Place, Refusal, check
-from daimon.core.workflows.run_views import hides_output
+from daimon.core.workflows.run_views import hides_output, secret_steps
 from daimon.core.workflows.spec import (
     ActionNode,
     AgentNode,
@@ -991,7 +991,7 @@ async def start_run(
         source_steps = await workflow_runs.list_steps(session, source.id) if source else []
         if source is not None and await hides_output(session, source, start.run_as_account_id):
             # Another person's fork reuses none of the run-as person's private results.
-            hidden = private_steps(await run_spec(session, source))
+            hidden = secret_steps(await run_spec(session, source))
             source_steps = [s for s in source_steps if s.node_id not in hidden]
     spec = parse_spec(spec_document)
     given = start.inputs if start.inputs is not None else (source.inputs if source else {})

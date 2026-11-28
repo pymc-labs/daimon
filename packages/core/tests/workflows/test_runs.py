@@ -620,10 +620,44 @@ async def test_a_private_steps_result_reaches_only_the_person_it_runs_as(
     assert (await service.run_file(as_person, run.id, "f1")).file_id == "f1"
     assert await service._pins(owner, run.id, ["p"]) == {}, "another person pins nothing"  # pyright: ignore[reportPrivateUsage]
     assert "p" in await service._pins(as_person, run.id, ["p"])  # pyright: ignore[reportPrivateUsage]
+    pinned = await service._pins(as_person, run.id, ["post"])  # pyright: ignore[reportPrivateUsage]
+    assert "post" in pinned, "the post reading it is the person's own"
+    assert await service._pins(owner, run.id, ["post"]) == {}, "and nobody else's"  # pyright: ignore[reportPrivateUsage]
     for runner, copied in ((world.owner, None), (person, "secret")):
-        fork = await world.run(run_as_account_id=runner, fork_of=(run.id, "post"))
+        fork = await world.run(run_as_account_id=runner, fork_of=(run.id, "f"))
         steps = await world.steps(fork.id)
         assert (steps["p"].output if "p" in steps else None) == copied, f"fork as {runner}"
+        assert ("post" in steps) is (copied is not None), f"the post's text, fork as {runner}"
+
+
+async def test_a_private_step_reads_the_private_steps_before_it_and_others_do_not(
+    db_session: AsyncSession,
+) -> None:
+    from daimon.core.workflows import step_tools
+
+    flow: dict[str, Any] = {
+        "p": {"kind": "agent", "instructions": "Notes", "memory": "personal", "next": "q"},
+        "q": {"kind": "agent", "instructions": "More", "memory": "personal", "next": "a"},
+        "a": {"kind": "agent", "instructions": "Go on", "next": "f"},
+        "f": {"kind": "finish"},
+    }
+    world = await make_world(db_session, flow, "p")
+    person = (await _runner(db_session, world)).who.account_id
+    run = await world.run(run_as_account_id=person)
+    async with world.sm.begin() as s:
+        await workflow_runs.save_steps(
+            s, tenant_id=world.tenant_id, run_id=run.id,
+            steps={("p", 1): {"status": "succeeded", "output": "secret"},
+                   ("q", 1): {"status": "ready"}, ("a", 1): {"status": "ready"}},
+        )  # fmt: skip
+    for key, sees in (("q", True), ("a", False)):
+        claimed = await world.claim(run.id, key)
+        async with world.sm() as s:
+            attempt = await workflow_runs.running_attempt(s, claimed.step.id)
+            assert attempt is not None
+            spec = await runs.run_spec(s, run)
+            grant = step_tools.Grant(run, claimed.step, attempt, spec, spec.nodes[key])  # type: ignore[arg-type]
+            assert ("secret" in await step_tools.context_text(s, grant)) is sees, key
 
 
 async def test_only_the_run_as_person_or_an_admin_redrives_a_private_run(
@@ -640,3 +674,22 @@ async def test_only_the_run_as_person_or_an_admin_redrives_a_private_run(
         await service.redrive(as_owner, run.id)
     admin = Env(world.sm, world.settings, Who(world.tenant_id, world.owner, admin=True), NOW)
     assert (await service.redrive(admin, run.id)).status == "running"
+
+
+async def test_only_the_run_as_person_or_an_admin_retries_a_private_runs_unknown_step(
+    db_session: AsyncSession,
+) -> None:
+    world = await make_world(db_session, PRIVATE_FLOW, "p")
+    person = (await _runner(db_session, world)).who.account_id
+    run = await world.run(run_as_account_id=person)
+    claimed = await world.claim(run.id, "p")
+    async with world.sm.begin() as s:
+        await workflow_runs.mark_send_intent(s, step_id=claimed.step.id, now=NOW)
+    await runs.reclaim(
+        world.sm, world.settings, step_id=claimed.step.id, now=NOW + timedelta(minutes=10)
+    )
+    as_owner = Env(world.sm, world.settings, Who(world.tenant_id, world.owner), NOW)
+    with pytest.raises(service.Forbidden, match="restart"):
+        await service.decide(as_owner, run.id, "retry")
+    admin = Env(world.sm, world.settings, Who(world.tenant_id, world.owner, admin=True), NOW)
+    assert (await service.decide(admin, run.id, "retry")).status == "running"

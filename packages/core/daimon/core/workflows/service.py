@@ -1026,11 +1026,8 @@ async def _pins(env: Env, from_run: uuid.UUID, nodes: Sequence[str]) -> dict[str
         steps = await runs_store.list_steps(session, run.id)
         # Another person's test pins none of the run-as person's private results.
         if await run_views.hides_output(session, run, env.who.account_id):
-            steps = [
-                s
-                for s in steps
-                if s.node_id not in private_steps(await runs.run_spec(session, run))
-            ]
+            secret = run_views.secret_steps(await runs.run_spec(session, run))
+            steps = [s for s in steps if s.node_id not in secret]
     wanted = set(nodes)
     return {
         s.node_id: {"route": s.route, "output": s.output}

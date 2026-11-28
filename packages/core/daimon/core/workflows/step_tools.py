@@ -205,8 +205,10 @@ async def context_text(session: AsyncSession, g: Grant) -> str:
     """The brief again, plus the latest outputs of the steps upstream of this one."""
     briefs = await step_events(session, g.run.id, step_key=g.key, types=[BRIEF_SENT])
     brief = next((e.data["brief"] for e in reversed(briefs) if "brief" in e.data), "")
-    # A private step's result reads only to a post to the run-as person (`reads_private`).
-    up = ancestors(g.spec, g.step.node_id) - private_steps(g.spec)
+    # A private step's result reads only to a post to the run-as person (`reads_private`)
+    # and to a private step, which reads as that person.
+    hidden = frozenset[str]() if g.node.memory == "personal" else private_steps(g.spec)
+    up = ancestors(g.spec, g.step.node_id) - hidden
     latest: dict[str, StepRow] = {}
     for s in await workflow_runs.list_steps(session, g.run.id):
         fresher = s.node_id not in latest or s.visit > latest[s.node_id].visit
