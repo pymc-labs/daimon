@@ -114,7 +114,7 @@ class ProviderLaneTurn:
         try:
             admission = await self.admit(
                 self.deps,
-                # A private step is billed to and configured by its workflow's home.
+                # A private step is configured by its workflow's home.
                 replace(subject, channel_id=subject.channel_id or subject.home_channel_id),
                 platform=admitted.platform,
                 owner=owner,
@@ -133,7 +133,10 @@ class ProviderLaneTurn:
             )
         ):
             return engine.Failed("gate", refused.error or refused.reason, refused.reason)
-        admission = _with_step(admission, node.model, step)
+        # Billed to the workflow's home, as a Managed Agents step is (`budget_channel_id`).
+        admission = replace(
+            _with_step(admission, node.model, step), budget_channel_id=subject.home_channel_id
+        )
         lane = lane_of(work)
         lifetime = DispatchTimeoutSettings().dispatch_timeout_s
         async with workflow_execution(sm, run.tenant_id, run.id, lane=lane, lifetime_s=lifetime):

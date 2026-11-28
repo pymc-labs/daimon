@@ -353,6 +353,7 @@ class _Admission:
     backend_revision: ConfigRevision
     channel_skills: tuple[Any, ...] = ()
     backend: Any = None
+    budget_channel_id: str | None = None
 
 
 class _Outputs:
@@ -377,10 +378,13 @@ async def _provider_step(
     *,
     resume: bool = False,
     refused: AdmissionDenied | None = None,
+    world: World | None = None,
 ) -> tuple[Any, dict[str, Any], dict[str, Any], runs.StepWork]:
     """Step `a` admitted at a place on `provider`, then one turn of it: what the turn returned,
     what its admission and its run were given, and the step."""
-    world = await _world(db_session, {"a": STEP["a"] | {"model": "m-step"}, "f": STEP["f"]})
+    world = world or await _world(
+        db_session, {"a": STEP["a"] | {"model": "m-step"}, "f": STEP["f"]}
+    )
     monkeypatch.setattr(admit, "place_provider", AsyncMock(return_value=provider))
     lane = _lane(world, monkeypatch, None)
     work = await _work(world)
@@ -423,6 +427,23 @@ async def _provider_step(
     return reply, admitted, ran, work
 
 
+async def test_a_provider_step_is_billed_to_home_as_on_managed_agents(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Configured at its place, billed to its workflow's home: the budget channel a
+    Managed Agents step's usage carries."""
+    nodes = {"a": STEP["a"] | {"at": "C0OTHER"}, "f": STEP["f"]}
+    world = await make_world(db_session, nodes, "a", platform="slack", home="C0HOME")
+    async with world.sm.begin() as s:
+        await identity.create_platform_principal(
+            s, tenant_id=world.tenant_id, platform="slack", external_id="U1",
+            account_id=world.owner,
+        )  # fmt: skip
+    _, admitted, ran, _ = await _provider_step(db_session, monkeypatch, "openai", world=world)
+    assert admitted["row"].channel_id == "C0OTHER", "admitted where it works"
+    assert ran["admission"].budget_channel_id == "C0HOME", "billed to home"
+
+
 @pytest.mark.parametrize("provider", ["openai", "gemini"])
 async def test_provider_step_runs_in_its_lane_on_the_places_provider(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch, provider: str
@@ -431,7 +452,7 @@ async def test_provider_step_runs_in_its_lane_on_the_places_provider(
     the step's model and skills, under the run's credential; its files are staged."""
     reply, admitted, ran, work = await _provider_step(db_session, monkeypatch, provider)
     assert (admitted["owner"], admitted["refusal"]) == (OWNER, STEP_SHELL_NEEDS_GRANT), admitted
-    assert admitted["row"].channel_id == HOME, "billed to and configured by the step's place"
+    assert admitted["row"].channel_id == HOME, "configured by the step's place"
     node = work.node
     assert isinstance(node, AgentNode)
     lane = lane_key(work.spec, work.step.node_id, node, work.step.visit)
