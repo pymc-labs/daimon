@@ -57,9 +57,8 @@ the installation does not cover needs a GitHub org owner to add it first.
 The Add repos list shows only the accounts and orgs where the App is
 installed. To add a repo from another account, choose **Repo in another account
 or org? Install the app there** in the dialog. It opens the App's install page
-on GitHub and keeps the connect flow, so after you install the App on that
-account and pick its repos, GitHub returns you to the picker and the account is
-listed. On an org you don't own, GitHub sends an install request that an org
+on GitHub. Install the App on that account and pick its repos. GitHub then
+returns you to the picker, where the account is listed. On an org you don't own, GitHub sends an install request that an org
 owner approves under the org's **Settings → GitHub Apps**.
 
 Other accounts can install the App only if it is public. In the App's settings

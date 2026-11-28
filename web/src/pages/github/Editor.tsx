@@ -169,7 +169,7 @@ export function Editor({ view, step }: { view: AgentEditorView; step: Step }) {
               onRetry={() => step.run(() => connectApi.view(view.state))}
             />
           )}
-          {view.install_url && <p className="text-sm text-muted-foreground">Not listed? <a href={view.install_url} className="text-link hover:underline">Open GitHub setup</a></p>}
+          {view.install_url && <p className="text-sm text-muted-foreground">Only accounts and orgs where the Daimon GitHub App is installed are listed. Repo in another account or org? <a href={view.install_url} className="text-link hover:underline">Install the app there</a></p>}
           <DialogFooter>
             <Button disabled={!draft || (draft.size === 0 && adds.size === 0)} onClick={() => draft && confirmAdds(draft)}>{draft?.size ? `Add ${plural(draft.size, "repo")}` : "Done"}</Button>
           </DialogFooter>
