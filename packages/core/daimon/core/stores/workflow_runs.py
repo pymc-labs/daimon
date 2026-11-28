@@ -25,6 +25,7 @@ from daimon.core._models import (
     WorkflowStepActivity,
     WorkflowWait,
 )
+from daimon.core.stores.file_uploads import delete_run_uploads
 from daimon.core.workflows.engine import ErrorClass, StepStatus
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import and_, delete, func, literal, select, true, update
@@ -1081,8 +1082,10 @@ async def tenants_with_finished_runs(session: AsyncSession) -> list[uuid.UUID]:
 
 
 async def delete_runs(session: AsyncSession, run_ids: Sequence[uuid.UUID]) -> None:
-    """Delete runs with their steps, waits and ledger (the ledger guard lets a cascade pass)."""
+    """Delete runs with their steps, waits, ledger and staged files (the ledger guard lets a
+    cascade pass)."""
     if run_ids:
+        await delete_run_uploads(session, runs=WorkflowRun.id.in_(run_ids))
         await session.execute(delete(WorkflowRun).where(WorkflowRun.id.in_(run_ids)))
 
 

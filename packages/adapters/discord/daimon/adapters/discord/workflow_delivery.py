@@ -297,6 +297,7 @@ def make_discord_workflow_poster(
             may_post=may_post,
             sessions=sessionmaker,
             tenant_id=row.tenant_id,
+            keep_staged=True,
         )
         return done
 

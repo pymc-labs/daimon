@@ -28,7 +28,7 @@ from daimon.adapters.web.faces import avatars_of
 from daimon.adapters.web.routines import reachable_channels_of
 from daimon.adapters.web.runtime import WebRuntime
 from daimon.core.channel_audience import channels_with_outsiders
-from daimon.core.output_delivery import download_output_file
+from daimon.core.routine_files import read_file
 from daimon.core.stores import tenants
 from daimon.core.stores import web_chat as chat_store
 from daimon.core.stores.thread_agent_bindings import create_binding
@@ -280,11 +280,12 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
     @router.get("/runs/{run_id}/files/{name}")
     @speaks
     async def run_file(run_id: uuid.UUID, name: str, caller: Viewer) -> Response:  # pyright: ignore[reportUnusedFunction]
-        ref = await service.run_file(await env_of(caller), run_id, name)
+        env = await env_of(caller)
+        ref = await service.run_file(env, run_id, name)
         anthropic = client()
-        if anthropic is None:
+        if anthropic is None and not ref.staged:
             raise HTTPException(status_code=503, detail=SOON)
-        content = await download_output_file(anthropic, ref.file_id)
+        content = await read_file(anthropic, ref, env.sm, env.who.tenant_id)
         disposition = f"attachment; filename*=UTF-8''{quote(ref.filename)}"
         return Response(
             content,

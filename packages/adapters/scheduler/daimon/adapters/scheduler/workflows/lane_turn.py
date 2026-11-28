@@ -55,6 +55,7 @@ from daimon.core.scope import DeploymentDefault, ScopeContext
 from daimon.core.spend_gate import spend_person_of_account
 from daimon.core.stores import identity, tenants, workflow_runs
 from daimon.core.stores.domain import SandboxPin, pin_json
+from daimon.core.stores.file_uploads import workflow_output_title
 from daimon.core.stores.lead_intake import workflow_execution
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.tool_safety import ToolSafetyPolicy
@@ -155,7 +156,9 @@ class ProviderLaneTurn:
                 on_session=step.on_session,
                 on_render=step.on_render,
             )
-        files, _ = await stage_files(sm, ran_turn.outputs, tenant_id=run.tenant_id)
+        files, _ = await stage_files(
+            sm, ran_turn.outputs, tenant_id=run.tenant_id, title=workflow_output_title(run.id)
+        )
         posted = await posted_places(
             sm,
             ran_turn.state,

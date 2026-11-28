@@ -34,6 +34,9 @@ Runs already started stop at their next step without spending.
 | Run budget | `workflow_run_budget` | $5 |
 | Run history | `workflow_retention_days` | 90 days |
 
+The files a step makes stay available to later posts and to the run page until its run
+leaves the history.
+
 Deployment caps on steps, runs, items and webhooks are under
 [Workflows settings](configuration.md#workflows).
 

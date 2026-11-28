@@ -19,12 +19,13 @@ from collections.abc import Collection, Sequence
 from datetime import datetime, timedelta
 from typing import Any, cast
 
-from daimon.core._models import FileUpload, WebMessage
+from daimon.core._models import FileUpload, WebMessage, WorkflowRun
 from daimon.core.stores.domain import FileUploadRow, UploadedFile
 from daimon.core.stores.retention import Position
 from sqlalchemy import (
     CursorResult,
     Select,
+    Text,
     and_,
     delete,
     func,
@@ -34,6 +35,7 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 # Matches Discord's per-file upload ceiling — a larger row could never be
 # delivered, so it is refused at the door rather than after the transfer.
@@ -287,12 +289,14 @@ async def delete_stale_unowned_uploads(
     waiting on delivery keep their own 7-day rule.
 
     A file a message still carries stays, so with a `cursor` a batch starts after
-    the last one deleted instead of reading those again.
+    the last one deleted instead of reading those again. A workflow step's files live
+    as long as their run.
     """
     stale = select(FileUpload.id).where(
         FileUpload.person_id.is_(None),
         FileUpload.created_at < created_before,
         FileUpload.title.is_distinct_from(ROUTINE_OUTPUT_TITLE),
+        FileUpload.title.not_like(f"{WORKFLOW_OUTPUT_PREFIX}%"),
         ~_carrying_message().exists(),
     )
     if cursor is not None and cursor.after is not None:
@@ -309,6 +313,23 @@ async def delete_stale_unowned_uploads(
 
 #: The title of a provider routine's output staged for delivery (`routine_files`).
 ROUTINE_OUTPUT_TITLE = "routine-output"
+#: A provider workflow step's staged files: the prefix and the run's id, so they live and
+#: die with the run (`delete_run_uploads`), not with a delivery.
+WORKFLOW_OUTPUT_PREFIX = "workflow-output:"
+
+
+def workflow_output_title(run_id: uuid.UUID) -> str:
+    return f"{WORKFLOW_OUTPUT_PREFIX}{run_id}"
+
+
+def is_staged_output(title: str) -> bool:
+    return title == ROUTINE_OUTPUT_TITLE or title.startswith(WORKFLOW_OUTPUT_PREFIX)
+
+
+async def delete_run_uploads(session: AsyncSession, *, runs: ColumnElement[bool]) -> None:
+    """Delete the staged files of the workflow runs `runs` selects, before the runs go."""
+    titles = select(func.concat(WORKFLOW_OUTPUT_PREFIX, WorkflowRun.id.cast(Text))).where(runs)
+    await session.execute(delete(FileUpload).where(FileUpload.title.in_(titles)))
 
 
 async def stage_upload(

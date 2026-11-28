@@ -7,6 +7,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -20,6 +21,7 @@ from daimon.core.features.service import set_workspace_feature
 from daimon.core.stores import web_roles as roles_store
 from daimon.core.stores import workflow_runs
 from daimon.core.stores.domain import WebPersonRow
+from daimon.core.stores.file_uploads import stage_upload, workflow_output_title
 from daimon.testing import ma_agent
 from daimon.testing.ma import MARouter
 from daimon.testing.turn_router import AGENT_ID, build_turn_router
@@ -241,6 +243,33 @@ async def test_a_run_file_downloads_for_a_viewer_and_no_other_file_does(rig: Rig
         assert got.headers["content-disposition"].startswith("attachment;"), "always a download"
         other = await r.client.get(f"/api/workflows/runs/{run['id']}/files/file_y")
         assert other.status_code == 404, "only files the run holds download"
+
+
+async def test_a_staged_run_file_downloads_from_the_staging_table(rig: Rig) -> None:
+    """A provider step's file is read from its staged bytes, never the Files API."""
+    async with rig.open() as r:
+        made = await r.make()
+        await r.client.post(f"/api/workflows/{made['id']}/draft/publish", json={})
+        run = (await r.client.post(f"/api/workflows/{made['id']}/runs", json={})).json()
+        async with r.factory.begin() as db:
+            handle = await stage_upload(
+                db,
+                tenant_id=r.ws.tenant_id,
+                title=workflow_output_title(uuid.UUID(run["id"])),
+                display_filename="notes.txt",
+                content_type="text/plain",
+                content=b"staged",
+                now=datetime.now(UTC),
+            )
+            ref = {"file_id": handle, "filename": "notes.txt", "mime_type": "text/plain"}
+            await workflow_runs.save_steps(
+                db,
+                tenant_id=r.ws.tenant_id,
+                run_id=uuid.UUID(run["id"]),
+                steps={("done", 1): {"files": [ref | {"size_bytes": 6, "staged": True}]}},
+            )
+        got = await r.client.get(f"/api/workflows/runs/{run['id']}/files/{handle}")
+        assert (got.status_code, got.content) == (200, b"staged"), got.text
 
 
 async def test_each_starter_template_creates_a_draft_that_validates(rig: Rig) -> None:
