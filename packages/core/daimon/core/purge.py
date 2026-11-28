@@ -129,6 +129,7 @@ from daimon.core.memory_resource import (
     delete_personal_memory_stores_for_account,
     sweep_erased_personal_memory,
 )
+from daimon.core.ports import erasure as ports_erasure
 from daimon.core.provider_purge import ProviderSessionDeleter, delete_provider_sessions
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import dm_access as dm_access_store
@@ -343,6 +344,7 @@ async def _purge_account_transaction(
     await privacy_deletes_store.lock_account(session, account_id=account_id)
     watches_count = await watches_store.delete_for_account(session, account_id=account_id)
     await security_audit_store.erase_account_for_privacy(session, account_id=account_id)
+    await ports_erasure.erase_account(session, account_id=account_id)
     cli_list = await identity_store.list_cli_principals_for_account(session, account_id=account_id)
     pp_list = await identity_store.list_platform_principals_for_account(
         session, account_id=account_id

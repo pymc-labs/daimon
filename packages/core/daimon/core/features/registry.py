@@ -1667,6 +1667,23 @@ FEATURES: Final[Mapping[str, FeatureSpec]] = _features(
         page="repo-memory.md#what-it-holds",
     ),
     FeatureSpec(
+        key="data_sources",
+        name="Data sources",
+        category="model_input",
+        effect="capability",
+        values=_ON_OFF,
+        default="off",
+        tiers=("deployment", "workspace"),
+        binds="turn",
+        doc=(
+            "The data store, with its connected sources and search. The operator turns it on; "
+            "a team can turn it off."
+        ),
+        platforms=EVERY_PLATFORM,
+        authority=_ADMIN,
+        page="data-sources.md#set-it-up",
+    ),
+    FeatureSpec(
         key="context_provider",
         name="Context provider",
         category="capabilities",

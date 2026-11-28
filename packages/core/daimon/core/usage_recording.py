@@ -63,6 +63,8 @@ SPEND_LEDGER_REASONS: tuple[str, ...] = (
     "classifier_debit",
     "thread_naming_debit",
     "owner_notice_debit",
+    "data_embedding_debit",
+    "data_rerank_debit",
 )
 """Every debit reason this module writes: model spend, as opposed to clawbacks
 or promo expiries. Timed promo credit is drawn down by exactly these rows, so a
@@ -557,12 +559,16 @@ _AUXILIARY_PURPOSES = {
     "thread_naming": ("thread_naming_debit", "thread-naming"),
     "classifier": ("classifier_debit", "classifier"),
     "owner_notice": ("owner_notice_debit", "owner-notice"),
+    "data_embedding": ("data_embedding_debit", "data-embedding"),
+    "data_rerank": ("data_rerank_debit", "data-rerank"),
 }
 
 
 async def record_auxiliary_usage(
     *,
-    purpose: Literal["thread_naming", "classifier", "owner_notice"],
+    purpose: Literal[
+        "thread_naming", "classifier", "owner_notice", "data_embedding", "data_rerank"
+    ],
     provider: Provider,
     sessionmaker: async_sessionmaker[AsyncSession],
     tenant_id: uuid.UUID,

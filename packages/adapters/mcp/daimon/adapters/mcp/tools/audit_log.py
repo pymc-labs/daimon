@@ -14,7 +14,7 @@ from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivat
 from daimon.adapters.mcp.tools._web_admin import web_admin_of
 from daimon.adapters.mcp.tools._web_url import WebUrl, admin_links
 from daimon.core import audit_trail
-from daimon.core.audit_trail import AuditFilter
+from daimon.core.audit_trail import AuditFilter, AuditSource, SourceAuditRow
 from daimon.core.stores import web_people as people_store
 from daimon.core.stores.domain import WebAuditRow
 from daimon.core.web_admin import WebAdmin
@@ -26,7 +26,7 @@ _LIMIT = 100
 
 @dataclass(frozen=True)
 class AuditLine:
-    source: Literal["web", "security"]
+    source: AuditSource
     at: datetime
     who: str | None
     action: str
@@ -43,7 +43,7 @@ class AuditLog:
 
 @dataclass(frozen=True)
 class AuditKindLine:
-    source: Literal["web", "security"]
+    source: AuditSource
     kind: str
 
 
@@ -70,7 +70,7 @@ async def _log_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
     *,
-    source: Literal["web", "security"] | None,
+    source: AuditSource | None,
     person_id: str | None,
     kind: str | None,
     first: str | None,
@@ -120,6 +120,10 @@ async def _log_impl(
             lines.append(
                 AuditLine(e.source, e.at, who, e.row.action, e.row.target, e.row.detail, None)
             )
+        elif isinstance(e.row, SourceAuditRow):
+            lines.append(
+                AuditLine(e.source, e.at, who, e.row.kind, e.row.target, e.row.detail, None)
+            )
         else:
             lines.append(
                 AuditLine(
@@ -146,6 +150,8 @@ def register_audit_log_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool(name="list_audit_log", tags={"admin"})
     async def audit_log(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
+        # The built-in sources only, so the schema is the same with or without the data store;
+        # its entries still show when no source is given.
         source: Literal["web", "security"] | None = None,
         person_id: str | None = None,
         kind: str | None = None,

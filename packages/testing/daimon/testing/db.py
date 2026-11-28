@@ -91,6 +91,8 @@ from sqlalchemy.pool import ConnectionPoolEntry, NullPool, Pool, QueuePool
 
 #: Names this module creates: ``test_w<pid>_<8hex>`` (worker) / ``test_f<pid>_<8hex>`` (fresh).
 WORKER_SCHEMA_PATTERN = re.compile(r"^test_[wf](\d+)_[0-9a-f]{8}$")
+#: The same, plus the data store's ``<worker>_data`` / ``<worker>_data_views`` (see ``data_db``).
+SWEEP_SCHEMA_PATTERN = re.compile(r"^test_[wf](\d+)_[0-9a-f]{8}(_data|_data_views)?$")
 _IDENTIFIER_PATTERN = re.compile(r"^[a-z_][a-z0-9_]*$")
 _INTERVAL_PATTERN = re.compile(r"^\d+(ms|s|min)?$")
 _SWEEP_LOCK_KEY = "daimon:test-schema-sweep"
@@ -491,7 +493,7 @@ async def sweep_orphan_schemas(engine: AsyncEngine, *, limit: int = 8) -> list[s
                             "  WHERE datname = current_database()"
                             ") ORDER BY nspname"
                         ),
-                        {"pattern": WORKER_SCHEMA_PATTERN.pattern},
+                        {"pattern": SWEEP_SCHEMA_PATTERN.pattern},
                     )
                 )
                 .scalars()
@@ -501,7 +503,7 @@ async def sweep_orphan_schemas(engine: AsyncEngine, *, limit: int = 8) -> list[s
             for schema in candidates:
                 if len(dropped) >= limit:
                     break
-                match = WORKER_SCHEMA_PATTERN.match(schema)
+                match = SWEEP_SCHEMA_PATTERN.match(schema)
                 if match is None or _pid_is_alive(int(match.group(1))):
                     continue
                 await _drop_schema(engine, schema)

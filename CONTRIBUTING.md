@@ -13,6 +13,7 @@ look for in a pull request.
   owns one platform's I/O, rendering, and auth; adapters never import from
   each other.
 - `packages/mux/` — provider-agnostic managed-agent interface.
+- `packages/data/` — optional data store (its own schemas, psycopg 3).
 - `packages/testing/` — shared test fixtures/harness.
 - `apps/notebook-host/` — standalone marimo notebook host service.
 - `apps/report-host/` — standalone report host service.
@@ -25,6 +26,9 @@ Dependency rule (enforced by `import-linter` in CI):
 
 - `daimon.core` must not import `daimon.adapters.*`.
 - `daimon.adapters.X` must not import `daimon.adapters.Y`.
+- `daimon.core` must not import `daimon.data`, the optional data store. It reaches core
+  only through settings, stores and `daimon.core.ports`, which the package fills at
+  startup through its `daimon.ports` entry point.
 - `daimon.core._models` (the ORM schema) is private to `daimon.core.stores.**`
   and `daimon.core.defaults.**`. Stores map ORM rows to Pydantic models at the
   boundary; callers never see a session object.
@@ -176,6 +180,15 @@ you changed that mention them, and rewrites `head.txt`. From a fork, pass
 `--base upstream/main` (your fork's `main` may be stale). CI runs it with `--check`.
 A migration ships in the same PR as the code that uses it; a `contract`
 migration must not remove or change anything the previous release still uses.
+
+### Data store SQL and psycopg
+
+`packages/data` is the one place that uses psycopg 3 rather than asyncpg and SQLAlchemy:
+its pool and scripts run plain SQL. Its DDL lives in numbered files under
+`daimon/data/sql/`, with `{{data}}` and `{{views}}` for the schema names, never edited
+once released. A change is a new file, listed in `migrate.STORE_FILES` and pinned by its
+own Alembic revision. Tests that need the store use the `data_db` fixture, which runs
+on the pgvector image in CI's data job.
 
 ### Designators in comments
 

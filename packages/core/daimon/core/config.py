@@ -3173,6 +3173,75 @@ class ProviderLimitsSettings(BaseModel):
     )
 
 
+class DataSettings(BaseModel):
+    """The data store: where it lives, how it embeds and searches. Whether it runs at all
+    is the `data_sources` feature (`DAIMON_FEATURES__DATA_SOURCES`)."""
+
+    schema_name: str = Field(
+        default="data",
+        pattern=r"^[a-z_][a-z0-9_]{0,40}$",
+        description=(
+            "Postgres schema holding the store; its read views live in the same name plus "
+            "`_views`. Set before the first start; a changed name is a different, empty store."
+        ),
+    )
+    pool_size: int = Field(
+        default=4,
+        ge=1,
+        le=64,
+        description="Connections one process keeps open to the store, opened on first use.",
+    )
+    embed_url: str | None = Field(
+        default=None,
+        description="Base URL of the embeddings API (OpenAI-compatible). Unset: no embeddings.",
+    )
+    embed_model: str = Field(default="", description="Embedding model name sent to the API.")
+    embed_key: SecretStr | None = Field(default=None, description="API key for the embeddings API.")
+    embed_provider: str = Field(
+        default="",
+        description=(
+            "Who serves the embeddings: `openai` for OpenAI's API, or the providers an "
+            "OpenRouter-style router may use, comma-separated. Usage rows name it, "
+            "or `selfhosted` for anything else."
+        ),
+    )
+    embed_query_prefix: str = Field(
+        default="", description="Text put before a search query when it is embedded."
+    )
+    embed_dim: int = Field(
+        default=384, ge=1, le=4096, description="Length of the embedding vectors."
+    )
+    rerank: Literal["off", "vertex"] = Field(
+        default="off", description="Reranker applied to search results."
+    )
+    rerank_project: str = Field(default="", description="Cloud project the reranker bills to.")
+    worker_concurrency: int = Field(
+        default=3, ge=1, le=32, description="Sources the sync worker syncs at once."
+    )
+    search_seconds: float = Field(
+        default=8.0,
+        gt=0,
+        allow_inf_nan=False,
+        description="Seconds a search may run before it returns what it has.",
+    )
+    private_hosts: Annotated[tuple[str, ...], NoDecode] = Field(
+        default=(),
+        description=(
+            "Private hosts or ranges, comma-separated, that database connections to external "
+            "Postgres servers may reach. Public hosts need no entry."
+        ),
+    )
+
+    _split_lists = field_validator("private_hosts", mode="before")(_split_csv)
+
+    @field_validator("schema_name")
+    @classmethod
+    def _own_schema(cls, name: str) -> str:
+        if name in ("public", "information_schema") or name.startswith("pg_"):
+            raise ValueError("the data store needs a schema of its own, not a system one")
+        return name
+
+
 class SelfKnowledgeSettings(BaseModel):
     """Where the `self_knowledge` tools read this release's docs and source, and the public
     addresses their results name."""
@@ -3415,6 +3484,7 @@ class Settings(BaseSettings):
     github: GithubSettings = Field(default_factory=GithubSettings)
     github_app: GithubAppSettings = Field(default_factory=GithubAppSettings)
     repo_memory: RepoMemorySettings = Field(default_factory=RepoMemorySettings)
+    data: DataSettings = Field(default_factory=DataSettings)
     self_knowledge: SelfKnowledgeSettings = Field(default_factory=SelfKnowledgeSettings)
     microsoft_accounts: MicrosoftAccountsSettings = Field(default_factory=MicrosoftAccountsSettings)
     crypto: CryptoSettings = Field(default_factory=CryptoSettings)
@@ -3641,6 +3711,24 @@ class _CryptoSettingsSource(BaseSettings):
 def load_crypto_settings() -> CryptoSettings:
     """Load keys without requiring unrelated API or database configuration."""
     return _CryptoSettingsSource().crypto
+
+
+class _DataSettingsSource(BaseSettings):
+    """Data-store settings alone, for the store's own migrations and commands."""
+
+    data: DataSettings = Field(default_factory=DataSettings)
+    model_config = SettingsConfigDict(
+        env_prefix="DAIMON_",
+        env_nested_delimiter="__",
+        env_file=".env",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
+
+
+def load_data_settings() -> DataSettings:
+    """Load the data-store settings without unrelated API or database configuration."""
+    return _DataSettingsSource().data
 
 
 class _TurnSettingsSource(BaseSettings):

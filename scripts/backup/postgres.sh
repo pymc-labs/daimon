@@ -27,6 +27,9 @@ case "$mode" in
     [ "$objects" = 0 ] || { echo 'Restore requires an empty database.' >&2; exit 1; }
     pg_restore --dbname="$PGDATABASE" --single-transaction --exit-on-error \
       --no-owner --no-privileges "$archive/database.dump"
+    # Optional step for what a restore drops (the data store's roles and grants). This image
+    # has psql but no daimon CLI; see docs/data-sources.md.
+    [ -z "${DAIMON_AFTER_RESTORE:-}" ] || sh -c "$DAIMON_AFTER_RESTORE"
     ;;
   *) echo 'Expected backup or restore.' >&2; exit 2 ;;
 esac

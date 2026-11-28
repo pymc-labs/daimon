@@ -29,6 +29,7 @@ FILES: dict[str, str] = {
     "docs/slack-app-manifest.yaml": "slack-manifest",
     "docs/teams-app-manifest.yaml": "teams-manifest",
     "docker-compose.yml": "docs",
+    "docker-compose.data.yml": "docs",
     "LICENSE": "prose",
     # Ruff and the wheel builds lint runs honour it.
     ".gitignore": "tooling",
@@ -79,6 +80,9 @@ RULES: tuple[tuple[str, str], ...] = (
     ("packages/adapters/mcp/", "mcp"),
     ("packages/adapters/scheduler/", "scheduler"),
     ("packages/testing/", "testing"),
+    # The data store's own tests run against its pgvector image.
+    ("packages/data/", "data"),
+    ("deploy/postgres/", "data"),
     # Only a migration or a change to the table models needs the migrate job; any other
     # core change skips it.
     ("packages/core/alembic/", "migrations"),
@@ -131,8 +135,10 @@ SUITES: dict[str, tuple[str, ...]] = {
     "simulated": ("simulated", "lint"),
     # The mux tests read the golden scenarios, defaults/ (core) and the agent-chat tool (mcp).
     "golden": (*DAIMON, "mux"),
+    "data": ("data", "lint"),
     "testing": (
         *DAIMON,
+        "data",
         "mux",
         "harness",
         "harness-conformance",
@@ -141,8 +147,8 @@ SUITES: dict[str, tuple[str, ...]] = {
         "compute-session",
     ),
     # The compute-session tests drive the server with core's own caller and task scripts.
-    "core": (*_HOSTS, "mux", "compute-session"),
-    "migrations": (*_HOSTS, "mux", "migration-upgrade"),
+    "core": (*_HOSTS, "data", "mux", "compute-session"),
+    "migrations": (*_HOSTS, "data", "mux", "migration-upgrade"),
     # A script, so ruff runs on it as well.
     "migration-check": ("lint", "migration-upgrade"),
     "image-check": ("lint", "image-daimon"),
@@ -212,6 +218,7 @@ JOBS: dict[str, tuple[str, ...]] = {
         for job, legs in MATRICES.items()
     },
     "pytest-staging-config": ("staging-config",),
+    "pytest-data": ("data",),
     "pytest-discord": ("discord",),
     "mux-standalone": ("mux",),
     "pytest-notebook-host": ("notebook-host",),
@@ -236,6 +243,7 @@ COMPONENTS: dict[str, tuple[str, ...]] = {
     "core": ("daimon", "mcp", "workers:all"),
     "migrations": ("daimon", "migrate", "mcp", "workers:all"),
     "mux": ("daimon", "mcp", "workers:all"),
+    "data": ("daimon", "mcp", "workers:all"),
     "deploy-workflow": ("daimon", "notebook", "report", "migrate", "mcp", "workers:all"),
     "discord": ("daimon", "workers:discord"),
     "slack": ("daimon", "workers:slack"),

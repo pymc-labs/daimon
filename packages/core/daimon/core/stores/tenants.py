@@ -32,6 +32,7 @@ from daimon.core._models import (
     UsageEvent,
 )
 from daimon.core.errors import StoreError
+from daimon.core.ports import erasure as ports_erasure
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores.domain import FundingMode, Platform, TenantDependentCounts, TenantRow
 from daimon.core.stores.security_audit import erase_tenant
@@ -221,6 +222,7 @@ async def delete_tenant(
         await delete_workspace_tokens(session, tenant_id=tenant_id, team_id=tenant.external_id)
     await delete_settle_state(session, tenant_id=tenant_id)
     await erase_tenant(session, tenant_id=tenant_id)
+    await ports_erasure.erase_tenant(session, tenant_id=tenant_id)
     # Its accounts' ids in agent-chat session records have no FK to cascade with.
     await erase_agent_chat_provenance_for_tenant(session, tenant_id=tenant_id)
     stmt = delete(Tenant).where(Tenant.id == tenant_id)
