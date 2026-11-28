@@ -477,6 +477,21 @@ async def list_access(
     return [WorkflowAccessRow.model_validate(orm) for orm in rows.scalars()]
 
 
+async def access_by_workflow(
+    session: AsyncSession, *, tenant_id: uuid.UUID
+) -> dict[uuid.UUID, list[WorkflowAccessRow]]:
+    """Every workflow's access rows in one query, each list oldest first."""
+    rows = await session.scalars(
+        select(WorkflowAccess)
+        .where(WorkflowAccess.tenant_id == tenant_id)
+        .order_by(WorkflowAccess.created_at)
+    )
+    found: dict[uuid.UUID, list[WorkflowAccessRow]] = {}
+    for orm in rows:
+        found.setdefault(orm.workflow_id, []).append(WorkflowAccessRow.model_validate(orm))
+    return found
+
+
 def _private_owned(account_id: uuid.UUID) -> ColumnElement[bool]:
     return (Workflow.owner_account_id == account_id) & (Workflow.visibility == "private")
 

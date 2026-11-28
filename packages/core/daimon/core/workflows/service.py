@@ -877,11 +877,9 @@ async def run_scope(
         workflow, _, rights = await _load(session, env, workflow_id)
         found.append((workflow, rights))
     else:
+        access = await store.access_by_workflow(session, tenant_id=env.who.tenant_id)
         for workflow in await store.list_workflows(session, tenant_id=env.who.tenant_id):
-            access = await store.list_access(
-                session, tenant_id=workflow.tenant_id, workflow_id=workflow.id
-            )
-            rights = rights_of(workflow, access, env.who)
+            rights = rights_of(workflow, access.get(workflow.id, []), env.who)
             if rights.view:
                 found.append((workflow, rights))
     return _scope_of(env, found), {w.id: w.name for w, _ in found}
