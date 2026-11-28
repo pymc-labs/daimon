@@ -111,6 +111,10 @@ CLAIMS: Mapping[str, str | tuple[str, ...]] = {
     "A loop needs": f"{_V}[a loop without max visits]",
     "load skills from the workspace library": _SKILLS,
     "Each publish pins the version": _SKILLS[0],
+    "Renaming an agent renames it": _W + "test_agent_rename.py::"
+    "test_rename_agent_references_when_workflows_name_it_then_specs_tools_and_grants_follow",
+    "A step whose named agent is gone fails": _SCHED + "test_workflow_agent_lookup.py::"
+    "test_agent_id_when_agent_is_missing_then_applies_defaults_only_for_the_default_agent",
     "lists `skills` by name": _SKILLS,
     "a draft with errors cannot be published": (
         f"{_V}[unknown next step]",

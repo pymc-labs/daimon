@@ -60,6 +60,9 @@ limit. Validation names each problem, and a draft with errors cannot be publishe
 An Agent step can load skills from the workspace library by name. Each publish
 pins the version it saw, so a later library edit reaches runs after a republish.
 
+Renaming an agent renames it in every draft and published version, so its steps
+keep working. A step whose named agent is gone fails; no new agent is made.
+
 An Agent step can work in a place: home, where the run started, or a channel or
 thread. The place's access rules apply, and the agent can post there itself. A
 later step reads where it posted in `steps.<id>.posted`. With personal memory, the

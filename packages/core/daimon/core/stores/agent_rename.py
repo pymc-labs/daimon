@@ -5,7 +5,7 @@ Rows that reference an agent by id already follow it. Audit and history rows
 (`security_audit_events`, `agent_tool_rule_history`, `channel_changes`,
 `long_job_policy_history`, `routine_sandbox_history`), settled or retired
 `task_continuations` and the immutable neutral catalog keep the name they
-recorded.
+recorded. Workflow specs name agents by key inside JSON: see `workflow_agent_rename`.
 """
 
 from __future__ import annotations
@@ -18,6 +18,10 @@ from daimon.core._models import Base, TenantAccessPolicyRecord
 from daimon.core.ma_metadata_keys import MA_METADATA_KEY_MANAGED, MA_METADATA_KEY_NAME
 from daimon.core.stores.agent_avatars import normalize_agent_name
 from daimon.core.stores.domain import ContinuationReason
+from daimon.core.stores.workflow_agent_rename import (
+    count_workflow_agents,
+    rename_workflow_agents,
+)
 from sqlalchemy import (
     ColumnElement,
     Row,
@@ -155,6 +159,7 @@ async def rename_agent_references(
         .where(*_user_config_filters(tenant_id=tenant_id, old=old))
         .values(agent_name=new)
     )
+    await rename_workflow_agents(session, tenant_id=tenant_id, old=old, new=new)
 
 
 async def count_agent_references(
@@ -186,6 +191,9 @@ async def count_agent_references(
         "user_config.agent_name",
         _table("user_config"),
         _user_config_filters(tenant_id=tenant_id, old=old),
+    )
+    counts["workflows.spec"] = await count_workflow_agents(
+        session, tenant_id=tenant_id, old=old, new=new
     )
     return counts
 
