@@ -372,6 +372,11 @@ def workflows_router(runtime: WebRuntime) -> APIRouter:
         found = await inbox.items_page(await env_of(caller), limit=page.limit, before=page.cursor)
         return send(found, response)
 
+    @router.get("/inbox/count")
+    @speaks
+    async def inbox_count(caller: Viewer) -> int:  # pyright: ignore[reportUnusedFunction]
+        return await inbox.open_count(await env_of(caller))
+
     @router.get("/inbox/{item_id}")
     @speaks
     async def inbox_item(item_id: uuid.UUID, caller: Viewer) -> inbox.InboxDetail:  # pyright: ignore[reportUnusedFunction]

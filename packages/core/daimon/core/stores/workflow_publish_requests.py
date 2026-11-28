@@ -12,7 +12,7 @@ from typing import Any
 
 from daimon.core._models import WorkflowGrant, WorkflowPublishRequest
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -112,6 +112,20 @@ async def inbox_requests(
         .limit(100)
     )
     return [PublishRequestRow.model_validate(r) for r in rows]
+
+
+async def count_pending(session: AsyncSession, *, tenant_id: uuid.UUID) -> int:
+    return (
+        await session.scalar(
+            select(func.count())
+            .select_from(WorkflowPublishRequest)
+            .where(
+                WorkflowPublishRequest.tenant_id == tenant_id,
+                WorkflowPublishRequest.status == "pending",
+            )
+        )
+        or 0
+    )
 
 
 async def decide_request(

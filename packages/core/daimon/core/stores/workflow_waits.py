@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 
 class _Row(BaseModel):
@@ -184,6 +185,60 @@ async def set_remind_at(
     )
 
 
+def _askable(
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    admin: bool,
+    groups: Collection[str],
+    scope: RunScope,
+    closed_since: datetime | None,
+) -> list[ColumnElement[bool]]:
+    """The conditions for the approvals and questions one person may answer
+    (`workflows.waits.may_answer`, in SQL): those still open, and with `closed_since`
+    those answered since."""
+    approvers = WorkflowWait.shown["approvers"]
+    asked = [WorkflowWait.addressees.contains([str(account_id)])]
+    if admin:
+        asked.append(approvers.contains(["admins"]))
+    asked += [approvers.contains([f"role:{g}"]) for g in groups]
+    # A thread's ask goes to anyone who may see the run.
+    seen = select(WorkflowRun.id).where(WorkflowRun.tenant_id == tenant_id, scope.clause())
+    asked.append(and_(approvers.contains(["thread"]), WorkflowWait.run_id.in_(seen)))
+    still = WorkflowWait.status == "waiting"
+    return [
+        WorkflowWait.tenant_id == tenant_id,
+        WorkflowWait.kind.in_(("approval", "question")),
+        or_(*asked),
+        still
+        if closed_since is None
+        else or_(
+            still, and_(WorkflowWait.status == "completed", WorkflowWait.closed_at >= closed_since)
+        ),
+    ]
+
+
+async def count_open_asks(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    admin: bool,
+    groups: Collection[str],
+    scope: RunScope,
+) -> int:
+    """How many open approvals and questions one person may answer."""
+    where = _askable(
+        tenant_id=tenant_id,
+        account_id=account_id,
+        admin=admin,
+        groups=groups,
+        scope=scope,
+        closed_since=None,
+    )
+    return await session.scalar(select(func.count()).select_from(WorkflowWait).where(*where)) or 0
+
+
 async def inbox_waits(
     session: AsyncSession,
     *,
@@ -196,27 +251,17 @@ async def inbox_waits(
     before: Cursor | None = None,
     limit: int = 100,
 ) -> list[Wait]:
-    """The approvals and questions one person may answer (`workflows.waits.may_answer`, in
-    SQL), newest first, after the cursor `before`: those still open, and with `closed_since`
-    those answered since."""
-    approvers = WorkflowWait.shown["approvers"]
-    asked = [WorkflowWait.addressees.contains([str(account_id)])]
-    if admin:
-        asked.append(approvers.contains(["admins"]))
-    asked += [approvers.contains([f"role:{g}"]) for g in groups]
-    # A thread's ask goes to anyone who may see the run.
-    seen = select(WorkflowRun.id).where(WorkflowRun.tenant_id == tenant_id, scope.clause())
-    asked.append(and_(approvers.contains(["thread"]), WorkflowWait.run_id.in_(seen)))
-    still = WorkflowWait.status == "waiting"
+    """The approvals and questions one person may answer, newest first, after the cursor
+    `before`: those still open, and with `closed_since` those answered since."""
     query = select(WorkflowWait).where(
-        WorkflowWait.tenant_id == tenant_id,
-        WorkflowWait.kind.in_(("approval", "question")),
-        or_(*asked),
-        still
-        if closed_since is None
-        else or_(
-            still, and_(WorkflowWait.status == "completed", WorkflowWait.closed_at >= closed_since)
-        ),
+        *_askable(
+            tenant_id=tenant_id,
+            account_id=account_id,
+            admin=admin,
+            groups=groups,
+            scope=scope,
+            closed_since=closed_since,
+        )
     )
     if before is not None:
         at, key = before

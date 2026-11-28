@@ -267,6 +267,7 @@ export function useRequestPublish(id: string) {
 // ---------- inbox ----------
 
 export const useInbox = () => usePaged<InboxItem>(["workflow-inbox"], "/api/workflows/inbox", { refetchInterval: 8000 })
+export const useInboxCount = () => useQuery({ queryKey: ["workflow-inbox", "count"], queryFn: () => api.get<number>("/api/workflows/inbox/count"), refetchInterval: 8000 })
 export const useInboxItem = (id: string | null) => useQuery({ queryKey: ["workflow-inbox", id], queryFn: () => api.get<InboxDetail>(`/api/workflows/inbox/${id}`), enabled: !!id })
 
 export function useDecide(id: string, after?: () => void) {

@@ -144,3 +144,5 @@ async def test_inbox_page_when_newer_asks_are_others_then_the_callers_page_to_th
     assert [i.id for i in theirs.rows] == [str(asks[3]), str(asks[2])], "the stranger's own"
     attention = await inbox.attention(owner)
     assert [a.kind for a in attention] == ["approval", "approval"], "attention lists only theirs"
+    assert await inbox.open_count(owner) == 2, "the badge counts their open asks, not a page"
+    assert await inbox.open_count(_env(world, stranger)) == 2, "and each person's own"

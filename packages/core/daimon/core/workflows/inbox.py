@@ -384,6 +384,31 @@ async def items_page(
     return Page(sorted((_item(d) for d in out), key=lambda i: i.since, reverse=True), more)
 
 
+async def open_count(env: Env) -> int:
+    """How many items wait on this person: the open asks they may answer and, for an
+    admin, the pending publish requests. The sidebar badge shows it."""
+    async with env.sm() as session:
+        scope, _ = await service.run_scope(session, env)
+        asks = (
+            0
+            if env.who.external
+            else await waits_store.count_open_asks(
+                session,
+                tenant_id=env.who.tenant_id,
+                account_id=env.who.account_id,
+                admin=env.who.admin,
+                groups=env.who.groups,
+                scope=scope,
+            )
+        )
+        pending = (
+            await publish_requests.count_pending(session, tenant_id=env.who.tenant_id)
+            if env.who.admin
+            else 0
+        )
+    return asks + pending
+
+
 async def list_items(env: Env) -> list[InboxItem]:
     return (await items_page(env)).rows
 
