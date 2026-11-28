@@ -44,7 +44,6 @@ from daimon.core.workflows.spec import (
     dump_spec,
     node_hash,
     parse_spec,
-    private_steps,
     spec_hash,
 )
 from daimon.core.workflows.taint import Catalog
