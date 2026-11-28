@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from daimon.adapters.scheduler.workflows import WorkflowEngine, run_once
-from daimon.adapters.scheduler.workflows.loops import polls_step
+from daimon.adapters.scheduler.workflows.loops import polls_step, steps_step
 from daimon.core.config import AnthropicSettings, DatabaseSettings, DiscordSettings, Settings
 from daimon.core.stores import tenants, workflow_runs, workflows
 from daimon.core.stores.workflow_run_events import list_events
@@ -216,3 +216,45 @@ async def test_a_run_whose_spec_no_longer_reads_fails_alone(db_session: AsyncSes
     assert all(s.status == "cancelled" for s in steps), "its steps end with it"
     assert verify(broken, events).ok, "its ledger still verifies"
     assert done is not None and done.status == "succeeded", "the other run finished"
+
+
+async def test_a_workspace_at_its_cap_does_not_hold_up_another_workspaces_steps(
+    db_session: AsyncSession,
+) -> None:
+    """Workspace A has an agent step running at its cap and an older backlog than the
+    steps loop reads at once; workspace B's later step is still claimed."""
+    sm, settings, first = await _started(db_session)
+    async with sm() as session:
+        run = await workflow_runs.get_run(session, first)
+    assert run is not None
+    start = runs.Start(
+        run.workflow_id, triggered_by={"kind": "person"}, run_as_account_id=run.run_as_account_id
+    )
+    for _ in range(4):
+        more = await runs.start_run(sm, settings, tenant_id=run.tenant_id, start=start, now=NOW)
+        assert not isinstance(more, Refusal), more
+    later = NOW + timedelta(seconds=1)
+    _, _, other = await _started(db_session)
+    async with sm.begin() as session:
+        await session.execute(
+            text("UPDATE workflow_steps SET ready_at = :at WHERE run_id = :run"),
+            {"at": later, "run": other},
+        )
+    caps = settings.workflows.model_copy(
+        update={"max_concurrent_steps": 2, "per_tenant_agent_steps": 1}
+    )
+    capped = settings.model_copy(update={"workflows": caps})
+    async with sm() as session:
+        step = (await workflow_runs.list_steps(session, first))[0]
+    held = await runs.claim(sm, step_id=step.id, owner="w0", lease=timedelta(minutes=5), now=NOW)
+    assert held is not None, "workspace A is at its cap"
+    seen: list[uuid.UUID] = []
+
+    async def agent(work: runs.StepWork) -> engine.Outcome:
+        seen.append(work.run.id)
+        return engine.Succeeded({"n": 3})
+
+    loops = WorkflowEngine(sm, capped, {"agent": agent}, owner="w1", clock=lambda: later)
+    await steps_step(loops)
+    await loops.drain()
+    assert seen == [other], f"workspace B's step runs past A's backlog: {seen}"

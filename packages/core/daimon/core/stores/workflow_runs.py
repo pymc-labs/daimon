@@ -485,9 +485,22 @@ async def cancel_active_steps(session: AsyncSession, *, run_id: uuid.UUID, now: 
 
 
 async def ready_steps(
-    session: AsyncSession, *, now: datetime, limit: int
+    session: AsyncSession,
+    *,
+    now: datetime,
+    limit: int,
+    full_tenants: Sequence[uuid.UUID] = (),
+    full_owners: Sequence[uuid.UUID] = (),
 ) -> list[tuple[uuid.UUID, uuid.UUID, uuid.UUID | None, bool]]:
-    """Due ready steps, oldest first: `(step id, tenant, run-as account, is an agent step)`."""
+    """Due ready steps, oldest first: `(step id, tenant, run-as account, is an agent step)`.
+
+    Agent steps of a workspace or run-as person at its cap are left out, so one busy
+    workspace's backlog never fills the window the others' steps are read in."""
+    owner = WorkflowRun.run_as_account_id
+    room = and_(
+        WorkflowStep.tenant_id.not_in(full_tenants),
+        owner.is_(None) | owner.not_in(full_owners),
+    )
     rows = await session.execute(
         select(
             WorkflowStep.id,
@@ -500,6 +513,7 @@ async def ready_steps(
             WorkflowStep.status == "ready",
             WorkflowStep.ready_at <= now,
             WorkflowRun.status.in_(("running", "waiting")),
+            WorkflowStep.lane.is_(None) | room,
         )
         .order_by(WorkflowStep.ready_at)
         .limit(limit)

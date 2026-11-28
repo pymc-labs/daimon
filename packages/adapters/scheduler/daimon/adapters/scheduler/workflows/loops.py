@@ -118,7 +118,13 @@ async def steps_step(engine: WorkflowEngine) -> None:
     async with engine.sm() as session:
         total, per_tenant, per_owner = await workflow_runs.running_counts(session)
         free = caps.max_concurrent_steps - total
-        due = await workflow_runs.ready_steps(session, now=now, limit=max(free, 0) * 3)
+        due = await workflow_runs.ready_steps(
+            session,
+            now=now,
+            limit=max(free, 0) * 3,
+            full_tenants=[t for t, n in per_tenant.items() if n >= caps.per_tenant_agent_steps],
+            full_owners=[o for o, n in per_owner.items() if n >= caps.per_owner_agent_steps],
+        )
     for step_id, tenant_id, owner, agent in due:
         if free <= 0:
             return
