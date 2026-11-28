@@ -1445,7 +1445,7 @@ async def test_agent_editor_saves_explicit_changes_and_rejects_stale_page(
         assert "An editor owner must approve Daimon" in unavailable
         assert "editor/repo-101" not in unavailable and "editor/repo-102" not in unavailable
         assert "Hidden repo" in unavailable
-        assert "Open GitHub setup" in unavailable
+        assert "Install the app there" in unavailable
         admin_ids.update({101, 102, 103})
 
         state, hidden, rendered = await page()

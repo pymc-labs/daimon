@@ -52,6 +52,20 @@ signed-in person can see, and says how many it hides. Each selection is checked
 again against GitHub at confirmation, and the grants go live then. A repository
 the installation does not cover needs a GitHub org owner to add it first.
 
+### Repos in another account or org
+
+The Add repos list shows only the accounts and orgs where the App is
+installed. To add a repo from another account, choose **Repo in another account
+or org? Install the app there** in the dialog. It opens the App's install page
+on GitHub and keeps the connect flow, so after you install the App on that
+account and pick its repos, GitHub returns you to the picker and the account is
+listed. On an org you don't own, GitHub sends an install request that an org
+owner approves under the org's **Settings → GitHub Apps**.
+
+Other accounts can install the App only if it is public. In the App's settings
+on GitHub, under **Advanced**, choose **Make public**. A private App can be
+installed only on the account that owns it.
+
 Every connected repository is read and write for the agent, within the App's
 permissions. The person's own GitHub role does not lower that.
 
