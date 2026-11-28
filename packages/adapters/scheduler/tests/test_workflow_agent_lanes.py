@@ -108,6 +108,16 @@ async def run_lanes(
     return run.id, sessions
 
 
+async def _linked(db_session: AsyncSession, world: World) -> None:
+    """The run-as person linked here: a step runs only as someone it can check."""
+    tenant = await tenants.get_tenant(db_session, world.tenant_id)
+    owner = await accounts.get_account(db_session, world.owner)
+    assert tenant is not None and owner is not None
+    await make_platform_principal(
+        db_session, platform=tenant.platform, external_id="U1", tenant=tenant, account=owner
+    )
+
+
 async def test_agent_then_finish_runs_metered_through_the_loops(
     db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -124,6 +134,7 @@ async def test_agent_then_finish_runs_metered_through_the_loops(
         },
         "a",
     )
+    await _linked(db_session, world)
     run_id, _ = await run_lanes(world, monkeypatch, [complete(greeting="hi")])
     done, step = await world.get(run_id), (await world.steps(run_id))["a"]
     assert (done.status, step.output) == ("succeeded", {"greeting": "hi"}), f"{done}"
@@ -172,6 +183,7 @@ async def test_the_digest_continues_its_lane_or_ends_with_nothing_to_do(
     sessions: list[str | None],
 ) -> None:
     world = await make_world(db_session, DIGEST, "collect")
+    await _linked(db_session, world)
     run_id, seen = await run_lanes(world, monkeypatch, list(acts))
     done, steps = await world.get(run_id), await world.steps(run_id)
     assert (done.status, done.outcome, seen) == ("succeeded", outcome, sessions), f"{done}"
@@ -186,12 +198,7 @@ async def test_step_spend_counts_against_the_run_as_persons_allowance_and_gates_
     """Step usage is the run-as person's, as for any turn of theirs: their allowance counts
     it, and once it is used up their next step waits blocked on it."""
     world = await make_world(db_session, DIGEST, "collect")
-    tenant = await tenants.get_tenant(db_session, world.tenant_id)
-    owner = await accounts.get_account(db_session, world.owner)
-    assert tenant is not None and owner is not None
-    await make_platform_principal(
-        db_session, platform=tenant.platform, external_id="U1", tenant=tenant, account=owner
-    )
+    await _linked(db_session, world)
     await spend_allowances.create_allowance(
         db_session,
         tenant_id=world.tenant_id,
