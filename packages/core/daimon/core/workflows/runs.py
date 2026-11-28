@@ -1731,6 +1731,7 @@ _NOT_POSTED: Final[dict[str, str]] = {
     "recipient_not_on_platform": "The person has no linked account here.",
     "speaker_not_on_platform": "The person the run runs as has no linked account here.",
     "reach": "The post would reach more places or people than allowed.",
+    "restricted_source": "The workflow was made in a channel whose content stays there.",
 }
 
 

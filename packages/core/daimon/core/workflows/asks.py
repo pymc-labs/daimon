@@ -56,6 +56,7 @@ _WHY: Final[dict[str, str]] = {
     "creator_cannot_post": "the person the run runs as cannot post there",
     "audience_contained": "the channel's audience rules keep it there",
     "protected_channel": "the channel does not take Daimon's posts",
+    "restricted_source": "the workflow was made in a channel whose content stays there",
 }
 
 

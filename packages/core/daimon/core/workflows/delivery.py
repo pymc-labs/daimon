@@ -32,6 +32,7 @@ from typing import Any, Final, Literal, cast
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Place, Subject, Surface, authorize
 from daimon.core.config import DirectMessagePolicy, Settings, env_admits
+from daimon.core.fire.subject import Subject as Facts
 from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.outbound.mentions import Platform, RenderedPost, attribution_line, render_post
@@ -39,6 +40,7 @@ from daimon.core.outbound.opt_out import untag_opted_out
 from daimon.core.outbound.reach import ReachPlan, ReachTally, check_reach
 from daimon.core.routine_delivery import creator_refusal_for
 from daimon.core.routine_hold import DeliveryGate, workflow_delivery_gate
+from daimon.core.rule_views import keeps_routine_inside
 from daimon.core.stores import (
     web_people,
     workflow_deliveries,
@@ -46,6 +48,7 @@ from daimon.core.stores import (
     workflow_threads,
     workflow_waits,
 )
+from daimon.core.stores import workflows as workflows_store
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.direct_messages import dm_enabled
@@ -542,6 +545,8 @@ async def clear_post(
             policy = await load_access_policy(session, tenant_id=row.tenant_id)
         except AccessPolicyUnreadable:
             return "access_policy_unreadable"
+        if dm_to is not None and await _made_sealed(session, row, policy):
+            return "restricted_source"
         thread = target.get("thread_id")
         message = target.get("message_id")
         if kind == "edit":
@@ -615,6 +620,24 @@ async def clear_post(
         title=title if isinstance(title, str) and kind == "channel" else None,
         open_on=open_on if isinstance(open_on, str) and kind == "channel" else None,
     )
+
+
+async def _made_sealed(session: AsyncSession, row: DeliveryRow, policy: TenantAccessPolicy) -> bool:
+    """Whether the workflow was made where content stays, so posts nothing by DM: the
+    routine rule (`keeps_routine_inside`) on its `made_in`."""
+    workflow = await workflows_store.get_workflow(
+        session, tenant_id=row.tenant_id, workflow_id=row.workflow_id
+    )
+    if workflow is None or workflow.made_in is None:
+        return workflow is None
+    made = workflow.made_in
+    facts = Facts(
+        id=workflow.id, tenant_id=row.tenant_id, created_by_user_id=None, agent_id="",
+        agent_name="", cron_expr="", timezone="UTC", trigger_message="",
+        destination_kind="dm", source_provenance_known=made["known"],
+        source_channel_id=made["channel_id"], source_thread_id=made["thread_id"],
+    )  # fmt: skip
+    return keeps_routine_inside(policy, facts)
 
 
 def _uuid(raw: object) -> uuid.UUID | None:

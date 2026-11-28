@@ -164,3 +164,30 @@ def test_targets_name_threads_on_every_platform() -> None:
     teams = target_for("19:a@thread.tacv2;messageid=42", home=None, **run)
     assert (teams["channel_id"], teams["thread_id"]) == ("19:a@thread.tacv2", "42")
     assert target_for("home", home="555", **run)["home"] is True
+
+
+async def test_a_workflow_made_where_content_stays_posts_nothing_by_dm(
+    db_session: AsyncSession,
+) -> None:
+    """The routine rule (`keeps_routine_inside`) on the workflow's `made_in`, for every DM."""
+    from daimon.core._models import Workflow
+    from sqlalchemy import update
+
+    world = await make_world(db_session, _digest("owner"), "t", platform="slack", home="C0HOME")
+    await world.run(inputs={"n": 1})
+    [dm] = await _rows(world)
+    await set_dm_enabled(db_session, tenant_id=world.tenant_id, enabled=True)
+    tenant = await tenants.get_tenant(db_session, world.tenant_id)
+    owner = await accounts.get_account(db_session, world.owner)
+    assert tenant is not None and owner is not None
+    await make_platform_principal(
+        db_session, platform="slack", external_id="U1", tenant=tenant, account=owner
+    )
+    for known, cleared in ((False, "restricted_source"), (True, WorkflowPost)):
+        made = {"known": known, "channel_id": "C0HOME", "thread_id": None}
+        await db_session.execute(
+            update(Workflow).where(Workflow.id == world.workflow_id).values(made_in=made)
+        )
+        await db_session.commit()
+        got = await clear_post(world.sm, dm, platform="slack", dm_policies={})
+        assert got == cleared if isinstance(cleared, str) else isinstance(got, cleared), got
